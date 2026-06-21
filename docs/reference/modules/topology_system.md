@@ -4,11 +4,11 @@
 
 ## Purpose
 
-The topology system is Zeus's machine-readable governance and routing kernel. It tells agents what law to read, which files are in scope, what companions are required, which manifest owns each fact type, and which failures block a given mode.
+The topology system is Zeus's machine-readable governance and routing kernel. It tells agents what law to read, which files are in scope, which related context exists, which manifest owns each fact type, and which checks determine whether a mode is complete.
 
 ## Authority anchors
 
-- Root `AGENTS.md` requires topology navigation before code changes.
+- Root `AGENTS.md` needs topology navigation before code changes.
 - `workspace_map.md` defines default route and visibility classes.
 - `architecture/topology.yaml`, `zones.yaml`, `invariants.yaml`, and `negative_constraints.yaml` define the durable kernel.
 - `architecture/docs_registry.yaml`, `module_manifest.yaml`, `source_rationale.yaml`, `test_topology.yaml`, and `script_manifest.yaml` define registries.
@@ -20,40 +20,37 @@ Topology has five interacting layers:
 
 1. **Authority surfaces**: system/developer/user instructions, root/scoped AGENTS, authority docs, manifests, tests, and executable source.
 2. **Routing manifests**: compact machine facts about files, zones, docs, modules, tests, scripts, graph, and context budget.
-3. **Validator lanes**: topology doctor checks that expose drift and missing companions.
-4. **Mode policies**: navigation, closeout, strict/global health, context pack, and packet prefill use different blocking rules.
+3. **Validator lanes**: topology doctor checks that expose drift and registry context.
+4. **Mode policies**: navigation, closeout, strict/global health, context pack, and packet prefill use different completion rules.
 5. **Cognition surfaces**: module books and derived appendices explain hidden obligations without becoming law.
 
 ## Hidden obligations
 
 - Topology indexes authority; it never outranks source, tests, canonical DB/event truth, or current law.
 - Archives are accessed through `docs/archive_registry.md` and are not default-read.
-- Planning lock applies to architecture/governance/control/lifecycle/cross-zone and broad file changes.
+- Topology is orientation only for architecture/governance/control/lifecycle/cross-zone or broad file changes.
 - Machine manifests should stay compact; module books carry explanation.
 - Global health drift must remain visible even when a scoped route is clear.
 - Agent-runtime output should reduce decisions, not add ceremony: route cards
   summarize admission, risk tier, dominant driver, next action, safe next files,
-  and gate budget before appendices.
+  and verification budget before appendices.
 - Route cards are typed runtime decision packets, not prose summaries. Their
   core is an operation vector compiled from finite facts: operation stage,
   mutation surface, side effect, authority surfaces, artifact target, merge
   state, and claims. Natural language may provide hints, but files, manifests,
-  typed CLI fields, and merge facts are the durable routing inputs. When a
-  route is not admitted, expose `why_not_admitted` and
-  `suggested_next_command`; when artifact lifecycle matters, expose
-  `persistence_target`; when merge protocol matters, expose
-  `merge_evidence_required`; when manifest/path provenance matters, expose
-  `provenance_notes`.
+  typed CLI fields, and merge facts are the durable routing inputs. The public
+  CLI view stays orientation-first: profile, operation vector, candidates,
+  provenance, and compact context.
 - Operation-end feedback should create a positive loop without becoming a new
   gate: agents capture context recovery, Zeus improvement insights, and
-  topology helped/blocked notes in the final response or an already-required
+  topology helped/friction notes in the final response or an existing
   packet closeout surface. The topology note should name route/admission/risk,
   semantic match, one help, one friction, and one next topology delta or
   `none_observed`.
 
 ## Failure modes
 
-- Lane conflation makes unrelated repo-health drift block a focused task.
+- Lane conflation makes unrelated repo-health drift obscure a focused task.
 - Flat issue shapes make repair ownership impossible to automate.
 - Dense knowledge remains hidden in tests, package plans, source comments, or graph blobs.
 - A tidy manifest layer becomes cognitively hollow and causes zero-context agents to guess.
@@ -71,16 +68,15 @@ Topology has five interacting layers:
 - Use `--route-card-only` for first-screen orientation and `--claim` only when
   the completion statement depends on a specific gate such as graph impact,
   repo health, packet closeout, semantic boot, or live authorization.
-- Treat high-fanout file-only matches as soft advisory routing, not as a hard
-  ambiguous topology failure. They must not admit edits or choose a profile,
-  but they should let the agent continue orientation and then pass typed intent
-  only when the edit actually needs that file.
+- Treat high-fanout file-only matches as soft advisory routing. They should
+  let the agent continue orientation and then provide typed intent only when
+  the edit actually needs that file.
 - Use typed issue `owner_manifest` and `repair_kind` metadata to select the owning registry.
-- Stop and plan when planning-lock or unknown ownership appears.
+- Use ownership context for governed changes.
 - Close with targeted tests. Add changed-file `closeout` and work/receipt
-  evidence only when a packet, closeout claim, or high-risk gate consumes them.
+  evidence only when a packet, closeout claim, or high-risk check consumes them.
 - If topology helped, preserve the pattern in tests, route-card text, or module
-  docs only when the current route owns that surface. If topology blocked or
+  docs only when the current route owns that surface. If topology misrouted or
   misrouted, record the friction as feedback first; promote it to a topology
   fix only when it is repeatable or already in scope.
 - Use the `direct operation feedback capsule` profile for "context recycling",
@@ -89,19 +85,18 @@ Topology has five interacting layers:
   admitted only when that packet already consumes them.
 - Use the `operation planning packet` route when a real runtime task starts as
   a broad fix/remediation package. The implementation files are impact context,
-  not edit permission; the packet should split K structural decisions and each
-  slice must come back through its own route.
+  and the packet should split K structural decisions into individually routed
+  slices.
 
 ## Agent runtime posture
 
 Topology is most useful when it behaves like a runtime contract:
 
-- T0 read-only work gets a route card and stops before edits.
+- T0 read-only work gets a compact route card.
 - T1/T2 work gets focused gates, not full-governance ritual.
-- T3 work gets planning-lock when governed files are touched and focused gates
-  for the changed surface. Packet evidence, receipts, and critics are
+- T3 work gets focused checks for the changed surface. Packet evidence, receipts, and critics are
   conditional on packet closeout, explicit claims, or semantic ambiguity.
-- T4 live/prod work remains blocked without explicit operator authorization.
+- T4 live/prod work remains operator-authorized only.
 - Impact/context output should use the owner manifest for the file class:
   `source_rationale` for `src/**`, script manifest for `scripts/**`, docs
   registry or operations router for `docs/**`, and test topology for `tests/**`.

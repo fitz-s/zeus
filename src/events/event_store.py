@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-11
+# Last reused/audited: 2026-06-19
 # Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
 #                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE.
 #                  2026-06-11 operator throughput/fairness directive — fetch_pending
@@ -50,6 +50,7 @@ _TERMINAL_NO_VALUE_REFUTATION_SQL = """
         )
     )
 """
+_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
 
 
 def _no_value_refutation_event_types_compatible(
@@ -57,6 +58,11 @@ def _no_value_refutation_event_types_compatible(
 ) -> bool:
     active = str(active_event_type or "").strip()
     regret = str(regret_event_type or "").strip()
+    # A redecision row is created only after the continuous screen sees current
+    # value/rest evidence. Older same-payload no-value receipts may suppress
+    # ordinary discovery rows, but must not expire the live redecision itself.
+    if active == "EDLI_REDECISION_PENDING":
+        return False
     if active in _FORECAST_DECISION_EVENT_TYPES:
         return not regret or regret in _FORECAST_DECISION_EVENT_TYPES
     if active == "DAY0_EXTREME_UPDATED":
@@ -129,13 +135,30 @@ class EventStore:
 
         inserted = cur.rowcount == 1
         if inserted:
+            now = _utc_now()
+            if event.event_type in self._CHANNEL_EVENT_TYPES:
+                processing_status = "ignored"
+                processed_at = now
+                last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+            else:
+                processing_status = "pending"
+                processed_at = None
+                last_error = None
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO opportunity_event_processing (
-                    consumer_name, event_id, processing_status, attempt_count, updated_at
-                ) VALUES (?, ?, 'pending', 0, ?)
+                    consumer_name, event_id, processing_status, attempt_count,
+                    processed_at, last_error, updated_at
+                ) VALUES (?, ?, ?, 0, ?, ?, ?)
                 """,
-                (self.consumer_name, event.event_id, _utc_now()),
+                (
+                    self.consumer_name,
+                    event.event_id,
+                    processing_status,
+                    processed_at,
+                    last_error,
+                    now,
+                ),
             )
         return inserted
 
@@ -292,10 +315,10 @@ class EventStore:
               --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
               --         target window, so source_run completeness is not the queue authority.
               -- Tier 2: Other decision-trigger events — still actionable
-              --         or cheaply dead-letterable; must not be starved by market-channel.
-              -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
-              --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
-              --         but can accumulate to 300k+; without explicit demotion they starve all FSR.
+              --         or cheaply dead-letterable. Market-channel cache-hydration
+              --         events are intentionally excluded from fetch_pending and
+              --         initialized as ignored at the write boundary; they are quote
+              --         cache / feasibility inputs, not submit-reactor work.
               c._claim_tier ASC,
               -- FAIRNESS (primary cross-city key): one event per city before any
               -- city's second event. A budget of K reaches K distinct cities/cycle;
@@ -1001,8 +1024,32 @@ class EventStore:
                    CASE
                      WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
                       AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+                      AND COALESCE(
+                            json_extract(e.payload_json, '$.member_count'),
+                            json_extract(e.payload_json, '$.observed_members'),
+                            json_extract(e.payload_json, '$.sr_observed_members')
+                          ) IS NOT NULL
+                      AND COALESCE(
+                            json_extract(e.payload_json, '$.expected_members'),
+                            json_extract(e.payload_json, '$.sr_expected_members')
+                          ) IS NOT NULL
+                      AND CAST(COALESCE(
+                            json_extract(e.payload_json, '$.expected_members'),
+                            json_extract(e.payload_json, '$.sr_expected_members')
+                          ) AS INTEGER) > 0
+                      AND CAST(COALESCE(
+                            json_extract(e.payload_json, '$.member_count'),
+                            json_extract(e.payload_json, '$.observed_members'),
+                            json_extract(e.payload_json, '$.sr_observed_members')
+                          ) AS INTEGER) >= CAST(COALESCE(
+                            json_extract(e.payload_json, '$.expected_members'),
+                            json_extract(e.payload_json, '$.sr_expected_members')
+                          ) AS INTEGER)
                      THEN 0
-                     ELSE 1
+                     WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+                      AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+                     THEN 1
+                     ELSE 2
                    END ASC,
                    e.available_at DESC,
                    e.received_at DESC,
@@ -1037,6 +1084,87 @@ class EventStore:
             )
         return len(superseded_ids)
 
+    def archive_invalid_forecast_snapshot_events(
+        self, *, batch_limit: int = 5_000
+    ) -> int:
+        """Terminalize live-eligible FSR/redecision rows with impossible carrier counts.
+
+        ``FORECAST_SNAPSHOT_READY`` and ``EDLI_REDECISION_PENDING`` are money-path
+        carriers. If a row advertises ``COMPLETE``/``LIVE_ELIGIBLE`` coverage while
+        its observed carrier count is missing or smaller than its expected carrier
+        count, the row is not a conservative no-trade signal; it is a structurally
+        invalid live carrier. Leaving it ``pending`` or ``processing`` lets legacy
+        producer bugs re-enter the decision path after restart.
+
+        The immutable event remains append-only. Only the mutable processing row is
+        expired, with ``last_error`` explaining why it was removed from the active
+        working set.
+        """
+
+        self._require_world_event_tables()
+        rows = self.conn.execute(
+            """
+            SELECT e.event_id
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
+               AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+               AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+               AND COALESCE(
+                     json_extract(e.payload_json, '$.expected_members'),
+                     json_extract(e.payload_json, '$.sr_expected_members')
+                   ) IS NOT NULL
+               AND CAST(COALESCE(
+                     json_extract(e.payload_json, '$.expected_members'),
+                     json_extract(e.payload_json, '$.sr_expected_members')
+                   ) AS INTEGER) > 0
+               AND (
+                    COALESCE(
+                      json_extract(e.payload_json, '$.member_count'),
+                      json_extract(e.payload_json, '$.observed_members'),
+                      json_extract(e.payload_json, '$.sr_observed_members')
+                    ) IS NULL
+                 OR CAST(COALESCE(
+                      json_extract(e.payload_json, '$.member_count'),
+                      json_extract(e.payload_json, '$.observed_members'),
+                      json_extract(e.payload_json, '$.sr_observed_members')
+                    ) AS INTEGER) < CAST(COALESCE(
+                      json_extract(e.payload_json, '$.expected_members'),
+                      json_extract(e.payload_json, '$.sr_expected_members')
+                    ) AS INTEGER)
+               )
+             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, batch_limit),
+        ).fetchall()
+        event_ids = [str(row[0]) for row in rows]
+        if not event_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(event_ids), _CHUNK):
+            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'INVALID_FORECAST_SNAPSHOT_CARRIER_COUNTS',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(event_ids)
+
     def archive_recent_no_value_refuted_events(
         self,
         *,
@@ -1053,9 +1181,12 @@ class EventStore:
         preserving the append-only ``opportunity_events`` provenance.
 
         Same-evidence is deliberately narrow: same city/target/metric plus
-        matching payload hash or causal snapshot id. Forecast ordinary FSR and
-        ``EDLI_REDECISION_PENDING`` share one evidence family; Day0 remains a
-        separate observation lane and only Day0 no-value can refute Day0. Unlike
+        matching payload hash or causal snapshot id. Ordinary FSR rows can be
+        refuted by prior forecast/redecision no-value receipts. Active
+        ``EDLI_REDECISION_PENDING`` rows are not archive-refuted here because
+        the continuous screen already observed current value/rest evidence; the
+        reactor must decide them on the fresh path. Day0 remains a separate
+        observation lane and only Day0 no-value can refute Day0. Unlike
         emit-time suppression, this is not limited to the short cooldown window:
         if an old row is still queued and the same evidence was terminally
         refuted after that evidence became available, the row is stale.
@@ -1125,6 +1256,7 @@ class EventStore:
              WHERE n.created_at >= ?
                AND n.created_at <= ?
                AND ({_TERMINAL_NO_VALUE_REFUTATION_SQL})
+               AND ({_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL})
              ORDER BY n.created_at DESC
             """,
             (evidence_floor, parsed_decision_time.isoformat()),

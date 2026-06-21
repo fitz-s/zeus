@@ -155,7 +155,7 @@ def test_request_builder_output_passes_consumer_validation(tmp_path) -> None:
     request = validate_materialization_request(dict(result.request))
     assert request.city == "Shanghai"
     assert request.temperature_metric == "high"
-    assert request.aifs_input_key == "aifs_samples_json"
+    assert not hasattr(request, "aifs_input_key")
     assert request.schema_version == MATERIALIZATION_REQUEST_SCHEMA_VERSION
 
 
@@ -164,7 +164,7 @@ def test_seed_payload_round_trips_through_seed_validator(tmp_path) -> None:
     seed = _valid_seed_payload(tmp_path)
     validated = validate_materialization_seed(seed)
     assert validated.city == "Shanghai"
-    assert validated.aifs_input_key == "aifs_samples_json"
+    assert not hasattr(validated, "aifs_input_key")
     assert validated.settlement_step_c == 1.0
     assert validated.schema_version == MATERIALIZATION_SEED_SCHEMA_VERSION
 
@@ -219,9 +219,30 @@ def test_request_without_aifs_input_is_accepted(tmp_path) -> None:
     payload.pop("aifs_source_run_id", None)
     payload.pop("aifs_source_available_at", None)
     validated = validate_materialization_request(payload)
-    assert validated.aifs_input_key == ""
-    assert validated.aifs_input_value == ""
-    assert validated.aifs_source_run_id == ""
+    assert not hasattr(validated, "aifs_input_key")
+
+
+def test_day0_observed_extreme_fields_round_trip_seed_to_request(tmp_path) -> None:
+    seed = _write_seed_artifacts(tmp_path)
+    seed.update(
+        {
+            "day0_observed_extreme_c": 26.0,
+            "day0_observed_extreme_source": "wu_api",
+            "day0_observed_extreme_observation_time": "2026-06-06T17:55:00+00:00",
+            "day0_observed_extreme_sample_count": 12,
+            "day0_observed_extreme_unit": "C",
+        }
+    )
+
+    validated_seed = validate_materialization_seed(seed)
+    result = build_replacement_forecast_materialization_request(seed, base_dir=tmp_path)
+    assert result.ok, result.reason_codes
+    validated_request = validate_materialization_request(dict(result.request))
+
+    assert validated_seed.day0_observed_extreme_c == 26.0
+    assert validated_seed.day0_observed_extreme_source == "wu_api"
+    assert validated_request.day0_observed_extreme_c == 26.0
+    assert validated_request.day0_observed_extreme_sample_count == 12
 
 
 def test_request_wrong_typed_number_is_rejected(tmp_path) -> None:

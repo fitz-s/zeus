@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-06-20
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ import sqlite3
 import pytest
 
 from src.events.event_store import EventStore, EventStoreSchemaError
-from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+from src.events.opportunity_event import (
+    ForecastSnapshotReadyPayload,
+    MarketBookEventPayload,
+    make_opportunity_event,
+)
 from src.state.db import init_schema
 
 
@@ -62,6 +66,29 @@ def _event(snapshot_id: str, priority: int, available_at: str, received_at: str)
     )
 
 
+def _channel_event(event_type: str = "BEST_BID_ASK_CHANGED"):
+    available_at = "2026-05-24T04:15:00+00:00"
+    payload = MarketBookEventPayload(
+        condition_id="0xcondition",
+        token_id="token-yes",
+        outcome_label="YES",
+        event_type=event_type,
+        quote_seen_at=available_at,
+        best_bid=0.44,
+        best_ask=0.56,
+    )
+    return make_opportunity_event(
+        event_type=event_type,
+        entity_key=f"0xcondition:token-yes:{event_type}",
+        source="market_channel",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        payload=payload,
+        priority=0,
+    )
+
+
 def _fsr_entity_event(
     entity_key: str,
     snapshot_id: str,
@@ -74,12 +101,19 @@ def _fsr_entity_event(
     source_run_completeness_status: str = "COMPLETE",
     coverage_completeness_status: str | None = None,
     coverage_readiness_status: str | None = None,
+    member_count: int = 51,
+    expected_members: int = 51,
 ):
     payload = _payload(
         snapshot_id,
         city=city,
         target_date=target_date,
         metric=metric,
+    )
+    payload = dataclasses.replace(
+        payload,
+        member_count=member_count,
+        expected_members=expected_members,
     )
     if source_run_completeness_status != "COMPLETE":
         payload = dataclasses.replace(
@@ -115,6 +149,7 @@ def _insert_no_value_regret(
     *,
     created_at: str = "2026-05-24T04:18:00+00:00",
     rejection_reason: str = "TRADE_SCORE_NON_POSITIVE",
+    executable_snapshot_id: str | None = None,
 ) -> None:
     payload = json.loads(event.payload_json)
     conn.execute(
@@ -122,9 +157,9 @@ def _insert_no_value_regret(
         INSERT INTO no_trade_regret_events (
             regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
             decision_time, city, target_date, metric, family_id, causal_snapshot_id,
-            created_at, schema_version
+            executable_snapshot_id, created_at, schema_version
         ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
-                  ?, ?, ?, ?, ?, ?, ?, 1)
+                  ?, ?, ?, ?, ?, ?, ?, ?, 1)
         """,
         (
             "regret-" + event.event_id,
@@ -142,6 +177,7 @@ def _insert_no_value_regret(
                 )
             ),
             event.causal_snapshot_id,
+            executable_snapshot_id,
             created_at,
         ),
     )
@@ -155,6 +191,38 @@ def test_insert_or_ignore_duplicate():
     assert store.insert_or_ignore(event) is False
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM opportunity_event_processing").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["BEST_BID_ASK_CHANGED", "BOOK_SNAPSHOT", "NEW_MARKET_DISCOVERED"],
+)
+def test_channel_cache_events_are_immutable_inputs_not_pending_reactor_work(event_type: str):
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = _channel_event(event_type)
+
+    assert store.insert_or_ignore(event) is True
+
+    event_row = conn.execute(
+        "SELECT event_type, payload_json FROM opportunity_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    processing_row = conn.execute(
+        """
+        SELECT processing_status, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+
+    assert event_row["event_type"] == event_type
+    assert json.loads(event_row["payload_json"])["token_id"] == "token-yes"
+    assert processing_row["processing_status"] == "ignored"
+    assert processing_row["processed_at"]
+    assert processing_row["last_error"] == "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+    assert store.fetch_pending(decision_time="2026-05-24T05:00:00+00:00") == []
 
 
 def test_processing_state_separate_from_event_row():
@@ -476,6 +544,76 @@ def test_archive_superseded_forecast_snapshot_events_keeps_window_complete_sourc
     assert rows[window_complete.event_id] == "pending"
 
 
+def test_archive_invalid_forecast_snapshot_events_expires_live_carrier_count_mismatch():
+    conn = _world_conn()
+    store = EventStore(conn)
+    invalid = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-bad",
+        "snap-invalid-carrier",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        member_count=0,
+        expected_members=51,
+    )
+    valid = _fsr_entity_event(
+        "Denver|2026-05-24|high|source-run-good",
+        "snap-valid-carrier",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        city="Denver",
+        member_count=3,
+        expected_members=3,
+    )
+    for event in (invalid, valid):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_invalid_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = {
+        event_id: (status, last_error)
+        for event_id, status, last_error in conn.execute(
+            "SELECT event_id, processing_status, last_error FROM opportunity_event_processing"
+        ).fetchall()
+    }
+    assert rows[invalid.event_id] == ("expired", "INVALID_FORECAST_SNAPSHOT_CARRIER_COUNTS")
+    assert rows[valid.event_id] == ("pending", None)
+
+
+def test_archive_superseded_forecast_snapshot_events_keeps_valid_carrier_over_newer_invalid():
+    conn = _world_conn()
+    store = EventStore(conn)
+    valid_older = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-good",
+        "snap-valid-older",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+        member_count=3,
+        expected_members=3,
+    )
+    invalid_newer = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-bad",
+        "snap-invalid-newer",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        member_count=0,
+        expected_members=51,
+    )
+    for event in (valid_older, invalid_newer):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[valid_older.event_id] == "pending"
+    assert rows[invalid_newer.event_id] == "expired"
+
+
 def test_archive_recent_no_value_refuted_events_expires_queued_fsr_from_redecision_refutation():
     conn = _world_conn()
     store = EventStore(conn)
@@ -526,6 +664,115 @@ def test_archive_recent_no_value_refuted_events_expires_queued_fsr_from_redecisi
     assert rows[queued_fsr.event_id][0] == "expired"
     assert rows[queued_fsr.event_id][1].startswith(
         "RECENT_NO_VALUE_REFUTATION:payload_hash:"
+    )
+
+
+def test_archive_recent_no_value_refuted_events_keeps_queued_redecision_live():
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-same",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:11:00+00:00",
+        causal_snapshot_id="snap-same",
+        payload=_payload("snap-same"),
+        priority=50,
+    )
+    queued_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-same-refresh",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:12:00+00:00",
+        available_at="2026-05-24T04:12:00+00:00",
+        received_at="2026-05-24T04:12:30+00:00",
+        causal_snapshot_id="snap-same",
+        payload=_payload("snap-same"),
+        priority=50,
+    )
+    for event in (prior_redecision, queued_redecision):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_redecision.event_id,),
+    )
+    _insert_no_value_regret(conn, prior_redecision)
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T05:20:00+00:00"
+    )
+
+    assert archived == 0
+    assert (
+        conn.execute(
+            """
+            SELECT processing_status
+              FROM opportunity_event_processing
+             WHERE event_id = ?
+            """,
+            (queued_redecision.event_id,),
+        ).fetchone()[0]
+        == "pending"
+    )
+
+
+def test_archive_recent_no_value_refuted_events_keeps_price_conditioned_regret_live():
+    conn = _world_conn()
+    store = EventStore(conn)
+    prior_redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Chicago|2026-05-24|high|snap-priced",
+        source="edli_redecision:screen",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:11:00+00:00",
+        causal_snapshot_id="snap-priced",
+        payload=_payload("snap-priced"),
+        priority=50,
+    )
+    queued_fsr = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-priced",
+        "snap-priced",
+        "2026-05-24T04:12:00+00:00",
+        "2026-05-24T04:12:30+00:00",
+    )
+    for event in (prior_redecision, queued_fsr):
+        store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed'
+         WHERE event_id = ?
+        """,
+        (prior_redecision.event_id,),
+    )
+    _insert_no_value_regret(
+        conn,
+        prior_redecision,
+        executable_snapshot_id="ems2-old-price",
+    )
+
+    archived = store.archive_recent_no_value_refuted_events(
+        decision_time="2026-05-24T05:20:00+00:00"
+    )
+
+    assert archived == 0
+    assert (
+        conn.execute(
+            """
+            SELECT processing_status
+              FROM opportunity_event_processing
+             WHERE event_id = ?
+            """,
+            (queued_fsr.event_id,),
+        ).fetchone()[0]
+        == "pending"
     )
 
 

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -52,6 +53,19 @@ UTC = timezone.utc
 
 # Latest-fact states that mean "this order is resting open at the venue".
 OPEN_REST_FACT_STATES = ("LIVE", "RESTING", "PARTIALLY_MATCHED")
+TERMINAL_COMMAND_STATES = frozenset(
+    {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
+)
+
+
+class _TerminalCommandNoop(RuntimeError):
+    def __init__(self, command_id: str, state: str, event_type: str) -> None:
+        super().__init__(
+            f"terminal command {command_id} already {state}; skipping {event_type}"
+        )
+        self.command_id = command_id
+        self.state = state
+        self.event_type = event_type
 
 
 def _deadline_minutes() -> float:
@@ -89,6 +103,7 @@ def find_expired_resting_entries(
         WHERE vc.intent_kind = 'ENTRY'
           AND vc.venue_order_id IS NOT NULL
           AND vc.venue_order_id != ''
+          AND vc.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
           AND lf.state IN ({placeholders})
           AND vc.created_at <= ?
         """,
@@ -196,6 +211,49 @@ def _close_conn_if_needed(conn: sqlite3.Connection, *, close: bool) -> None:
         pass
 
 
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text or "busy" in text
+
+
+def _cancel_journal_event_already_persisted(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    event_type: str,
+    venue_order_id: str,
+) -> bool:
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = ?
+             ORDER BY sequence_no DESC
+            """,
+            (command_id, event_type),
+        ).fetchall()
+    except Exception:
+        return False
+    import json
+
+    for row in rows:
+        try:
+            raw = row["payload_json"]
+        except Exception:
+            raw = row[0]
+        try:
+            payload = json.loads(str(raw or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and str(payload.get("venue_order_id") or "") == venue_order_id:
+            return True
+    return False
+
+
 def _append_cancel_journal_event(
     conn_factory: Callable[[], sqlite3.Connection],
     *,
@@ -207,18 +265,55 @@ def _append_cancel_journal_event(
 ) -> None:
     from src.state.venue_command_repo import append_event
 
-    conn = conn_factory()
-    try:
-        append_event(
-            conn,
-            command_id=command_id,
-            event_type=event_type,
-            occurred_at=occurred_at,
-            payload=payload,
-        )
-        conn.commit()
-    finally:
-        _close_conn_if_needed(conn, close=close_connections)
+    venue_order_id = str(payload.get("venue_order_id") or "")
+    for attempt in range(1, 4):
+        conn = conn_factory()
+        try:
+            row = conn.execute(
+                "SELECT state FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if row is not None:
+                current_state = str(row["state"] if isinstance(row, sqlite3.Row) else row[0]).upper()
+                if current_state in TERMINAL_COMMAND_STATES:
+                    raise _TerminalCommandNoop(command_id, current_state, event_type)
+            if venue_order_id and _cancel_journal_event_already_persisted(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                venue_order_id=venue_order_id,
+            ):
+                return
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=payload,
+            )
+            conn.commit()
+            return
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if isinstance(exc, _TerminalCommandNoop):
+                raise
+            if not _is_sqlite_lock_error(exc) or attempt == 3:
+                raise
+            logger.warning(
+                "maker_rest_escalation: retrying %s journal command=%s order=%s "
+                "after sqlite lock (attempt %d/3): %s",
+                event_type,
+                command_id,
+                venue_order_id,
+                attempt,
+                exc,
+            )
+            time.sleep(0.25 * attempt)
+        finally:
+            _close_conn_if_needed(conn, close=close_connections)
 
 
 def run_persisted_cancels_for_expired_rests(
@@ -272,6 +367,15 @@ def run_persisted_cancels_for_expired_rests(
                 },
                 close_connections=close_connections,
             )
+        except _TerminalCommandNoop as exc:
+            logger.info(
+                "maker_rest_escalation: skipped terminal command before cancel "
+                "command=%s order=%s state=%s",
+                command_id,
+                order_id,
+                exc.state,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001
             stats["cancel_failed"] += 1
             logger.error(
@@ -304,6 +408,8 @@ def run_persisted_cancels_for_expired_rests(
             payload = {
                 "venue_order_id": order_id,
                 "reason": "post_cancel_unknown_possible_side_effect",
+                "requires_m5_reconcile": True,
+                "semantic_cancel_status": "CANCEL_UNKNOWN",
                 "cancel_outcome": raw,
             }
 
@@ -316,6 +422,16 @@ def run_persisted_cancels_for_expired_rests(
                 payload=payload,
                 close_connections=close_connections,
             )
+        except _TerminalCommandNoop as exc:
+            logger.info(
+                "maker_rest_escalation: skipped post-cancel journal for terminal command "
+                "command=%s order=%s event=%s state=%s",
+                command_id,
+                order_id,
+                event_type,
+                exc.state,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001
             stats["cancel_journal_failed"] += 1
             logger.error(
@@ -330,6 +446,12 @@ def run_persisted_cancels_for_expired_rests(
 
         if event_type == "CANCEL_ACKED":
             stats["cancelled"] += 1
+            _reconcile_terminal_no_fill_after_cancel_ack(
+                conn_factory,
+                command_id=command_id,
+                order_id=order_id,
+                close_connections=close_connections,
+            )
             if collect_cancelled is not None:
                 collect_cancelled.append(entry)
         else:
@@ -362,6 +484,71 @@ def run_persisted_cancels_for_expired_rests(
                 float(deadline_minutes if deadline_minutes is not None else _deadline_minutes()),
             )
     return stats
+
+
+def _reconcile_terminal_no_fill_after_cancel_ack(
+    conn_factory: Callable[[], sqlite3.Connection],
+    *,
+    command_id: str,
+    order_id: str,
+    close_connections: bool,
+) -> None:
+    """Immediately consume zero-fill cancel truth after a maker-rest pull.
+
+    The full INV-31 command-recovery sweep can be delayed by authenticated venue
+    reads. A confirmed cancel already has enough durable local evidence for the
+    DB-only terminal-no-fill reducers to clear a zero-exposure ``pending_entry``
+    projection, so run those narrow reducers in the cancel path.
+    """
+
+    conn = conn_factory()
+    try:
+        required_tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not {
+            "position_current",
+            "venue_commands",
+            "venue_command_events",
+            "venue_order_facts",
+        }.issubset(required_tables):
+            return
+        from src.execution.command_recovery import (
+            reconcile_cancel_ack_terminal_no_fill_facts,
+            reconcile_terminal_order_facts,
+        )
+
+        cancel_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
+        terminal_summary = reconcile_terminal_order_facts(conn)
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        advanced = int(cancel_summary.get("advanced", 0) or 0) + int(
+            terminal_summary.get("advanced", 0) or 0
+        )
+        if advanced:
+            logger.info(
+                "maker_rest_escalation: terminal no-fill reducers advanced command=%s "
+                "order=%s cancel_ack=%s terminal=%s",
+                command_id,
+                order_id,
+                cancel_summary,
+                terminal_summary,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "maker_rest_escalation: terminal no-fill reducer deferred command=%s "
+            "order=%s: %r",
+            command_id,
+            order_id,
+            exc,
+        )
+    finally:
+        _close_conn_if_needed(conn, close=close_connections)
 
 
 def run_maker_rest_escalation_cycle(

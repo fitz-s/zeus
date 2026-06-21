@@ -210,18 +210,37 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
         required_chain_cols = {"chain_state", "chain_shares", "chain_cost_basis_usd"}
         if not required_chain_cols.issubset(cols):
             return set()
-        rows = conn_trades.execute(
-            """
-            SELECT DISTINCT city, target_date, temperature_metric
-            FROM position_current
-            WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
-              AND COALESCE(chain_state, '') = 'synced'
-              AND COALESCE(chain_shares, 0) > 0
-              AND COALESCE(chain_cost_basis_usd, 0) > 0
-              AND city IS NOT NULL AND target_date IS NOT NULL
-              AND temperature_metric IS NOT NULL
-            """
-        ).fetchall()
+        if {"order_status", "exit_reason"}.issubset(cols):
+            rows = conn_trades.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                FROM position_current
+                WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
+                  AND COALESCE(chain_state, '') = 'synced'
+                  AND COALESCE(chain_shares, 0) > 0
+                  AND COALESCE(chain_cost_basis_usd, 0) > 0
+                  AND city IS NOT NULL AND target_date IS NOT NULL
+                  AND temperature_metric IS NOT NULL
+                  AND NOT (
+                        COALESCE(phase, '') = 'pending_exit'
+                    AND COALESCE(order_status, '') = 'backoff_exhausted'
+                    AND COALESCE(exit_reason, '') = 'MARKET_CLOSED_AWAITING_SETTLEMENT'
+                  )
+                """
+            ).fetchall()
+        else:
+            rows = conn_trades.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                FROM position_current
+                WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
+                  AND COALESCE(chain_state, '') = 'synced'
+                  AND COALESCE(chain_shares, 0) > 0
+                  AND COALESCE(chain_cost_basis_usd, 0) > 0
+                  AND city IS NOT NULL AND target_date IS NOT NULL
+                  AND temperature_metric IS NOT NULL
+                """
+            ).fetchall()
     except Exception as exc:  # noqa: BLE001
         # FINDING 2 / MEDIUM (external review 2026-06-12): a held-family read FAILURE silently
         # dropped held-position priority — the families whose stale belief most directly risks
@@ -252,6 +271,7 @@ def _already_enqueued(
     target_date: str,
     metric: str,
     target_cycle_iso: str,
+    allow_missing_seed_file_reenqueue: bool = False,
 ) -> bool:
     """True iff a real re-materialization seed already exists for this exact target cycle.
 
@@ -276,7 +296,47 @@ def _already_enqueued(
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
         return False
+    if allow_missing_seed_file_reenqueue and seed_file and not Path(seed_file).exists():
+        return False
     return True
+
+
+def _promote_existing_enqueue_to_held(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    target_cycle_iso: str,
+) -> bool:
+    """Upgrade an existing enqueue row into the held-position priority tier.
+
+    Monitor-triggered single-family reseeds are money-at-risk work even when a
+    broad cycle scanner already wrote the idempotency row first. The unique
+    enqueue key must prevent duplicate seeds, not permanently freeze the row in
+    the non-held tier.
+    """
+    before = conn.total_changes
+    conn.execute(
+        """
+        UPDATE cycle_advance_enqueues
+           SET held_position = 1,
+               enqueued_at = ?
+         WHERE city = ?
+           AND target_date = ?
+           AND metric = ?
+           AND target_cycle_time = ?
+           AND COALESCE(held_position, 0) != 1
+        """,
+        (
+            datetime.now(tz=UTC).isoformat(),
+            city,
+            target_date,
+            metric,
+            target_cycle_iso,
+        ),
+    )
+    return conn.total_changes > before
 
 
 def _record_enqueue(
@@ -290,6 +350,7 @@ def _record_enqueue(
     held_position: bool,
     seed_file: str | None,
     reason: str | None = None,
+    replace_existing_seed_file: bool = False,
 ) -> bool:
     """Write the idempotency marker. Returns True iff this call inserted the row (False = a
     concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE).
@@ -324,6 +385,33 @@ def _record_enqueue(
         return True
     if seed_file:
         update_before = conn.total_changes
+        if replace_existing_seed_file:
+            conn.execute(
+                """
+                UPDATE cycle_advance_enqueues
+                   SET enqueued_at = ?,
+                       consumed_cycle_time = ?,
+                       held_position = ?,
+                       seed_file = ?,
+                       reason = ?
+                 WHERE city = ?
+                   AND target_date = ?
+                   AND metric = ?
+                   AND target_cycle_time = ?
+                """,
+                (
+                    datetime.now(tz=UTC).isoformat(),
+                    consumed_cycle_iso,
+                    1 if held_position else 0,
+                    seed_file,
+                    reason,
+                    city,
+                    target_date,
+                    metric,
+                    target_cycle_iso,
+                ),
+            )
+            return conn.total_changes > update_before
         conn.execute(
             """
             UPDATE cycle_advance_enqueues
@@ -614,6 +702,12 @@ def enqueue_single_family_cycle_advance_reseed(
     target_date: str,
     metric: str,
     computed_at: datetime | None = None,
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_sample_count: int | None = None,
+    day0_observed_extreme_unit: str | None = None,
+    held_position: bool = False,
 ) -> dict[str, object]:
     """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Single-family variant of
     ``enqueue_cycle_advance_reseeds``: when the reactor/monitor finds ONE family blocked on a
@@ -654,11 +748,13 @@ def enqueue_single_family_cycle_advance_reseed(
     city = str(city)
     target_date = str(target_date)
     metric = str(metric)
+    has_day0_observed_extreme = day0_observed_extreme_c is not None
     report: dict[str, object] = {
         "status": "SINGLE_FAMILY_CYCLE_ADVANCE",
         "city": city,
         "target_date": target_date,
         "metric": metric,
+        "held_position": bool(held_position),
         "enqueued": False,
     }
     if not forecast_db.exists():
@@ -711,7 +807,16 @@ def enqueue_single_family_cycle_advance_reseed(
                 _record_enqueue(
                     conn, city=city, target_date=target_date, metric=metric,
                     consumed_cycle_iso=consumed_cycle_iso, target_cycle_iso=target_cycle_iso,
-                    held_position=False, seed_file=None, reason=reason,
+                    held_position=held_position, seed_file=None, reason=reason,
+                )
+                conn.commit()
+            elif held_position:
+                report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    target_cycle_iso=target_cycle_iso,
                 )
                 conn.commit()
             report["status"] = "CYCLE_ADVANCE_LEG_ARTIFACT_MISSING"
@@ -732,8 +837,22 @@ def enqueue_single_family_cycle_advance_reseed(
                 return report
             target_cycle_iso = family_cycle.isoformat()
             if _already_enqueued(
-                conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
             ):
+                if held_position:
+                    report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        target_cycle_iso=target_cycle_iso,
+                    )
+                    conn.commit()
                 report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
                 return report
             seed_file = _build_and_write_advance_seed(
@@ -756,6 +875,11 @@ def enqueue_single_family_cycle_advance_reseed(
                 seed_name=_seed_name,
                 expected_identity=expected_replacement_dependency_identity_by_role,
                 upgrade_trigger="missing_live_posterior_reseed",
+                day0_observed_extreme_c=day0_observed_extreme_c,
+                day0_observed_extreme_source=day0_observed_extreme_source,
+                day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+                day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+                day0_observed_extreme_unit=day0_observed_extreme_unit,
             )
             if seed_file is None:
                 report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -767,9 +891,10 @@ def enqueue_single_family_cycle_advance_reseed(
                 metric=metric,
                 consumed_cycle_iso="NO_LIVE_POSTERIOR",
                 target_cycle_iso=target_cycle_iso,
-                held_position=False,
+                held_position=held_position,
                 seed_file=str(seed_file),
                 reason="MISSING_LIVE_POSTERIOR",
+                replace_existing_seed_file=has_day0_observed_extreme,
             )
             conn.commit()
             report["enqueued"] = bool(inserted)
@@ -790,8 +915,22 @@ def enqueue_single_family_cycle_advance_reseed(
             return report
         target_cycle_iso = family_cycle.isoformat()
         if _already_enqueued(
-            conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
         ):
+            if held_position:
+                report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    target_cycle_iso=target_cycle_iso,
+                )
+                conn.commit()
             report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
             return report
         seed_file = _build_and_write_advance_seed(
@@ -814,6 +953,11 @@ def enqueue_single_family_cycle_advance_reseed(
             seed_name=_seed_name,
             expected_identity=expected_replacement_dependency_identity_by_role,
             upgrade_trigger="newer_cycle_ingested",
+            day0_observed_extreme_c=day0_observed_extreme_c,
+            day0_observed_extreme_source=day0_observed_extreme_source,
+            day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+            day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+            day0_observed_extreme_unit=day0_observed_extreme_unit,
         )
         if seed_file is None:
             report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
@@ -825,8 +969,9 @@ def enqueue_single_family_cycle_advance_reseed(
             metric=metric,
             consumed_cycle_iso=consumed_cycle_iso,
             target_cycle_iso=target_cycle_iso,
-            held_position=False,
+            held_position=held_position,
             seed_file=str(seed_file),
+            replace_existing_seed_file=has_day0_observed_extreme,
         )
         conn.commit()
         report["enqueued"] = bool(inserted)
@@ -866,6 +1011,11 @@ def _build_and_write_advance_seed(
     seed_name,
     expected_identity,
     upgrade_trigger: str = "newer_cycle_ingested",
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_sample_count: int | None = None,
+    day0_observed_extreme_unit: str | None = None,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     write it into seed_dir. Returns the seed Path, or None when the required manifests/context are
@@ -904,6 +1054,11 @@ def _build_and_write_advance_seed(
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
+        day0_observed_extreme_c=day0_observed_extreme_c,
+        day0_observed_extreme_source=day0_observed_extreme_source,
+        day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
+        day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
+        day0_observed_extreme_unit=day0_observed_extreme_unit,
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

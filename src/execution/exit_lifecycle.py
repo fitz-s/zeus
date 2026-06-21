@@ -2496,12 +2496,46 @@ def _exit_command_id_for_order(
     return str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0]) or None
 
 
-def _last_exit_order_id(position: Position) -> str:
-    return str(
-        getattr(position, "last_exit_order_id", None)
-        or getattr(position, "order_id", "")
-        or ""
-    )
+def _last_exit_order_id(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> str:
+    explicit = str(getattr(position, "last_exit_order_id", "") or "").strip()
+    if explicit:
+        return explicit
+
+    # Legacy rows sometimes keep the ENTRY venue order in ``position.order_id`` even
+    # after the position moves to pending_exit. Treating that entry id as a sell order
+    # makes pending-exit recovery poll a filled BUY forever instead of retrying the
+    # missing exit. Only accept the fallback when durable command truth proves it is an
+    # EXIT command for this position, or when no DB is available and the runtime status
+    # is explicitly sell-scoped.
+    fallback = str(getattr(position, "order_id", "") or "").strip()
+    if not fallback:
+        return ""
+    if conn is not None:
+        trade_id = str(getattr(position, "trade_id", "") or "").strip()
+        if not trade_id:
+            return ""
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM venue_commands
+                 WHERE position_id = ?
+                   AND intent_kind = 'EXIT'
+                   AND venue_order_id = ?
+                 LIMIT 1
+                """,
+                (trade_id, fallback),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        return fallback if row is not None else ""
+
+    order_status = str(getattr(position, "order_status", "") or "").strip().lower()
+    return fallback if order_status.startswith("sell_") else ""
 
 
 def check_pending_exits(
@@ -2562,7 +2596,7 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
-        exit_order_id = _last_exit_order_id(pos)
+        exit_order_id = _last_exit_order_id(pos, conn=conn)
         if not exit_order_id:
             _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
@@ -2913,7 +2947,7 @@ def _exit_command_row_for_order(
     position: Position,
     token_id: str,
 ) -> sqlite3.Row | None:
-    exit_order_id = _last_exit_order_id(position)
+    exit_order_id = _last_exit_order_id(position, conn=conn)
     if conn is None or not exit_order_id:
         return None
     try:

@@ -19,6 +19,7 @@ Covers the two helpers added in src/main.py:
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 
 from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 
@@ -108,6 +109,90 @@ def test_family_recovery_empty_when_no_tokens():
         )
         == set()
     )
+
+
+def _trade_conn_with_rest_screen_rows(*, command_state: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE venue_commands (
+            command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT,
+            side TEXT, price REAL, snapshot_id TEXT, created_at TEXT,
+            intent_kind TEXT, state TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE venue_order_facts (
+            venue_order_id TEXT, state TEXT, matched_size TEXT, local_sequence INTEGER
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE executable_market_snapshots (
+            selected_outcome_token_id TEXT, condition_id TEXT,
+            yes_token_id TEXT, no_token_id TEXT, captured_at TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO venue_commands
+           VALUES ('cmd-rest', 'ord-rest', 'tok-no', 'market-1', 'BUY', 0.66,
+                   'snap-rest', '2026-06-16T11:00:00+00:00', 'ENTRY', ?)""",
+        (command_state,),
+    )
+    conn.execute(
+        "INSERT INTO venue_order_facts VALUES ('ord-rest', 'LIVE', '0', 1)"
+    )
+    conn.execute(
+        """INSERT INTO executable_market_snapshots
+           VALUES ('tok-no', 'cond-1', 'tok-yes', 'tok-no',
+                   '2026-06-16T11:01:00+00:00')"""
+    )
+    return conn
+
+
+def _belief_for_rest_screen() -> SimpleNamespace:
+    return SimpleNamespace(
+        family_id="hyp|live|Paris|2026-06-21|low|disc",
+        condition_ids=["cond-1"],
+        bin_labels=["Will the lowest temperature in Paris be 20°C on June 21?"],
+        p_posterior_vec=[0.2],
+    )
+
+
+def test_open_rest_screen_ignores_terminal_local_commands_even_if_venue_fact_is_stale_live():
+    """A cancelled command with a stale LIVE venue fact is not an open rest.
+
+    Live failure mode 2026-06-20: continuous redecision repeatedly tried to
+    pull a command already marked CANCELLED locally because the screen read only
+    the latest venue fact. The cancel path then skipped the terminal command,
+    creating an infinite false rest-pull loop instead of a clean reprice flow.
+    """
+
+    import src.main as m
+
+    trade = _trade_conn_with_rest_screen_rows(command_state="CANCELLED")
+    world = sqlite3.connect(":memory:")
+
+    assert m._edli_open_maker_rests_for_screen(
+        trade,
+        world,
+        beliefs=[_belief_for_rest_screen()],
+    ) == []
+
+
+def test_open_rest_screen_keeps_active_local_commands_with_open_venue_fact():
+    import src.main as m
+
+    trade = _trade_conn_with_rest_screen_rows(command_state="ACKED")
+    world = sqlite3.connect(":memory:")
+
+    rests = m._edli_open_maker_rests_for_screen(
+        trade,
+        world,
+        beliefs=[_belief_for_rest_screen()],
+    )
+
+    assert len(rests) == 1
+    assert rests[0].command_id == "cmd-rest"
+    assert rests[0].side == "buy_no"
 
 
 def test_emit_routes_through_fsr_machinery_with_escalation_source(monkeypatch):

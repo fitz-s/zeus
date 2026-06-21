@@ -24,6 +24,7 @@ import hashlib
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.replacement_forecast_cycle_policy import (
@@ -126,6 +127,11 @@ class ReplacementForecastMaterializeRequest:
     anchor_weight: float = 0.80
     anchor_sigma_c: float = 3.00
     settlement_step_c: float = 1.0
+    day0_observed_extreme_c: float | None = None
+    day0_observed_extreme_source: str | None = None
+    day0_observed_extreme_observation_time: datetime | str | None = None
+    day0_observed_extreme_sample_count: int | None = None
+    day0_observed_extreme_unit: str | None = None
     # Task #32 honest provenance: set to "instrument_set_expansion" when this materialization was
     # enqueued by the fusion-upgrade trigger (a re-materialization because a strictly-larger
     # decorrelated-provider set became capturable at the same cycle). None for a normal first
@@ -406,6 +412,97 @@ def _precision_guard_block_reason(
     return ()
 
 
+def _day0_observed_extreme_c(request: ReplacementForecastMaterializeRequest) -> float | None:
+    value = request.day0_observed_extreme_c
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _is_day0_target_window(request: ReplacementForecastMaterializeRequest, *, computed_at: datetime | None = None) -> bool:
+    computed = computed_at or _to_utc(request.computed_at, field_name="computed_at")
+    target_date_value = date.fromisoformat(_date_text(request.target_date))
+    target_window = compute_target_local_day_window_utc(
+        city_timezone=request.city_timezone,
+        target_local_date=target_date_value,
+    )
+    return target_window.start_utc <= computed < target_window.end_utc
+
+
+def _local_hour_slot(value: datetime, *, city_timezone: str) -> datetime:
+    tz = ZoneInfo(city_timezone)
+    return value.astimezone(tz).replace(minute=0, second=0, microsecond=0)
+
+
+def _expected_localday_hour_slots(*, city_timezone: str, target_date: date) -> tuple[datetime, ...]:
+    window = compute_target_local_day_window_utc(
+        city_timezone=city_timezone,
+        target_local_date=target_date,
+    )
+    slots: list[datetime] = []
+    cursor = window.start_utc
+    while cursor < window.end_utc:
+        slots.append(_local_hour_slot(cursor, city_timezone=city_timezone))
+        cursor += timedelta(hours=1)
+    return tuple(slots)
+
+
+def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) -> datetime | None:
+    value = request.day0_observed_extreme_observation_time
+    if value is None:
+        return None
+    try:
+        return _to_utc(value, field_name="day0_observed_extreme_observation_time")
+    except ValueError:
+        return None
+
+
+def _om9_localday_hourly_coverage_ok(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    expected_sample_count: int,
+    computed_at: datetime,
+) -> bool:
+    anchor = request.openmeteo_anchor
+    if anchor.sample_count == expected_sample_count:
+        return True
+    if not _is_day0_target_window(request, computed_at=computed_at):
+        return False
+    if _day0_observed_extreme_c(request) is None:
+        return False
+    observed_at = _day0_observed_extreme_time(request)
+    if observed_at is None:
+        return False
+
+    target_date_value = date.fromisoformat(_date_text(request.target_date))
+    expected_slots = set(
+        _expected_localday_hour_slots(
+            city_timezone=request.city_timezone,
+            target_date=target_date_value,
+        )
+    )
+    covered_slots = {
+        _local_hour_slot(item, city_timezone=request.city_timezone)
+        for item in anchor.contributing_local_times
+    }
+    if not covered_slots.issubset(expected_slots):
+        return False
+    missing_slots = expected_slots - covered_slots
+    if not missing_slots:
+        return True
+
+    observed_slot = _local_hour_slot(observed_at, city_timezone=request.city_timezone)
+    if observed_slot.date() != target_date_value:
+        return False
+    return all(slot <= observed_slot for slot in missing_slots)
+
+
 def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> tuple[str, ...]:
     metric = _metric(request.temperature_metric)
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
@@ -433,13 +530,13 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         city_timezone=request.city_timezone,
         target_date=request.target_date,
     )
-    if request.openmeteo_anchor.sample_count != expected_om9_count:
+    if not _om9_localday_hourly_coverage_ok(
+        request,
+        expected_sample_count=expected_om9_count,
+        computed_at=computed_at,
+    ):
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
-    target_window = compute_target_local_day_window_utc(
-        city_timezone=request.city_timezone,
-        target_local_date=target_date_value,
-    )
-    if target_window.start_utc <= computed_at < target_window.end_utc:
+    if _is_day0_target_window(request, computed_at=computed_at) and _day0_observed_extreme_c(request) is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED")
     if any(source_available_at > computed_at for _, source_available_at in dependency_times):
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
@@ -1310,6 +1407,48 @@ def _family_rounding_rule(bins: Sequence[object]) -> str:
     return next(iter(rules))
 
 
+def _normal_cdf(*, mu: float, sigma: float, x: float) -> float:
+    if x == -math.inf:
+        return 0.0
+    if x == math.inf:
+        return 1.0
+    return 0.5 * (1.0 + math.erf((float(x) - float(mu)) / (float(sigma) * math.sqrt(2.0))))
+
+
+def _day0_conditioned_bin_probability(
+    *,
+    metric: str,
+    observed_extreme_c: float,
+    mu: float,
+    sigma: float,
+    bin_low_c: float | None,
+    bin_high_c: float | None,
+    half_step: float,
+    rounding_rule: str,
+) -> float:
+    from src.forecast.day0_conditioner import (  # noqa: PLC0415
+        day0_bin_preimage_native,
+        probability_high_day0_bin,
+        probability_low_day0_bin,
+    )
+
+    lo, hi = day0_bin_preimage_native(
+        bin_low_c,
+        bin_high_c,
+        rounding_rule=rounding_rule,
+        half_step=half_step,
+    )
+
+    def _cdf(x: float) -> float:
+        return _normal_cdf(mu=mu, sigma=sigma, x=x)
+
+    if metric == "high":
+        return probability_high_day0_bin(float(observed_extreme_c), lo, hi, _cdf)
+    if metric == "low":
+        return probability_low_day0_bin(float(observed_extreme_c), lo, hi, _cdf)
+    raise ValueError(f"metric must be high or low, got {metric!r}")
+
+
 def _build_fused_q_bounds(
     *,
     mu_star: float,
@@ -1320,6 +1459,8 @@ def _build_fused_q_bounds(
     q_point: Mapping[str, float],
     n_draws: int = _QLCB_BOOTSTRAP_DRAWS,
     rounding_rule: str = "wmo_half_up",
+    day0_observed_extreme_c: float | None = None,
+    day0_metric: str | None = None,
     return_samples: bool = False,
 ) -> tuple[dict[str, float], dict[str, float]] | tuple[
     dict[str, float], dict[str, float], dict[str, list[float]]
@@ -1389,7 +1530,29 @@ def _build_fused_q_bounds(
     # standard-normal CDF; -inf -> 0.0, +inf -> 1.0 are handled by ndtr natively.
     z_low = (lows[None, :] - mu_draws[:, None]) / sigma  # (N, M)
     z_high = (highs[None, :] - mu_draws[:, None]) / sigma  # (N, M)
-    probs = np.clip(ndtr(z_high) - ndtr(z_low), 0.0, 1.0)  # (N, M) per-draw per-bin mass
+    cdf_low = ndtr(z_low)
+    cdf_high = ndtr(z_high)
+    day0_obs = None if day0_observed_extreme_c is None else float(day0_observed_extreme_c)
+    if day0_obs is not None and math.isfinite(day0_obs):
+        metric = str(day0_metric or "").lower()
+        probs = np.zeros_like(cdf_high)
+        if metric == "high":
+            below = highs <= day0_obs
+            straddles = (lows <= day0_obs) & (day0_obs < highs)
+            ordinary = ~(below | straddles)
+            probs[:, straddles] = cdf_high[:, straddles]
+            probs[:, ordinary] = cdf_high[:, ordinary] - cdf_low[:, ordinary]
+        elif metric == "low":
+            above = lows >= day0_obs
+            straddles = (lows < day0_obs) & (day0_obs <= highs)
+            ordinary = ~(above | straddles)
+            probs[:, straddles] = 1.0 - cdf_low[:, straddles]
+            probs[:, ordinary] = cdf_high[:, ordinary] - cdf_low[:, ordinary]
+        else:
+            raise ValueError(f"day0_metric must be high or low when day0 observed extreme is set, got {day0_metric!r}")
+        probs = np.clip(probs, 0.0, 1.0)
+    else:
+        probs = np.clip(cdf_high - cdf_low, 0.0, 1.0)  # (N, M) per-draw per-bin mass
 
     # PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): renormalize EACH
     # draw's row to the probability simplex BEFORE taking the marginal quantile — the
@@ -1566,6 +1729,9 @@ def _insert_posterior(
             # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
+            _day0_obs_extreme_c = (
+                _day0_observed_extreme_c(request) if _is_day0_target_window(request) else None
+            )
             # Wave-2 item 6 (2026-06-12): the settlement σ-floor is applied by PER-CELL DATA
             # AVAILABILITY, not a global flag (edli_settlement_sigma_floor_enabled / _required
             # merged + deleted). Look up the SAME floor the EMOS path uses (city|season|metric)
@@ -1653,25 +1819,49 @@ def _insert_posterior(
             def _bin_mass(_b) -> float:
                 _lo = None if _b.lower_c is None else float(_b.lower_c)
                 _hi = None if _b.upper_c is None else float(_b.upper_c)
-                _m = bin_probability_settlement(
-                    mu=float(bayes_precision_fusion_override.anchor_value_c),
-                    sigma=_sigma_used,
-                    bin_low=_lo,
-                    bin_high=_hi,
-                    half_step=_half_step,
-                    rounding_rule=_rounding_rule,
-                )
-                # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
-                # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
-                if _is_open_ended_bin(_b):
-                    _m_unfloored = bin_probability_settlement(
+                if _day0_obs_extreme_c is not None:
+                    _m = _day0_conditioned_bin_probability(
+                        metric=metric,
+                        observed_extreme_c=_day0_obs_extreme_c,
                         mu=float(bayes_precision_fusion_override.anchor_value_c),
-                        sigma=_sigma_pred,
+                        sigma=_sigma_used,
+                        bin_low_c=_lo,
+                        bin_high_c=_hi,
+                        half_step=_half_step,
+                        rounding_rule=_rounding_rule,
+                    )
+                else:
+                    _m = bin_probability_settlement(
+                        mu=float(bayes_precision_fusion_override.anchor_value_c),
+                        sigma=_sigma_used,
                         bin_low=_lo,
                         bin_high=_hi,
                         half_step=_half_step,
                         rounding_rule=_rounding_rule,
                     )
+                # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
+                # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
+                if _is_open_ended_bin(_b):
+                    if _day0_obs_extreme_c is not None:
+                        _m_unfloored = _day0_conditioned_bin_probability(
+                            metric=metric,
+                            observed_extreme_c=_day0_obs_extreme_c,
+                            mu=float(bayes_precision_fusion_override.anchor_value_c),
+                            sigma=_sigma_pred,
+                            bin_low_c=_lo,
+                            bin_high_c=_hi,
+                            half_step=_half_step,
+                            rounding_rule=_rounding_rule,
+                        )
+                    else:
+                        _m_unfloored = bin_probability_settlement(
+                            mu=float(bayes_precision_fusion_override.anchor_value_c),
+                            sigma=_sigma_pred,
+                            bin_low=_lo,
+                            bin_high=_hi,
+                            half_step=_half_step,
+                            rounding_rule=_rounding_rule,
+                        )
                     _catchall_honest_mass[_b.bin_id] = float(_m_unfloored)
                     if _sigma_used > _sigma_pred and _m_unfloored < _m:
                         _catchall_capped_bins.append(_b.bin_id)
@@ -1699,10 +1889,19 @@ def _insert_posterior(
             # in NORMALIZED space, so neither correction can recreate the far-catch-all inflation
             # category. The mass removed by the cap is redistributed over the remaining bins (renorm).
             if _uniform_w > 0.0 and _k >= 1.0 and _city_unit == "C":
-                _n_bins = len(q)
+                _uniform_eligible_bins = (
+                    [key for key, val in q.items() if float(val) > 0.0]
+                    if _day0_obs_extreme_c is not None
+                    else list(q)
+                )
+                _n_bins = len(_uniform_eligible_bins)
                 if _n_bins > 0:
                     _u = 1.0 / _n_bins
-                    _mixed = {key: (1.0 - _uniform_w) * val + _uniform_w * _u for key, val in q.items()}
+                    _eligible = set(_uniform_eligible_bins)
+                    _mixed = {
+                        key: (1.0 - _uniform_w) * val + _uniform_w * (_u if key in _eligible else 0.0)
+                        for key, val in q.items()
+                    }
                     _mtot = sum(_mixed.values())
                     if _mtot > 0.0 and math.isfinite(_mtot):
                         _q_mixed = {key: val / _mtot for key, val in _mixed.items()}
@@ -1773,7 +1972,11 @@ def _insert_posterior(
                             assert abs(sum(q.values()) - 1.0) <= 1e-9, (
                                 f"constrained-redistribution mass drift: {sum(q.values())}"
                             )
-            q_shape = "fused_normal_direct"
+            q_shape = (
+                "fused_day0_conditioned_normal"
+                if _day0_obs_extreme_c is not None
+                else "fused_normal_direct"
+            )
             # Q_LCB / Q_UCB (2026-06-09) — fused-center parameter-uncertainty bootstrap. INDEPENDENT
             # fail-soft: a bound-construction error must NOT roll back the fused q point (that would
             # regress the q_shape gain). On error the certified bootstrap bounds are absent and a
@@ -1792,6 +1995,8 @@ def _insert_posterior(
                     half_step=_half_step,
                     q_point=q,
                     rounding_rule=_rounding_rule,
+                    day0_observed_extreme_c=_day0_obs_extreme_c,
+                    day0_metric=metric,
                     return_samples=True,
                 )
                 q_lcb_map = _lcb_map
@@ -1863,7 +2068,7 @@ def _insert_posterior(
     # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this fallback never
     # carries). This fallback is experiment-only; it is intentionally not live-eligible.
     # FAIL-SOFT: any error leaves q at the prior value and logs.
-    if q_shape != "fused_normal_direct" and bayes_precision_fusion_override is not None:
+    if q_shape not in {"fused_normal_direct", "fused_day0_conditioned_normal"} and bayes_precision_fusion_override is not None:
         try:
             _fc_mu = float(bayes_precision_fusion_override.anchor_value_c)
             # Spread: ONLY the predictive settlement sigma (sqrt(fused.sd^2 + sigma_resid^2)) is a
@@ -1927,6 +2132,22 @@ def _insert_posterior(
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
     }
+    _posterior_day0_observed_extreme_c = (
+        _day0_observed_extreme_c(request) if _is_day0_target_window(request) else None
+    )
+    if _posterior_day0_observed_extreme_c is not None:
+        posterior_config.update(
+            {
+                "day0_conditioning": True,
+                "day0_observed_extreme_c": float(_posterior_day0_observed_extreme_c),
+                "day0_observed_extreme_source": str(request.day0_observed_extreme_source or ""),
+                "day0_observed_extreme_observation_time": (
+                    None
+                    if request.day0_observed_extreme_observation_time is None
+                    else str(request.day0_observed_extreme_observation_time)
+                ),
+            }
+        )
     if bayes_precision_fusion_override is not None:
         # F6: the FUSED product gets its OWN EMOS cell identity (product + resolution_mix_hash +
         # model_set_hash + lead_bucket) so it never reuses the single-anchor EMOS cell. The fused
@@ -2050,6 +2271,25 @@ def _insert_posterior(
         "runtime_policy_status": runtime_layer,
         "training_allowed": False,
     }
+    if _posterior_day0_observed_extreme_c is not None:
+        provenance_payload["day0_conditioning"] = {
+            "active": True,
+            "metric": metric,
+            "observed_extreme_c": float(_posterior_day0_observed_extreme_c),
+            "source": request.day0_observed_extreme_source,
+            "observation_time": (
+                None
+                if request.day0_observed_extreme_observation_time is None
+                else str(request.day0_observed_extreme_observation_time)
+            ),
+            "sample_count": request.day0_observed_extreme_sample_count,
+            "unit": request.day0_observed_extreme_unit,
+            "conditioned_random_variable": (
+                "max(observed_high_so_far, remaining_distribution)"
+                if metric == "high"
+                else "min(observed_low_so_far, remaining_distribution)"
+            ),
+        }
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.

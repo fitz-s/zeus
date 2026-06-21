@@ -256,11 +256,16 @@ _SEED_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "baseline_data_version",
     "baseline_source_available_at",
     "openmeteo_source_available_at",
+    "day0_observed_extreme_source",
+    "day0_observed_extreme_observation_time",
+    "day0_observed_extreme_unit",
 )
 _SEED_OPTIONAL_NUMBER_KEYS: tuple[str, ...] = (
     "anchor_weight",
     "anchor_sigma_c",
     "settlement_step_c",
+    "day0_observed_extreme_c",
+    "day0_observed_extreme_sample_count",
 )
 
 
@@ -288,9 +293,14 @@ class MaterializationSeed:
     baseline_data_version: str = ""
     baseline_source_available_at: str = ""
     openmeteo_source_available_at: str = ""
+    day0_observed_extreme_source: str = ""
+    day0_observed_extreme_observation_time: str = ""
+    day0_observed_extreme_unit: str = ""
     anchor_weight: float | None = None
     anchor_sigma_c: float | None = None
     settlement_step_c: float | None = None
+    day0_observed_extreme_c: float | None = None
+    day0_observed_extreme_sample_count: float | None = None
     schema_version: str = MATERIALIZATION_SEED_SCHEMA_VERSION
 
 
@@ -358,9 +368,14 @@ def validate_materialization_seed(payload: Mapping[str, object]) -> Materializat
         baseline_data_version=optional_text["baseline_data_version"],
         baseline_source_available_at=optional_text["baseline_source_available_at"],
         openmeteo_source_available_at=optional_text["openmeteo_source_available_at"],
+        day0_observed_extreme_source=optional_text["day0_observed_extreme_source"],
+        day0_observed_extreme_observation_time=optional_text["day0_observed_extreme_observation_time"],
+        day0_observed_extreme_unit=optional_text["day0_observed_extreme_unit"],
         anchor_weight=number_values["anchor_weight"],
         anchor_sigma_c=number_values["anchor_sigma_c"],
         settlement_step_c=number_values["settlement_step_c"],
+        day0_observed_extreme_c=number_values["day0_observed_extreme_c"],
+        day0_observed_extreme_sample_count=number_values["day0_observed_extreme_sample_count"],
     )
 
 
@@ -414,11 +429,16 @@ _REQUEST_OPTIONAL_TEXT_KEYS: tuple[str, ...] = (
     "openmeteo_source_available_at",
     "openmeteo_payload_json",
     "precision_metadata_json",
+    "day0_observed_extreme_source",
+    "day0_observed_extreme_observation_time",
+    "day0_observed_extreme_unit",
 )
 _REQUEST_OPTIONAL_NUMBER_KEYS: tuple[str, ...] = (
     "anchor_weight",
     "anchor_sigma_c",
     "settlement_step_c",
+    "day0_observed_extreme_c",
+    "day0_observed_extreme_sample_count",
 )
 
 
@@ -447,9 +467,14 @@ class MaterializationRequest:
     openmeteo_source_available_at: str = ""
     openmeteo_payload_json: str = ""
     precision_metadata_json: str = ""
+    day0_observed_extreme_source: str = ""
+    day0_observed_extreme_observation_time: str = ""
+    day0_observed_extreme_unit: str = ""
     anchor_weight: float | None = None
     anchor_sigma_c: float | None = None
     settlement_step_c: float | None = None
+    day0_observed_extreme_c: float | None = None
+    day0_observed_extreme_sample_count: float | None = None
     bins: tuple[Mapping[str, object], ...] = ()
     schema_version: str = MATERIALIZATION_REQUEST_SCHEMA_VERSION
 
@@ -514,8 +539,13 @@ def validate_materialization_request(payload: Mapping[str, object]) -> Materiali
         openmeteo_source_available_at=optional_text["openmeteo_source_available_at"],
         openmeteo_payload_json=optional_text["openmeteo_payload_json"],
         precision_metadata_json=optional_text["precision_metadata_json"],
+        day0_observed_extreme_source=optional_text["day0_observed_extreme_source"],
+        day0_observed_extreme_observation_time=optional_text["day0_observed_extreme_observation_time"],
+        day0_observed_extreme_unit=optional_text["day0_observed_extreme_unit"],
         anchor_weight=number_values["anchor_weight"],
         anchor_sigma_c=number_values["anchor_sigma_c"],
         settlement_step_c=number_values["settlement_step_c"],
+        day0_observed_extreme_c=number_values["day0_observed_extreme_c"],
+        day0_observed_extreme_sample_count=number_values["day0_observed_extreme_sample_count"],
         bins=bins,
     )

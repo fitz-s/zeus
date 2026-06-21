@@ -1335,6 +1335,9 @@ def test_review_required_recovery_no_venue_exposure_rejects_matching_trade(conn)
                 {
                     "id": "trade-match",
                     "asset_id": "tok-m2-clear-has-trade",
+                    "side": "BUY",
+                    "price": "0.55",
+                    "size": "18.19",
                     "match_time": str(NOW.timestamp() + 1),
                 }
             ]
@@ -1374,7 +1377,16 @@ def test_review_required_recovery_no_venue_exposure_rejects_matching_open_order(
 
     class FakeAdapter:
         def get_open_orders(self):
-            return [{"id": "ord-match", "asset_id": "tok-m2-clear-has-open", "status": "LIVE"}]
+            return [
+                {
+                    "id": "ord-match",
+                    "asset_id": "tok-m2-clear-has-open",
+                    "side": "BUY",
+                    "price": "0.55",
+                    "original_size": "18.19",
+                    "status": "LIVE",
+                }
+            ]
 
         def get_trades(self):
             return []

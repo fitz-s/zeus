@@ -88,6 +88,19 @@ economic_objects:
         meaning: "Settlement source finality time."
 
 state_machines:
+  reactor_runtime_config:
+    owner: src/engine/event_reactor_adapter.py
+    description: >
+      Live reactor runtime configuration knobs whose ALL-CAPS names can be
+      detected by semantic CI's state-candidate scan. These are not lifecycle,
+      command, order, or venue states; registering them prevents the classifier
+      from treating known live config as an unreviewed money-path state machine.
+      ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS controls how long the reactor
+      suppresses repeated empty Gamma probes after a no-market response.
+    states:
+      - ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS
+    invariant_tests:
+      - tests/test_money_path_semantic_ci.py
   venue_command:
     owner: src/state/venue_command_repo.py
     states:
@@ -289,6 +302,7 @@ state_machines:
       - ZEUS_ALLOW_LEGACY_EXECUTION_INTENT
       - ZEUS_LEGACY_EXECUTION_INTENT_SCOPE
       - ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS
+      - ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS
       - ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS
     invariant_tests:
       - tests/test_inv_family_exclusive_sizing.py
@@ -958,14 +972,16 @@ schema_objects:
         - tests/events/test_event_store_idempotency.py
         - tests/state/test_edli_table_ownership.py
     edli_execution_feasibility_evidence:
-      db: world
+      db: trade
       pk: evidence_id
       writer: src/events/triggers/market_channel_ingestor.py::insert_execution_feasibility_evidence
       meaning: >
         Public market-channel and submit-window evidence about quote depth,
         book hashes, latency, and hypothetical FOK/FAK feasibility. This is
-        never accepted/fill truth; user channel and reconciliation remain the
-        only fill authorities.
+        written by the price/held-quote sidecars to zeus_trades.db and read by
+        the live order runtime as pre-submit book evidence. It is never
+        accepted/fill truth; user channel and reconciliation remain the only
+        fill authorities.
       required_tests:
         - tests/events/test_market_channel_ingestor.py
     edli_no_trade_regret_events:

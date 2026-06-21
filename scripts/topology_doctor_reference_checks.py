@@ -104,14 +104,14 @@ def validate_reference_claim_proofs(
         gates = proof.get("gates") or []
         if status == "replaced" and role not in nonblocking_roles:
             if not proof_targets:
-                issues.append(api._issue("reference_claim_proof_invalid", proof_path, "replaced claim requires proof_targets"))
+                issues.append(api._issue("reference_claim_proof_invalid", proof_path, "replaced claim missing proof_targets"))
             if not gates:
-                issues.append(api._issue("reference_claim_proof_invalid", proof_path, "replaced claim requires gates"))
+                issues.append(api._issue("reference_claim_proof_invalid", proof_path, "replaced claim uses gates"))
         if role in invariant_roles and api._metadata_missing(proof.get("invalidation_condition")):
-            issues.append(api._issue("reference_claim_proof_invalid", proof_path, f"{role} requires invalidation_condition"))
+            issues.append(api._issue("reference_claim_proof_invalid", proof_path, f"{role} missing invalidation_condition"))
         if role in nonblocking_roles or status in nonblocking_statuses:
             if api._metadata_missing(proof.get("nonblocking_reason")):
-                issues.append(api._issue("reference_claim_proof_invalid", proof_path, "nonblocking claim requires nonblocking_reason"))
+                issues.append(api._issue("reference_claim_proof_invalid", proof_path, "nonblocking claim missing nonblocking_reason"))
 
     return issues
 
@@ -264,14 +264,14 @@ def run_reference_replacement(api: Any) -> Any:
         issues.extend(validate_reference_claim_proofs(api, path, entry, manifest, seen_claim_ids))
         if entry.get("delete_allowed") is True:
             if entry.get("replacement_status") != "replaced":
-                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed requires replacement_status=replaced"))
+                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed with replacement_status other than replaced"))
             if entry.get("unique_remaining"):
-                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed requires unique_remaining=[]"))
+                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed with nonempty unique_remaining"))
             if not entry.get("replaced_by"):
-                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed requires replaced_by evidence"))
+                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed missing replaced_by evidence"))
             claim_proofs = entry.get("claim_proofs") or []
             if not claim_proofs:
-                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed requires claim_proofs"))
+                issues.append(api._issue("reference_replacement_delete_unsafe", path, "delete_allowed missing claim_proofs"))
             for proof in claim_proofs:
                 status = proof.get("claim_status")
                 if status not in {"replaced", "stale_superseded", "intentionally_unpromoted"}:
@@ -279,7 +279,7 @@ def run_reference_replacement(api: Any) -> Any:
                         api._issue(
                             "reference_replacement_delete_unsafe",
                             path,
-                            f"delete_allowed requires final claim proof status, got {status!r}",
+                            f"delete_allowed with nonfinal claim proof status, got {status!r}",
                         )
                     )
 

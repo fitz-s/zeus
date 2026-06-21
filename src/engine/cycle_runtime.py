@@ -3015,6 +3015,21 @@ def _dual_write_canonical_entry_if_available(
     if conn is None:
         return False
 
+    try:
+        has_position_events = conn.execute(
+            """
+            SELECT 1
+              FROM sqlite_master
+             WHERE type = 'table'
+               AND name = 'position_events'
+             LIMIT 1
+            """
+        ).fetchone()
+    except Exception:
+        has_position_events = None
+    if has_position_events is None:
+        return False
+
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import append_many_and_project
 
@@ -3026,6 +3041,20 @@ def _dual_write_canonical_entry_if_available(
             source_module="src.engine.cycle_runtime",
             decision_evidence=decision_evidence,
         )
+        position_id = str(getattr(pos, "trade_id", "") or "")
+        if position_id:
+            already_posted = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'ENTRY_ORDER_POSTED'
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            if already_posted is not None:
+                return True
         append_many_and_project(conn, events, projection)
     except RuntimeError as exc:
         deps.logger.warning("CANONICAL_DUAL_WRITE_SKIPPED trade_id=%s reason=%s", pos.trade_id, exc)
@@ -4285,14 +4314,374 @@ def _table_exists_in_schema(conn, schema_name: str, table_name: str) -> bool:
         return False
 
 
-def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
-    """Report live rotation posture without emitting non-actuating decisions."""
+def _table_columns_in_schema(conn, schema_name: str, table_name: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA {schema_name}.table_info({table_name})").fetchall()
+    except Exception:
+        return set()
+    out: set[str] = set()
+    for row in rows:
+        try:
+            out.add(str(row[1]))
+        except Exception:
+            continue
+    return out
 
-    _ = deps
+
+def _select_expr(columns: set[str], column: str, alias: str, default_sql: str = "NULL") -> str:
+    if column in columns:
+        return f"{column} AS {alias}"
+    return f"{default_sql} AS {alias}"
+
+
+def _row_get(row, key: str, default=None):
+    if row is None:
+        return default
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return getattr(row, key)
+        except Exception:
+            return default
+
+
+def _finite_probability_or_none(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out < 0.0 or out > 1.0:
+        return None
+    return out
+
+
+def _finite_positive_or_none(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out <= 0.0:
+        return None
+    return out
+
+
+def _parse_utc_or_none(value) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_monitor_best_bid_by_position(conn) -> dict[str, float]:
+    if conn is None or not _table_exists_in_schema(conn, "main", "position_events"):
+        return {}
+    out: dict[str, float] = {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT position_id, payload_json
+              FROM position_events
+             WHERE event_type = 'MONITOR_REFRESHED'
+             ORDER BY occurred_at DESC, rowid DESC
+            """
+        ).fetchall()
+    except Exception:
+        return {}
+    for row in rows:
+        position_id = str(_row_get(row, "position_id", "") or "").strip()
+        if not position_id or position_id in out:
+            continue
+        try:
+            payload = json.loads(str(_row_get(row, "payload_json", "") or "{}"))
+        except (TypeError, ValueError):
+            continue
+        bid = _finite_probability_or_none(payload.get("last_monitor_best_bid"))
+        if bid is not None:
+            out[position_id] = bid
+    return out
+
+
+def _rotation_held_positions(conn, *, best_bids: dict[str, float]) -> tuple[list, list[str]]:
+    from src.strategy.portfolio_rotation import RotationHold
+
+    if conn is None or not _table_exists_in_schema(conn, "main", "position_current"):
+        return [], ["position_current_unavailable"]
+    columns = _table_columns_in_schema(conn, "main", "position_current")
+    required = {
+        "position_id",
+        "phase",
+        "city",
+        "target_date",
+        "bin_label",
+        "direction",
+        "shares",
+        "last_monitor_prob",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_market_price_is_fresh",
+    }
+    missing_required = sorted(required - columns)
+    if missing_required:
+        return [], [f"position_current_missing_columns:{','.join(missing_required)}"]
+    select_sql = ", ".join(
+        [
+            "position_id",
+            _select_expr(columns, "trade_id", "trade_id", "position_id"),
+            "phase",
+            "city",
+            "target_date",
+            _select_expr(columns, "temperature_metric", "metric", "'high'"),
+            "bin_label",
+            "direction",
+            "shares",
+            "last_monitor_prob",
+            "last_monitor_prob_is_fresh",
+            "last_monitor_market_price_is_fresh",
+            _select_expr(columns, "token_id", "token_id"),
+            _select_expr(columns, "no_token_id", "no_token_id"),
+            _select_expr(columns, "condition_id", "condition_id"),
+        ]
+    )
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {select_sql}
+              FROM position_current
+             WHERE phase IN ('active', 'day0_window')
+               AND COALESCE(shares, 0) > 0
+            """
+        ).fetchall()
+    except Exception as exc:
+        return [], [f"position_current_read_failed:{exc.__class__.__name__}"]
+    holds: list = []
+    missing: list[str] = []
+    for row in rows:
+        position_id = str(_row_get(row, "position_id", "") or "").strip()
+        shares = _finite_positive_or_none(_row_get(row, "shares"))
+        held_prob = _finite_probability_or_none(_row_get(row, "last_monitor_prob"))
+        if not position_id:
+            missing.append("held_position_missing_id")
+            continue
+        if int(_row_get(row, "last_monitor_prob_is_fresh", 0) or 0) != 1:
+            missing.append(f"{position_id}:held_probability_not_fresh")
+            continue
+        if int(_row_get(row, "last_monitor_market_price_is_fresh", 0) or 0) != 1:
+            missing.append(f"{position_id}:held_market_price_not_fresh")
+            continue
+        best_bid = best_bids.get(position_id)
+        if shares is None or held_prob is None or best_bid is None:
+            missing.append(f"{position_id}:held_rotation_value_inputs_incomplete")
+            continue
+        direction = str(_row_get(row, "direction", "") or "").strip()
+        token_id = (
+            str(_row_get(row, "no_token_id", "") or "").strip()
+            if direction == "buy_no"
+            else str(_row_get(row, "token_id", "") or "").strip()
+        )
+        try:
+            holds.append(
+                RotationHold(
+                    position_id=position_id,
+                    city=str(_row_get(row, "city", "") or "").strip(),
+                    target_date=str(_row_get(row, "target_date", "") or "").strip(),
+                    metric=str(_row_get(row, "metric", "") or "").strip(),
+                    bin_label=str(_row_get(row, "bin_label", "") or "").strip(),
+                    direction=direction,
+                    shares=shares,
+                    held_probability=held_prob,
+                    held_side_best_bid=best_bid,
+                    token_id=token_id,
+                    condition_id=str(_row_get(row, "condition_id", "") or "").strip(),
+                )
+            )
+        except ValueError as exc:
+            missing.append(f"{position_id}:held_rotation_invalid:{exc}")
+    return holds, missing
+
+
+def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[str]]:
+    from src.strategy.portfolio_rotation import RotationCandidate
+
+    if conn is None:
+        return [], ["connection_unavailable"]
+    schema = None
+    if _is_attached_schema(conn, "world") and _table_exists_in_schema(conn, "world", "no_trade_regret_events"):
+        schema = "world"
+    elif _table_exists_in_schema(conn, "main", "no_trade_regret_events"):
+        schema = "main"
+    if schema is None:
+        return [], ["no_trade_regret_events_unavailable"]
+    columns = _table_columns_in_schema(conn, schema, "no_trade_regret_events")
+    required = {
+        "event_id",
+        "rejection_reason",
+        "city",
+        "target_date",
+        "metric",
+        "bin_label",
+        "direction",
+        "q_lcb_5pct",
+        "c_fee_adjusted",
+        "trade_score",
+        "created_at",
+    }
+    missing_required = sorted(required - columns)
+    if missing_required:
+        return [], [f"no_trade_regret_events_missing_columns:{','.join(missing_required)}"]
+    select_sql = ", ".join(
+        [
+            "event_id",
+            _select_expr(columns, "rejection_stage", "rejection_stage", "''"),
+            "rejection_reason",
+            "city",
+            "target_date",
+            "metric",
+            "bin_label",
+            "direction",
+            "q_lcb_5pct",
+            "c_fee_adjusted",
+            _select_expr(columns, "p_fill_lcb", "p_fill_lcb"),
+            "trade_score",
+            _select_expr(columns, "token_id", "token_id"),
+            _select_expr(columns, "condition_id", "condition_id"),
+            "created_at",
+        ]
+    )
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {select_sql}
+              FROM {schema}.no_trade_regret_events
+             WHERE COALESCE(trade_score, 0) > 0
+             ORDER BY created_at DESC
+             LIMIT 200
+            """
+        ).fetchall()
+    except Exception as exc:
+        return [], [f"no_trade_regret_events_read_failed:{exc.__class__.__name__}"]
+    lookback_hours = max(
+        0.25,
+        float(os.environ.get("ZEUS_PORTFOLIO_ROTATION_CANDIDATE_LOOKBACK_HOURS", "6.0")),
+    )
+    earliest = decision_time.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+    candidates: list = []
+    skipped: list[str] = []
+    for row in rows:
+        created_at = _parse_utc_or_none(_row_get(row, "created_at"))
+        if created_at is None or created_at < earliest:
+            continue
+        rejection_stage = str(_row_get(row, "rejection_stage", "") or "").strip()
+        rejection_reason = str(_row_get(row, "rejection_reason", "") or "").strip()
+        if rejection_stage not in {"KELLY", "LIVE_CAP", ""} and not (
+            "KELLY" in rejection_reason or "CAP" in rejection_reason or "BUDGET" in rejection_reason
+        ):
+            continue
+        q_lcb = _finite_probability_or_none(_row_get(row, "q_lcb_5pct"))
+        cost = _finite_probability_or_none(_row_get(row, "c_fee_adjusted"))
+        score = _finite_positive_or_none(_row_get(row, "trade_score"))
+        p_fill_lcb = _finite_probability_or_none(_row_get(row, "p_fill_lcb"))
+        event_id = str(_row_get(row, "event_id", "") or "").strip()
+        if q_lcb is None or cost is None or cost <= 0.0 or cost >= 1.0 or score is None or not event_id:
+            skipped.append(f"{event_id or 'unknown'}:candidate_rotation_inputs_incomplete")
+            continue
+        try:
+            candidates.append(
+                RotationCandidate(
+                    event_id=event_id,
+                    city=str(_row_get(row, "city", "") or "").strip(),
+                    target_date=str(_row_get(row, "target_date", "") or "").strip(),
+                    metric=str(_row_get(row, "metric", "") or "").strip(),
+                    bin_label=str(_row_get(row, "bin_label", "") or "").strip(),
+                    direction=str(_row_get(row, "direction", "") or "").strip(),
+                    q_lcb=q_lcb,
+                    fee_adjusted_cost=cost,
+                    trade_score=score,
+                    p_fill_lcb=p_fill_lcb,
+                    token_id=str(_row_get(row, "token_id", "") or "").strip(),
+                    condition_id=str(_row_get(row, "condition_id", "") or "").strip(),
+                    rejection_reason=rejection_reason,
+                )
+            )
+        except ValueError as exc:
+            skipped.append(f"{event_id}:candidate_rotation_invalid:{exc}")
+    return candidates, skipped
+
+
+def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
+    """Evaluate live portfolio rotation posture from current held and candidate evidence."""
+
     if conn is None:
         summary["portfolio_rotation_live_status"] = "unavailable:no_connection"
         return
-    summary["portfolio_rotation_live_status"] = "disabled:no_live_rotation_executor"
+    now_fn = getattr(deps, "_utcnow", None)
+    try:
+        decision_time = now_fn() if callable(now_fn) else datetime.now(timezone.utc)
+    except Exception:
+        decision_time = datetime.now(timezone.utc)
+    if decision_time.tzinfo is None:
+        decision_time = decision_time.replace(tzinfo=timezone.utc)
+    decision_time = decision_time.astimezone(timezone.utc)
+
+    best_bids = _latest_monitor_best_bid_by_position(conn)
+    holds, hold_missing = _rotation_held_positions(conn, best_bids=best_bids)
+    candidates, candidate_missing = _rotation_candidates(conn, decision_time=decision_time)
+    summary["portfolio_rotation_held_positions_evaluated"] = len(holds)
+    summary["portfolio_rotation_candidates_evaluated"] = len(candidates)
+    if hold_missing:
+        summary["portfolio_rotation_hold_input_gaps"] = hold_missing[:10]
+    if candidate_missing:
+        summary["portfolio_rotation_candidate_input_gaps"] = candidate_missing[:10]
+    if not holds:
+        summary["portfolio_rotation_live_status"] = "evaluated:no_held_positions_with_fresh_rotation_inputs"
+        return
+    if not candidates:
+        summary["portfolio_rotation_live_status"] = "evaluated:no_capital_constrained_positive_candidates"
+        return
+
+    from src.strategy.portfolio_rotation import best_rotation
+
+    fee_rate = float(os.environ.get("ZEUS_PORTFOLIO_ROTATION_FEE_RATE", "0.02"))
+    min_usd = max(0.0, float(os.environ.get("ZEUS_PORTFOLIO_ROTATION_MIN_IMPROVEMENT_USD", "0.05")))
+    min_ratio = max(0.0, float(os.environ.get("ZEUS_PORTFOLIO_ROTATION_MIN_IMPROVEMENT_RATIO", "0.03")))
+    decision = best_rotation(
+        holds,
+        candidates,
+        fee_rate=fee_rate,
+        min_net_improvement_usd=min_usd,
+        min_net_improvement_ratio=min_ratio,
+        require_fill_lcb=True,
+    )
+    if decision is None:
+        summary["portfolio_rotation_live_status"] = "evaluated:hold_value_dominant"
+        return
+    summary["portfolio_rotation_live_status"] = "evaluated:rotate_candidate_ready"
+    summary["portfolio_rotation_best"] = {
+        "hold_position_id": decision.hold.position_id,
+        "hold_city": decision.hold.city,
+        "hold_target_date": decision.hold.target_date,
+        "hold_metric": decision.hold.metric,
+        "hold_bin_label": decision.hold.bin_label,
+        "hold_direction": decision.hold.direction,
+        "candidate_event_id": decision.candidate.event_id,
+        "candidate_city": decision.candidate.city,
+        "candidate_target_date": decision.candidate.target_date,
+        "candidate_metric": decision.candidate.metric,
+        "candidate_bin_label": decision.candidate.bin_label,
+        "candidate_direction": decision.candidate.direction,
+        "reason": decision.reason,
+        "sell_value_usd": decision.sell_value_usd,
+        "hold_future_value_usd": decision.hold_future_value_usd,
+        "candidate_future_value_usd": decision.candidate_future_value_usd,
+        "net_improvement_usd": decision.net_improvement_usd,
+        "net_improvement_ratio": decision.net_improvement_ratio,
+        "fill_lcb_used": decision.fill_lcb_used,
+    }
 
 
 def _observation_time_to_local_date(observation_time, timezone_name: str):

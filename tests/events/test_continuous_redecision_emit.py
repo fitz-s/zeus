@@ -488,6 +488,46 @@ def test_fsr_scan_suppresses_recent_same_evidence_no_value_refutation():
     assert second == []
 
 
+def test_fsr_scan_keeps_price_conditioned_no_value_refutation_live():
+    fc = _seed_forecasts()
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    trig = _trigger(fc, world)
+
+    first = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+        source="cycle-1",
+    )
+    assert len(first) == 1
+    event_id = first[0].event_id
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            executable_snapshot_id, created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE', 'NO_EDGE',
+                  '2026-05-24T04:18:00+00:00', 'Chicago', '2026-05-24', 'high',
+                  'family-chicago-high', '1', 'ems2-old-price',
+                  '2026-05-24T04:18:00+00:00', 1)
+        """,
+        ("regret-" + event_id, event_id),
+    )
+
+    second = trig.scan_committed_snapshots(
+        forecasts_conn=fc,
+        decision_time=datetime(2026, 5, 24, 4, 20, tzinfo=timezone.utc),
+        received_at="2026-05-24T04:20:00+00:00",
+        source="cycle-2",
+        suppress_recent_no_value_refutations=True,
+    )
+
+    assert len(second) == 1
+
+
 def test_fsr_scan_suppresses_recent_redecision_same_evidence_no_value_refutation():
     fc = _seed_forecasts()
     world = sqlite3.connect(":memory:")
@@ -1043,6 +1083,82 @@ def test_held_position_family_provider_excludes_closed_phases():
     assert _held_position_families(conn) == {
         ("Tokyo", "2026-06-18", "low"),
         ("Shenzhen", "2026-06-19", "high"),
+    }
+
+
+def test_held_position_family_provider_excludes_market_closed_pending_exit():
+    """Closed pending-exit rows wait for settlement; they must not refresh CLOB books."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL,
+            size_usd REAL,
+            chain_state TEXT,
+            phase TEXT,
+            order_status TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Seattle",
+                "2026-06-19",
+                "high",
+                9.39,
+                9.39,
+                6.85,
+                6.85,
+                6.85,
+                "synced",
+                "pending_exit",
+                "backoff_exhausted",
+                "MARKET_CLOSED_AWAITING_SETTLEMENT",
+            ),
+            (
+                "Tokyo",
+                "2026-06-21",
+                "low",
+                11.33,
+                11.33,
+                7.02,
+                7.02,
+                7.02,
+                "synced",
+                "active",
+                "filled",
+                "",
+            ),
+            (
+                "Paris",
+                "2026-06-20",
+                "low",
+                5.06,
+                5.06,
+                3.79,
+                3.79,
+                3.79,
+                "synced",
+                "pending_exit",
+                "backoff_exhausted",
+                "MODEL_DIVERGENCE_PANIC",
+            ),
+        ],
+    )
+
+    assert _held_position_families(conn) == {
+        ("Tokyo", "2026-06-21", "low"),
+        ("Paris", "2026-06-20", "low"),
     }
 
 

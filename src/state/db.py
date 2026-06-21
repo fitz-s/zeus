@@ -302,8 +302,9 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
 # --------------------------------------------------------------------------
 # Root (EDLI live canary): zeus-world.db is a WAL database with multiple
 # in-process writers running as apscheduler jobs / daemon threads inside the
-# SAME daemon process — the EDLI reactor (EventStore emit/claim/mark) and the
-# market-channel ingestor (execution_feasibility_evidence + event rows). With
+# SAME daemon process — especially the EDLI reactor (EventStore emit/claim/mark)
+# and other world-class event writers. Market-channel executable feasibility rows
+# are trade-class evidence and are not written through this world lock. With
 # sqlite3's default ``isolation_level=""`` (implicit DEFERRED BEGIN), the first
 # DML opens a transaction that upgrades to the single WAL *write* lock and holds
 # it until COMMIT. The reactor's long cycle (~330 s, incl. HTTP/MC re-pricing)
@@ -736,6 +737,133 @@ def forecasts_connection_with_trades_flocked(
     with db_writer_lock(ordered_paths[0], resolved):
         with db_writer_lock(ordered_paths[1], resolved):
             conn = _connect(ZEUS_FORECASTS_DB_PATH, write_class=resolved)
+            try:
+                attached = {
+                    row[1]
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                }
+                if "trades" not in attached:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS trades",
+                        (str(_zeus_trade_db_path()),),
+                    )
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 — best-effort close
+                    pass
+
+
+def get_world_connection_with_trades_required(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """World connection (zeus-world.db MAIN) with zeus_trades.db ATTACHed as 'trades'.
+
+    INV-37 price-channel fix (PR415 review B5, 2026-06-20) — the NON-flocked sibling
+    of ``world_connection_with_trades_flocked``, for callers that must hold the
+    connection across a LONG-LIVED loop (the forever market-channel ingestor thread)
+    where holding cross-DB writer flocks for the whole lifetime would starve every
+    other writer. Atomicity of each write unit still comes from the single connection
+    + single ``commit()`` (SQLite commits the MAIN + ATTACHed databases atomically —
+    the same shape ``get_trade_connection_with_world_required`` relies on); the
+    per-commit world-WAL serialization is provided by the caller's world write mutex.
+
+    world.db is MAIN so the EventStore's UNQUALIFIED ``opportunity_events`` (and its
+    ``sqlite_master`` table-presence guard) resolve to the REAL world log; the
+    feasibility write is schema-qualified ``trades.`` by the caller so it reaches the
+    runtime-read trades table and never the world shadow (see
+    ``world_connection_with_trades_flocked`` for the full shadow-table rationale).
+
+    Fail closed: if ``trades`` cannot be ATTACHed, close and raise.
+
+    Created: 2026-06-20
+    Last audited: 2026-06-20
+    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    """
+    resolved = _resolve_write_class(write_class)
+    conn = get_world_connection(write_class=resolved)
+    try:
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "trades" not in attached:
+            conn.execute("ATTACH DATABASE ? AS trades", (str(_zeus_trade_db_path()),))
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+@contextlib.contextmanager
+def world_connection_with_trades_flocked(
+    *,
+    write_class: WriteClass | str = "live",
+):
+    """Context manager: zeus-world.db as MAIN with zeus_trades.db ATTACHed as 'trades'.
+
+    INV-37 price-channel fix (PR415 review B5, 2026-06-20): the held/candidate
+    quote-evidence ingest must write BOTH the world event (``opportunity_events``,
+    world-class, via EventWriter/EventStore) AND the trade-owned book witness
+    (``execution_feasibility_evidence``, trade-class) in a SINGLE atomic SAVEPOINT.
+    The prior shape opened two independent connections (``get_world_connection`` +
+    ``get_trade_connection``) and committed them SEPARATELY — a crash/busy/kill
+    between the two commits left divergent state, violating INV-37.
+
+    SHADOW-TABLE HAZARD (why this helper is world-MAIN, not trade-MAIN, and why the
+    feasibility write must be schema-QUALIFIED): BOTH databases physically contain
+    BOTH tables. ``world.opportunity_events`` is the real ~9.5M-row log while
+    ``trades.opportunity_events`` is an empty shadow; conversely
+    ``trades.execution_feasibility_evidence`` is the real ~4.3M-row table the live
+    runtime reads (via the trade connection) while ``world.execution_feasibility_
+    evidence`` is a populated-but-not-read legacy table (~12.9M rows). So UNQUALIFIED
+    name resolution on a single ATTACHed connection is AMBIGUOUS — it resolves to the
+    MAIN schema's copy, and ``EventStore._require_world_event_tables`` queries plain
+    ``sqlite_master`` (MAIN-only), so a trade-MAIN+world-ATTACHed connection would
+    silently write ``opportunity_events`` to the EMPTY trade shadow AND falsely pass
+    the presence guard. The repo's existing flocked helpers
+    (``forecasts_connection_with_trades_flocked``) only work because the non-MAIN
+    table is ABSENT from MAIN — which is FALSE here. This helper therefore:
+
+      - opens world.db as MAIN, so the EventStore's UNQUALIFIED ``opportunity_events``
+        (and its ``sqlite_master`` guard) resolve to the REAL world log — NO
+        EventStore change.
+      - ATTACHes zeus_trades.db as ``trades`` so the feasibility write can target
+        ``trades.execution_feasibility_evidence`` EXPLICITLY (the caller passes the
+        ``trades`` qualifier), reaching the runtime-read table and NEVER the world
+        shadow.
+
+    Single SAVEPOINT / single commit spanning both writes makes the pair
+    all-or-nothing per INV-37.
+
+    Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
+    (``zeus-world.db`` before ``zeus_trades.db``) — the SAME order as
+    ``get_trade_connection_with_world_required`` /
+    ``forecasts_connection_with_trades_flocked`` (both go through
+    ``canonical_lock_order``), so there is no cross-writer lock-order inversion.
+
+    Callers MUST use this as a context manager and MUST NOT close the connection
+    themselves — the ``finally`` block handles it.
+
+    Created: 2026-06-20
+    Last audited: 2026-06-20
+    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    """
+    from src.state.db_writer_lock import (
+        canonical_lock_order,
+        db_writer_lock,
+    )
+
+    resolved = _resolve_write_class(write_class)
+    if resolved is None:
+        from src.state.db_writer_lock import WriteClass as _WC
+        resolved = _WC.LIVE
+    # Canonical alphabetical sort: zeus-world.db < zeus_trades.db
+    ordered_paths = canonical_lock_order([ZEUS_WORLD_DB_PATH, _zeus_trade_db_path()])
+    with db_writer_lock(ordered_paths[0], resolved):
+        with db_writer_lock(ordered_paths[1], resolved):
+            conn = _connect(ZEUS_WORLD_DB_PATH, write_class=resolved)
             try:
                 attached = {
                     row[1]
@@ -3006,10 +3134,6 @@ def init_schema(
     _ensure_opportunity_event_processing_table(conn)
     _ensure_event_dead_letters_table(conn)
 
-    # EDLI v1 (2026-05-24): executable quote/book feasibility evidence.
-    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
-    _ensure_execution_feasibility_evidence_table(conn)
-
     # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
     from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
     _ensure_no_trade_regret_events_table(conn)
@@ -4281,6 +4405,7 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "book_hash_transitions",
     "decision_integrity_quarantine",
     "execution_fact",
+    "execution_feasibility_evidence",
     "executable_market_snapshots",
     # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact
     # corrected to trade_class. The live writer (harvester.py log_settlement_event)
@@ -4890,6 +5015,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
+    _ensure_execution_feasibility_evidence_table(conn)
     # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
     from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
     _ensure_decision_integrity_quarantine_table(conn)
@@ -7230,8 +7357,7 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
     vector = getattr(decision, attr_name, None)
     if edge is None or vector is None:
         return None
-    if getattr(edge, "direction", "") == "buy_no":
-        return None
+    direction = str(getattr(edge, "direction", "") or "")
     try:
         values = vector.tolist() if hasattr(vector, "tolist") else list(vector)
     except TypeError:
@@ -7254,6 +7380,10 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
         probability = float(values[idx])
     except (TypeError, ValueError):
         return None
+    if probability != probability or probability in (float("inf"), float("-inf")):
+        return None
+    if direction == "buy_no":
+        probability = 1.0 - probability
     return probability
 
 
@@ -9780,6 +9910,21 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
     )
+    # These runtime columns are additive on live DBs. Keep the loader read
+    # boundary compatible with older/partially migrated DBs, but always project
+    # the keys it later maps into Position so load_portfolio cannot fail after
+    # restart.
+    _runtime_cols_defaults = {
+        "entry_ci_width": "0.0",
+        "exit_retry_count": "0",
+        "next_exit_retry_at": "NULL",
+        "last_monitor_prob_is_fresh": "0",
+        "last_monitor_market_price_is_fresh": "0",
+    }
+    runtime_select_expr = ", ".join(
+        c if c in actual_cols else f"{default} AS {c}"
+        for c, default in _runtime_cols_defaults.items()
+    )
 
     rows = conn.execute(
         f"""
@@ -9788,7 +9933,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                last_monitor_prob, last_monitor_edge, last_monitor_market_price,
                decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
                chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-               temperature_metric, {position_current_env_expr}, {authority_select_expr}
+               temperature_metric, {position_current_env_expr}, {authority_select_expr},
+               {runtime_select_expr}
         FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
         """,

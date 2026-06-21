@@ -48,9 +48,11 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
         FROM accepted
         """
     ).fetchone()
-    feasibility_count = conn.execute(
-        "SELECT COUNT(*) FROM execution_feasibility_evidence"
-    ).fetchone()[0]
+    feasibility_count = (
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        if _table_exists(conn, "execution_feasibility_evidence")
+        else 0
+    )
     event_available_after_decision = _event_time_violation_counts(conn, "available_at")
     event_received_after_decision = _event_time_violation_counts(conn, "received_at")
     violations = {
@@ -206,3 +208,13 @@ def _payload_violation_count(conn: sqlite3.Connection, predicate: str) -> int:
         WHERE {predicate}
         """
     ).fetchone()[0]
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        is not None
+    )

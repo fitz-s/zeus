@@ -6,13 +6,14 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
 from src.contracts.replacement_pipeline_files import validate_materialization_seed
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
+from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 
 
@@ -179,6 +180,11 @@ def build_replacement_forecast_materialization_seed(
     expires_at: datetime | str | None = None,
     anchor_weight: float = 0.80,
     anchor_sigma_c: float = 3.00,
+    day0_observed_extreme_c: float | None = None,
+    day0_observed_extreme_source: str | None = None,
+    day0_observed_extreme_observation_time: str | None = None,
+    day0_observed_extreme_sample_count: int | None = None,
+    day0_observed_extreme_unit: str | None = None,
 ) -> ReplacementForecastMaterializationSeedResult:
     city_name = _reject_alias(city, field_name="city")
     metric = _reject_alias(temperature_metric, field_name="temperature_metric")
@@ -219,7 +225,11 @@ def build_replacement_forecast_materialization_seed(
             seed=None,
         )
     source_cycle_time = openmeteo_manifest.source_cycle_time
-    expiry = _dt(expires_at, field_name="expires_at") if expires_at is not None else computed + timedelta(hours=3)
+    expiry = (
+        _dt(expires_at, field_name="expires_at")
+        if expires_at is not None
+        else replacement_readiness_expires_at(source_cycle_time)
+    )
 
     seed = {
         "city": city_name,
@@ -254,6 +264,16 @@ def build_replacement_forecast_materialization_seed(
         "latitude": getattr(city_config, "lat", None),
         "longitude": getattr(city_config, "lon", None),
     }
+    if day0_observed_extreme_c is not None:
+        seed.update(
+            {
+                "day0_observed_extreme_c": float(day0_observed_extreme_c),
+                "day0_observed_extreme_source": str(day0_observed_extreme_source or ""),
+                "day0_observed_extreme_observation_time": str(day0_observed_extreme_observation_time or ""),
+                "day0_observed_extreme_sample_count": int(day0_observed_extreme_sample_count or 0),
+                "day0_observed_extreme_unit": str(day0_observed_extreme_unit or "C"),
+            }
+        )
     final_seed = {key: value for key, value in seed.items() if value is not None}
     # BOUNDARY CONTRACT (2026-06-10): validate the assembled seed against the
     # shared producer⇄consumer schema BEFORE returning it READY. A seed that

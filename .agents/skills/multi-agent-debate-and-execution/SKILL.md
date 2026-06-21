@@ -12,7 +12,7 @@ A complete reusable workflow for long-horizon engineering work that needs high-t
 Use this skill when:
 - Engineering work will span 30+ hours / 5+ batches / multiple rotating sessions
 - High-risk surfaces (live modules, schemas, calibration stores, retrain pipelines) are touched
-- Work requires verifiable trust across session boundaries
+- Work spans verifiable trust across session boundaries
 - The cost of a silent regression > the cost of explicit review gates
 - A team of multiple agents must coordinate without a single agent owning end-to-end context
 
@@ -141,7 +141,7 @@ DO NOT execute BATCH 1 until you receive explicit GO_BATCH_1_<PACKET>.
 Created: YYYY-MM-DD
 Author: <executor>@<team>
 Source dispatch: DISPATCH_<PACKET>
-Plan-evidence basis: <verdict>
+Decision basis: <verdict>
 
 ## §0 Read summary
 | Source | What I learned |
@@ -316,7 +316,7 @@ When dispatch's intended axis doesn't match HEAD's substrate:
 |------|---------|----------|
 | **PATH A** (precision-favored) | Drop the unsupported axis from contract; measure only what's supported | Default. Honest. Documented limitation. Mirrors prior 4-of-5 packets in case study. |
 | **PATH B** (recall-favored heuristic) | Use a heuristic classifier or proxy join | Only when operator explicitly authorizes; risks invented-data critique. |
-| **PATH C** (writer extension) | Modify the upstream writer to add the missing axis | Out-of-scope by default; requires explicit operator dispatch as separate packet. |
+| **PATH C** (writer extension) | Modify the upstream writer to add the missing axis | Separate operator-dispatched packet. |
 
 ### §6.2 Surface classification (K0 / K1 / K2 / K3)
 
@@ -324,7 +324,7 @@ Define for your project (or import from existing AGENTS.md):
 - **K0** — frozen kernel (DB schema, contracts); never mutate without schema migration packet
 - **K1** — read-only projections; pure SELECT; aggregation in memory; safe extension surface
 - **K2** — derived/auxiliary state; controlled mutation OK with critic-gate
-- **K3** — live execution path; touching writer side requires HIGH-risk gate + operator dispatch
+- **K3** — live execution path; touching writer side uses operator dispatch
 
 ### §6.3 K3-adjacent surface pre-flag pattern
 

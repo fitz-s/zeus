@@ -47,6 +47,7 @@ import inspect
 import json
 import os
 import textwrap
+from dataclasses import replace
 from decimal import Decimal
 
 from src.engine import event_reactor_adapter as era
@@ -383,6 +384,50 @@ def test_single_selection_path_always_uses_marginal_utility_ranker(monkeypatch):
     assert book["selected_candidate_id"] == expected_id
     assert book["selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
     assert book["proposed_selected_candidate_id"] == expected_id
+
+
+def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
+    """Actual qkernel selections must not be serialized as non-admitted losers."""
+    bin_b = Bin(low=62.0, high=63.0, unit="F", label="62-63F")
+    row_b = _row(condition_id="cond-B", yes_token="yesB", no_token="noB",
+                 yes_asks=(("0.20", "100000"),), snapshot_id="snap-B")
+    proof_b = _proof(direction="buy_yes", row=row_b, token_id="yesB",
+                     q_posterior=0.65, q_lcb_5pct=0.55, bin_obj=bin_b, trade_score=0.0)
+    qkernel_cert = {
+        "source": "qkernel_spine",
+        "candidate_id": "DIRECT_YES:bin-B",
+        "route_id": "DIRECT_YES:bin-B@proof",
+        "payoff_q_lcb": 0.30,
+        "edge_lcb": 0.10,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": "6.25",
+        "optimal_delta_u": 0.02,
+        "cost": 0.20,
+        "false_edge_rate": 0.02,
+    }
+    selected = replace(
+        proof_b,
+        q_source="qkernel_spine",
+        qkernel_execution_economics=qkernel_cert,
+    )
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt",
+        family_id="fam",
+        proofs=(proof_b,),
+        selected_proof=selected,
+    ).to_receipt_dict()
+    selected_id = era._candidate_evaluation_id(proof_b)
+    rec = next(c for c in book["candidates"] if c["candidate_id"] == selected_id)
+
+    assert book["admitted_count"] == 1
+    assert book["selection_authority"] == "qkernel_spine"
+    assert book["selected_qkernel_execution_economics"] == qkernel_cert
+    assert rec["legacy_admitted"] is False
+    assert rec["admitted"] is True
+    assert rec["live_decision_selected"] is True
+    assert rec["live_selection_authority"] == "qkernel_spine"
+    assert rec["qkernel_execution_economics"] == qkernel_cert
 
 
 def test_decision_src_has_no_alternate_ranker_or_legacy_fallback():

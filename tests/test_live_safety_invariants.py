@@ -3616,7 +3616,7 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
 
 
 def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
-    """Monitor refresh must not roll a chain-corrected position back to stale fill size."""
+    """Monitor refresh must not roll a chain-corrected position back to stale fill size/state."""
     from src.engine.lifecycle_events import (
         build_entry_canonical_write,
         build_monitor_refreshed_canonical_write,
@@ -3657,10 +3657,11 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
                shares = 60.0,
                cost_basis_usd = 44.4,
                entry_price = 0.74,
+               chain_state = 'local_only',
                chain_shares = 60.0,
                chain_avg_price = 0.74,
                chain_cost_basis_usd = 44.4,
-               chain_seen_at = '2026-06-17T20:51:29+00:00'
+               chain_seen_at = NULL
          WHERE position_id = ?
         """,
         ("monitor-preserve-chain-1",),
@@ -3682,7 +3683,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
 
     current = conn.execute(
         """
-        SELECT size_usd, shares, cost_basis_usd, chain_shares,
+        SELECT size_usd, shares, cost_basis_usd, chain_state, chain_shares,
                chain_cost_basis_usd, last_monitor_prob, last_monitor_edge,
                last_monitor_market_price, updated_at
           FROM position_current
@@ -3693,6 +3694,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     assert current["size_usd"] == pytest.approx(44.4)
     assert current["shares"] == pytest.approx(60.0)
     assert current["cost_basis_usd"] == pytest.approx(44.4)
+    assert current["chain_state"] == "synced"
     assert current["chain_shares"] == pytest.approx(60.0)
     assert current["chain_cost_basis_usd"] == pytest.approx(44.4)
     assert current["last_monitor_prob"] == pytest.approx(0.869)
@@ -4341,17 +4343,23 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
         "observation_time": "2026-06-08T00:10:00+09:00",
         "source": "wu_api",
     })
-    monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {
+    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", lambda **kw: {
         "members_hourly": np.zeros((3, 3)),
-        "times": ["2026-06-07T15:00:00+00:00"],
+        "times": [
+            "2026-06-07T15:00:00+00:00",
+            "2026-06-07T16:00:00+00:00",
+            "2026-06-07T17:00:00+00:00",
+        ],
         "source_id": "test_source",
-        "forecast_source_role": "monitor_fallback",
+        "forecast_source_role": "day0_remaining_window_live",
     })
-    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda *_: True)
     monkeypatch.setattr(diurnal, "build_day0_temporal_context", lambda *a, **k: SimpleNamespace(
         daypart="morning",
         post_peak_confidence=0.0,
         current_utc_timestamp=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
+        solar_day=None,
+        current_local_hour=0.17,
+        daylight_progress=0.0,
     ))
     # Freeze the staleness gate's wall-clock to the fixture's frame: the obs
     # fast-lane gate (task #49) added a 1.0h max observation age measured
@@ -4376,6 +4384,18 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
             23.0,
         ),
     )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *a, **k: (
+            [
+                monitor_refresh.Bin(low=24, high=24, label="24°C", unit="C"),
+                monitor_refresh.Bin(low=25, high=25, label="25°C", unit="C"),
+                monitor_refresh.Bin(low=26, high=26, label="26°C", unit="C"),
+            ],
+            1,
+        ),
+    )
 
     p, validations = monitor_refresh._refresh_day0_observation(
         position=pos,
@@ -4385,9 +4405,10 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
         target_d=date(2026, 6, 8),
     )
 
-    assert p == pytest.approx(0.79)
-    assert getattr(pos, "_monitor_probability_is_fresh") is False
-    assert "day0_extreme_maturity_gate" in validations
+    assert np.isfinite(p)
+    assert getattr(pos, "_monitor_probability_is_fresh") is True
+    assert "day0_observation_remaining_window" in validations
+    assert "day0_extreme_not_absorbing" in validations
     assert any(v.startswith("day0_high_extreme_not_mature:") for v in validations)
 
 

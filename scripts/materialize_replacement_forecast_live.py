@@ -196,6 +196,31 @@ def main(argv: list[str] | None = None) -> int:
             anchor_weight=float(payload.get("anchor_weight", 0.80)),
             anchor_sigma_c=float(payload.get("anchor_sigma_c", 3.00)),
             settlement_step_c=float(payload.get("settlement_step_c", 1.0)),
+            day0_observed_extreme_c=(
+                None
+                if payload.get("day0_observed_extreme_c") in (None, "")
+                else float(payload["day0_observed_extreme_c"])
+            ),
+            day0_observed_extreme_source=(
+                None
+                if payload.get("day0_observed_extreme_source") in (None, "")
+                else str(payload["day0_observed_extreme_source"])
+            ),
+            day0_observed_extreme_observation_time=(
+                None
+                if payload.get("day0_observed_extreme_observation_time") in (None, "")
+                else str(payload["day0_observed_extreme_observation_time"])
+            ),
+            day0_observed_extreme_sample_count=(
+                None
+                if payload.get("day0_observed_extreme_sample_count") in (None, "")
+                else int(payload["day0_observed_extreme_sample_count"])
+            ),
+            day0_observed_extreme_unit=(
+                None
+                if payload.get("day0_observed_extreme_unit") in (None, "")
+                else str(payload["day0_observed_extreme_unit"])
+            ),
             # Task #32: honest re-materialization provenance carried by a fusion-upgrade-trigger
             # request. None for a normal first materialization (default), so behaviour is unchanged.
             upgrade_trigger=(str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None),

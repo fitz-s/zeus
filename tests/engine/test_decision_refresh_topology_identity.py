@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-19
 # Authority basis: freshness-throughput starvation fix (#92,
 #   docs/evidence/deadloop_2026-06-14/binding_wall.md). The decision-triggered
 #   family snapshot refresher's reconstruct returned None for EVERY family because
@@ -277,3 +277,45 @@ def test_decision_refresher_reinjects_family_identity() -> None:
         "the refresher must re-inject city AND target_date alongside "
         "temperature_metric -- reconstruct's identity guard requires all three"
     )
+
+
+def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh(monkeypatch) -> None:
+    """Gate-level snapshot blocks must not run producer I/O in the reactor.
+
+    A blocked event is already requeued into the pending event table; that table is
+    the substrate-observer sidecar's work surface. The reactor drain therefore
+    records the nudge and returns without calling the Gamma/CLOB refresh helper.
+    """
+
+    import src.main as main
+
+    def fail_refresh(*_args, **_kwargs):
+        raise AssertionError("reactor must not call substrate producer refresh")
+
+    monkeypatch.setattr(main, "_refresh_pending_family_snapshots", fail_refresh)
+
+    refresher = main._edli_reactor_family_snapshot_refresher()
+
+    assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is False
+
+
+def test_reactor_market_absence_provider_reads_gamma_empty_backoff(monkeypatch) -> None:
+    """The reactor terminalizes no-listed-market blocks only from Gamma-empty proof.
+
+    The provider must read the same normalized family key the warm lane writes, including
+    metric aliases, and must stop proving absence when the backoff expires.
+    """
+
+    import src.main as main
+
+    monkeypatch.setattr(main.time, "monotonic", lambda: 100.0)
+    key = main._substrate_refresh_family_key("Auckland", "2026-06-20", "lowest")
+    monkeypatch.setattr(main, "_GAMMA_EMPTY_BACKOFF_UNTIL", {key: 130.0})
+
+    provider = main._edli_reactor_family_market_absence_provider()
+
+    assert provider(city="Auckland", target_date="2026-06-20", metric="low") is True
+    assert provider(city="Auckland", target_date="2026-06-20", metric="high") is False
+
+    monkeypatch.setattr(main.time, "monotonic", lambda: 131.0)
+    assert provider(city="Auckland", target_date="2026-06-20", metric="low") is False

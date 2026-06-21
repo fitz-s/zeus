@@ -69,12 +69,13 @@ from src.data.observation_instants_writer import (  # noqa: E402
     ObsV2Row,
     insert_rows,
 )
+from src.config import STATE_DIR  # noqa: E402
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
-DEFAULT_LOG_PATH = _REPO_ROOT / "state" / "hko_ingest_log.jsonl"
+DEFAULT_DB_PATH = STATE_DIR / "zeus-world.db"
+DEFAULT_LOG_PATH = STATE_DIR / "hko_ingest_log.jsonl"
 HKO_ACCUMULATOR_PARSER_VERSION = "hko_hourly_accumulator_projection_v2"
 
 HK_CITY_NAME = "Hong Kong"

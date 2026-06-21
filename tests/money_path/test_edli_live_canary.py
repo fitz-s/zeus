@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -251,6 +253,52 @@ def test_live_adapter_rejects_if_actionable_certificate_fails(monkeypatch):
 
     assert receipt.proof_accepted is False
     assert "ACTIONABLE_CERTIFICATE_REJECTED" in receipt.reason
+
+
+def test_live_order_build_savepoint_retries_sqlite_lock_after_rollback(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE writes (value TEXT)")
+    attempts = {"count": 0}
+    sleeps = []
+    monkeypatch.setenv("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(adapter._time, "sleep", lambda delay: sleeps.append(delay))
+
+    def _build():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            conn.execute("INSERT INTO writes(value) VALUES ('rolled-back')")
+            raise sqlite3.OperationalError("database is locked")
+        rows = conn.execute("SELECT value FROM writes").fetchall()
+        assert rows == []
+        conn.execute("INSERT INTO writes(value) VALUES ('committed')")
+        return ("command-cert",)
+
+    result = adapter._run_live_order_build_savepoint(conn, _build)
+
+    assert result == ("command-cert",)
+    assert attempts["count"] == 2
+    assert sleeps == [0.01]
+    assert [row[0] for row in conn.execute("SELECT value FROM writes")] == ["committed"]
+
+
+def test_live_order_build_savepoint_does_not_retry_non_lock_operational_error(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    attempts = {"count": 0}
+    monkeypatch.setenv("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(adapter._time, "sleep", lambda _delay: pytest.fail("unexpected sleep"))
+
+    def _build():
+        attempts["count"] += 1
+        raise sqlite3.OperationalError("no such table: live_cap")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        adapter._run_live_order_build_savepoint(conn, _build)
+
+    assert attempts["count"] == 1
 
 
 def test_live_cap_certificate_is_backed_by_usage_row():
@@ -1197,6 +1245,52 @@ def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch)
     assert _table_count(conn, "edli_live_cap_usage") == 0
 
 
+def test_live_certificate_build_failure_preserves_selected_leg_on_receipt(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", lambda *_args, **_kwargs: accepted)
+
+    def _raise_build_failure(**_kwargs):
+        raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
+
+    monkeypatch.setattr(adapter, "_build_live_execution_command_certificates", _raise_build_failure)
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("executor must not be called after certificate build failure")
+        ),
+        operator_arm=_operator_arm(),
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+
+    receipt = submit(event, decision_time)
+
+    assert receipt.proof_accepted is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING"
+    assert receipt.token_id == accepted.token_id
+    assert receipt.condition_id == accepted.condition_id
+    assert receipt.bin_label == accepted.bin_label
+    assert receipt.direction == accepted.direction
+    assert receipt.q_live == accepted.q_live
+    assert receipt.c_fee_adjusted == accepted.c_fee_adjusted
+
+
 def test_live_execution_command_build_fails_without_pre_submit_authority_witness():
     from src.engine import event_reactor_adapter as adapter
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
@@ -1307,6 +1401,249 @@ def test_actionable_payload_persists_live_authority_provenance():
         ],
     }
     assert payload["strategy_key"] == "center_buy"
+
+
+def test_actionable_payload_persists_qkernel_execution_economics():
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    qkernel_cert = _qkernel_execution_cert()
+    receipt = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=qkernel_cert,
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 15.39,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+
+    assert payload["q_source"] == "qkernel_spine"
+    assert payload["qkernel_execution_economics"] == qkernel_cert
+
+
+@pytest.mark.parametrize(
+    "bad_cert",
+    [
+        None,
+        {},
+        {"source": "qkernel_spine"},
+        {
+            "source": "qkernel_spine",
+            "candidate_id": "DIRECT_NO:bin-1",
+            "route_id": "DIRECT_NO:bin-1@proof",
+            "payoff_q_lcb": 0.72,
+            "edge_lcb": 0.17,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "15.39",
+            "optimal_delta_u": 0.03,
+            "cost": 0.55,
+            "side": "NO",
+        },
+    ],
+)
+def test_live_execution_command_requires_qkernel_execution_economics_for_qkernel_receipt(bad_cert):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=bad_cert,
+        opportunity_book=_opportunity_book_with_qkernel_cert(bad_cert),
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_QKERNEL_.*INVALID"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+
+def test_live_execution_command_requires_qkernel_book_certificate_match():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    receipt_cert = _qkernel_execution_cert(payoff_q_lcb=0.72)
+    book_cert = _qkernel_execution_cert(payoff_q_lcb=0.73)
+    accepted = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=receipt_cert,
+        opportunity_book=_opportunity_book_with_qkernel_cert(book_cert),
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_MISMATCH"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+
+def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
+    from src.engine import event_reactor_adapter as adapter
+
+    proof = adapter._build_event_bound_taker_quality_proof(
+        actionable_payload={
+            "q_source": "qkernel_spine",
+            # B3: the authority stamp (q_source) AND the selected-candidate identity
+            # (candidate_id matching the cert) are now mandatory to reach the qkernel
+            # payoff path — this test exercises that path, so it supplies both.
+            "candidate_id": "DIRECT_YES:bin-1",
+            "direction": "buy_yes",
+            "q_live": 0.90,
+            "q_lcb_5pct": 0.90,
+            "qkernel_execution_economics": _qkernel_execution_cert(
+                payoff_q_lcb=0.30,
+                cost=0.20,
+            ),
+            "live_cap_reserved_notional_usd": 10.0,
+            "proof_maker_limit_price": 0.45,
+            "proof_ev_maker": 0.01,
+        },
+        order_mode="TAKER",
+        fresh_best_bid=0.49,
+        fresh_best_ask=0.50,
+    )
+
+    assert proof is not None
+    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+    assert proof["passed"] is False
+    assert float(proof["taker_fee_adjusted_edge"]) < 0.0
+
+
+def _b3_payload(**overrides):
+    """An ADMISSIBLE taker payload (positive after-cost edge) carrying a qkernel cert.
+
+    Base: q_source stamped, candidate_id matching the cert, payoff_q_lcb 0.72 vs a
+    fresh ask 0.50 -> a clearly POSITIVE edge so a CONSUMED cert yields passed=True.
+    The B3 guard only changes WHETHER the cert is consumed (authority + identity);
+    the surplus math is unchanged.
+    """
+    payload = {
+        "q_source": "qkernel_spine",
+        "candidate_id": "DIRECT_YES:bin-1",  # matches _qkernel_execution_cert default
+        "direction": "buy_yes",
+        "q_live": 0.72,
+        "q_lcb_5pct": 0.72,
+        "qkernel_execution_economics": _qkernel_execution_cert(),  # candidate_id DIRECT_YES:bin-1
+        "live_cap_reserved_notional_usd": 10.0,
+        "proof_maker_limit_price": 0.45,
+        "proof_ev_maker": 0.01,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_unstamped_proof_with_stray_cert_is_not_qkernel_authority():
+    """B3 residual (re-review): an UNSTAMPED (legacy-selected) proof that carries a
+    valid qkernel execution-economics cert must NOT be treated as qkernel authority —
+    otherwise its payoff_q_lcb feeds sizing/materialization
+    (_qkernel_execution_economics -> _robust_marginal_utility_stake_and_price) without
+    the spine being the selector. RED-on-revert: restoring the cert-alone branch in
+    _proof_uses_qkernel_spine makes this return True.
+    """
+    from src.engine.event_reactor_adapter import _proof_uses_qkernel_spine
+
+    unstamped = SimpleNamespace(
+        q_source="legacy_calibrator",                  # NOT the qkernel stamp
+        selection_authority_applied=None,              # NOT stamped
+        qkernel_execution_economics=_qkernel_execution_cert(),  # stray VALID cert
+        direction="buy_yes",
+    )
+    assert _proof_uses_qkernel_spine(unstamped) is False, (
+        "an unstamped proof carrying a stray valid qkernel cert must not be treated "
+        "as qkernel authority — the cert alone is not the selection stamp"
+    )
+
+
+def test_spine_stamped_proof_is_qkernel_authority():
+    """No regression: a spine-selected (stamped) proof still uses the qkernel path,
+    which is how the bridge marks every legitimate qkernel selection
+    (selection_authority_applied == 'qkernel_spine')."""
+    from src.engine.event_reactor_adapter import _proof_uses_qkernel_spine
+
+    stamped = SimpleNamespace(
+        q_source=None,
+        selection_authority_applied="qkernel_spine",   # the stamp qkernel_spine_bridge sets
+        qkernel_execution_economics=None,
+        direction="buy_yes",
+    )
+    assert _proof_uses_qkernel_spine(stamped) is True
+
+
+class TestB3QkernelCertAuthorityAndIdentityGuard:
+    """B3 (PR415): the taker-quality proof may consume the qkernel payoff_q_lcb ONLY
+    when the payload carries the qkernel AUTHORITY STAMP (q_source == qkernel_spine)
+    AND the cert is bound to the SELECTED candidate (cert.candidate_id ==
+    payload.candidate_id). RED-on-revert: on the unfixed tree a mismatched/unstamped
+    cert is consumed (q_lcb_source == qkernel path, edge computed); after the fix it
+    fails closed with a typed reason and never sizes off the foreign cert's q.
+    """
+
+    def _proof(self, **overrides):
+        from src.engine import event_reactor_adapter as adapter
+
+        return adapter._build_event_bound_taker_quality_proof(
+            actionable_payload=_b3_payload(**overrides),
+            order_mode="TAKER",
+            fresh_best_bid=0.49,
+            fresh_best_ask=0.50,
+        )
+
+    def test_matched_stamped_cert_is_consumed(self):
+        """The happy path is UNCHANGED: stamped + identity-matched cert is consumed."""
+        proof = self._proof()
+        assert proof is not None
+        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+        # positive after-cost surplus (0.72 payoff vs 0.50 ask) -> passes
+        assert float(proof["taker_fee_adjusted_edge"]) > 0.0
+        assert proof["passed"] is True
+
+    def test_candidate_identity_mismatch_fails_closed(self):
+        """RED-ON-REVERT. Cert.candidate_id (DIRECT_YES:bin-1) != payload.candidate_id
+        (a DIFFERENT selected candidate). On the unfixed tree the foreign cert is
+        consumed (q_lcb_source == qkernel path). After the fix it fails closed and the
+        cert's q never drives the proof."""
+        proof = self._proof(candidate_id="DIRECT_YES:bin-OTHER")
+        assert proof is not None
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_cert_candidate_identity_mismatch"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
+
+    def test_cert_without_authority_stamp_fails_closed(self):
+        """RED-ON-REVERT. A qkernel cert present but the payload is NOT under qkernel
+        authority (q_source != qkernel_spine). On the unfixed tree the cert is consumed
+        anyway; after the fix it fails closed."""
+        proof = self._proof(q_source="legacy_calibrator")
+        assert proof is not None
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_cert_present_without_qkernel_authority_stamp"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
+
+    def test_missing_candidate_id_fails_closed(self):
+        """A stamped cert with NO payload candidate_id cannot prove identity -> closed."""
+        proof = self._proof(candidate_id="")
+        assert proof is not None
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_cert_candidate_identity_mismatch"
 
 
 def test_live_execution_command_requires_opportunity_book_selection_match():
@@ -2060,7 +2397,7 @@ def test_main_live_mode_wires_production_executor_boundary_source():
     assert "submit_event_bound_final_intent_via_existing_executor" in source
     assert "executor_submit=lambda final_intent_cert, execution_command_cert" in source
     assert "live_bridge_mode" in source
-    assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn" in source
+    assert "pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn" in source
 
 
 def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatch):
@@ -2120,7 +2457,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2148,7 +2485,179 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
-    assert clob_timeouts == [2.5, 2.5]
+    assert len(clob_timeouts) == 2
+    assert all(0 < timeout < 1.25 for timeout in clob_timeouts)
+
+
+def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypatch):
+    import src.main as main
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", "2026-05-25T11:59:59.950000+00:00", "book-hash-1", 0.39, 0.41),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+
+    calls: list[str] = []
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def v2_preflight(self):
+            return {"ok": True}
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_pusd_collateral_payload(self):
+            calls.append("pusd")
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 25_000_000,
+                "ctf_token_balances_units": {},
+                "ctf_token_allowances_units": {},
+            }
+
+        def get_collateral_payload(self):
+            calls.append("full")
+            raise AssertionError("BUY pre-submit proof must not enumerate CTF positions")
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {
+            "pre_submit_max_quote_age_ms": 1000,
+            "pre_submit_balance_allowance_check_enabled": True,
+        },
+    )
+    final_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+    witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+
+    assert witness.balance_allowance_status == "OK"
+    assert calls == ["pusd"]
+
+
+def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
+    import src.main as main
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", "2026-05-25T11:59:59.950000+00:00", "book-hash-1", 0.39, 0.41),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "0.05")
+    release = threading.Event()
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def v2_preflight(self):
+            return {"ok": True}
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_collateral_payload(self):
+            release.wait(timeout=5.0)
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 25_000_000,
+            }
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {
+            "pre_submit_max_quote_age_ms": 1000,
+            "pre_submit_balance_allowance_check_enabled": True,
+        },
+    )
+    final_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="timeout_guard: pre_submit_collateral_payload"):
+            provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+    finally:
+        release.set()
+        conn.close()
+
+    assert time.monotonic() - started < 1.0
 
 
 def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
@@ -2176,7 +2685,19 @@ def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
     provider = main._edli_pre_submit_jit_book_quote_provider()
 
     assert provider("yes-1")["hash"] == "book-hash"
-    assert captured["public_http_timeout"] == 2.5
+    assert 0 < captured["public_http_timeout"] < 1.25
+    assert captured["public_http_timeout"] * 2.0 < 2.5
+
+
+def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):
+    import src.main as main
+
+    monkeypatch.delenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS", raising=False)
+    timeout = main._edli_pre_submit_inner_io_timeout_seconds()
+
+    assert 0 < timeout <= 2.0
+    assert timeout * 2.0 < main._edli_pre_submit_clob_timeout_seconds()
 
 
 def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(monkeypatch):
@@ -2234,7 +2755,7 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2311,7 +2832,7 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
             }
 
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {
             "pre_submit_max_quote_age_ms": 1000,
@@ -2409,6 +2930,46 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         },
         decision_proof_bundle=object(),
     )
+
+
+def _qkernel_execution_cert(**overrides):
+    cert = {
+        "source": "qkernel_spine",
+        "candidate_id": "DIRECT_YES:bin-1",
+        "route_id": "DIRECT_YES:bin-1@proof",
+        "payoff_q_lcb": 0.72,
+        "edge_lcb": 0.17,
+        "delta_u_at_min": 0.01,
+        "optimal_stake_usd": "15.39",
+        "optimal_delta_u": 0.03,
+        "cost": 0.55,
+        "false_edge_rate": 0.02,
+        "side": "YES",
+        "bin_id": "bin-1",
+    }
+    cert.update(overrides)
+    if (
+        ("payoff_q_lcb" in overrides or "cost" in overrides)
+        and "edge_lcb" not in overrides
+    ):
+        cert["edge_lcb"] = float(cert["payoff_q_lcb"]) - float(cert["cost"])
+    return cert
+
+
+def _opportunity_book_with_qkernel_cert(qkernel_cert):
+    return {
+        "selected_candidate_id": "candidate-1",
+        "actual_receipt_selected_candidate_id": "candidate-1",
+        "candidates": [
+            {
+                "candidate_id": "candidate-1",
+                "condition_id": "condition-1",
+                "token_id": "yes-1",
+                "direction": "buy_yes",
+                "qkernel_execution_economics": qkernel_cert,
+            }
+        ],
+    }
 
 
 def _command_cert_bundle():
@@ -2879,7 +3440,7 @@ def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monk
             "timestamp": str(int((decision_time - timedelta(seconds=71)).timestamp() * 1000)),
         }
 
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=_jit_book,
@@ -2915,7 +3476,7 @@ def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
     def _jit_book_fails(token_id: str) -> dict:
         raise RuntimeError("CLOB /book 503")
 
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
         book_quote_provider=_jit_book_fails,
@@ -2937,7 +3498,7 @@ def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
     )
     _gate84_patch_authority_guards(monkeypatch)
 
-    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
         conn,
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
     )

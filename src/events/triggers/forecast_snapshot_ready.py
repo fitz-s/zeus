@@ -629,7 +629,9 @@ class ForecastSnapshotReadyTrigger:
             # completeness_status='COMPLETE' / readiness_status='LIVE_ELIGIBLE' are correct by
             # construction (a posterior row exists only after the materializer's own decorrelated-model
             # + topology gates pass). members_json is NULL (the spine re-sources members from
-            # raw_model_forecasts; the FSR members never feed belief on this lane).
+            # raw_model_forecasts; the FSR members never feed belief on this lane), but the event's
+            # member counters must still describe that same raw-model carrier instead of falling back
+            # to legacy 51-member ensemble telemetry.
             # The market_filter references c.* columns; re-alias onto the posterior row p.*.
             _posterior_market_filter = (
                 market_filter.replace("c.city", "p.city")
@@ -637,7 +639,19 @@ class ForecastSnapshotReadyTrigger:
                 .replace("c.temperature_metric", "p.temperature_metric")
             )
             _select_sql_base = f"""
-                WITH ranked_posterior AS (
+                WITH raw_model_counts AS (
+                    SELECT
+                        rmf.city,
+                        rmf.target_date,
+                        rmf.metric,
+                        date(rmf.source_cycle_time) AS source_cycle_date,
+                        COUNT(DISTINCT rmf.model) AS raw_model_member_count
+                      FROM raw_model_forecasts rmf
+                     WHERE rmf.source_available_at <= ?
+                       AND rmf.forecast_value_c IS NOT NULL
+                     GROUP BY rmf.city, rmf.target_date, rmf.metric, date(rmf.source_cycle_time)
+                ),
+                ranked_posterior AS (
                     SELECT
                         fp.*,
                         ROW_NUMBER() OVER (
@@ -662,8 +676,8 @@ class ForecastSnapshotReadyTrigger:
                     p.target_date AS target_local_date,
                     p.temperature_metric AS temperature_metric,
                     '{POSTERIOR_BACKED_DATA_VERSION}' AS data_version,
-                    NULL AS expected_members,
-                    NULL AS observed_members,
+                    rmc.raw_model_member_count AS expected_members,
+                    rmc.raw_model_member_count AS observed_members,
                     NULL AS expected_steps_json,
                     NULL AS observed_steps_json,
                     NULL AS snapshot_ids_json,
@@ -683,8 +697,8 @@ class ForecastSnapshotReadyTrigger:
                     'COMPLETE' AS sr_completeness_status,
                     NULL AS sr_expected_steps_json,
                     NULL AS sr_observed_steps_json,
-                    NULL AS sr_expected_members,
-                    NULL AS sr_observed_members,
+                    rmc.raw_model_member_count AS sr_expected_members,
+                    rmc.raw_model_member_count AS sr_observed_members,
                     ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || p.city || '|' || p.target_date || '|'
                         || p.temperature_metric || '|' || substr(p.source_cycle_time, 1, 10)) AS snapshot_id,
                     p.city AS snapshot_city,
@@ -695,21 +709,15 @@ class ForecastSnapshotReadyTrigger:
                     p.posterior_identity_hash AS snapshot_manifest_hash,
                     NULL AS snapshot_members_json
                 FROM ranked_posterior p
+                JOIN raw_model_counts rmc
+                  ON rmc.city = p.city
+                 AND rmc.target_date = p.target_date
+                 AND rmc.metric = p.temperature_metric
+                 AND rmc.source_cycle_date = date(p.source_cycle_time)
                 WHERE p._family_rank = 1
                   AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
                   AND (p.computed_at IS NULL OR p.computed_at <= ?)
-                  AND EXISTS (
-                        SELECT 1
-                          FROM raw_model_forecasts rmf
-                         WHERE rmf.city = p.city
-                           AND rmf.target_date = p.target_date
-                           AND rmf.metric = p.temperature_metric
-                           AND date(rmf.source_cycle_time) = date(p.source_cycle_time)
-                           AND rmf.source_available_at <= ?
-                           AND rmf.forecast_value_c IS NOT NULL
-                         GROUP BY rmf.city, rmf.target_date, rmf.metric, date(rmf.source_cycle_time)
-                        HAVING COUNT(DISTINCT rmf.model) >= 3
-                  ){_posterior_market_filter}
+                  AND rmc.raw_model_member_count >= 3{_posterior_market_filter}
                 ORDER BY p.source_cycle_time DESC, p.computed_at DESC
                 """
             rows = _dict_rows(

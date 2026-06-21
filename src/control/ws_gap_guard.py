@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Literal, Optional
 
 SubscriptionState = Literal[
@@ -30,6 +32,7 @@ SubscriptionState = Literal[
 ]
 
 DEFAULT_STALE_AFTER_SECONDS = 30
+DURABLE_SIDECAR_STALE_AFTER_SECONDS = 180
 
 
 class WSGapSubmitBlocked(RuntimeError):
@@ -117,8 +120,119 @@ def summary(*, now: datetime | None = None) -> dict:
     return _materialize_stale_gap(now=now).to_summary(now=now)
 
 
+def _parse_dt(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _fresh_timestamp(value: object, *, now: datetime, max_age_seconds: int) -> datetime | None:
+    parsed = _parse_dt(value)
+    if parsed is None:
+        return None
+    if (now - parsed).total_seconds() > max_age_seconds:
+        return None
+    return parsed
+
+
+def _scheduler_job_fresh(
+    health: dict,
+    job_name: str,
+    *,
+    now: datetime,
+    max_age_seconds: int,
+) -> datetime | None:
+    job = health.get(job_name)
+    if not isinstance(job, dict) or job.get("status") != "OK":
+        return None
+    return _fresh_timestamp(
+        job.get("last_success_at") or job.get("last_run_at"),
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+def _clean_boot_latch(current: WSGapStatus) -> bool:
+    return (
+        current.subscription_state == "DISCONNECTED"
+        and current.gap_reason == "not_configured"
+        and current.last_message_at is None
+        and current.m5_reconcile_required
+    )
+
+
+def _durable_sidecar_status(*, now: datetime) -> WSGapStatus | None:
+    """Return healthy sidecar-derived WS authority for the order daemon.
+
+    The user/market WebSocket writer lives in the price-channel-ingest sidecar.
+    The order daemon therefore cannot use this module's process-local clean-boot
+    default as live truth. It may only clear that clean-boot default from durable
+    sidecar evidence; real in-process disconnect/auth gaps still fail closed.
+    """
+
+    try:
+        from src.config import state_path
+    except Exception:
+        return None
+
+    heartbeat_path = state_path("daemon-heartbeat-price-channel-ingest.json")
+    health_path = state_path("scheduler_jobs_health.json")
+    heartbeat = _read_json(heartbeat_path)
+    health = _read_json(health_path)
+
+    heartbeat_at = _fresh_timestamp(
+        heartbeat.get("alive_at"),
+        now=now,
+        max_age_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
+    )
+    market_at = _scheduler_job_fresh(
+        health,
+        "edli_market_channel_ingestor",
+        now=now,
+        max_age_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
+    )
+    reconcile_at = _scheduler_job_fresh(
+        health,
+        "edli_user_channel_reconcile",
+        now=now,
+        max_age_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
+    )
+    if heartbeat_at is None or market_at is None or reconcile_at is None:
+        return None
+    observed_at = max(heartbeat_at, market_at, reconcile_at)
+    return WSGapStatus(
+        connected=True,
+        last_message_at=observed_at,
+        consecutive_gaps=0,
+        subscription_state="SUBSCRIBED",
+        gap_reason="sidecar_durable_evidence",
+        m5_reconcile_required=False,
+        updated_at=observed_at,
+        stale_after_seconds=DURABLE_SIDECAR_STALE_AFTER_SECONDS,
+    )
+
+
 def _materialize_stale_gap(*, now: datetime | None = None) -> WSGapStatus:
+    now = now or datetime.now(timezone.utc)
     current = status()
+    if _clean_boot_latch(current):
+        sidecar = _durable_sidecar_status(now=now)
+        if sidecar is not None:
+            return sidecar
     if current.is_stale(now=now) and not current.m5_reconcile_required:
         return record_gap(
             "stale_last_message",

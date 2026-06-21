@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-20; last_reused=2026-06-20
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 from scripts import check_live_restart_preflight as preflight
@@ -178,6 +181,83 @@ def _patch_paths(monkeypatch, tmp_path):
     return trade_db, forecast_db, state_dir
 
 
+def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
+    monkeypatch.delenv("ZEUS_LIVE_PREFLIGHT_STATE_DIR", raising=False)
+    monkeypatch.delenv("ZEUS_STATE_DIR", raising=False)
+    monkeypatch.delenv("ZEUS_PRIMARY_ROOT", raising=False)
+    runtime_root = tmp_path / "runtime-root"
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_bytes(
+        (
+            b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+            b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+            b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+            b"""<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>"""
+            + f"<key>ZEUS_PRIMARY_ROOT</key><string>{runtime_root}</string>".encode()
+            + b"""</dict></dict></plist>\n"""
+        )
+    )
+
+    assert preflight._runtime_state_dir(plist) == runtime_root / "state"
+
+
+def test_import_time_db_paths_follow_live_plist_primary_root(tmp_path):
+    home = tmp_path / "home"
+    launch_agents = home / "Library" / "LaunchAgents"
+    launch_agents.mkdir(parents=True)
+    runtime_root = tmp_path / "runtime-root"
+    plist = launch_agents / "com.zeus.live-trading.plist"
+    plist.write_bytes(
+        (
+            b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+            b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+            b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+            b"""<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>"""
+            + f"<key>ZEUS_PRIMARY_ROOT</key><string>{runtime_root}</string>".encode()
+            + b"""</dict></dict></plist>\n"""
+        )
+    )
+    env = os.environ.copy()
+    for key in (
+        "ZEUS_LIVE_PREFLIGHT_STATE_DIR",
+        "ZEUS_STATE_DIR",
+        "ZEUS_PRIMARY_ROOT",
+        "ZEUS_TRADE_DB",
+        "ZEUS_WORLD_DB",
+        "ZEUS_FORECAST_DB",
+    ):
+        env.pop(key, None)
+    env["HOME"] = str(home)
+    env["PYTHONPATH"] = str(preflight.ROOT)
+    code = """
+import json
+from scripts import check_live_restart_preflight as p
+print(json.dumps({
+    "state": str(p.STATE_DIR),
+    "trade": str(p.TRADE_DB),
+    "world": str(p.WORLD_DB),
+    "forecast": str(p.FORECAST_DB),
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=preflight.ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    state_dir = runtime_root.resolve() / "state"
+
+    assert payload == {
+        "state": str(state_dir),
+        "trade": str(state_dir / "zeus_trades.db"),
+        "world": str(state_dir / "zeus-world.db"),
+        "forecast": str(state_dir / "zeus-forecasts.db"),
+    }
+
+
 def test_preflight_blocks_qkernel_cutover_flag_off(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
@@ -340,7 +420,30 @@ def _init_sidecar_surfaces(conn, *, now: datetime):
         "INSERT INTO executable_market_snapshots VALUES (?, ?)",
         (now.isoformat(), (now + timedelta(minutes=2)).isoformat()),
     )
+    _insert_collateral_snapshot(conn, now=now)
     conn.commit()
+
+
+def _insert_collateral_snapshot(conn, *, now: datetime):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT NOT NULL,
+            authority_tier TEXT NOT NULL,
+            pusd_balance_micro INTEGER,
+            pusd_allowance_micro INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            captured_at, authority_tier, pusd_balance_micro, pusd_allowance_micro
+        ) VALUES (?, 'CHAIN', 1000000, 1000000)
+        """,
+        (now.isoformat(),),
+    )
 
 
 def _write_fresh_sidecar_heartbeats(state_dir, *, now: datetime):
@@ -400,6 +503,7 @@ def _init_sidecar_surfaces_for_identity(
             (now + timedelta(minutes=2)).isoformat(),
         ),
     )
+    _insert_collateral_snapshot(trade, now=now)
 
 
 def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tmp_path):
@@ -656,7 +760,7 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
 
 
-def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializable(
+def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
     monkeypatch, tmp_path
 ):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
@@ -732,17 +836,18 @@ def test_preflight_accepts_stale_belief_when_single_family_reseed_is_materializa
 
     result = preflight.evaluate()
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
-    assert belief["ok"] is True
-    assert belief["evidence"]["risky"] == []
+    assert belief["ok"] is False
+    risky_risks = [r["risk"] for r in belief["evidence"]["risky"]]
+    assert any("stale_live_belief_repairable_only_not_materialized" in r for r in risky_risks)
     repair = belief["evidence"]["repairable"][0]
     assert repair["position_id"] == "karachi-pos"
     assert repair["risk"] == "stale_live_belief_repairable_by_single_family_reseed"
     assert repair["posterior_id"] == "1"
 
 
-def test_preflight_accepts_missing_belief_when_single_family_reseed_is_materializable(
+def test_preflight_blocks_missing_belief_repairable_but_not_materialized(
     monkeypatch, tmp_path
 ):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
@@ -804,10 +909,11 @@ def test_preflight_accepts_missing_belief_when_single_family_reseed_is_materiali
 
     result = preflight.evaluate()
 
-    assert result["ok"] is True
+    assert result["ok"] is False
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
-    assert belief["ok"] is True
-    assert belief["evidence"]["risky"] == []
+    assert belief["ok"] is False
+    risky_risks = [r["risk"] for r in belief["evidence"]["risky"]]
+    assert any("missing_live_belief_repairable_only_not_materialized" in r for r in risky_risks)
     assert belief["evidence"]["repairable"][0]["position_id"] == "sh-pos"
 
 
@@ -993,9 +1099,10 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
     now = datetime.now(timezone.utc)
+    target_date = (now + timedelta(days=3)).date().isoformat()
     _write_fresh_sidecar_heartbeats(state_dir, now=now)
     _add_identity_columns(trade)
-    label = "Will the highest temperature in Seattle be between 82-83°F on June 19?"
+    label = f"Will the highest temperature in Seattle be between 82-83F on {target_date}?"
     trade.execute(
         """
         INSERT INTO position_current (
@@ -1006,12 +1113,12 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
             last_monitor_market_price_is_fresh, updated_at,
             condition_id, token_id, no_token_id
         ) VALUES (
-            'active-pos', 'active', 'Seattle', '2026-06-19', 'high',
+            'active-pos', 'active', 'Seattle', ?, 'high',
             ?, 'buy_no', 9.0, 9.0, 'filled', NULL, 0, NULL,
             0.84, 1, 0.72, 1, ?, 'cond-target', 'tok-yes-target', 'tok-no-target'
         )
         """,
-        (label, now.isoformat()),
+        (target_date, label, now.isoformat()),
     )
     trade.execute(
         """
@@ -1051,9 +1158,10 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
         INSERT INTO forecast_posteriors (
             posterior_id, city, target_date, temperature_metric,
             source_cycle_time, computed_at, q_json, runtime_layer
-        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, ?, 'live')
+        ) VALUES (1, 'Seattle', ?, 'high', ?, ?, ?, 'live')
         """,
         (
+            target_date,
             now.isoformat(),
             now.isoformat(),
             json.dumps({label: 0.15}),
@@ -1075,6 +1183,179 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
     assert feasibility["evidence"]["risky"][0]["risk"] == "missing_execution_feasibility_evidence"
     assert substrate["evidence"]["risky"][0]["condition_id"] == "cond-target"
     assert feasibility["evidence"]["risky"][0]["tokens"] == ["tok-no-target", "tok-yes-target"]
+
+
+def test_execution_feasibility_freshness_uses_observation_time_not_venue_book_timestamp():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    stale_book_time = now - timedelta(minutes=5)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("cond-target", "tok-no-target", stale_book_time.isoformat(), now.isoformat()),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "London",
+                "target_date": "2026-06-19",
+                "temperature_metric": "low",
+                "bin_label": "Will the lowest temperature in London be 17°C on June 19?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["freshness_basis"] == "created_at"
+    assert covered["latest_observed_at"] == now.isoformat()
+    assert covered["latest_quote_seen_at"] == stale_book_time.isoformat()
+
+
+def test_execution_feasibility_freshness_tolerates_small_writer_clock_skew():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    observed_after_check_started = now + timedelta(seconds=1)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        (
+            "cond-target",
+            "tok-no-target",
+            now.isoformat(),
+            observed_after_check_started.isoformat(),
+        ),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "Tokyo",
+                "target_date": "2026-06-21",
+                "temperature_metric": "low",
+                "bin_label": "Will the lowest temperature in Tokyo be 22°C on June 21?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["age_seconds"] == -1.0
+    assert covered["clock_skew_tolerated_seconds"] == 1.0
+
+
+def test_execution_feasibility_freshness_blocks_large_future_timestamp():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(
+        seconds=preflight.EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS + 1
+    )
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("cond-target", "tok-no-target", now.isoformat(), future.isoformat()),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "Tokyo",
+                "target_date": "2026-06-21",
+                "temperature_metric": "low",
+                "bin_label": "Will the lowest temperature in Tokyo be 22°C on June 21?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"][0]["risk"] == "future_execution_feasibility_evidence"
+
+
+def test_executable_quote_not_required_after_venue_close(monkeypatch):
+    from src.strategy import market_phase
+
+    monkeypatch.setattr(market_phase, "family_venue_closed", lambda **_: True)
+    now = datetime.now(timezone.utc)
+
+    for phase in ("active", "day0_window", "pending_exit"):
+        assert preflight._requires_executable_quote(
+            {
+                "phase": phase,
+                "city": "Singapore",
+                "target_date": "2026-06-19",
+            },
+            now_utc=now,
+        ) is False
+
+
+def test_executable_quote_required_before_venue_close(monkeypatch):
+    from src.strategy import market_phase
+
+    monkeypatch.setattr(market_phase, "family_venue_closed", lambda **_: False)
+    now = datetime.now(timezone.utc)
+
+    assert preflight._requires_executable_quote(
+        {
+            "phase": "day0_window",
+            "city": "Paris",
+            "target_date": "2026-06-20",
+        },
+        now_utc=now,
+    ) is True
 
 
 def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
@@ -1104,3 +1385,131 @@ def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
     heartbeat = next(c for c in result["checks"] if c["name"] == "price_channel_daemon_heartbeat")
     assert heartbeat["ok"] is False
     assert heartbeat["detail"] == "sidecar heartbeat file is missing"
+
+
+# --- B1: submit_authority_config fail-closed tests ---
+
+
+def _write_settings_with_edli(settings_path, *, real_order_submit_enabled, reactor_mode, live_execution_mode):
+    settings_path.write_text(
+        json.dumps(
+            {
+                "edli": {
+                    "real_order_submit_enabled": real_order_submit_enabled,
+                    "reactor_mode": reactor_mode,
+                    "live_execution_mode": live_execution_mode,
+                },
+                "feature_flags": {"qkernel_spine_enabled": True},
+            }
+        )
+    )
+
+
+def test_preflight_blocks_armed_live_when_real_submit_disabled(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    _write_settings_with_edli(
+        preflight.SETTINGS_PATH,
+        real_order_submit_enabled=False,
+        reactor_mode="live",
+        live_execution_mode="edli_live",
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is False
+    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
+    # main() should return nonzero
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        exit_code = preflight.main(["--json"])
+    assert exit_code != 0
+
+
+def test_preflight_blocks_armed_live_when_reactor_mode_live_no_submit(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    _write_settings_with_edli(
+        preflight.SETTINGS_PATH,
+        real_order_submit_enabled=True,
+        reactor_mode="live_no_submit",
+        live_execution_mode="edli_live",
+    )
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is False
+    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
+
+
+def test_preflight_submit_authority_passes_when_reactor_mode_live_and_real_submit_enabled(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    _write_settings_with_edli(
+        preflight.SETTINGS_PATH,
+        real_order_submit_enabled=True,
+        reactor_mode="live",
+        live_execution_mode="edli_live",
+    )
+
+    result = preflight.evaluate()
+
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is True
+    assert not any(c["name"] == "submit_authority_config" for c in result["blockers"])

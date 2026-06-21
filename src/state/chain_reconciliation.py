@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 LIVE_TRADE_FACT_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
 FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
+CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON = "chain_absent_confirmed_position_unattributed"
+CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE = "chain_absent_confirmed_position_unattributed"
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
@@ -592,13 +594,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
     def _canonical_current_chain_shares(
         position_id: str,
-    ) -> tuple[bool, float | None, str | None]:
-        """Return (row_exists, chain_shares, chain_seen_at) from position_current.
+    ) -> tuple[bool, float | None, str | None, str | None]:
+        """Return (row_exists, chain_shares, chain_seen_at, chain_state) from position_current.
 
         chain_shares is the persisted on-chain share count (NULL when the
         chain observation has never been projected). chain_seen_at is the
         ISO-8601 string of the last persisted positive-observation timestamp
-        (empty-string or NULL when never written). (False, None, None) means
+        (empty-string or NULL when never written). (False, None, None, None) means
         no canonical row exists yet — the position has no projection to update.
 
         Copilot review fix (2026-05-31, issue #1): include chain_seen_at so the
@@ -609,33 +611,36 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         to mis-classify long-lived synced positions on restart.
         """
         if conn is None:
-            return (False, None, None)
+            return (False, None, None, None)
         try:
             row = conn.execute(
-                "SELECT chain_shares, chain_seen_at FROM position_current "
+                "SELECT chain_shares, chain_seen_at, chain_state FROM position_current "
                 "WHERE position_id = ?",
                 (position_id,),
             ).fetchone()
         except Exception:
-            return (False, None, None)
+            return (False, None, None, None)
         if row is None:
-            return (False, None, None)
+            return (False, None, None, None)
         if hasattr(row, "keys"):
             raw_shares = row["chain_shares"]
             raw_seen_at = row["chain_seen_at"]
+            raw_chain_state = row["chain_state"]
         else:
             raw_shares = row[0]
             raw_seen_at = row[1]
+            raw_chain_state = row[2]
         seen_at = str(raw_seen_at or "") or None
+        persisted_chain_state = str(raw_chain_state or "") or None
         if raw_shares is None:
-            return (True, None, seen_at)
+            return (True, None, seen_at, persisted_chain_state)
         try:
             parsed = Decimal(str(raw_shares))
         except (InvalidOperation, ValueError):
-            return (True, None, seen_at)
+            return (True, None, seen_at, persisted_chain_state)
         if not parsed.is_finite():
-            return (True, None, seen_at)
-        return (True, float(parsed), seen_at)
+            return (True, None, seen_at, persisted_chain_state)
+        return (True, float(parsed), seen_at, persisted_chain_state)
 
     def _append_canonical_chain_observation_if_available(
         position: Position,
@@ -690,6 +695,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
           (e) shares unchanged + timestamp stale + prior_chain_state != "synced"
               → skip (transitioning into synced: chain_seen_at will be fresh
               after this cycle's canonical write from the size-correction path).
+          (f) shares unchanged + projected chain_state != "synced" → write
+              (chain economics match, but the canonical visibility projection
+              still misleads monitor/redecision).
 
         Gating mirrors _append_canonical_size_correction_if_available:
           - conn present; skip pending_entry phase (don't fight fill detection);
@@ -709,7 +717,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if not current_phase:
                 return False
 
-            row_exists, persisted_chain_shares, persisted_seen_at = (
+            row_exists, persisted_chain_shares, persisted_seen_at, persisted_chain_state = (
                 _canonical_current_chain_shares(trade_id)
             )
             if not row_exists:
@@ -729,11 +737,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             #   (e) shares are unchanged AND timestamp is stale AND position was
             #       NOT already synced → skip (fix #121: transitioning into
             #       synced; chain_seen_at will be fresh after this write).
+            #   (f) shares are unchanged but projected chain_state is not synced
+            #       → write (restore canonical chain visibility).
             shares_unchanged = (
                 persisted_chain_shares is not None
                 and abs(float(persisted_chain_shares) - float(target_chain_shares)) <= 1e-9
             )
-            if shares_unchanged:
+            if shares_unchanged and persisted_chain_state == "synced":
                 # Check timestamp freshness (case c vs d/e).
                 timestamp_fresh = False
                 if persisted_seen_at:
@@ -1016,6 +1026,47 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             or getattr(position, "exit_state", "") in PENDING_EXIT_STATES
         )
 
+    def _has_confirmed_entry_authority(position: Position) -> bool:
+        return (
+            bool(getattr(position, "entry_fill_verified", False))
+            or str(getattr(position, "fill_authority", "") or "")
+            == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        )
+
+    def _quarantine_confirmed_chain_absence(
+        position: Position,
+        *,
+        token_id: str,
+        source: str,
+    ) -> None:
+        corrected = replace(position)
+        corrected.state = LifecycleState.QUARANTINED.value
+        corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+        corrected.last_chain_absence_observed_at = now
+        corrected.quarantined_at = corrected.quarantined_at or now
+        logger.error(
+            "CONFIRMED_POSITION_CHAIN_ABSENT: trade_id=%s token=%s source=%s; "
+            "quarantining for attribution instead of phantom void",
+            getattr(position, "trade_id", "?"),
+            token_id,
+            source,
+        )
+        if _append_canonical_review_required(
+            corrected,
+            reason=CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+        ):
+            stats["review_required_persisted"] = (
+                stats.get("review_required_persisted", 0) + 1
+            )
+        position.state = corrected.state
+        position.chain_state = corrected.chain_state
+        position.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
+        position.quarantined_at = corrected.quarantined_at
+        stats["quarantined"] += 1
+        stats["confirmed_chain_absence_quarantined"] = (
+            stats.get("confirmed_chain_absence_quarantined", 0) + 1
+        )
+
     def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> None:
         if conn is None:
             return
@@ -1150,6 +1201,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         # Pass-2: skip aggregate-phantom positions — chain cannot back them.
         # Void using the existing PHANTOM_NOT_ON_CHAIN state (no new enum).
         if pos.trade_id in phantom_set:
+            if _has_confirmed_entry_authority(pos):
+                _quarantine_confirmed_chain_absence(
+                    pos,
+                    token_id=tid,
+                    source="aggregate_allocation",
+                )
+                continue
             logger.warning(
                 "AGGREGATE_PHANTOM: trade_id=%s token=%s voided by chain aggregate reconciliation",
                 pos.trade_id,
@@ -1382,6 +1440,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 # verification — see Position.chain_verified_at docstring.
                 pos.last_chain_absence_observed_at = now
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
+                continue
+            if _has_confirmed_entry_authority(pos):
+                _quarantine_confirmed_chain_absence(
+                    pos,
+                    token_id=tid,
+                    source="per_position_missing_token",
+                )
                 continue
             # Rule 2: Local but NOT on chain → VOID — but ONLY when the
             # chain snapshot reaching this line is CHAIN_EMPTY (fresh,

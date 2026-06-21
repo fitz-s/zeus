@@ -73,6 +73,45 @@ _TERMINAL_VENUE_ORDER_STATES = {
     "EXPIRED",
     "REJECTED",
 }
+_BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE = {
+    "mode",
+    "started_at",
+    "completed_at",
+    "candidates",
+    "candidates_evaluated",
+    "processed",
+    "proof_accepted",
+    "final_intents_built",
+    "final_execution_intents_built",
+    "submit_attempts",
+    "entry_submit_attempts",
+    "entry_orders_submitted",
+    "venue_acks",
+    "venue_ack_count",
+    "no_trades",
+    "no_trade_count",
+    "rejected",
+    "retried",
+    "dead_lettered",
+    "rejection_reason_counts",
+    "top_no_trade_reasons",
+    "no_trade_reasons",
+    "deterministic_rejections",
+}
+_BUSINESS_CYCLE_KEYS = _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE - {
+    "mode",
+    "started_at",
+    "completed_at",
+}
+
+
+def _cycle_has_business_activity(cycle: dict | None) -> bool:
+    if not isinstance(cycle, dict):
+        return False
+    mode = str(cycle.get("mode") or "")
+    if mode and mode != "heartbeat_pulse":
+        return True
+    return any(key in cycle for key in _BUSINESS_CYCLE_KEYS)
 
 
 def _atomic_write_status_payload(payload: dict) -> None:
@@ -109,7 +148,6 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         "pid": os.getpid(),
         "mode": get_mode(),
         "version": "zeus_v2",
-        "pulse_only": True,
     }
     if cycle_summary is not None:
         incoming_cycle = dict(cycle_summary)
@@ -120,10 +158,19 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             and "candidates" not in incoming_cycle
         ):
             merged_cycle = dict(prior_cycle)
-            merged_cycle.update(incoming_cycle)
+            auxiliary_cycle = dict(incoming_cycle)
+            for key in _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE:
+                auxiliary_cycle.pop(key, None)
+            merged_cycle.update(auxiliary_cycle)
+            if incoming_cycle:
+                merged_cycle["last_auxiliary_pulse"] = incoming_cycle
             status["cycle"] = merged_cycle
         else:
             status["cycle"] = incoming_cycle
+    status["process"]["pulse_only"] = not _cycle_has_business_activity(status.get("cycle"))
+    status["process"]["last_pulse_kind"] = (
+        "business_cycle" if not status["process"]["pulse_only"] else "auxiliary_pulse"
+    )
     minimal_refresh_ok = _refresh_minimal_runtime_read_model_for_status(status)
     try:
         status["execution_capability"] = _get_execution_capability_status()
@@ -199,6 +246,86 @@ def _pulse_only_summary(surface: str) -> dict:
     }
 
 
+def _check_armed_live_no_submit_receipts(
+    *,
+    status: dict,
+    cycle: dict,
+    window_seconds: int,
+) -> bool:
+    """Return True when the system is armed-live with no recent submit receipt.
+
+    armed_live is True when:
+      - the global entry gate (global_allow_submit) is True (entry is open), AND
+      - the current cycle produced at least one submit-admissible intent
+        (final_intents_built > 0 in the cycle summary).
+
+    recent_submit_receipt is True when at least one SUBMIT_REQUESTED or
+    SUBMIT_ACKED row exists in venue_command_events with occurred_at within
+    the last ``window_seconds`` seconds.
+
+    Returns True (→ append to consistency_issues) only when armed_live AND
+    zero recent submit receipts.  Detection-only: this function never blocks
+    or gates an order.
+    """
+    from datetime import datetime, timezone
+
+    # --- armed_live: gate open AND intents were built ---
+    entry_cap = (
+        status.get("execution_capability", {}).get("entry", {})
+        if isinstance(status.get("execution_capability"), dict)
+        else {}
+    )
+    global_allow_submit = bool(entry_cap.get("global_allow_submit", False))
+    final_intents_built = int(cycle.get("final_intents_built", 0) or 0)
+    armed_live = global_allow_submit and final_intents_built > 0
+
+    if not armed_live:
+        return False
+
+    # --- recent_submit_receipt: query venue_command_events ---
+    now_utc = datetime.now(timezone.utc)
+    window_start = now_utc.timestamp() - window_seconds
+    # ISO-8601 threshold string for SQL comparison (SQLite string comparison
+    # works correctly for ISO-8601 UTC timestamps in the same timezone).
+    import datetime as _dt
+    threshold_iso = _dt.datetime.fromtimestamp(window_start, tz=_dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    try:
+        conn = get_trade_connection_with_world()
+        try:
+            row = conn.execute(
+                """
+                SELECT 1 FROM venue_command_events
+                WHERE event_type IN ('SUBMIT_REQUESTED', 'SUBMIT_ACKED')
+                  AND occurred_at >= ?
+                LIMIT 1
+                """,
+                (threshold_iso,),
+            ).fetchone()
+            recent_submit_receipt = row is not None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:  # noqa: BLE001
+        # B6 (2026-06-20): FAIL CLOSED. An unreadable receipt table under armed-live
+        # must NOT suppress the dead-submit RED. The prior `return False` let the
+        # detector be silenced by its OWN query failure (a false-green): armed-live
+        # could avoid RED simply because venue_command_events was unreadable. Treat an
+        # unreadable query as "cannot confirm a recent submit receipt" -> surface the
+        # consistency issue -> RED. Detection-only; this never blocks an order.
+        logger.warning(
+            "armed_live submit-receipt DB query UNREADABLE under armed-live "
+            "(surfacing as a consistency issue, NOT suppressing): %s", exc
+        )
+        return True
+
+    return not recent_submit_receipt
+
+
 def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | None) -> None:
     """Recompute infrastructure truth for the surfaces a cycle pulse refreshes.
 
@@ -225,10 +352,37 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     if isinstance(current_open_entry_orders, dict) and current_open_entry_orders.get("status") == "query_error":
         consistency_issues.append("current_open_entry_orders_query_error")
 
+    # B6 (2026-06-20): armed-live + zero submit receipts → RED (dead-submit detection).
+    # Detects the 2026-06-06 silent dead-submit mode: the entry gate is open AND
+    # the cycle produced submit-admissible intents, but no SUBMIT_REQUESTED/
+    # SUBMIT_ACKED event landed in venue_command_events in the last 30 minutes.
+    # DETECTION ONLY — never blocks an order; no throttle; no gate object.
+    _ARMED_LIVE_SUBMIT_RECEIPT_WINDOW_SECONDS = 1800  # 30 min
+    try:
+        _armed_live = _check_armed_live_no_submit_receipts(
+            status=status,
+            cycle=cycle,
+            window_seconds=_ARMED_LIVE_SUBMIT_RECEIPT_WINDOW_SECONDS,
+        )
+        if _armed_live:
+            consistency_issues.append("armed_live_no_recent_submit_receipts")
+    except Exception as _exc:  # noqa: BLE001 - armed-live check must never break the pulse
+        logger.warning("armed_live submit-receipt check failed (non-fatal): %s", _exc)
+
     risk = status.setdefault("risk", {})
     if not isinstance(risk, dict):
         risk = {}
         status["risk"] = risk
+    try:
+        risk["level"] = _get_risk_level()
+        risk["riskguard_level"] = risk["level"]
+        risk["details"] = _get_risk_details()
+    except Exception as exc:  # noqa: BLE001 - status pulse must remain non-fatal
+        risk["details"] = {
+            "status": "riskguard_status_refresh_failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
     fallback_risk_level = str(
         cycle.get("risk_level")
         or risk.get("level")

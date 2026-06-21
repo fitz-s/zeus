@@ -825,7 +825,8 @@ class TestRCPV2RowCountSensor:
         status = json.loads(status_path.read_text())
 
         assert status["process"]["pid"] != 37175
-        assert status["process"]["pulse_only"] is True
+        assert status["process"]["pulse_only"] is False
+        assert status["process"]["last_pulse_kind"] == "business_cycle"
         assert status["portfolio"]["open_positions"] == 2
         assert status["portfolio"]["total_exposure_usd"] == 0.03
         assert status["portfolio"]["positions"] == fresh_positions
@@ -847,6 +848,77 @@ class TestRCPV2RowCountSensor:
         assert status["risk"]["infrastructure_level"] == "GREEN"
         assert status["risk"]["infrastructure_issues"] == []
         assert status["risk"]["consistency_check"]["ok"] is True
+
+    def test_cycle_pulse_refreshes_risk_details_and_preserves_business_process_kind(self, tmp_path, monkeypatch):
+        """A heartbeat pulse must not preserve stale risk details or hide the active business cycle."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({
+            "process": {"pid": 37175, "mode": "live", "version": "zeus_v2", "pulse_only": False},
+            "cycle": {
+                "mode": "live",
+                "candidates": 7,
+                "processed": 7,
+                "submit_attempts": 1,
+            },
+            "risk": {
+                "level": "GREEN",
+                "riskguard_level": "GREEN",
+                "details": {
+                    "status": "dependency_db_locked_previous_risk_level_preserved",
+                    "previous_full_risk_checked_at": "2026-06-13T01:53:09+00:00",
+                },
+            },
+        }))
+
+        empty_position_view = {
+            "status": "ok",
+            "positions": [],
+            "open_positions": 0,
+            "total_exposure_usd": 0.0,
+            "unrealized_pnl": 0.0,
+            "strategy_open_counts": {},
+            "chain_state_counts": {},
+            "exit_state_counts": {},
+            "unverified_entries": 0,
+            "day0_positions": 0,
+        }
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(status_summary_module, "query_position_current_status_view", lambda conn: empty_position_view)
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "_query_current_open_entry_orders",
+            lambda conn: {"status": "ok", "orders": []},
+        )
+        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"status": "ok_full_metrics"})
+
+        def _annotate_truth_payload(payload, path, generated_at, authority):
+            payload["truth"] = {
+                "generated_at": generated_at,
+                "authority": authority,
+                "source_path": str(path),
+            }
+            return payload
+
+        monkeypatch.setattr(status_summary_module, "annotate_truth_payload", _annotate_truth_payload)
+
+        status_summary_module.write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+        status = json.loads(status_path.read_text())
+
+        assert status["cycle"]["candidates"] == 7
+        assert status["cycle"]["last_auxiliary_pulse"] == {"mode": "heartbeat_pulse", "heartbeat": True}
+        assert status["process"]["pulse_only"] is False
+        assert status["process"]["last_pulse_kind"] == "business_cycle"
+        assert status["risk"]["details"] == {"status": "ok_full_metrics"}
 
     def test_cycle_pulse_refresh_failure_does_not_advance_status_freshness(self, tmp_path, monkeypatch):
         """Relationship: failed DB truth refresh cannot mint a fresh status timestamp."""

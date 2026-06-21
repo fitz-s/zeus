@@ -30,6 +30,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CONTROL_PLANE = PROJECT_ROOT / "src" / "control" / "control_plane.py"
+POST_TRADE_CAPITAL = PROJECT_ROOT / "src" / "execution" / "post_trade_capital.py"
 
 
 class TestRequestStatusNoLongerWritesStatusSummary:
@@ -89,6 +90,22 @@ class TestRequestStatusNoLongerWritesStatusSummary:
         assert "from src.observability.status_summary import write_status" not in non_comment_block, (
             "request_status branch must not locally import write_status"
         )
+
+    def test_post_trade_capital_sidecar_does_not_write_status_summary(self):
+        """The post-trade sidecar must not refresh daemon-owned status_summary.json.
+
+        The sidecar lacks the live trading daemon's process-local heartbeat,
+        risk-allocator, and collateral-ledger singletons. Calling write_cycle_pulse
+        from this process overwrites the daemon's correct execution_capability with
+        false UNCONFIGURED blockers.
+        """
+        content = POST_TRADE_CAPITAL.read_text()
+        non_comment_lines = [
+            line for line in content.splitlines()
+            if not re.match(r"^\s*#", line)
+        ]
+        non_comment_content = "\n".join(non_comment_lines)
+        assert "write_cycle_pulse" not in non_comment_content
 
 
 class TestRequestStatusApplyCommandBehavior:

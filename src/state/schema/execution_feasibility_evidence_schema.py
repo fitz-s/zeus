@@ -1,4 +1,4 @@
-"""EDLI execution_feasibility_evidence schema owner.
+"""EDLI trade-class execution_feasibility_evidence schema owner.
 
 C4 telemetry-truth (2026-06-16) — HONEST_NULL_COLUMNS declaration:
 

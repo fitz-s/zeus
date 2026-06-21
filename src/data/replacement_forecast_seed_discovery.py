@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -148,11 +148,50 @@ def _manifest_allows_target_date(manifest: RawForecastArtifactManifest, *, targe
     metadata = manifest.product_metadata
     explicit = metadata.get("target_date")
     if explicit is not None and str(explicit).strip():
-        return str(explicit).strip() == target_date
+        if str(explicit).strip() == target_date:
+            return True
     dates = metadata.get("target_dates")
     if isinstance(dates, list) and dates:
-        return target_date in {str(item).strip() for item in dates}
-    return False
+        if target_date in {str(item).strip() for item in dates}:
+            return True
+    return _manifest_horizon_allows_target_date(metadata, target_date=target_date)
+
+
+def _manifest_horizon_allows_target_date(metadata: Mapping[str, object], *, target_date: str) -> bool:
+    """Allow single-runs manifests for any local target date inside their forecast horizon.
+
+    The Open-Meteo single-runs payload is one multi-day hourly file. Its legacy
+    manifest metadata records the local date used in the artifact filename, not
+    the complete set of target dates materializable from the file. The extracted
+    ``raw_model_forecasts`` rows are target-date scoped, so manifest admission
+    must use the same multi-day horizon or held day+1/day+2 families can be
+    marked stale while cycle-advance incorrectly reports no materializable
+    newer cycle.
+    """
+
+    artifact_class = str(metadata.get("artifact_class") or "")
+    endpoint = str(metadata.get("openmeteo_endpoint") or "")
+    if artifact_class != "openmeteo_ecmwf_ifs9_anchor_current_targets":
+        return False
+    if endpoint and endpoint != "single_runs_api":
+        return False
+    start_raw = metadata.get("target_date")
+    if start_raw is None or not str(start_raw).strip():
+        return False
+    try:
+        start = date.fromisoformat(str(start_raw).strip())
+        wanted = date.fromisoformat(str(target_date).strip())
+        hours = int(float(metadata.get("forecast_hours") or 0))
+    except Exception:
+        return False
+    if hours <= 0:
+        return False
+    # A 120h hourly payload spans the start date plus up to five following
+    # local calendar dates depending on timezone/run hour. This is an admission
+    # bound only; materialization still fails closed if the payload lacks the
+    # requested local day.
+    max_extra_days = max(0, (hours + 23) // 24)
+    return start <= wanted <= start + timedelta(days=max_extra_days)
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:

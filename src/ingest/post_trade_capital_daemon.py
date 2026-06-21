@@ -18,6 +18,7 @@ used to bundle with exit monitoring:
   - ``_wrap_intent_creator_cycle`` (5-min)
   - ``_wrap_submitter_cycle``      (2-min)
   - ``_wrap_reconciler_cycle``     (2-min)
+  - ``collateral_snapshot_refresh_cycle`` (30s; pUSD/CTF collateral truth)
 
 All cycle bodies live in ``src.execution.post_trade_capital``. The EXIT-monitoring /
 exit-SUBMIT phase of the former ``_chain_sync_and_exit_monitor_cycle`` STAYS in the order
@@ -240,6 +241,7 @@ def main() -> None:
     # The lifted post-trade cycle bodies.
     from src.execution.post_trade_capital import (
         chain_sync_read_cycle,
+        collateral_snapshot_refresh_cycle,
         _harvester_cycle,
         _redeem_submitter_cycle,
         _redeem_reconciler_cycle,
@@ -320,6 +322,12 @@ def main() -> None:
         _scheduler_job("wrap_reconciler")(_wrap_reconciler_cycle),
         "interval", minutes=2, id="wrap_reconciler",
         max_instances=1, coalesce=True,
+    )
+    _scheduler.add_job(
+        _scheduler_job("collateral_snapshot_refresh")(collateral_snapshot_refresh_cycle),
+        "interval", seconds=30, id="collateral_snapshot_refresh",
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
     )
 
     # 60s liveness heartbeat (file-only). The heartbeat-sensor watches this file's mtime.

@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-06-19
 # Authority basis: #122 / GOAL #83 — ARCH_PLAN_EVIDENCE
 #   docs/evidence/qkernel_rebuild/fix_122_collateral_lock_retry_2026-06-16.md
 """A TRANSIENT `database is locked` on the pre-submit collateral refresh must RETRY,
@@ -8,6 +8,8 @@ discarded armed harvest crosses on transient zeus_trades.db write-contention).""
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -102,6 +104,42 @@ def test_fresh_snapshot_reused_without_adapter_fetch(monkeypatch):
         reuse_fresh_snapshot=True,
     )
     assert out["allowed"] is True
+    assert out["details"]["reused_fresh_snapshot"] is True
+
+
+def test_entry_refresh_wrapper_reuses_fresh_sidecar_snapshot(monkeypatch):
+    from src.execution.executor import _refresh_entry_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+
+    class ClientShouldNotBeConstructed:
+        def __init__(self, *args, **kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("fresh sidecar collateral snapshot should not refresh")
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        ClientShouldNotBeConstructed,
+    )
+
+    out = _refresh_entry_collateral_snapshot_for_submit(conn)
+    assert out["allowed"] is True
+    assert out["details"]["action"] == "entry_submit"
     assert out["details"]["reused_fresh_snapshot"] is True
 
 
@@ -225,3 +263,48 @@ def test_persistent_lock_surfaces_after_retries(monkeypatch):
     with pytest.raises(ci):
         ex._refresh_entry_collateral_snapshot_for_submit(sqlite3.connect(":memory:"))
     assert calls["n"] == 5  # bounded retries exhausted, then surfaces
+
+
+def test_submit_collateral_refresh_timeout_fails_closed_without_deadlocking(monkeypatch):
+    from src.execution import collateral
+    from src.execution.collateral import refresh_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralInsufficient
+
+    release = threading.Event()
+
+    class _SlowAdapter:
+        def get_collateral_payload(self):
+            release.wait(timeout=5.0)
+            return {
+                "pusd_balance_micro": 1_000_000,
+                "pusd_allowance_micro": 1_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+            }
+
+    class _StubClient:
+        def _ensure_v2_adapter(self):
+            return _SlowAdapter()
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        lambda *a, **k: _StubClient(),
+    )
+    monkeypatch.setattr(collateral, "SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS", 0.05)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            CollateralInsufficient,
+            match="collateral_snapshot_degraded: refreshed_before_entry_submit: timeout_guard: submit_collateral_refresh",
+        ):
+            refresh_collateral_snapshot_for_submit(conn, action="entry_submit")
+    finally:
+        release.set()
+        conn.close()
+
+    assert time.monotonic() - started < 1.0

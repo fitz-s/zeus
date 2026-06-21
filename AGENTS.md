@@ -146,24 +146,17 @@ Default route:
 1. Read root `AGENTS.md`.
 2. Read scoped `AGENTS.md` for any subtree you will touch.
 3. Use CodeGraph for structural questions: symbols, callers, callees, traces, file impact, and "how does X work?"
-4. Use topology/boot gates for governance facts: required law, stop conditions, planning lock, map maintenance, current-fact proof questions.
+4. Use topology only as optional route/context orientation; do not treat it as a runtime permission surface.
 5. Read reference docs only after the route says which domain reference matters.
 
 Do not grep first for symbol definitions or flow when CodeGraph is available. Do not use CodeGraph as settlement/source/current-fact authority.
 
-Required gates:
-
-| Situation | Gate |
-|---|---|
-| pipeline-impacting work | `python3 scripts/topology_doctor.py --task-boot-profiles` |
-| governed or broad changes | `python3 scripts/topology_doctor.py --planning-lock --changed-files <files...>` |
-| file adds/removes/moves or manifest-sensitive changes | `python3 scripts/topology_doctor.py --map-maintenance --changed-files <files...>` |
-| precommit/closeout map check | `python3 scripts/topology_doctor.py --map-maintenance --map-maintenance-mode precommit` |
-| docs, guidance, or authority work | `python3 scripts/topology_doctor.py --docs --json` |
+Topology checks are advisory orientation. They must not add paperwork,
+deny runtime-directed work, or turn broad/cross-zone edits into a refusal path.
 
 If repo-wide docs checks fail from unrelated pre-existing registry drift, report the root changed-surface status separately from repo-wide drift. Do not repair unrelated docs drift just to make a narrow AGENTS change look globally clean.
 
-`topology_doctor.py --navigation` is legacy substring routing: a route-card hint only, not a required gate and not a replacement for CodeGraph, boot profiles, planning-lock, or map-maintenance.
+`topology_doctor.py --navigation` is legacy substring routing: a route-card hint only, not a step and not a replacement for CodeGraph or live evidence.
 
 Semantic boot inputs for settlement/source/observation/Day0/calibration tasks:
 
@@ -176,7 +169,7 @@ Semantic boot inputs for settlement/source/observation/Day0/calibration tasks:
 
 Stop and plan before touching `architecture/**`, `docs/authority/**`, `.github/workflows/**`, `src/state/**` schema/truth/projection/lifecycle write paths, `src/control/**`, `src/supervisor_api/**`, cross-zone changes, more than four changed files, or anything described as canonical truth, lifecycle, governance, control, schema, DB authority, live execution, or settlement semantics.
 
-Plan evidence belongs only where the planning gate or active packet consumes it. Do not create root-level plans, scratch plans, scratch research, or ad hoc handoff files as durable evidence.
+Do not create root-level coordination files, scratch research, or ad hoc handoff files unless the user explicitly asks for them.
 
 Task-specific supplemental reads:
 
@@ -199,9 +192,9 @@ Layering: `docs/authority/**` carries durable law; `architecture/**` carries mac
 
 Current-fact docs must be summary-only, receipt/evidence-backed, expiry-bound, and fail-closed when stale. Do not update them from memory.
 
-Packet-local names (`evidence.md`, `findings.md`, `work_log.md`, `receipt.json`) are required only when an active packet, closeout gate, audit/review task, or future handoff consumes them. Direct T0/T1 work should not create packet evidence for appearance.
+Packet-local names (`evidence.md`, `findings.md`, `work_log.md`, `receipt.json`) are used only when an active packet, closeout gate, audit/review task, or future handoff consumes them. Direct T0/T1 work should not create packet evidence for appearance.
 
-At the end of complete work, summarize what was promoted to durable surfaces, what was left local/scratch, and concrete topology friction or `none_observed`. Do not create standalone feedback capsules, root plans, ad hoc handoffs, or backlog entries unless the active packet or an explicit closeout gate requires them.
+At the end of complete work, summarize what was promoted to durable surfaces, what was left local/scratch, and concrete topology friction or `none_observed`. Do not create standalone feedback capsules, root coordination files, ad hoc handoffs, or backlog entries unless the user explicitly asks.
 
 When adding, renaming, deleting, or reclassifying files: update the owning manifest/registry when one exists; update scoped `AGENTS.md` only if local routes or file registries changed; update `workspace_map.md` only when directory-level structure or visibility classes changed.
 

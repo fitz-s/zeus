@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-06-19
 # Authority basis: operator law 2026-06-12 ("no caps of any kind"; "重试次数不是市场
 #   事实" — a retry count is not a market fact) + Wave 1 items 1 and 13 of
 #   docs/operations/overengineering_simplification_plan_2026-06-12.md + external
@@ -152,7 +152,13 @@ def _status(conn, event_id: str) -> str:
     ).fetchone()[0]
 
 
-def _reactor_with_reason(conn, store, reason: str) -> OpportunityEventReactor:
+def _reactor_with_reason(
+    conn,
+    store,
+    reason: str,
+    *,
+    family_market_absence_provider=None,
+) -> OpportunityEventReactor:
     """Reactor whose submit always returns a money-path-blocking receipt with
     ``reason`` — the exact route a live PRICE_MOVED receipt takes."""
 
@@ -177,6 +183,7 @@ def _reactor_with_reason(conn, store, reason: str) -> OpportunityEventReactor:
         final_intent_submit=_submit,
         reject=lambda _e, _s, _r: None,
         regret_ledger=NoTradeRegretLedger(conn),
+        family_market_absence_provider=family_market_absence_provider,
     )
 
 
@@ -722,5 +729,89 @@ def test_day0_live_future_close_family_does_not_terminalize():
     assert res.dead_lettered == 0, (
         "a live future-close DAY0 family must requeue, never terminalize one cycle early"
     )
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_day0_gamma_empty_market_absence_terminalizes_snapshot_block():
+    """RELATIONSHIP (reactor<->Gamma warm lane): once live venue discovery proves a
+    family has no listed Polymarket market, its EXECUTABLE_SNAPSHOT_BLOCKED event
+    must terminalize instead of retrying forever. This uses a provider because the
+    reactor must not import venue/Gamma code directly."""
+    conn, store = _store()
+    event = _day0_event(
+        city="Auckland",
+        target_date="2026-06-20",
+        metric="low",
+        suffix="gamma-empty",
+    )
+    store.insert_or_ignore(event)
+
+    calls = []
+
+    def _absence_provider(*, city, target_date, metric):
+        calls.append((city, target_date, metric))
+        return (city, target_date, metric) == ("Auckland", "2026-06-20", "low")
+
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        _SNAPSHOT_STALE_REASON,
+        family_market_absence_provider=_absence_provider,
+    )
+    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_OPEN,
+        result=res,
+    )
+
+    assert calls == [("Auckland", "2026-06-20", "low")]
+    assert res.dead_lettered == 1
+    assert res.retried == 0
+    assert _status(conn, event.event_id) == "dead_letter"
+    row = conn.execute(
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
+    assert "VENUE_MARKET_NOT_LISTED" in (row[1] or "")
+    assert "EXECUTABLE_SNAPSHOT_BLOCKED" in (row[1] or "")
+
+
+def test_day0_market_absence_provider_false_keeps_retrying():
+    """No over-termination: a cache miss or failed discovery proof must not be treated
+    as a market fact. Provider false keeps the normal transient requeue path."""
+    conn, store = _store()
+    event = _day0_event(
+        city="Auckland",
+        target_date="2026-06-20",
+        metric="low",
+        suffix="gamma-retry",
+    )
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        _SNAPSHOT_STALE_REASON,
+        family_market_absence_provider=lambda **_kw: False,
+    )
+    reactor._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_OPEN,
+        result=res,
+    )
+
+    assert res.dead_lettered == 0
     assert res.retried == 1
     assert _status(conn, event.event_id) == "pending"

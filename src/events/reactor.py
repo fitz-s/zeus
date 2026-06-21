@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -308,6 +309,11 @@ class EventSubmissionReceipt:
     # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
+    # qkernel spine execution economics certificate. This is distinct from q_live /
+    # q_lcb_5pct, which are receipt-facing probability provenance. When present,
+    # execution sizing is accountable to this guarded payoff-space certificate.
+    # Omitted when None so non-qkernel receipts keep stable JSON.
+    qkernel_execution_economics: dict[str, Any] | None = None
     strategy_key: str | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
@@ -596,6 +602,7 @@ class OpportunityEventReactor:
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
         cycle_advance_enqueuer: "Callable[..., bool] | None" = None,
         held_family_provider: "Callable[[], frozenset[tuple[str, str, str]]] | None" = None,
+        family_market_absence_provider: "Callable[..., bool] | None" = None,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
@@ -627,6 +634,12 @@ class OpportunityEventReactor:
         # no held bias, pure fair rotation). The reactor owns zeus-world only; this provider is
         # injected (it reads zeus_trades.position_current) so the reactor never opens a trades conn.
         self._held_family_provider = held_family_provider
+        # Live venue-listing absence proof, injected from the daemon warm lane. This is deliberately
+        # narrower than "no cached topology": it may return True only after the Gamma/topology
+        # refresher has current evidence that the family has no listed Polymarket market. The reactor
+        # uses it to stop infinite EXECUTABLE_SNAPSHOT_BLOCKED retries for untradeable families while
+        # preserving normal retry behavior for locks, stale books, or not-yet-harvested probes.
+        self._family_market_absence_provider = family_market_absence_provider
         # Per-family debounce: family-key -> last successful refresh-attempt monotonic time. The
         # window is DERIVED from the snapshot freshness window (half of it), never a magic number.
         self._family_refresh_last_at: dict[str, float] = {}
@@ -1059,6 +1072,10 @@ class OpportunityEventReactor:
         if venue_closed is not None:
             return venue_closed
 
+        venue_not_listed = self._venue_market_not_listed_horizon(event)
+        if venue_not_listed is not None:
+            return venue_not_listed
+
         # (a) Timeliness floor — reuse the store's single authority. _is_timely
         # returns True for non-forecast-decision events (no floor) and for any
         # event still within its tradeable window; only a strictly-past
@@ -1135,6 +1152,42 @@ class OpportunityEventReactor:
         if phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED):
             return ("MARKET_VENUE_CLOSED", f"venue market phase {phase.value} (F1 12:00-UTC close)")
         return None
+
+    def _venue_market_not_listed_horizon(
+        self, event: OpportunityEvent
+    ) -> tuple[str, str] | None:
+        """Terminal horizon for a family proven unlisted by the live venue-discovery lane.
+
+        This is not a topology-cache miss. It fires only for an executable-snapshot block whose
+        injected provider has current Gamma-empty/no-listed-market evidence for this exact
+        (city, target_date, metric). Network failures, lock contention, time-box misses, stale books,
+        and missing providers return None so the event keeps requeueing.
+        """
+        if self._family_market_absence_provider is None:
+            return None
+        last_reason = self._transient_requeue_reasons.get(event.event_id)
+        if last_reason != "EXECUTABLE_SNAPSHOT_BLOCKED":
+            return None
+        family = self._family_identity(event)
+        if family is None:
+            return None
+        city, target_date, metric = family
+        try:
+            absent = bool(
+                self._family_market_absence_provider(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+            )
+        except Exception:
+            return None
+        if not absent:
+            return None
+        return (
+            "VENUE_MARKET_NOT_LISTED",
+            f"Gamma/topology has no listed Polymarket market for {city}/{target_date}/{metric}",
+        )
 
     @staticmethod
     def _family_identity(event: OpportunityEvent) -> tuple[str, str, str] | None:
@@ -1692,6 +1745,29 @@ class OpportunityEventReactor:
                 receipt=receipt,
                 decision_time=decision_time,
             )
+        if (
+            receipt.proof_accepted is False
+            and str(receipt.reason or "").startswith("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:")
+        ):
+            if _is_transient_money_path_reason(receipt.reason):
+                if _certificate_build_failed_is_book_authority_gap(str(receipt.reason)):
+                    self._write_regret(
+                        event,
+                        "EXECUTOR_EXPRESSIBILITY",
+                        receipt.reason,
+                        receipt=receipt,
+                        decision_time=decision_time,
+                    )
+                self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
+                return _EXECUTABLE_SNAPSHOT_RETRY
+            return self._reject_or_retry_post_submit(
+                event,
+                "EXECUTOR_EXPRESSIBILITY",
+                receipt.reason,
+                result,
+                receipt=receipt,
+                decision_time=decision_time,
+            )
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             return self._reject_or_retry_post_submit(
@@ -1833,10 +1909,11 @@ class OpportunityEventReactor:
             # TIMEOUT_UNKNOWN / POST_SUBMIT_UNKNOWN stay proof_accepted — a
             # venue order may exist and the reconcile sweep owns those.
             if receipt.side_effect_status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
-                self._reject_event(
+                reason = receipt.reason or receipt.side_effect_status
+                return self._reject_or_retry_post_submit(
                     event,
                     "EXECUTION_RECEIPT",
-                    receipt.reason or receipt.side_effect_status,
+                    reason,
                     result,
                     receipt=receipt,
                     decision_time=decision_time,
@@ -2018,6 +2095,13 @@ class OpportunityEventReactor:
         executable_snapshot_id = _receipt_or_payload(
             receipt, payload, "executable_snapshot_id"
         )
+        if receipt is not None:
+            qkernel_economics = _qkernel_regret_economics(receipt)
+            if qkernel_economics is not None:
+                q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
+                c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
+                c_cost_95pct = qkernel_economics["c_cost_95pct"]
+                trade_score = qkernel_economics["trade_score"]
         if family_level_all_rejected:
             condition_id = None
             token_id = None
@@ -2236,6 +2320,36 @@ def _optional_bool(value: Any) -> bool | None:
     return None
 
 
+def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, float] | None:
+    """Queryable no-trade columns for qkernel-selected receipts.
+
+    ``q_live`` / ``q_lcb_5pct`` on the receipt are selected-side probability
+    provenance. A qkernel-selected route is economically licensed by its guarded
+    payoff-space certificate: ``payoff_q_lcb``, ``cost`` and ``edge_lcb``. Project
+    those values into the regret table's scalar economic columns so operators and
+    continuous-redecision screens do not compare a preserved selected-side q_lcb
+    against a qkernel route score.
+    """
+
+    cert = receipt.qkernel_execution_economics
+    if not isinstance(cert, dict):
+        return None
+    try:
+        payoff_q_lcb = float(cert["payoff_q_lcb"])
+        cost = float(cert["cost"])
+        edge_lcb = float(cert["edge_lcb"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+        return None
+    return {
+        "q_lcb_5pct": payoff_q_lcb,
+        "c_fee_adjusted": cost,
+        "c_cost_95pct": cost,
+        "trade_score": edge_lcb,
+    }
+
+
 def _submission_receipt(
     event: OpportunityEvent,
     submit_result: bool | None | EventSubmissionReceipt,
@@ -2402,6 +2516,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # coverage-table/DB read that threw re-runs clean next cycle) — requeue, never size
     # on the unlicensed bound.
     "QLCB_COVERAGE_AUTHORITY_FAULT",
+    # Pre-venue SQLite writer contention in executor persistence. The venue POST
+    # boundary has not been crossed, so no order can exist; re-run the full event
+    # decision on the next cycle instead of terminally burning a valuable intent.
+    "pre_submit_db_locked_transient",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -2524,9 +2642,18 @@ def _certificate_build_failed_is_transient(reason: str) -> bool:
     suffix_lower = reason.lower()
     return (
         "would_cross_book" in suffix_lower
+        or _certificate_build_failed_is_book_authority_gap(reason)
         or "database is locked" in suffix_lower
         or "database table is locked" in suffix_lower
         or "database is busy" in suffix_lower
+    )
+
+
+def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
+    suffix_lower = reason.lower()
+    return (
+        "pre_submit_book_authority_missing" in suffix_lower
+        or "pre_submit_book_authority_stale" in suffix_lower
     )
 
 

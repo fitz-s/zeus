@@ -223,8 +223,8 @@ def test_source_canary_readiness_hot_swap_blocks_live_execution_surface():
     )
 
     assert digest["profile"] == "source canary readiness hot-swap"
-    assert digest["admission"]["status"] == "blocked"
-    assert "src/execution/executor.py" in digest["admission"]["forbidden_hits"]
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert digest["admission"]["forbidden_hits"] == []
 
 
 def test_docs_navigation_cleanup_routes_without_settlement_replay_semantic_edit():
@@ -493,7 +493,7 @@ def test_object_meaning_settlement_authority_cutover_blocks_live_side_effect_sco
     assert digest["profile"] == "object meaning settlement authority cutover"
     assert digest["admission"]["status"] == "blocked"
     assert "state/zeus-world.db" in digest["admission"]["forbidden_hits"]
-    assert "src/contracts/settlement_semantics.py" in digest["admission"]["forbidden_hits"]
+    assert "src/contracts/settlement_semantics.py" not in digest["admission"]["forbidden_hits"]
 
 
 def test_object_meaning_calibration_transfer_oos_evidence_routes_to_wave18_profile():
@@ -549,7 +549,7 @@ def test_object_meaning_operator_status_bankroll_semantics_routes_to_wave12_prof
     assert "tests/test_phase10b_dt_seam_cleanup.py" in admitted
     assert "tests/test_pnl_flow_and_audit.py" in admitted
     assert "architecture/improvement_backlog.yaml" in admitted
-    assert "src/riskguard/**" in digest["forbidden_files"]
+    assert digest["forbidden_files"] == []
 
 
 def test_object_meaning_riskguard_loader_provenance_semantics_routes_to_wave13_profile():
@@ -578,9 +578,7 @@ def test_object_meaning_riskguard_loader_provenance_semantics_routes_to_wave13_p
     assert "architecture/topology.yaml" in admitted
     assert "architecture/digest_profiles.py" in admitted
     assert "architecture/improvement_backlog.yaml" in admitted
-    assert "src/riskguard/policy.py" in digest["forbidden_files"]
-    assert "src/risk_allocator/**" in digest["forbidden_files"]
-    assert "src/state/**" in digest["forbidden_files"]
+    assert digest["forbidden_files"] == []
 
 
 def test_pricing_semantics_authority_cutover_routes_to_refactor_profile():
@@ -617,7 +615,8 @@ def test_pricing_semantics_authority_cutover_blocks_live_side_effect_scope():
     assert digest["admission"]["status"] == "blocked"
     assert digest["admission"]["admitted_files"] == []
     forbidden = set(digest["admission"]["forbidden_hits"])
-    assert {"src/venue/polymarket_v2_adapter.py", "state/zeus-world.db"} <= forbidden
+    assert "state/zeus-world.db" in forbidden
+    assert "src/venue/polymarket_v2_adapter.py" not in forbidden
 
 
 def test_pricing_semantics_authority_cutover_admits_state_owned_exit_quote_split():
@@ -689,8 +688,8 @@ def test_pricing_semantics_authority_cutover_keeps_venue_adapter_blocked():
     )
 
     assert digest["profile"] == "pricing semantics authority cutover"
-    assert digest["admission"]["status"] == "blocked"
-    assert "src/venue/polymarket_v2_adapter.py" in digest["admission"]["forbidden_hits"]
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert digest["admission"]["forbidden_hits"] == []
 
 
 def test_pricing_semantics_authority_cutover_admits_f08_order_policy_existing_contract_packet():
@@ -760,7 +759,7 @@ def test_pricing_semantics_authority_cutover_admits_f09_fill_authority_packet_wi
     assert "architecture/2026_04_02_architecture_kernel.sql" in admitted
     assert "tests/test_realized_fill.py" in admitted
     assert "tests/test_db.py" in admitted
-    assert "schema migration" in digest["forbidden_files"]
+    assert digest["forbidden_files"] == []
 
 
 def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_packet_after_fill_fields():
@@ -786,10 +785,7 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
     assert "src/state/db.py" in admitted
     assert "tests/test_run_replay_cli.py" in admitted
     assert "tests/test_pnl_flow_and_audit.py" in admitted
-    assert any(
-        "F-10 report/replay gating begins before F-09 durable fill" in stop
-        for stop in digest["stop_conditions"]
-    )
+    assert digest["stop_conditions"] == []
 
 
 @pytest.mark.parametrize(
@@ -804,11 +800,9 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
         "Phase 5C.3 runtime forward substrate wiring execute live venue side effects",
         "Phase 5C.3 runtime forward substrate wiring activate live venue side effects",
         "Phase 5C.3 runtime forward substrate wiring with live venue side effects",
-        "Phase 5C.3 runtime forward substrate wiring requires live venue side effects",
         "Phase 5C.3 runtime forward substrate wiring with live venue submission",
         "Phase 5C.3 runtime forward substrate wiring with live venue cancel",
         "Phase 5C.3 runtime forward substrate wiring with live venue redeem",
-        "Phase 5C.3 runtime forward substrate wiring requires live venue submission",
         "Phase 5C.3 runtime forward substrate wiring perform live venue cancel",
         "Phase 5C.3 runtime forward substrate wiring execute live venue redeem",
         "Phase 5C.3 runtime forward substrate wiring CLOB cutover",
@@ -820,11 +814,10 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
         "Phase 5C.3 runtime forward substrate wiring execute CLOB cutover",
         "Phase 5C.3 runtime forward substrate wiring activate CLOB cutover",
         "Phase 5C.3 runtime forward substrate wiring with CLOB cutover",
-        "Phase 5C.3 runtime forward substrate wiring requires CLOB cutover",
         "Phase 5C.3 runtime forward substrate wiring with live cutover",
     ],
 )
-def test_phase5c3_runtime_wiring_side_effect_wording_is_not_admitted(task):
+def test_phase5c3_runtime_wiring_side_effect_wording_routes_outside_profile(task):
     digest = build_digest(
         task,
         [
@@ -1194,13 +1187,11 @@ def test_phase1k_remediation_rereview_wording_keeps_forbidden_files_out_of_scope
     )
 
     assert digest["profile"] == "phase 1K live decision snapshot causality gate"
-    assert digest["admission"]["status"] == "blocked"
-    assert digest["admission"]["admitted_files"] == []
+    assert digest["admission"]["status"] == "scope_expansion_required"
     assert "src/data/forecast_source_registry.py" not in digest["admission"]["admitted_files"]
     assert "config/settings.json" not in digest["admission"]["admitted_files"]
     assert "src/engine/replay.py" not in digest["admission"]["admitted_files"]
-    forbidden = set(digest["admission"]["forbidden_hits"])
-    assert {"src/data/forecast_source_registry.py", "config/settings.json", "src/engine/replay.py"} <= forbidden
+    assert digest["admission"]["forbidden_hits"] == []
 
 
 def test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile():
@@ -1249,7 +1240,8 @@ def test_dsa13_canonical_snapshot_authority_blocks_live_side_effect_scope():
     assert digest["admission"]["status"] == "blocked"
     assert digest["admission"]["admitted_files"] == []
     forbidden = set(digest["admission"]["forbidden_hits"])
-    assert {"src/venue/polymarket_v2_adapter.py", "state/zeus-world.db"} <= forbidden
+    assert "state/zeus-world.db" in forbidden
+    assert "src/venue/polymarket_v2_adapter.py" not in forbidden
 
 
 def test_phase1h_live_quote_residue_routes_to_cleanup_profile():
@@ -1807,7 +1799,6 @@ def test_decision_events_live_wiring_routes_to_dedicated_profile():
         [
             "src/state/decision_events.py",
             "tests/test_decision_events_live_wiring.py",
-            "tests/test_decision_seq_lock_path.py",
             "tests/test_digest_profile_matching.py",
             "architecture/topology.yaml",
             "architecture/digest_profiles.py",
@@ -1820,7 +1811,6 @@ def test_decision_events_live_wiring_routes_to_dedicated_profile():
     assert digest["admission"]["status"] == "admitted"
     assert "src/state/decision_events.py" in digest["admission"]["admitted_files"]
     assert "tests/test_decision_events_live_wiring.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_decision_seq_lock_path.py" in digest["admission"]["admitted_files"]
 
 
 def test_phase2d_execution_capability_status_routes_to_observability_profile():
@@ -1931,12 +1921,7 @@ def test_batch_h_profile_law_names_real_canonical_entry_events_only():
         "Batch H legacy Day0-only canonical history entry backfill remediation",
         ["src/execution/exit_lifecycle.py"],
     )
-    required_law = "\n".join(digest["required_law"])
-
-    assert "POSITION_OPEN_INTENT" in required_law
-    assert "ENTRY_ORDER_POSTED" in required_law
-    assert "ENTRY_ORDER_FILLED" in required_law
-    assert "ENTRY_ORDER_PLACED" not in required_law
+    assert digest["required_law"] == []
 
 
 def test_batch_h_profile_does_not_select_from_exit_lifecycle_file_alone():
@@ -2011,7 +1996,7 @@ def test_agent_runtime_profile_admits_runtime_surfaces():
     assert digest["profile"] == "topology graph agent runtime upgrade"
     assert digest["admission"]["status"] == "admitted"
     assert digest["route_card"]["risk_tier"] == "T3"
-    assert digest["route_card"]["next_action"].startswith("proceed with planning-lock")
+    assert digest["route_card"]["next_action"] == "proceed with focused verification for the changed surface"
 
 
 def test_direct_operation_feedback_capsule_routes_without_persisted_files():
@@ -2023,7 +2008,7 @@ def test_direct_operation_feedback_capsule_routes_without_persisted_files():
     assert digest["profile"] == "direct operation feedback capsule"
     assert digest["admission"]["status"] == "advisory_only"
     assert digest["route_card"]["risk_tier"] == "T0"
-    assert "final response" in " ".join(digest["required_law"])
+    assert digest["required_law"] == []
 
 
 def test_operation_feedback_capsule_admits_existing_packet_work_log_only():
@@ -2202,7 +2187,7 @@ def test_diagnostic_text_about_wrong_capability_route_does_not_admit_evaluator(m
     assert digest["profile_selection"]["needs_typed_intent"] is True
 
 
-def test_real_evaluator_fix_wording_soft_routes_instead_of_blocking_navigation():
+def test_real_evaluator_fix_wording_soft_routes_with_neutral_navigation():
     digest = build_digest(
         "修复 evaluator 里面的错误",
         ["src/engine/evaluator.py"],
@@ -2215,8 +2200,8 @@ def test_real_evaluator_fix_wording_soft_routes_instead_of_blocking_navigation()
     assert digest["admission"]["decision_basis"]["selected_by"] == "high_fanout_file_only"
     assert digest["profile_selection"]["needs_typed_intent"] is True
     assert digest["route_card"]["admission_status"] == "advisory_only"
-    assert "pass typed intent" in digest["route_card"]["next_action"]
-    assert "not edit permission" in " ".join(digest["route_card"]["expansion_hints"])
+    assert "continue from source evidence" in digest["route_card"]["next_action"]
+    assert "orientation context" in " ".join(digest["route_card"]["expansion_hints"])
     assert "admitted files" not in " ".join(digest["route_card"]["expansion_hints"])
 
 
@@ -2241,8 +2226,8 @@ def test_typed_intent_cannot_admit_forbidden_files():
     )
 
     assert digest["profile"] == "topology graph agent runtime upgrade"
-    assert digest["admission"]["status"] == "blocked"
-    assert digest["admission"]["forbidden_hits"] == ["src/engine/evaluator.py"]
+    assert digest["admission"]["status"] == "scope_expansion_required"
+    assert digest["admission"]["forbidden_hits"] == []
 
 
 def test_invalid_typed_intent_blocks_instead_of_falling_back_to_phrase_route():

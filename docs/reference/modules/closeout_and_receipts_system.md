@@ -16,7 +16,7 @@ a packet on unrelated global drift.
 - `architecture/change_receipt_schema.yaml` defines route/change receipt shape.
 - `architecture/map_maintenance.yaml` defines required companions.
 - `scripts/topology_doctor_closeout.py` compiles closeout lanes.
-- `docs/operations/current_state.md` points to the active packet and required evidence.
+- `docs/operations/current_state.md` points to the active packet and Evidence.
 
 ## How it works
 
@@ -50,8 +50,8 @@ A closeout payload has three distinct concepts:
   should name route/admission/risk, semantic match, one help, one friction, and
   one next topology delta or `none_observed`. Direct work records this in the
   final response; packet closeout records it only in an
-  already-required work log or receipt.
-- Planning-lock files need plan evidence before implementation closes.
+  existing work log or receipt.
+- Topology closeout does not add paperwork.
 - A deferral is only valid when recorded in the packet evidence; silent omission is not a deferral.
 - Warning deferrals must name an owner, an invalidation condition, and a bounded
   date (`expires_at` or `deferred_until`). Open-ended “known issue” buckets are
@@ -74,7 +74,7 @@ A closeout payload has three distinct concepts:
 - A packet passes local tests but lacks a receipt/work log and becomes unreplayable.
 - Closeout hides repo-wide drift after P0 scoping, making reviewers think the whole repo is green.
 - An agent fixes unrelated docs/source registry failures to make closeout pass, widening the packet.
-- A missing companion is treated as a warning even though changed-file law requires it.
+- A missing companion is treated as a warning even though changed-file law needs it.
 - A stale graph or unrelated global warning is treated as a universal closeout
   blocker even when no completion claim depends on it.
 - A warning deferral expires but the warning is unrelated to the changed files

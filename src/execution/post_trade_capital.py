@@ -67,6 +67,45 @@ from src.config import get_mode
 logger = logging.getLogger("zeus.post_trade_capital")
 
 
+def _post_trade_collateral_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS")
+    if raw in (None, ""):
+        return 2.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 2.0", raw)
+        return 2.0
+    if value <= 0:
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 2.0", raw)
+        return 2.0
+    return value
+
+
+def collateral_snapshot_refresh_cycle() -> None:
+    """Refresh pUSD/CTF collateral truth for live trading consumers.
+
+    Ownership: post-trade-capital is the wallet/capital sidecar. The live order
+    daemon consumes the latest durable collateral_ledger_snapshots row and must
+    not perform py-clob-client wallet reads inside the event reactor.
+    """
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.state.collateral_ledger import CollateralLedger
+    from src.state.db import _zeus_trade_db_path
+
+    ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+    with PolymarketClient(public_http_timeout=_post_trade_collateral_timeout_seconds()) as clob:
+        snapshot = ledger.refresh(clob._ensure_v2_adapter())
+    logger.info(
+        "collateral_snapshot_refresh: authority=%s captured_at=%s pusd_available_micro=%s ctf_tokens=%d",
+        snapshot.authority_tier,
+        snapshot.captured_at.isoformat(),
+        snapshot.available_pusd_micro,
+        len(snapshot.ctf_token_balances),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Chain-truth sync READ phase (lifted from _chain_sync_and_exit_monitor_cycle).
 # §8 Step 2: the chain-sync READ phase moves to P4; the exit-SUBMIT phase STAYS in src.main.
@@ -148,17 +187,11 @@ def chain_sync_read_cycle() -> None:
         except Exception:  # noqa: BLE001
             pass
 
-    # Status-summary freshness pulse (release-gate surface). In EDLI event-driven modes the
-    # order daemon's run_cycle() never fires, so this pulse keeps state/status_summary.json
-    # fresh from the live read model. Moved here WITH the chain-sync job (it was emitted in
-    # the same former cycle). Non-fatal.
-    try:
-        from src.observability.status_summary import write_cycle_pulse
-        write_cycle_pulse(summary)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "chain_sync_read: status pulse failed (non-fatal): %s", exc, exc_info=True
-        )
+    # status_summary.json is owned by the live trading daemon. This sidecar lacks the
+    # process-local heartbeat/risk/collateral singletons required to compute execution
+    # capability, so writing a pulse here would overwrite the daemon's true gate state
+    # with false UNCONFIGURED blockers. Chain-sync liveness is reported through
+    # scheduler_jobs_health.json instead.
 
 
 # ---------------------------------------------------------------------------

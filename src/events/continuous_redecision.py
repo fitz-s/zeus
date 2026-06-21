@@ -120,6 +120,7 @@ _TERMINAL_NO_VALUE_SQL = """
         )
     )
 """
+_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
 _NO_VALUE_FORECAST_EVENT_TYPES = frozenset(
     {"FORECAST_SNAPSHOT_READY", REDECISION_EVENT_TYPE}
 )
@@ -1033,9 +1034,10 @@ def recent_no_value_event_refutation(
     This is an admission de-duplication guard, not an edge/no-edge cap. It only
     suppresses a newly minted ordinary FSR/DAY0 event when the same
     city/target/metric evidence identity has already reached a terminal
-    full-economics no-trade decision inside the cooldown. Ordinary FSR and
-    ``EDLI_REDECISION_PENDING`` are compatible forecast evidence lanes; Day0 is
-    a separate observation lane and only Day0 no-value can refute Day0.
+    full-economics no-trade decision inside the cooldown. ``EDLI_REDECISION_PENDING``
+    is emitted only after the continuous screen sees current value/rest evidence,
+    so it is not emit-suppressed here; the reactor owns the full redecision.
+    Day0 is a separate observation lane and only Day0 no-value can refute Day0.
     """
 
     if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
@@ -1073,6 +1075,7 @@ def recent_no_value_event_refutation(
                AND n.metric = ?
                AND n.created_at >= ?
                AND ({_TERMINAL_NO_VALUE_SQL})
+               AND ({_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL})
              ORDER BY n.created_at DESC
              LIMIT 25
             """,

@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: settlement, resolution, rounding, harvester, market settles, oracle.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root)
 2. workspace_map.md
@@ -27,7 +27,7 @@ Trigger keywords: settlement, resolution, rounding, harvester, market settles, o
 
 - docs/operations/current_source_validity.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **settlement_value_path**: Which source, unit, and rounding law produce the settlement value for this market?
    - Evidence: docs/reference/zeus_domain_model.md, docs/operations/current_source_validity.md, architecture/city_truth_contract.yaml, architecture/core_claims.yaml

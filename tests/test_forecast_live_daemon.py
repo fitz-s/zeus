@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import json
+import os
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -1169,3 +1171,60 @@ def test_premature_cron_fire_cannot_request_a_guessed_cycle() -> None:
     assert newest_complete_cycle(availability) == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
     # And the production module exposes the single authority the jobs call.
     assert callable(production._probe_resolved_available_cycle)
+
+
+def test_replacement_forecast_live_paths_honor_primary_runtime_root(
+    monkeypatch, tmp_path
+) -> None:
+    """Live replacement paths are runtime-state paths, not forecast daemon cwd paths."""
+    import src.config as config_mod
+    import src.data.replacement_forecast_production as production
+
+    old_primary = os.environ.get("ZEUS_PRIMARY_ROOT")
+    monkeypatch.setenv("ZEUS_PRIMARY_ROOT", str(tmp_path))
+    try:
+        config_mod = importlib.reload(config_mod)
+        production = importlib.reload(production)
+        cfg = dict(config_mod.settings._data.get("replacement_forecast_live", {}))
+        cfg.update(
+            {
+                "forecast_db": "state/zeus-forecasts.db",
+                "raw_manifest_dir": "state/replacement_forecast_live/raw_manifests",
+                "request_dir": "state/replacement_forecast_live/requests",
+                "processed_dir": "state/replacement_forecast_live/processed",
+                "failed_dir": "state/replacement_forecast_live/failed",
+                "seed_dir": "state/replacement_forecast_live/seeds",
+                "seed_processed_dir": "state/replacement_forecast_live/seeds_processed",
+                "seed_failed_dir": "state/replacement_forecast_live/seeds_failed",
+                "download_output_dir": "state/replacement_forecast_live/raw_manifests",
+            }
+        )
+        monkeypatch.setitem(
+            config_mod.settings._data, "replacement_forecast_live", cfg
+        )
+
+        resolved = (
+            production._replacement_forecast_live_materialization_queue_config()
+        )
+
+        runtime_state = tmp_path.resolve() / "state"
+        assert resolved["forecast_db"] == runtime_state / "zeus-forecasts.db"
+        assert resolved["raw_manifest_dir"] == (
+            runtime_state / "replacement_forecast_live" / "raw_manifests"
+        )
+        assert resolved["request_dir"] == (
+            runtime_state / "replacement_forecast_live" / "requests"
+        )
+        assert resolved["seed_dir"] == (
+            runtime_state / "replacement_forecast_live" / "seeds"
+        )
+        assert resolved["download_output_dir"] == (
+            runtime_state / "replacement_forecast_live" / "raw_manifests"
+        )
+    finally:
+        if old_primary is None:
+            monkeypatch.delenv("ZEUS_PRIMARY_ROOT", raising=False)
+        else:
+            monkeypatch.setenv("ZEUS_PRIMARY_ROOT", old_primary)
+        importlib.reload(config_mod)
+        importlib.reload(production)

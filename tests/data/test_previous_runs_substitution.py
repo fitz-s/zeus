@@ -269,3 +269,67 @@ def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -
     assert "SKIPPED_ALREADY_COVERED" in skip_statuses
     request_written = [s for s in sidecars.values() if s.get("request_written")]
     assert len(request_written) == 1
+
+
+def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            seed_file TEXT,
+            held_position INTEGER,
+            enqueued_at TEXT
+        )
+        """
+    )
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    nonheld_seed = seed_dir / "A_nonheld.2026-06-21.high.json"
+    held_seed = seed_dir / "Z_held.2026-06-21.high.json"
+    nonheld_payload = {**_minimal_seed(upgrade=False), "city": "Busan"}
+    held_payload = {**_minimal_seed(upgrade=False), "city": "Kuala Lumpur"}
+    nonheld_seed.write_text(json.dumps(nonheld_payload), encoding="utf-8")
+    held_seed.write_text(json.dumps(held_payload), encoding="utf-8")
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?)",
+        [
+            (str(nonheld_seed), 0, "2026-06-20T05:00:00+00:00"),
+            (str(held_seed), 1, "2026-06-20T07:00:00+00:00"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kw: False)
+    built: list[str] = []
+
+    def _fake_builder(seed, *, base_dir):
+        built.append(str(seed.get("city")))
+        return types.SimpleNamespace(
+            ok=True, status="READY", reason_codes=("OK",), request={"stub": seed.get("city")}
+        )
+
+    monkeypatch.setattr(
+        queue_mod, "build_replacement_forecast_materialization_request", _fake_builder
+    )
+
+    processed, failed, _reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=forecast_db,
+        limit=1,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert built == ["Kuala Lumpur"]
+    assert (request_dir / held_seed.name).exists()
+    assert not (request_dir / nonheld_seed.name).exists()

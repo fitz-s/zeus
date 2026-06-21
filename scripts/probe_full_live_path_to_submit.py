@@ -173,7 +173,7 @@ def _latest_book_for_token(trade_conn, token_id: str):
 
 def _faithful_pre_submit_provider(snap: dict, trade_conn=None):
     """Return a pre-submit authority provider that FAITHFULLY mirrors the live
-    daemon's ``_edli_pre_submit_authority_provider_from_world_conn`` JIT path.
+    daemon's ``_edli_pre_submit_authority_provider_from_book_evidence_conn`` JIT path.
 
     LIVE PARITY (the key fixes for probe artifacts):
       * ``tick_size`` and ``min_order_size`` are read from

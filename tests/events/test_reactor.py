@@ -259,7 +259,7 @@ def test_market_channel_event_not_direct_reactor_input():
     assert result.rejected == 0
     assert rejected == []
     assert submitted == []
-    assert _processing_status(_conn, event.event_id) == "pending"
+    assert _processing_status(_conn, event.event_id) == "ignored"
 
 
 def _retry_reactor(store, snapshot_present: dict):
@@ -499,6 +499,90 @@ def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
         "regret": 0,
         "dead_letter": 0,
     }
+    assert _processing_status(conn, event.event_id) == "pending"
+
+
+def test_live_book_authority_gap_requeues_with_selected_leg_identity():
+    """A pre-submit book authority gap is a retryable execution-expression deferral.
+
+    The adapter may have already selected a qkernel/Kelly leg before the final
+    command certificate fails. The reactor must keep the event pending, while
+    writing a token-bearing regret/deferral row so the price sidecar can pin and
+    seed exactly that token before the next attempt.
+    """
+    payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="token-selected",
+            outcome_label="YES",
+            executable_snapshot_id="exec-selected",
+            family_id="family-1",
+            bin_label="80F",
+            direction="buy_yes",
+            q_live=0.71,
+            q_lcb_5pct=0.62,
+            c_fee_adjusted=0.40,
+            c_cost_95pct=0.42,
+            p_fill_lcb=0.55,
+            trade_score=0.22,
+            native_quote_available=True,
+            source_status="MATCH",
+            family_complete=True,
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=3,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=4.0,
+            kelly_cost_basis_id="cost-1",
+            final_intent_id="intent-1",
+            reason="EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING",
+        )
+
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert result.retried == 1
+    row = conn.execute(
+        """
+        SELECT rejection_stage, rejection_reason, token_id, bin_label, direction
+        FROM no_trade_regret_events
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert row == (
+        "EXECUTOR_EXPRESSIBILITY",
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING",
+        "token-selected",
+        "80F",
+        "buy_yes",
+    )
     assert _processing_status(conn, event.event_id) == "pending"
 
 
@@ -1759,7 +1843,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
     ).fetchall()
     statuses = {row["event_id"]: row["processing_status"] for row in rows}
     assert {statuses[event.event_id] for event in forecast_events} == {"processed"}
-    assert statuses[book_event.event_id] == "pending"
+    assert statuses[book_event.event_id] == "ignored"
     for event in forecast_events:
         cert_count = conn.execute(
             """
@@ -1788,7 +1872,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         WHERE processing_status = 'pending'
         """
     ).fetchone()[0]
-    assert future_pending == 2
+    assert future_pending == 1
 
 
 def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_letter():
@@ -1817,7 +1901,7 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
     statuses = {row[0]: row[1] for row in rows}
     assert statuses[accepted.event_id] == "processed"
     assert statuses[source_rejected.event_id] == "processed"
-    assert statuses[market_rejected.event_id] == "pending"
+    assert statuses[market_rejected.event_id] == "ignored"
     expected = {
         accepted.event_id: {"verified_no_submit": 1, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
         source_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},

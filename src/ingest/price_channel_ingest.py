@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -99,6 +100,8 @@ EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
 }
 
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 15.0
+
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
 USER_CHANNEL_REQUIRED_ENV_VARS = (
     "ZEUS_USER_CHANNEL_WS_ENABLED",
@@ -117,10 +120,18 @@ USER_CHANNEL_REQUIRED_ENV_VARS = (
 def _settings_section(name: str, default=None):
     source = settings._data if hasattr(settings, "_data") else settings
     if isinstance(source, dict):
-        return source.get(name, default)
+        value = source.get(name)
+        if value is None and name == "edli_v1":
+            value = source.get("edli")
+        return value if value is not None else default
     try:
         return source[name]
     except KeyError:
+        if name == "edli_v1":
+            try:
+                return source["edli"]
+            except KeyError:
+                pass
         return default
 
 
@@ -143,6 +154,22 @@ def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum:
     if value <= 0:
         value = default
     return max(1, min(value, maximum))
+
+
+def _edli_bounded_positive_float(
+    config: dict,
+    key: str,
+    *,
+    default: float,
+    maximum: float,
+) -> float:
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    if value <= 0:
+        value = default
+    return max(0.001, min(value, maximum))
 
 
 def _row_get(row, key: str):
@@ -1231,6 +1258,64 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     return {str(r[0]) for r in rows if r and r[0]}
 
 
+def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
+    """Tokens for open local/chain exposure that need immediate quote evidence."""
+
+    if trade_conn is None:
+        return set()
+    try:
+        has_table = trade_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_current'"
+        ).fetchone()
+    except Exception:
+        return set()
+    if not has_table:
+        return set()
+    try:
+        rows = trade_conn.execute(
+            """
+            SELECT token_id, no_token_id
+              FROM position_current
+             WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
+            """
+        ).fetchall()
+    except Exception:
+        return set()
+    tokens: set[str] = set()
+    for token_id, no_token_id in rows:
+        for value in (token_id, no_token_id):
+            token = str(value or "").strip()
+            if token and token != "None":
+                tokens.add(token)
+    return tokens
+
+
+def _edli_market_channel_seed_first_token_ids(
+    *,
+    held_priority_token_ids: set[str],
+    candidate_priority_token_ids: set[str],
+) -> set[str]:
+    """REST-seed tokens that must be fresh before the broad market universe.
+
+    Open exposure owns the strictest freshness SLA: monitor/redecision/exit can
+    act only when held-position quote evidence is current. Candidate tokens still
+    stay pinned in the subscribed universe, but seeding a large candidate set
+    before held tokens lets open exposure age past preflight/redecision limits.
+    When there is no open exposure, fall back to candidate seeding so entry
+    witness rows are still warmed promptly.
+    """
+
+    held = {str(token or "").strip() for token in held_priority_token_ids}
+    held.discard("")
+    held.discard("None")
+    if held:
+        return held
+    candidates = {str(token or "").strip() for token in candidate_priority_token_ids}
+    candidates.discard("")
+    candidates.discard("None")
+    return candidates
+
+
 def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
     """Build refresh_executable_market_substrate_snapshots kwargs for a market-channel action.
 
@@ -1255,6 +1340,209 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
     )
 
 
+def _edli_refresh_held_position_quote_evidence() -> dict:
+    """Refresh executable quote evidence for currently held exposure.
+
+    The long-lived market-channel WebSocket can be healthy while quiet markets
+    emit no book deltas. Held-position monitor/redecision needs a wall-clock
+    freshness guarantee, so the scheduler performs a bounded REST refresh for
+    open exposure every cycle even when the WS thread is alive.
+    """
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.events.event_coalescer import EventCoalescer
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketChannelOnlineService,
+        _world_write_mutex,
+        active_weather_token_metadata_for_tokens,
+    )
+    from src.state.db import get_trade_connection, get_world_connection
+
+    trade_read = get_trade_connection(write_class=None)
+    try:
+        held_token_ids = _edli_held_position_priority_token_ids(trade_read)
+        if not held_token_ids:
+            return {"held_priority_token_ids": 0, "held_quote_refresh_events": 0}
+        token_metadata = active_weather_token_metadata_for_tokens(
+            trade_read,
+            token_ids=held_token_ids,
+        )
+    finally:
+        trade_read.close()
+
+    if not token_metadata:
+        return {
+            "held_priority_token_ids": len(held_token_ids),
+            "held_quote_refresh_events": 0,
+            "skipped": "no_held_token_metadata",
+        }
+
+    # INV-37 (PR415 B5, 2026-06-20): write the world event (opportunity_events) AND
+    # the trade-owned book witness (execution_feasibility_evidence) through ONE
+    # connection with a SINGLE atomic commit, never two independent connections
+    # committed separately. world.db is MAIN (so the EventStore's unqualified
+    # opportunity_events + its sqlite_master guard resolve to the real world log)
+    # and zeus_trades.db is ATTACHed as 'trades' (so the schema-qualified feasibility
+    # insert reaches the runtime-read trades table, never the world shadow). A single
+    # conn.commit() on the ATTACHed connection is atomic across BOTH databases — the
+    # same INV-37 atomic-commit shape the EDLI position bridge uses.
+    from src.state.db import world_connection_with_trades_flocked
+
+    with world_connection_with_trades_flocked(write_class="live") as conn:
+        def _commit_atomic_cross_db() -> None:
+            conn.commit()
+
+        with PolymarketClient() as clob:
+            service = MarketChannelOnlineService(
+                MarketChannelIngestor(
+                    EventWriter(conn),
+                    active_token_ids=set(token_metadata),
+                    token_metadata=token_metadata,
+                    feasibility_conn=conn,
+                    feasibility_schema="trades",
+                    coalescer=EventCoalescer(max_market_keys=1000),
+                ),
+                fetch_orderbook=clob.get_orderbook_snapshot,
+            )
+            written = service.seed_rest_books_in_chunks(
+                token_ids=set(token_metadata),
+                received_at=datetime.now(timezone.utc).isoformat(),
+                world_mutex=_world_write_mutex(),
+                commit=_commit_atomic_cross_db,
+                logger=logger,
+            )
+        return {
+            "held_priority_token_ids": len(held_token_ids),
+            "held_token_metadata": len(token_metadata),
+            "held_quote_refresh_events": int(written),
+        }
+
+
+def _edli_refresh_candidate_priority_quote_evidence(
+    *,
+    limit: int = 128,
+    budget_seconds: float = MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
+) -> dict:
+    """Refresh executable quote evidence for recently selected candidate tokens.
+
+    The long-lived market-channel thread captures its token universe at thread
+    start. Candidate tokens can appear minutes later through reactor no-trade
+    receipts, so they need the same bounded REST freshness path as held exposure
+    rather than waiting for the WS universe to restart.
+    """
+
+    from src.data.polymarket_client import PolymarketClient
+    from src.events.event_coalescer import EventCoalescer
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketChannelOnlineService,
+        _world_write_mutex,
+        active_weather_token_metadata_for_tokens,
+    )
+    from src.state.db import get_trade_connection, get_world_connection
+
+    world_read = get_world_connection(write_class=None)
+    try:
+        candidate_token_ids = _edli_candidate_priority_token_ids(
+            world_read,
+            limit=limit,
+        )
+    finally:
+        world_read.close()
+    started_monotonic = time.monotonic()
+    budget = max(0.001, float(budget_seconds))
+    deadline = started_monotonic + budget
+    if not candidate_token_ids:
+        return {"candidate_priority_token_ids": 0, "candidate_quote_refresh_events": 0}
+
+    trade_read = get_trade_connection(write_class=None)
+    try:
+        token_metadata = active_weather_token_metadata_for_tokens(
+            trade_read,
+            token_ids=candidate_token_ids,
+        )
+    finally:
+        trade_read.close()
+
+    if not token_metadata:
+        return {
+            "candidate_priority_token_ids": len(candidate_token_ids),
+            "candidate_quote_refresh_events": 0,
+            "skipped": "no_candidate_token_metadata",
+        }
+
+    # INV-37 (PR415 B5, 2026-06-20): single connection + single atomic commit for the
+    # world-event + trade-feasibility cross-DB pair (see the held-priority twin above
+    # for the full rationale + the shadow-table hazard this world-MAIN + ATTACHed
+    # 'trades' + schema-qualified-feasibility shape avoids).
+    from src.state.db import world_connection_with_trades_flocked
+
+    with world_connection_with_trades_flocked(write_class="live") as conn:
+        def _commit_atomic_cross_db() -> None:
+            conn.commit()
+
+        with PolymarketClient() as clob:
+            service = MarketChannelOnlineService(
+                MarketChannelIngestor(
+                    EventWriter(conn),
+                    active_token_ids=set(token_metadata),
+                    token_metadata=token_metadata,
+                    feasibility_conn=conn,
+                    feasibility_schema="trades",
+                    coalescer=EventCoalescer(max_market_keys=1000),
+                ),
+                fetch_orderbook=clob.get_orderbook_snapshot,
+            )
+            written = service.seed_rest_books_in_chunks(
+                token_ids=set(token_metadata),
+                received_at=datetime.now(timezone.utc).isoformat(),
+                world_mutex=_world_write_mutex(),
+                commit=_commit_atomic_cross_db,
+                logger=logger,
+                deadline_monotonic=deadline,
+            )
+        elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+        return {
+            "candidate_priority_token_ids": len(candidate_token_ids),
+            "candidate_token_metadata": len(token_metadata),
+            "candidate_quote_refresh_events": int(written),
+            "budget_seconds": budget,
+            "elapsed_seconds": elapsed_seconds,
+            "budget_exhausted": elapsed_seconds >= budget,
+        }
+
+
+def _edli_held_quote_refresh_cycle() -> dict:
+    """Scheduler entry point for held-position quote freshness.
+
+    This is deliberately separate from ``_edli_market_channel_ingestor_cycle``:
+    the market-channel/user-channel lanes can spend minutes in broad reconcile
+    or substrate scans, but held exposure needs bounded quote evidence refresh
+    before monitor/redecision can safely resume.
+    """
+
+    from src.observability.scheduler_health import _write_scheduler_health
+
+    try:
+        result = _edli_refresh_held_position_quote_evidence()
+    except Exception as exc:  # noqa: BLE001
+        _write_scheduler_health(
+            "edli_held_quote_refresh",
+            failed=True,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    _write_scheduler_health(
+        "edli_held_quote_refresh",
+        failed=False,
+        extra=result,
+    )
+    return result
+
+
 def _edli_market_channel_ingestor_cycle() -> None:
     """EDLI market-channel online data-service bootstrap.
 
@@ -1269,6 +1557,20 @@ def _edli_market_channel_ingestor_cycle() -> None:
         return
     global _edli_market_channel_thread
     if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
+        candidate_refresh = _edli_refresh_candidate_priority_quote_evidence(
+            limit=_edli_bounded_positive_int(
+                edli_cfg,
+                "market_channel_candidate_priority_max_tokens",
+                default=128,
+                maximum=1000,
+            ),
+            budget_seconds=_edli_bounded_positive_float(
+                edli_cfg,
+                "market_channel_candidate_quote_refresh_budget_seconds",
+                default=MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
+                maximum=120.0,
+            ),
+        )
         _write_scheduler_health(
             "edli_market_channel_ingestor",
             failed=False,
@@ -1276,40 +1578,50 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 "thread": "alive",
                 "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
                 "fill_authority": "user_channel_or_reconcile_only",
+                "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
+                "candidate_quote_refresh": candidate_refresh,
             },
         )
         return
 
-    from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_from_snapshots
+    from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_for_tokens
     from src.state.db import get_trade_connection, get_world_connection
 
     # Candidate universe (Blocker #52): tokens the reactor recently decided on must
     # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
     # evidence row before the pre-submit witness reads it. The full latest-per-market
     # universe is captured up to the cap; candidates are never dropped by the cap.
-    priority_token_ids: set[str] = set()
+    candidate_priority_token_ids: set[str] = set()
     world_read = get_world_connection(write_class=None)
     try:
-        priority_token_ids = _edli_candidate_priority_token_ids(world_read)
+        candidate_priority_limit = _edli_bounded_positive_int(
+            edli_cfg,
+            "market_channel_candidate_priority_max_tokens",
+            default=128,
+            maximum=1000,
+        )
+        candidate_priority_token_ids = _edli_candidate_priority_token_ids(
+            world_read,
+            limit=candidate_priority_limit,
+        )
     except Exception as exc:  # noqa: BLE001 - priority pinning is best-effort, universe still captured
         logger.warning("EDLI ingestor candidate-priority read failed (non-fatal): %s", exc)
     finally:
         if world_read is not None:
             world_read.close()
 
-    universe_cap = _edli_bounded_positive_int(
-        edli_cfg,
-        "market_channel_universe_max_tokens",
-        default=2000,
-        maximum=8000,
-    )
-
     trade_conn = get_trade_connection(write_class=None)
     try:
-        token_metadata = active_weather_token_metadata_from_snapshots(
+        held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
+        priority_token_ids = set(candidate_priority_token_ids)
+        priority_token_ids.update(held_priority_token_ids)
+        seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
+            held_priority_token_ids=held_priority_token_ids,
+            candidate_priority_token_ids=candidate_priority_token_ids,
+        )
+        token_metadata = active_weather_token_metadata_for_tokens(
             trade_conn,
-            limit=universe_cap,
-            priority_token_ids=priority_token_ids,
+            token_ids=priority_token_ids,
         )
         token_ids = set(token_metadata)
     finally:
@@ -1321,9 +1633,12 @@ def _edli_market_channel_ingestor_cycle() -> None:
             failed=False,
             extra={
                 "active_weather_token_ids": 0,
+                "priority_token_ids": len(priority_token_ids),
+                "held_priority_token_ids": len(held_priority_token_ids),
+                "seed_first_token_ids": len(seed_first_token_ids),
                 "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
                 "fill_authority": "user_channel_or_reconcile_only",
-                "skipped": "no_active_weather_tokens",
+                "skipped": "no_priority_token_metadata",
             },
         )
         return
@@ -1339,9 +1654,29 @@ def _edli_market_channel_ingestor_cycle() -> None:
             invalidate_executable_snapshots_for_market_channel_action,
             run_market_channel_service_forever,
         )
-        from src.state.db import get_world_connection
+        from src.state.db import get_world_connection_with_trades_required
 
-        world_conn = get_world_connection(write_class="live")
+        # INV-37 (PR415 B5, 2026-06-20): the long-lived market-channel ingestor writes
+        # the world event (opportunity_events) AND the trade-owned feasibility witness
+        # (execution_feasibility_evidence) atomically per unit through ONE connection
+        # (world.db MAIN + zeus_trades.db ATTACHed as 'trades'), never two independent
+        # connections committed separately. The NON-flocked helper is used here because
+        # this connection lives for the whole forever-loop — holding cross-DB writer
+        # flocks for that lifetime would starve every other writer; each per-unit
+        # commit is still atomic across both DBs (single connection) and serialized on
+        # zeus-world.db by the world write mutex inside the service loop. The
+        # feasibility insert is schema-qualified 'trades' (feasibility_schema below) so
+        # it reaches the runtime-read trades table, never the world shadow.
+        conn = get_world_connection_with_trades_required(write_class="live")
+        world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
+        feasibility_conn = conn
+
+        def _commit_event_and_feasibility() -> None:
+            conn.commit()
+
+        def _rollback_event_and_feasibility() -> None:
+            conn.rollback()
+
         try:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.state.db import get_trade_connection
@@ -1422,6 +1757,8 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         EventWriter(world_conn),
                         active_token_ids=token_ids,
                         token_metadata=token_metadata,
+                        feasibility_conn=feasibility_conn,
+                        feasibility_schema="trades",
                         coalescer=EventCoalescer(max_market_keys=1000),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
@@ -1434,14 +1771,16 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         maximum=20,
                     ),
                     refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
+                    seed_first_token_ids=seed_first_token_ids,
                 )
                 run_market_channel_service_forever(
                     service,
                     logger=logger,
-                    commit=world_conn.commit,
+                    commit=_commit_event_and_feasibility,
+                    rollback=_rollback_event_and_feasibility,
                 )
         finally:
-            world_conn.close()
+            conn.close()
 
     _edli_market_channel_thread = threading.Thread(
         target=_runner,
@@ -1454,6 +1793,9 @@ def _edli_market_channel_ingestor_cycle() -> None:
         failed=False,
         extra={
             "active_weather_token_ids": len(token_ids),
+            "priority_token_ids": len(priority_token_ids),
+            "held_priority_token_ids": len(held_priority_token_ids),
+            "seed_first_token_ids": len(seed_first_token_ids),
             "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
             "fill_authority": "user_channel_or_reconcile_only",
             "thread": "started",

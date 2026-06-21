@@ -20,6 +20,7 @@ import datetime as _dt
 import json
 from decimal import Decimal
 
+import numpy as np
 import pytest
 
 from src.engine import event_reactor_adapter as era
@@ -523,7 +524,6 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
     assert result.selected_proof.direction == "buy_yes"
     assert result.selected_proof.candidate.bin.label == "20C"
     assert result.decision is not None
-    assert result.decision.market_coherence.status == "COHERENT"
     selected = result.decision.selected
     assert selected is not None
     selected_decision = next(
@@ -532,6 +532,106 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
     )
     assert selected_decision.q_lcb_guard_basis == "OOF_WILSON_95"
     assert selected_decision.q_lcb_guard_cell_key.startswith("high|L2_3|YES|modal|")
+    assert selected_decision.coherence_allows is True
+
+
+def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypatch, tmp_path):
+    """Empirical q_lcb guard is the model-superiority license consumed by coherence.
+
+    Regression: market coherence used the default "license nothing" predicate, so a cheap
+    center YES with positive guarded edge/Delta-U could be blocked solely because the deep
+    market disagreed. That preserved the all-NO failure mode in Shanghai-style families.
+    """
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    _install_sigma_floor_artifact(monkeypatch, tmp_path)
+
+    reliability_cells: dict[str, tuple[int, float]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for pos in ("modal", "nonmodal"):
+                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                    reliability_cells[f"high|{lead}|{side}|{pos}|qb{qb}"] = (1000, 0.95)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.05, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    result = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+    )
+
+    assert result.no_trade_reason is None
+    assert result.selected_proof is not None
+    assert result.selected_proof.direction == "buy_yes"
+    assert result.selected_proof.candidate.bin.label == "20C"
+    assert result.decision is not None
+    selected_decision = next(
+        d for d in result.decision.candidate_decisions
+        if d.economics.candidate_id == result.decision.selected.candidate_id
+    )
+    assert selected_decision.q_lcb_guard_basis == "OOF_WILSON_95"
+    assert selected_decision.coherence_allows is True
+
+
+def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypatch):
+    """Point-bin q uses the reactor-served sigma, not a rebuilt generic fallback.
+
+    Regression: the bridge threaded ``sigma=0.05`` but the generic predictive builder
+    rebuilt a 1.5C fallback width before q integration. That spread most mass out of the
+    center point-bin preimage, making adjacent NO legs look better than the cheap center
+    YES in Shanghai-style families.
+    """
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    reliability_cells: dict[str, tuple[int, float]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for pos in ("modal", "nonmodal"):
+                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                    reliability_cells[f"high|{lead}|{side}|{pos}|qb{qb}"] = (1000, 0.95)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    result = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.05, members=[20, 20, 20, 20, 20]),
+    )
+
+    assert result.no_trade_reason is None
+    assert result.decision is not None
+    assert result.decision.predictive.sigma_native == pytest.approx(0.05)
+    q_by_label = {
+        bin_obj.label: float(q)
+        for bin_obj, q in zip(result.decision.omega.bins, result.decision.joint_q.q)
+    }
+    assert q_by_label["20C"] > 0.999
+    assert result.selected_proof is not None
+    assert result.selected_proof.direction == "buy_yes"
+    assert result.selected_proof.candidate.bin.label == "20C"
 
 
 def test_non_direct_selection_is_refused_as_typed_no_trade():
@@ -746,7 +846,23 @@ def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no"):
         q_lcb_5pct=q_lcb_5pct,
         bin_obj=Bin(low=20.0, high=20.0, unit="C", label="20C"),
     )
-    decision = SimpleNamespace(selected=economics)
+    selected_route = SimpleNamespace(
+        side="NO" if direction == "buy_no" else "YES",
+        bin_id="b1",
+        payoff_vector=np.array([1.0]),
+    )
+    selected_decision = SimpleNamespace(
+        economics=economics,
+        route=selected_route,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+    )
+    decision = SimpleNamespace(
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[1.0], [1.0], [1.0]])),
+        candidate_decisions=(selected_decision,),
+    )
     return bridge._overlay_spine_economics_onto_proof(proof, decision)
 
 
@@ -758,19 +874,86 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     overlay must preserve the reactor proof's selected-side probability fields.
     """
     economics = _selected_economics(
-        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
     new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
 
     assert new_proof.q_posterior == pytest.approx(0.80)
     assert new_proof.q_lcb_5pct == pytest.approx(0.990)
     assert new_proof.trade_score == pytest.approx(0.050)
-    assert new_proof.q_source == "qkernel_spine"
+    assert new_proof.q_source != "qkernel_spine"
+    assert new_proof.selection_authority_applied == "qkernel_spine"
     assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(
         0.052
     )
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
+    assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
+
+
+def test_overlay_sets_qkernel_band_false_edge_p_value():
+    """FDR consumes the selected qkernel route's empirical false-edge rate.
+
+    A qkernel-selected proof must not keep the legacy proof p-value after the
+    qkernel band has selected a different payoff-space route. The p-value is the
+    finite-sample-corrected share of band route edges <= 0.
+    """
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.01, cost=0.05, q_dot_payoff=0.08, point_ev=0.03
+    )
+    selected_route = SimpleNamespace(side="NO", bin_id="b1", payoff_vector=np.array([1.0]))
+    selected_decision = SimpleNamespace(
+        economics=economics,
+        route=selected_route,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+    )
+    decision = SimpleNamespace(
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.03], [0.06], [0.08]])),
+        candidate_decisions=(selected_decision,),
+    )
+    base = _overlay_proof(
+        q_posterior=0.80,
+        q_lcb_5pct=0.70,
+        economics=economics,
+    )
+    new_proof = bridge._overlay_spine_economics_onto_proof(base, decision)
+
+    assert new_proof is not None
+    assert new_proof.trade_score == pytest.approx(0.01)
+    assert new_proof.p_value == pytest.approx(0.5)  # (one failure + 1) / (three draws + 1)
+    assert new_proof.passed_prefilter is True
+    assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.5)
+
+
+def test_fdr_maps_consume_selected_qkernel_overlay_authority():
+    """FDR must see the selected qkernel false-edge rate, not the stale base proof p-value."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
+    )
+    base = _overlay_proof(
+        q_posterior=0.80,
+        q_lcb_5pct=0.70,
+        economics=economics,
+    )
+    stale_base = era.dataclass_replace(base, p_value=1.0, passed_prefilter=False)
+    selected = era.dataclass_replace(base, p_value=0.00025, passed_prefilter=True)
+
+    p_values, prefilter = era._fdr_maps_with_selected_authority(
+        family_id="family-qkernel",
+        proofs=(stale_base,),
+        selected_proof=selected,
+        selected_token_id=selected.token_id,
+    )
+
+    hypothesis_id = f"family-qkernel:{selected.token_id}"
+    assert p_values[hypothesis_id] == pytest.approx(0.00025)
+    assert prefilter[hypothesis_id] is True
 
 
 def test_overlay_failure_returns_none_instead_of_original_proof():
@@ -810,3 +993,127 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
     assert new_proof.q_posterior == pytest.approx(0.199009684818666)
     assert new_proof.q_lcb_5pct == pytest.approx(0.04625961651748593)
     assert new_proof.q_lcb_5pct <= new_proof.q_posterior
+
+
+def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes():
+    """The spine must rank executable family legs itself, not inherit legacy vetoes.
+
+    Regression: qkernel was called after `_selection_scoped_proofs`, which filtered
+    every proof with a legacy `missing_reason`. That meant an old capital/FDR veto
+    could remove the center YES before the payoff-vector selector ever saw it,
+    preserving the all-NO behavior the spine was introduced to replace.
+    """
+    from dataclasses import replace
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.05, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    marked = tuple(
+        replace(
+            proof,
+            missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy-pre-spine",
+            passed_prefilter=False,
+            trade_score=0.0,
+        )
+        if proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+        else proof
+        for proof in proofs
+    )
+
+    legacy_scoped = era._selection_scoped_proofs(
+        proofs=marked,
+        honor_admission_rejections=True,
+    )
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=marked,
+        honor_admission_rejections=False,
+    )
+
+    assert all(
+        not (proof.direction == "buy_yes" and proof.candidate.bin.label == "20C")
+        for proof in legacy_scoped
+    )
+    assert any(
+        proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+        for proof in qkernel_scoped
+    )
+
+    res = _drive(
+        family,
+        qkernel_scoped,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+    )
+
+    center_yes = [
+        decision
+        for decision in res.decision.candidate_decisions
+        if decision.route.side == "YES"
+        and decision.route.bin_id == era._candidate_bin_id(
+            next(
+                proof
+                for proof in qkernel_scoped
+                if proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+            )
+        )
+    ]
+
+    assert center_yes
+    assert center_yes[0].economics.edge_lcb > 0.0
+    assert center_yes[0].economics.optimal_delta_u > 0.0
+
+
+def test_qkernel_scope_rescores_legacy_distance_direction_law_rejections():
+    """The spine must not inherit the old distance-threshold direction law.
+
+    Regression: the reactor stamped ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` before the
+    qkernel call, and ``honor_admission_rejections=False`` still treated that reason as
+    unrecoverable. Live logs then showed positive-edge YES candidates with ``dlok=0
+    adm=0``. The qkernel owns the forecast-family direction law now, so legacy
+    distance-law rejections enter the spine and are judged by the settlement/q/OOF
+    family law there.
+    """
+    from dataclasses import replace
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=[0.10, 0.80, 0.10, 0.00],
+        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    marked = tuple(
+        replace(
+            proof,
+            missing_reason=(
+                "DIRECTION_LAW_BIN_FORECAST_MISMATCH:"
+                "direction=buy_no:forecast_boundary_zone"
+            ),
+            passed_prefilter=False,
+            trade_score=0.0,
+        )
+        if proof.direction == "buy_no" and proof.candidate.bin.label == "21C"
+        else proof
+        for proof in proofs
+    )
+
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=marked,
+        honor_admission_rejections=False,
+    )
+
+    assert any(
+        proof.direction == "buy_no" and proof.candidate.bin.label == "21C"
+        for proof in qkernel_scoped
+    )
+    assert any(
+        proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
+        for proof in qkernel_scoped
+    )

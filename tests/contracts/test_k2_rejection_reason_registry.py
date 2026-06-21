@@ -109,8 +109,11 @@ def test_registry_lookup_strips_detail_suffix():
     [
         ("RISK_GUARD_BLOCKED", RejectionCategory.DESIGNED_GATE),
         ("TRADE_SCORE_NON_POSITIVE", RejectionCategory.HONEST_MARKET),
+        ("QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE", RejectionCategory.HONEST_MARKET),
         ("LIVE_INFERENCE_INPUTS_MISSING:READINESS_EXPIRED", RejectionCategory.HONEST_DATA),
         ("DAY0_SCOPE_SHADOW_ONLY", RejectionCategory.DESIGNED_GATE),
+        ("UNSUPPORTED_EDLI_LIVE_SCOPE:forecast_only", RejectionCategory.DESIGNED_GATE),
+        ("EVENT_TYPE_OUT_OF_LIVE_SCOPE", RejectionCategory.DESIGNED_GATE),
         ("entry_cooldown:same_token_entry_cooling_down", RejectionCategory.DESIGNED_GATE),
         ("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:cost_basis_hash missing", RejectionCategory.ARTIFICIAL_SUSPECT),
         # The exception-leak class: NEVER classifies as honest.
@@ -145,6 +148,8 @@ def test_known_db_history_bases_are_registered():
         "EXECUTABLE_NATIVE_ASK_MISSING",
         "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
         "DAY0_SCOPE_SHADOW_ONLY",
+        "UNSUPPORTED_EDLI_LIVE_SCOPE",
+        "EVENT_TYPE_OUT_OF_LIVE_SCOPE",
         "entry_cooldown",
         "REPLACEMENT_FORECAST_HOOK_BLOCKED",
         "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED",
@@ -160,6 +165,7 @@ def test_known_db_history_bases_are_registered():
         "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING",
         "TOPOLOGY_CLOCK_MISSING",
         "EVENT_BOUND_MARKET_TOPOLOGY_INVALID",
+        "QKERNEL_SPINE_NO_TRADE",
         "DAY0_HARD_FACT_AUTHORITY_BLOCKED",
         "UNKNOWN_REVIEW_REQUIRED",
     ]

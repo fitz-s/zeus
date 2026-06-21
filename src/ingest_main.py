@@ -425,12 +425,14 @@ def _k2_obs_tick():
         if str(_REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(_REPO_ROOT))
         from scripts.obs_live_tick import run_live_tick
+        from src.config import STATE_DIR
         # run_live_tick opens its own db_writer_lock connection to world.db.
         # Do NOT create a second get_world_connection here.
-        results = run_live_tick(days_back=7, db_path=_REPO_ROOT / "state" / "zeus-world.db")
+        results = run_live_tick(days_back=7, db_path=STATE_DIR / "zeus-world.db")
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
         logger.info("K2 obs_tick: written=%d failed=%s", written, failed or "none")
+        _raise_if_all_obs_tick_attempts_failed("ingest_k2_obs", results)
 
 
 def _active_window_cities(now_utc: "datetime | None" = None) -> list[str]:
@@ -454,11 +456,11 @@ def _active_window_cities(now_utc: "datetime | None" = None) -> list[str]:
         if not city.timezone:
             continue
         try:
-            local_now = ref.astimezone(_ZI(city.timezone))
-            local_hour = local_now.hour + local_now.minute / 60.0
+            city_clock = ref.astimezone(_ZI(city.timezone))
+            clock_hour = city_clock.hour + city_clock.minute / 60.0
             # Active window: [0, peak_hour + 6] local time.
             window_end = float(getattr(city, "historical_peak_hour", 14.0) or 14.0) + 6.0
-            if 0.0 <= local_hour <= window_end:
+            if 0.0 <= clock_hour <= window_end:
                 active.append(city.name)
         except Exception:
             continue
@@ -502,6 +504,7 @@ def _k2_obs_fast_tick():
         if str(_REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(_REPO_ROOT))
         from scripts.obs_live_tick import run_live_tick
+        from src.config import STATE_DIR
 
         now_utc = _dt.now(_tz.utc)
         city_filter = _active_window_cities(now_utc)
@@ -521,7 +524,7 @@ def _k2_obs_fast_tick():
         results = run_live_tick(
             days_back=1,
             city_filter=city_filter,
-            db_path=_REPO_ROOT / "state" / "zeus-world.db",
+            db_path=STATE_DIR / "zeus-world.db",
         )
         written = sum(r.rows_written for r in results if not r.skipped_hko)
         failed = [r.city for r in results if r.failure_reason]
@@ -532,6 +535,26 @@ def _k2_obs_fast_tick():
             "K2 obs_fast_tick: cities=%d written=%d failed=%s reasons=%s",
             len(city_filter), written, failed or "none", reasons or "none",
         )
+        _raise_if_all_obs_tick_attempts_failed("ingest_k2_obs_fast_tick", results)
+
+
+def _raise_if_all_obs_tick_attempts_failed(job_id: str, results: list[object]) -> None:
+    """Fail scheduler health when an obs tick made no successful city attempt."""
+
+    attempted = [r for r in results if not bool(getattr(r, "skipped_hko", False))]
+    if not attempted:
+        return
+    failed = [r for r in attempted if getattr(r, "failure_reason", None)]
+    if len(failed) != len(attempted):
+        return
+    reasons = {
+        str(getattr(r, "city", "<unknown>")): str(getattr(r, "failure_reason", ""))[:160]
+        for r in failed[:10]
+    }
+    raise RuntimeError(
+        f"{job_id} all attempted observation cities failed "
+        f"(failed={len(failed)} sample_reasons={reasons})"
+    )
 
 
 @_scheduler_job("ingest_k2_hko_tick")
@@ -557,7 +580,8 @@ def _k2_hko_tick():
             logger.info("ingest k2_hko_tick skipped_lock_held")
             return
         _REPO_ROOT = Path(__file__).resolve().parent.parent
-        db_path = _REPO_ROOT / "state" / "zeus-world.db"
+        from src.config import STATE_DIR
+        db_path = STATE_DIR / "zeus-world.db"
         # Import the standalone script's two entry-point functions directly.
         # hko_ingest_tick.py is already in SQLITE_CONNECT_ALLOWLIST.
         import sys as _sys

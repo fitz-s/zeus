@@ -218,6 +218,62 @@ def test_unservable_residual_terminates_via_fixpoint(_cfg_with_db, _redirect_hea
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is False
 
 
+def test_fixpoint_does_not_suppress_missing_held_position_scope(
+    _cfg_with_db, _redirect_health, monkeypatch
+):
+    """A held-position family must keep healing even after ordinary scopes hit fixpoint."""
+    cfg, db = _cfg_with_db
+    for c in _NEAR_DAY_CITIES:
+        _insert_single_runs(db, city=c, metric="high", target_date=_NEAR_DAY, models=_MODELS)
+
+    prod._record_extras_fixpoint(cfg, _CYCLE, written=0)
+    assert prod._extras_fixpoint_latched(_CYCLE) is True
+    monkeypatch.setattr(
+        prod,
+        "_held_position_extras_missing_scopes",
+        lambda _cfg, missing: {("Lucknow", "high", _LEAD1)} & set(missing),
+    )
+
+    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
+
+
+def test_held_position_missing_scope_uses_extras_tuple_order(tmp_path):
+    """Held families are (city,target_date,metric); extras gaps are (city,metric,target_date)."""
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            size_usd REAL,
+            chain_cost_basis_usd REAL,
+            chain_state TEXT,
+            phase TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("Kuala Lumpur", "2026-06-21", "high", 5.0, 5.0, 0.06, 0.06, 0.06, "synced", "active"),
+    )
+    conn.commit()
+    conn.close()
+
+    missing = {
+        ("Kuala Lumpur", "high", "2026-06-21"),
+        ("Busan", "high", "2026-06-21"),
+    }
+
+    assert prod._held_position_extras_missing_scopes({"trades_db": str(trade_db)}, missing) == {
+        ("Kuala Lumpur", "high", "2026-06-21")
+    }
+
+
 def test_progress_unlatches_so_servable_data_keeps_healing(_cfg_with_db, _redirect_health):
     """A latch must NOT freeze a cycle that is still making progress: if a later pass lands new
     rows (written>0), the latch clears and the gate resumes re-running until coverage is full."""

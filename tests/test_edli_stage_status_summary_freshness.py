@@ -107,3 +107,31 @@ def test_cycle_pulse_preserves_edli_business_candidate_counters(tmp_path, monkey
     assert cycle["final_intents_built"] == 1
     assert cycle["deterministic_rejections"]["real_order_submit_disabled"] == 1
     assert cycle["chain_sync"]["synced"] == 1
+
+
+def test_auxiliary_pulse_does_not_relabel_business_cycle_as_heartbeat(tmp_path, monkeypatch):
+    """Heartbeat/status pulses may annotate but must not overwrite business-cycle identity."""
+    target = _redirect_status_path(tmp_path, monkeypatch)
+
+    write_cycle_pulse(
+        {
+            "mode": "edli_event_reactor",
+            "started_at": "2026-06-20T00:20:00+00:00",
+            "completed_at": "2026-06-20T00:20:03+00:00",
+            "candidates": 11,
+            "final_intents_built": 0,
+            "submit_attempts": 0,
+            "no_trades": 11,
+            "top_no_trade_reasons": {"FDR_REJECTED": 11},
+        }
+    )
+    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+
+    cycle = json.loads(target.read_text())["cycle"]
+    assert cycle["mode"] == "edli_event_reactor"
+    assert cycle["completed_at"] == "2026-06-20T00:20:03+00:00"
+    assert cycle["candidates"] == 11
+    assert cycle["final_intents_built"] == 0
+    assert cycle["submit_attempts"] == 0
+    assert cycle["heartbeat"] is True
+    assert cycle["last_auxiliary_pulse"] == {"mode": "heartbeat_pulse", "heartbeat": True}

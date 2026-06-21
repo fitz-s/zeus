@@ -189,3 +189,111 @@ def test_path_backed_ledger_does_not_hold_write_lock_between_calls(
             writer.close()
     finally:
         ledger.close()
+
+
+def test_path_backed_ledger_reads_fresh_chain_snapshot_past_latest_degraded(
+    tmp_path: Path,
+) -> None:
+    """A transient degraded refresh must not poison live bankroll readers."""
+
+    db_path = tmp_path / "trades.db"
+    ledger = CollateralLedger(db_path=db_path)
+    try:
+        ledger.set_snapshot(
+            _snapshot(
+                pusd=201_000_000,
+                allowance=900_000_000,
+                authority="CHAIN",
+                token_balances={"tok-live": 5_000_000},
+            )
+        )
+        ledger.set_snapshot(
+            _snapshot(
+                pusd=0,
+                allowance=0,
+                authority="DEGRADED",
+                token_balances={},
+            )
+        )
+
+        fresh = ledger.snapshot()
+
+        assert fresh.authority_tier == "CHAIN"
+        assert fresh.pusd_balance_micro == 201_000_000
+        assert fresh.ctf_token_balances == {"tok-live": 5_000_000}
+    finally:
+        ledger.close()
+
+
+def test_path_backed_ledger_does_not_let_empty_ctf_tick_override_active_exposure(
+    tmp_path: Path,
+) -> None:
+    """When chain-synced positions still exist, keep the latest non-empty CTF map."""
+
+    db_path = tmp_path / "trades.db"
+    ledger = CollateralLedger(db_path=db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+              position_id TEXT PRIMARY KEY,
+              phase TEXT,
+              shares REAL,
+              chain_shares REAL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('pos-1', 'active', 5.0, 5.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        ledger.set_snapshot(
+            _snapshot(
+                pusd=201_000_000,
+                allowance=900_000_000,
+                authority="CHAIN",
+                token_balances={"tok-live": 5_000_000},
+            )
+        )
+        ledger.set_snapshot(
+            _snapshot(
+                pusd=202_000_000,
+                allowance=900_000_000,
+                authority="CHAIN",
+                token_balances={},
+            )
+        )
+
+        fresh = ledger.snapshot()
+
+        assert fresh.authority_tier == "CHAIN"
+        assert fresh.ctf_token_balances == {"tok-live": 5_000_000}
+    finally:
+        ledger.close()
+
+
+def _snapshot(
+    *,
+    pusd: int,
+    allowance: int,
+    authority: str,
+    token_balances: dict[str, int],
+):
+    from src.state.collateral_ledger import CollateralSnapshot
+
+    return CollateralSnapshot(
+        pusd_balance_micro=pusd,
+        pusd_allowance_micro=allowance,
+        usdc_e_legacy_balance_micro=0,
+        ctf_token_balances=token_balances,
+        ctf_token_allowances=dict(token_balances),
+        reserved_pusd_for_buys_micro=0,
+        reserved_tokens_for_sells={},
+        captured_at=datetime.now(timezone.utc),
+        authority_tier=authority,  # type: ignore[arg-type]
+    )

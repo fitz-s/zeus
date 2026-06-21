@@ -72,6 +72,18 @@ def test_db_lock_certificate_failure_still_transient():
     )
 
 
+def test_pre_submit_book_authority_gap_is_transient():
+    assert _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING"
+    )
+    assert _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_STALE"
+    )
+    assert not _is_transient_money_path_reason(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE"
+    )
+
+
 def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
 
@@ -474,6 +486,101 @@ def test_pre_submit_error_terminal_is_visible_rejection_not_silent_proof():
     assert row is not None, "the rejection must be visible in the regret ledger"
     assert row["rejection_stage"] == "EXECUTION_RECEIPT"
     assert "EXECUTOR_PRE_VENUE_REJECTED" in row["rejection_reason"]
+
+
+def test_pre_submit_db_lock_error_requeues_without_regret():
+    """A pre-venue DB lock has no venue side effect and must retry next cycle.
+
+    Ordinary PRE_SUBMIT_ERROR receipts remain visible terminal rejections in the
+    companion test above; this pins the narrower sqlite-lock transient path.
+    """
+    from datetime import datetime, timezone
+
+    from src.decision_kernel import claims
+    from src.decision_kernel.certificate import build_certificate
+
+    now = datetime(2026, 6, 19, 11, 13, tzinfo=timezone.utc)
+    receipt_cert = build_certificate(
+        certificate_type=claims.EXECUTION_RECEIPT,
+        semantic_key="execution-receipt:evt-pse-lock",
+        claim_type=claims.EXECUTION_RECEIPT,
+        mode="LIVE",
+        decision_time=now,
+        source_available_at=now,
+        agent_received_at=now,
+        persisted_at=now,
+        payload={
+            "status": "PRE_SUBMIT_ERROR",
+            "reason_code": "pre_submit_db_locked_transient: database is locked",
+        },
+        parent_edges=(),
+        parent_certificates=(),
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+
+    conn, store = _store()
+    event = _event("snap-pse-lock")
+    store.insert_or_ignore(event)
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="fam-1",
+            fdr_hypothesis_count=22,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=10.0,
+            kelly_cost_basis_id="cost_basis:abc",
+            final_intent_id="intent-1",
+            side_effect_status="PRE_SUBMIT_ERROR",
+            reason="pre_submit_db_locked_transient: database is locked",
+            decision_proof_bundle=(receipt_cert,),
+        )
+
+    from src.events.reactor import ReactorConfig
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        config=ReactorConfig(reactor_mode="live", real_order_submit_enabled=True),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    class _RecorderLedger:
+        def __init__(self):
+            self.persisted = []
+
+        def persist_all(self, certificates):
+            self.persisted.extend(certificates)
+
+        def persist_failures(self, failures):
+            pass
+
+    reactor._decision_certificate_ledger = _RecorderLedger()
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.rejected == 0
+    assert result.proof_accepted == 0
+    assert _status(conn, event.event_id) == "pending"
+    assert conn.execute("SELECT count(*) FROM no_trade_regret_events").fetchone()[0] == 0
 
 
 # ---------------------------------------------------------------------------

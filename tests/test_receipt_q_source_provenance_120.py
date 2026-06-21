@@ -61,6 +61,19 @@ def test_q_source_present_is_recorded():
     assert payload.get("q_source") == "emos", f"q_source not persisted: {rj}"
 
 
+def test_non_qkernel_receipt_omits_qkernel_execution_economics():
+    payload = json.loads(
+        _receipt_json(
+            _receipt(
+                q_source="emos",
+                qkernel_execution_economics={},
+            )
+        )
+    )
+
+    assert "qkernel_execution_economics" not in payload
+
+
 def test_replacement_forecast_receipt_tag_is_hash_stable_when_absent_and_recorded_when_set():
     """replacement_forecast=None must not drift pre-replacement receipt hashes."""
     no_tag = json.loads(_receipt_json(_receipt(replacement_forecast=None)))

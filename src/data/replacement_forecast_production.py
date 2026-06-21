@@ -84,10 +84,10 @@ def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
 
 
 def _replacement_forecast_live_materialization_queue_config() -> dict[str, object]:
-    from src.config import PROJECT_ROOT
+    from src.config import PROJECT_ROOT, RUNTIME_ROOT, STATE_DIR
 
     cfg = _settings_section("replacement_forecast_live", {}) or {}
-    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_live"
+    base_dir = STATE_DIR / "replacement_forecast_live"
     raw_manifest_dir = cfg.get("raw_manifest_dir")
     forecast_db = cfg.get("forecast_db")
 
@@ -96,7 +96,11 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         if raw in (None, ""):
             return None
         path = Path(str(raw))
-        return path if path.is_absolute() else PROJECT_ROOT / path
+        if path.is_absolute():
+            return path
+        if path.parts and path.parts[0] == "state":
+            return RUNTIME_ROOT / path
+        return PROJECT_ROOT / path
 
     return {
         "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
@@ -433,6 +437,43 @@ def _extras_fixpoint_latched(cycle: datetime) -> bool:
         return False  # unreadable latch -> not latched -> re-probe (fail toward self-healing)
 
 
+def _held_position_extras_missing_scopes(
+    cfg: dict[str, object],
+    missing_scopes: set[tuple[str, str, str]],
+) -> set[tuple[str, str, str]]:
+    """Held-position scopes whose BPF current capture is still missing.
+
+    A per-cycle extras fixpoint is a resource-control latch for ordinary current
+    targets. It must not become a live-money dead end: if a held family still
+    lacks the current raw inputs required for a fresh posterior, the capture lane
+    keeps retrying until the cycle rolls or the scope is covered.
+    """
+    if not missing_scopes:
+        return set()
+    try:
+        from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+            _held_position_families,
+        )
+        from src.state.db import _connect, _zeus_trade_db_path  # noqa: PLC0415
+
+        trade_db = Path(str(cfg.get("trades_db") or _zeus_trade_db_path()))
+        if not trade_db.exists():
+            return set()
+        conn = _connect(trade_db, write_class=None)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            held = _held_position_families(conn)
+        finally:
+            conn.close()
+        held_as_extras_scopes = {
+            (city, metric, target_date)
+            for city, target_date, metric in held
+        }
+        return set(missing_scopes) & held_as_extras_scopes
+    except Exception:
+        return set()
+
+
 def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written: int) -> None:
     """Update the per-cycle fixpoint latch from the fan-out's own progress signal.
 
@@ -535,6 +576,17 @@ def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = No
         if not missing:
             return False  # every planned scope captured for this cycle => complete (terminates)
         if _extras_fixpoint_latched(cycle):
+            held_missing = _held_position_extras_missing_scopes(cfg, missing)
+            if held_missing:
+                logger.warning(
+                    "BAYES_PRECISION_FUSION extras FIXPOINT pierced for held positions at cycle %s: "
+                    "%d held scope(s) still missing current single_runs; re-running fan-out for "
+                    "live redecision: %s",
+                    cycle.isoformat(),
+                    len(held_missing),
+                    ", ".join(sorted(f"{c}/{m}/{d}" for c, m, d in held_missing)[:20]),
+                )
+                return True
             # Residual is a proven unservable-this-cycle fixpoint -> stop re-running (the latch
             # auto-clears when the cycle advances; bound B). Surface that we are skipping ON a gap.
             logger.info(

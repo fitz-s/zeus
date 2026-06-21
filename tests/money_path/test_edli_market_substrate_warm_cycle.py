@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-13
+# Last reused/audited: 2026-06-19
 # Authority basis (2026-06-13 add): docs/operations/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (inline _refresh_pending_family_snapshots
@@ -97,11 +97,14 @@ def _reset_substrate_refresh_cursor():
     main_module._SUBSTRATE_REFRESH_CURSOR = 0
     saved_lifted = substrate_observer._SUBSTRATE_REFRESH_CURSOR
     substrate_observer._SUBSTRATE_REFRESH_CURSOR = 0
+    saved_lifted_priority = substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR
+    substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
     try:
         yield
     finally:
         main_module._SUBSTRATE_REFRESH_CURSOR = saved
         substrate_observer._SUBSTRATE_REFRESH_CURSOR = saved_lifted
+        substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = saved_lifted_priority
 
 
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
@@ -116,6 +119,13 @@ def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
             {"enabled": enabled} if name in {"edli", "edli_v1"} else (default if default is not None else {})
         ),
     )
+
+
+def test_substrate_settings_section_accepts_live_edli_alias(monkeypatch):
+    """Live settings use `edli`; the lifted warm job must not silently no-op on old `edli_v1`."""
+    monkeypatch.setattr(substrate_observer, "settings", {"edli": {"enabled": True}})
+
+    assert substrate_observer._settings_section("edli_v1") == {"enabled": True}
 
 
 def test_reactor_cycle_does_not_refresh_inline():
@@ -207,6 +217,7 @@ def test_continuous_redecision_confirms_money_path_before_emit():
 
     screen_src = inspect.getsource(main_module._edli_continuous_redecision_screen_cycle)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    retry_src = inspect.getsource(main_module._edli_confirmation_refresh_lock_retry_delays)
 
     assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
     assert "acted_state=probe_acted_state" in screen_src
@@ -216,10 +227,209 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
+    assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS" in retry_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
     assert "_market_substrate_refresh_lock" not in confirm_src
     assert "include_pending_families=False" in confirm_src
     assert "extra_priority_families=clean_families" in confirm_src
+    assert "_edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary)" in screen_src
+    assert "_edli_families_with_fresh_executable_substrate(" in screen_src
+    assert "confirmed_entry_scope &= fresh_confirmed_families" in screen_src
+    assert "confirmed_rest_scope &= fresh_confirmed_families" in screen_src
+    assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
+
+
+def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatch):
+    """A transient trade-DB lock in confirmation refresh must not become a false
+    no-evidence tick when a fresh connection retry can still capture prices."""
+
+    import src.state.db as state_db
+
+    class _TrackedConn(_FakeConn):
+        def __init__(self, name: str):
+            self.name = name
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    worlds: list[_TrackedConn] = []
+    forecasts: list[_TrackedConn] = []
+
+    def _world_conn():
+        conn = _TrackedConn(f"world-{len(worlds)}")
+        worlds.append(conn)
+        return conn
+
+    def _forecast_conn():
+        conn = _TrackedConn(f"forecasts-{len(forecasts)}")
+        forecasts.append(conn)
+        return conn
+
+    summaries = [
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "NONE",
+            "failed": 1,
+            "failure_samples": [{"condition_id": "0xlock", "error": "database is locked"}],
+        },
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "FULL",
+            "failed": 0,
+            "inserted": 1,
+        },
+    ]
+    calls: list[dict] = []
+    sleeps: list[float] = []
+
+    def _refresh(*_args, **kwargs):
+        calls.append(kwargs)
+        return summaries.pop(0)
+
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _forecast_conn)
+    monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _refresh)
+    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "0.01")
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {("Paris", "2026-06-20", "low")},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["executable_substrate_coverage_status"] == "FULL"
+    assert len(calls) == 2
+    assert sleeps == [0.01]
+    assert len(worlds) == 2 and all(conn.closed for conn in worlds)
+    assert len(forecasts) == 2 and all(conn.closed for conn in forecasts)
+
+
+def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
+    """The emit gate must fail closed when confirmation refresh did not prove
+    any executable-price coverage for the current money-path families. A PARTIAL
+    capture is not globally sufficient; it must be resolved by family freshness
+    proof before any family can be emitted."""
+
+    assert main_module._edli_confirmation_refresh_unavailable(
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "NONE",
+            "failure_samples": [{"error": "database is locked"}],
+        }
+    )
+    assert main_module._edli_confirmation_refresh_unavailable(
+        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert not main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "PARTIAL",
+            "failure_samples": [{"error": "database is locked"}],
+        }
+    )
+    assert not main_module._edli_confirmation_refresh_unavailable(
+        {"status": "refreshed", "executable_substrate_coverage_status": "FULL"}
+    )
+
+
+def test_continuous_redecision_partial_refresh_filters_to_fresh_families(monkeypatch):
+    """A PARTIAL confirmation refresh must not freeze every family. Only families
+    whose full topology has fresh YES and NO executable substrate are admitted."""
+
+    import src.data.market_topology_rows as topology_rows
+    import src.state.db as state_db
+
+    class _Conn:
+        def __init__(self, name: str):
+            self.name = name
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    forecasts = _Conn("forecasts")
+    trade = _Conn("trade")
+    topology = {
+        ("Paris", "2026-06-20", "low"): [{"condition_id": "fresh-a"}, {"condition_id": "fresh-b"}],
+        ("Tokyo", "2026-06-20", "high"): [{"condition_id": "fresh-c"}, {"condition_id": "stale-d"}],
+        ("Berlin", "2026-06-20", "high"): [],
+    }
+    fresh_conditions: list[str] = []
+
+    def _topology(_conn, payload):
+        return topology.get((payload["city"], payload["target_date"], payload["metric"]), [])
+
+    def _fresh(_conn, condition_id, fresh_at_iso):
+        assert fresh_at_iso == "2026-06-19T12:00:00+00:00"
+        fresh_conditions.append(condition_id)
+        return condition_id.startswith("fresh")
+
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade)
+    monkeypatch.setattr(topology_rows, "_event_family_market_topology_rows", _topology)
+    monkeypatch.setattr(main_module, "_condition_buy_sides_fresh", _fresh)
+
+    admitted = main_module._edli_families_with_fresh_executable_substrate(
+        {
+            ("Paris", "2026-06-20", "low"),
+            ("Tokyo", "2026-06-20", "high"),
+            ("Berlin", "2026-06-20", "high"),
+        },
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert admitted == {("Paris", "2026-06-20", "low")}
+    assert {"fresh-a", "fresh-b", "stale-d"}.issubset(set(fresh_conditions))
+    assert forecasts.closed
+    assert trade.closed
+
+
+def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
+    class Trigger:
+        def __init__(self):
+            self.authority_calls = 0
+            self.observation_calls = 0
+
+        def scan_authority_rows(self, **_kwargs):
+            self.authority_calls += 1
+            if self.authority_calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return ["authority"]
+
+        def scan_observation_instants_rows(self, **_kwargs):
+            self.observation_calls += 1
+            return ["observation"]
+
+    trigger = Trigger()
+    sleeps = []
+    monkeypatch.setenv("ZEUS_DAY0_EMIT_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+    authority, observation = main_module._edli_scan_day0_with_lock_retry(
+        trigger=trigger,
+        trade_conn=object(),
+        decision_time=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        received_at="2026-06-19T12:00:00+00:00",
+        limit=10,
+    )
+
+    assert authority == ["authority"]
+    assert observation == ["observation"]
+    assert trigger.authority_calls == 2
+    assert trigger.observation_calls == 1
+    assert sleeps == [0.01]
+
+
+def test_day0_emit_lock_exhaustion_is_caught_at_reactor_boundary():
+    source = inspect.getsource(main_module._edli_event_reactor_cycle)
+
+    assert "_edli_emit_day0_extreme_events" in source
+    assert "_edli_is_sqlite_lock_error(_day0_emit_lock_exc)" in source
+    assert "skipping Day0 emit this cycle" in source
 
 
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
@@ -636,7 +846,11 @@ def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["families_checked"] == 12
@@ -781,7 +995,11 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -910,7 +1128,11 @@ def test_pending_family_refresh_reserves_time_for_direct_gamma_lookup(monkeypatc
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["topology_budget_exhausted"] == 1
@@ -1041,7 +1263,11 @@ def test_pending_family_refresh_direct_gamma_lookup_drains_multiple_families(mon
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(conn, _FakeConn())
+    result = substrate_observer._refresh_pending_family_snapshots(
+        conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == len(families)
@@ -1216,7 +1442,11 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 0
@@ -1291,7 +1521,11 @@ def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incompl
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1357,7 +1591,11 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
 
-    result = substrate_observer._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+    )
 
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 1
@@ -1523,7 +1761,7 @@ def _pending_family_conn(event_id: str, city: str, target_date: str, metric: str
     return conn
 
 
-def _venue_close_relationship_harness(monkeypatch):
+def _venue_close_relationship_harness(monkeypatch, *, refresh_module=main_module):
     """Wire a single Hong Kong / 2026-06-07 pending family through the warm
     refresh with all venue-I/O mocked. Returns a callable
     ``run(now_utc) -> (result, submitted)`` so a single fixture can be driven at
@@ -1558,6 +1796,7 @@ def _venue_close_relationship_harness(monkeypatch):
     }
 
     import src.data.market_scanner as scanner
+    import src.data.market_topology_rows as market_topology_rows
     import src.data.polymarket_client as polymarket_client
     import src.engine.event_reactor_adapter as adapter
     import src.state.db as state_db
@@ -1565,7 +1804,13 @@ def _venue_close_relationship_harness(monkeypatch):
     monkeypatch.setattr(
         adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
     )
+    monkeypatch.setattr(
+        market_topology_rows,
+        "_event_family_market_topology_rows",
+        lambda *a, **k: topology_rows,
+    )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
     monkeypatch.setattr(
         scanner,
         "reconstruct_weather_market_from_static_topology",
@@ -1591,7 +1836,7 @@ def _venue_close_relationship_harness(monkeypatch):
         )
         # Fresh pending family per run so a prior run's cursor / state does not leak.
         world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
-        result = main_module._refresh_pending_family_snapshots(
+        result = refresh_module._refresh_pending_family_snapshots(
             world_conn, forecasts_conn, now_utc=now_utc
         )
         return result, submitted
@@ -1636,8 +1881,78 @@ def test_warm_lane_skips_venue_closed_family_keeps_venue_open_family(monkeypatch
     # The closed family produced NO refresh work: no topology family, no submit.
     assert closed_result.get("cached_topology_families", 0) == 0
     assert closed_submitted == []
-    # all-fresh / no-work status (never "refreshed") because the only family was skipped.
-    assert closed_result["status"] != "refreshed"
+    assert closed_result["status"] in {"venue_closed", "no_refreshable_families"}
+
+
+def test_lifted_substrate_warm_lane_skips_venue_closed_family(monkeypatch):
+    """The sidecar-owned lifted warmer must carry the same venue-close eviction as
+    ``src.main``; otherwise a closed held family can pin the refresh queue head and
+    starve live executable substrate updates."""
+    run = _venue_close_relationship_harness(
+        monkeypatch, refresh_module=substrate_observer
+    )
+
+    closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
+    closed_result, closed_submitted = run(closed_now)
+
+    assert closed_result["venue_closed_skipped"] == 1
+    assert closed_result.get("cached_topology_families", 0) == 0
+    assert closed_submitted == []
+    assert closed_result["status"] == "venue_closed"
+
+
+def test_lifted_substrate_warm_lane_backs_off_gamma_empty_family(monkeypatch):
+    """A family whose direct Gamma slug lookup returned empty must cool down in the
+    lifted sidecar path too; otherwise the 20s warm tick hammers the same
+    not-listed/no-topology family and starves refreshable live families."""
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    substrate_observer._GAMMA_EMPTY_BACKOFF_UNTIL.clear()
+    monkeypatch.setenv("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300")
+
+    import src.data.market_scanner as scanner
+    import src.data.market_topology_rows as market_topology_rows
+    import src.state.db as state_db
+
+    class _EmptyGammaResponse:
+        status_code = 200
+
+        def json(self):
+            return []
+
+    gamma_calls = {"count": 0}
+
+    def _empty_gamma(*_args, **_kwargs):
+        gamma_calls["count"] += 1
+        return _EmptyGammaResponse()
+
+    monkeypatch.setattr(
+        market_topology_rows,
+        "_event_family_market_topology_rows",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(scanner, "_gamma_get", _empty_gamma)
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+
+    open_now = datetime(2026, 6, 7, 6, 0, tzinfo=timezone.utc)
+    first_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    first = substrate_observer._refresh_pending_family_snapshots(
+        first_conn, forecasts_conn, now_utc=open_now
+    )
+
+    second_conn = _pending_family_conn("event-2", "Hong Kong", "2026-06-07", "high")
+    second = substrate_observer._refresh_pending_family_snapshots(
+        second_conn, forecasts_conn, now_utc=open_now
+    )
+
+    assert first["gamma_slug_attempted"] == 1
+    assert first["gamma_slug_empty"] == 1
+    assert gamma_calls["count"] == 1
+    assert second.get("gamma_refresh_families", 0) == 0
+    assert second["no_topology_backed_off"] == 1
+    assert gamma_calls["count"] == 1
 
 
 def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypatch):

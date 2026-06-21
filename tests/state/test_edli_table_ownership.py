@@ -12,12 +12,15 @@ EDLI_WORLD_TABLES = {
     "opportunity_events",
     "opportunity_event_processing",
     "event_dead_letters",
-    "execution_feasibility_evidence",
     "no_trade_regret_events",
     "edli_no_submit_receipts",
     "edli_live_cap_usage",
     "edli_live_order_events",
     "edli_live_order_projection",
+}
+
+EDLI_TRADE_TABLES = {
+    "execution_feasibility_evidence",
 }
 
 
@@ -44,13 +47,16 @@ def test_trade_conn_does_not_silently_write_world_event_tables():
     conn = sqlite3.connect(":memory:")
     init_schema_trade_only(conn)
     assert EDLI_WORLD_TABLES.isdisjoint(_table_names(conn))
+    assert EDLI_TRADE_TABLES <= _table_names(conn)
 
 
 def test_db_table_ownership_registers_edli_tables():
-    from src.state.table_registry import DBIdentity, tables_for
+    from src.state.table_registry import DBIdentity, owner, tables_for
 
     assert EDLI_WORLD_TABLES <= tables_for(DBIdentity.WORLD)
+    assert EDLI_TRADE_TABLES <= tables_for(DBIdentity.TRADE)
     assert EDLI_WORLD_TABLES.isdisjoint(tables_for(DBIdentity.TRADE))
+    assert owner("execution_feasibility_evidence") is DBIdentity.TRADE
 
 
 def test_schema_version_check_accepts_edli_bump():
@@ -70,6 +76,7 @@ def test_schema_version_check_accepts_edli_bump():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     assert EDLI_WORLD_TABLES <= _table_names(conn)
+    assert EDLI_TRADE_TABLES.isdisjoint(_table_names(conn))
 
 
 def test_no_cross_db_fk():

@@ -366,6 +366,7 @@ class PolymarketClient:
             polygon_rpc_url=os.environ.get("POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL),
             api_creds=creds.get("api_creds"),
             q1_egress_evidence_path=q1_egress_evidence,
+            network_timeout_seconds=self._public_http_timeout,
         )
         self._v2_adapter = adapter
         logger.info("Polymarket CLOB V2 adapter initialized (live mode)")

@@ -7,7 +7,7 @@
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-06-20
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
 """Tests for exit triggers and harvester."""
 
@@ -575,6 +575,119 @@ def test_chain_reconciliation_does_not_void_chain_observed_aggregate_lot():
     assert stats["skipped_aggregate_allocation_existing_chain_observation"] == 1
     assert older.state == "holding"
     assert newer.state == "holding"
+
+
+def test_chain_reconciliation_confirmed_absent_position_quarantines_not_voids(tmp_path):
+    """Relationship: confirmed fills missing on-chain require attribution, not void."""
+
+    from src.state.chain_reconciliation import (
+        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+        CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+        ChainPosition,
+        reconcile,
+    )
+    from src.state.db import query_position_events
+    from src.state.portfolio import FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+
+    conn = get_connection(tmp_path / "chain_confirmed_absence.db")
+    init_schema(conn)
+
+    pos = _make_position(
+        trade_id="confirmed-absent-1",
+        state="day0_window",
+        chain_state="synced",
+        direction="buy_no",
+        token_id="tok-confirmed-yes",
+        no_token_id="tok-confirmed-no",
+        shares=5.06,
+        chain_shares=5.0599,
+        cost_basis_usd=3.795,
+        size_usd=3.795,
+        entry_price=0.75,
+        entered_at="2026-06-20T02:44:00+00:00",
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        env="live",
+        unit="C",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        entry_fill_verified=True,
+        order_status="filled",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster,
+            target_date, bin_label, direction, unit, size_usd, shares,
+            cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+            entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id,
+            order_status, updated_at, temperature_metric, fill_authority,
+            chain_shares, chain_seen_at
+        ) VALUES (
+            ?, 'day0_window', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            pos.trade_id,
+            pos.trade_id,
+            pos.market_id,
+            pos.city,
+            pos.cluster,
+            pos.target_date,
+            pos.bin_label,
+            pos.direction,
+            pos.unit,
+            pos.size_usd,
+            pos.shares,
+            pos.cost_basis_usd,
+            pos.entry_price,
+            pos.p_posterior,
+            "snap-confirmed-absent",
+            "ens_member_counting",
+            pos.strategy_key,
+            "opening_inertia",
+            "day0_capture",
+            pos.chain_state,
+            pos.token_id,
+            pos.no_token_id,
+            "cond-confirmed-absent",
+            "order-confirmed-absent",
+            "filled",
+            pos.entered_at,
+            "low",
+            pos.fill_authority,
+            pos.chain_shares,
+            "2026-06-20T02:45:00+00:00",
+        ),
+    )
+    conn.commit()
+
+    portfolio = PortfolioState(positions=[pos])
+    stats = reconcile(
+        portfolio,
+        [ChainPosition(token_id="tok-other", size=1.0, avg_price=0.5, condition_id="cond-other")],
+        conn=conn,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT phase, chain_state, shares, chain_shares FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    events = query_position_events(conn, pos.trade_id)
+    conn.close()
+
+    assert stats["voided"] == 0
+    assert stats["confirmed_chain_absence_quarantined"] == 1
+    assert row["phase"] == "quarantined"
+    assert row["chain_state"] == CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["shares"] == pos.shares
+    assert row["chain_shares"] == pos.chain_shares
+    assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
+    assert events[0]["details"]["reason"] == CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON
+    assert events[0]["details"]["held_token_id"] == "tok-confirmed-no"
+    assert events[0]["details"]["no_token_id"] == "tok-confirmed-no"
 
 
 def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tmp_path):

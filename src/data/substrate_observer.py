@@ -71,6 +71,7 @@ _market_substrate_refresh_lock = threading.Lock()
 # outer pending gates were deleted (§9 point 2). Never references consumer state.
 _market_discovery_last_completed_monotonic: float | None = None
 _SUBSTRATE_REFRESH_CURSOR = 0
+_SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
 
@@ -79,10 +80,18 @@ def _settings_section(name: str, default=None):
     """Mirror of src.main._settings_section (precedent: replacement_forecast_production)."""
     source = settings._data if hasattr(settings, "_data") else settings
     if isinstance(source, dict):
-        return source.get(name, default)
+        value = source.get(name)
+        if value is None and name == "edli_v1":
+            value = source.get("edli")
+        return value if value is not None else default
     try:
         return source[name]
     except KeyError:
+        if name == "edli_v1":
+            try:
+                return source["edli"]
+            except KeyError:
+                pass
         return default
 
 
@@ -321,12 +330,16 @@ def _topology_lookup_deadline_for_snapshot_refresh(
     """Stop topology reconstruction early enough to attempt direct Gamma lookup."""
 
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
     gamma_min_slice_s = max(
         0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "15.0")),
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "2.0")),
     )
-    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
-    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s)
+    # Gamma is only needed for families whose topology is missing. In steady-state
+    # live operation the money-path families already have cached topology, so the
+    # Gamma reserve must not consume the whole pre-capture window and collapse the
+    # topology scan to one family per tick.
+    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s * 0.5)
     return max(refresh_deadline - refresh_budget_s, pre_capture_deadline - gamma_min_slice_s)
 def _snapshot_capture_budget_for_refresh(
     *,
@@ -394,6 +407,7 @@ def _refresh_pending_family_snapshots(
     )
     from src.data.market_topology_rows import _event_family_market_topology_rows
     from src.data.polymarket_client import PolymarketClient
+    from src.strategy.market_phase import family_venue_closed as _family_venue_closed
     from src.state.db import get_trade_connection, get_trade_connection_read_only
 
     now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
@@ -495,7 +509,7 @@ def _refresh_pending_family_snapshots(
             "include_pending_families": bool(include_pending_families),
         }
 
-    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
+    global _SUBSTRATE_REFRESH_CURSOR, _SUBSTRATE_PRIORITY_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
     new_priority_families: list[tuple[str, str, str]] = []
     if _NEW_FAMILY_CONDITION_IDS:
         try:
@@ -521,6 +535,13 @@ def _refresh_pending_family_snapshots(
         except Exception:
             pass
     ordinary_families = families[len(priority_families):]
+    n_priority_families = len(priority_families)
+    priority_start_offset = _SUBSTRATE_PRIORITY_REFRESH_CURSOR % max(1, n_priority_families)
+    rotated_priority_families = (
+        priority_families[priority_start_offset:] + priority_families[:priority_start_offset]
+        if priority_families
+        else []
+    )
     n_ordinary_families = len(ordinary_families)
     start_offset = _SUBSTRATE_REFRESH_CURSOR % max(1, n_ordinary_families)
     rotated_ordinary_families = (
@@ -528,7 +549,7 @@ def _refresh_pending_family_snapshots(
         if ordinary_families
         else []
     )
-    families = priority_families + new_priority_families + rotated_ordinary_families
+    families = rotated_priority_families + new_priority_families + rotated_ordinary_families
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
@@ -557,15 +578,10 @@ def _refresh_pending_family_snapshots(
         refresh_budget_s=refresh_budget_s,
         snapshot_reserve_s=snapshot_reserve_s,
     )
-
-    # Staleness pre-filter REMOVED (STEP 4, consolidated timeliness fix): the
-    # local lexicographic _drop_stale_families is now redundant. Strictly-past
-    # (already-settled) targets can no longer become pending events — the
-    # emission floor (STEP 2, forecast_snapshot_ready.scan_committed_snapshots)
-    # never emits them and the EventStore claim floor (STEP 3, fetch_pending)
-    # never returns them — so no stale family reaches this refresh path. The
-    # pending-event query above is the single source of families; it is sourced
-    # from the same already-timeliness-filtered opportunity_events.
+    _gamma_empty_backoff_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300.0")),
+    )
 
     # Throughput contract: never slice pending families by a fixed count. Live has
     # hundreds of active weather families across time zones; a hard family cap lets
@@ -584,6 +600,8 @@ def _refresh_pending_family_snapshots(
     cached_topology_incomplete = 0
     topology_budget_exhausted = False
     topology_deferred_families = 0
+    venue_closed_skipped = 0
+    no_topology_backed_off = 0
 
     write_conn = get_trade_connection(write_class="live")
     try:
@@ -603,10 +621,20 @@ def _refresh_pending_family_snapshots(
                 )
                 break
             families_processed_this_cycle += 1
+            if _family_venue_closed(city=city, target_date=target_date, now_utc=now_utc):
+                venue_closed_skipped += 1
+                continue
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
                 no_topology += 1
+                nb_key = _refresh_family_key(city, target_date, metric)
+                if (
+                    _gamma_empty_backoff_s > 0.0
+                    and _GAMMA_EMPTY_BACKOFF_UNTIL.get(nb_key, 0.0) > time.monotonic()
+                ):
+                    no_topology_backed_off += 1
+                    continue
                 logger.debug(
                     "refresh_pending_family_snapshots: no market topology for %s/%s/%s "
                     "(no Polymarket market for this family — event will be rejected at gate)",
@@ -653,12 +681,50 @@ def _refresh_pending_family_snapshots(
             start_offset
             + max(1, max(0, families_processed_this_cycle - len(priority_families)))
         ) % max(1, n_ordinary_families)
+        if n_priority_families:
+            _SUBSTRATE_PRIORITY_REFRESH_CURSOR = (
+                priority_start_offset
+                + max(1, min(families_processed_this_cycle, n_priority_families))
+            ) % n_priority_families
 
         if not gamma_refresh_families and not cached_topology_markets:
+            if venue_closed_skipped:
+                no_work_status = (
+                    "venue_closed"
+                    if venue_closed_skipped == len(families)
+                    else "no_refreshable_families"
+                )
+                logger.info(
+                    "refresh_pending_family_snapshots: no refreshable families, skipped. "
+                    "status=%s families=%d fresh_skipped=%d venue_closed_skipped=%d "
+                    "no_topology=%d no_topology_backed_off=%d cached_topology_incomplete=%d",
+                    no_work_status,
+                    len(families),
+                    fresh_skipped,
+                    venue_closed_skipped,
+                    no_topology,
+                    no_topology_backed_off,
+                    cached_topology_incomplete,
+                )
+                return {
+                    "status": no_work_status,
+                    "families_checked": len(families),
+                    "explicit_priority_families": len(explicit_priority_families),
+                    "include_pending_families": bool(include_pending_families),
+                    "open_rest_priority_families": len(open_rest_priority_families),
+                    "held_position_priority_families": len(held_position_priority_families),
+                    "fresh_skipped": fresh_skipped,
+                    "no_topology": no_topology,
+                    "venue_closed_skipped": venue_closed_skipped,
+                    "no_topology_backed_off": no_topology_backed_off,
+                    "cached_topology_incomplete": cached_topology_incomplete,
+                }
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
-                "families=%d fresh_skipped=%d no_topology=%d cached_topology_incomplete=%d",
-                len(families), fresh_skipped, no_topology, cached_topology_incomplete,
+                "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "
+                "no_topology_backed_off=%d cached_topology_incomplete=%d",
+                len(families), fresh_skipped, no_topology, venue_closed_skipped,
+                no_topology_backed_off, cached_topology_incomplete,
             )
             return {
                 "status": "all_fresh",
@@ -669,6 +735,8 @@ def _refresh_pending_family_snapshots(
                 "held_position_priority_families": len(held_position_priority_families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
+                "venue_closed_skipped": venue_closed_skipped,
+                "no_topology_backed_off": no_topology_backed_off,
                 "cached_topology_incomplete": cached_topology_incomplete,
             }
 
@@ -841,6 +909,10 @@ def _refresh_pending_family_snapshots(
                         _submit_gamma_jobs(executor)
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
+            if _gamma_empty_backoff_s > 0.0 and gamma_empty_family_keys:
+                _eb_deadline = time.monotonic() + _gamma_empty_backoff_s
+                for _eb_key in gamma_empty_family_keys:
+                    _GAMMA_EMPTY_BACKOFF_UNTIL[_eb_key] = _eb_deadline
 
             # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
             # families. The old fallback called the global weather discovery scanner,
@@ -924,6 +996,15 @@ def _refresh_pending_family_snapshots(
                 "gamma_refresh_families": len(gamma_refresh_families),
                 "cached_topology_families": cached_topology_families,
                 "skipped_not_found": skipped_not_found,
+                "no_topology": no_topology,
+                "venue_closed_skipped": venue_closed_skipped,
+                "no_topology_backed_off": no_topology_backed_off,
+                "gamma_slug_attempted": gamma_slug_attempted,
+                "gamma_slug_empty": gamma_slug_empty,
+                "gamma_slug_http_non_200": gamma_slug_http_non_200,
+                "gamma_slug_failed": gamma_slug_failed,
+                "gamma_slug_invalid": gamma_slug_invalid,
+                "gamma_slug_timebox_unattempted": gamma_slug_timebox_unattempted,
             }
 
         # Step 4: CLOB fetch + cache write.
@@ -959,6 +1040,8 @@ def _refresh_pending_family_snapshots(
                 "cached_topology_incomplete": cached_topology_incomplete,
                 "no_topology": no_topology,
                 "fresh_skipped": fresh_skipped,
+                "venue_closed_skipped": venue_closed_skipped,
+                "no_topology_backed_off": no_topology_backed_off,
                 "gamma_slug_attempted": gamma_slug_attempted,
                 "gamma_slug_empty": gamma_slug_empty,
                 "gamma_slug_http_non_200": gamma_slug_http_non_200,
@@ -999,7 +1082,9 @@ def _refresh_pending_family_snapshots(
         "cached_topology_families": cached_topology_families,
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
+        "no_topology_backed_off": no_topology_backed_off,
         "fresh_skipped": fresh_skipped,
+        "venue_closed_skipped": venue_closed_skipped,
         "topology_budget_exhausted": int(topology_budget_exhausted),
         "topology_deferred_families": topology_deferred_families,
         "skipped_not_found": skipped_not_found,

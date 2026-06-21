@@ -1,5 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-20 (lifecycle conversion fix: no-identical-re-rest,
+#   shadow-gate collapse, double-submit-safety + first-rest-default acceptance tests)
 # Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
 # (operator escalation: taker-only execution root cause) +
 # docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md (KM measurement).
@@ -124,9 +125,17 @@ class TestEscalationLane:
         assert decision.chosen_mode == "TAKER"
         assert decision.policy == POLICY_TAKER_ESCALATED_AFTER_REST
 
-    def test_escalated_but_taker_forbidden_rests(self):
+    def test_escalated_but_taker_forbidden_does_not_re_rest(self):
         """Escalation licenses the cross only when the taker lane is admissible
-        (the spread guard stays lawful — K4.0 keeps TAKER_MAX_RELATIVE_SPREAD)."""
+        (the spread guard stays lawful — K4.0 keeps TAKER_MAX_RELATIVE_SPREAD).
+
+        NO-IDENTICAL-RE-REST fix (2026-06-20 conversion death-line): when the rest
+        already expired UNFILLED and the fresh taker is INADMISSIBLE, the policy must
+        NOT re-post the identical unfillable rest — it returns a NO-TRADE
+        (chosen_ev=-inf) so the trade-score gate rejects and the family re-evaluates
+        on a FRESH book next cycle. The verdict still travels as MAKER_TAKER_FORBIDDEN
+        for receipt provenance.
+        """
         decision = _decide(
             escalated_after_rest=True,
             best_bid=0.10,
@@ -138,6 +147,18 @@ class TestEscalationLane:
         )
         assert decision.chosen_mode == "MAKER"
         assert decision.policy == POLICY_MAKER_TAKER_FORBIDDEN
+        # The proven-unfillable rest is NOT re-posted: chosen_ev=-inf == no-trade.
+        assert decision.chosen_ev == float("-inf")
+
+    def test_first_rest_for_family_still_rests_default(self):
+        """The Karachi rest-first antibody is intact: a family with NO prior
+        cancelled-unfilled rest (escalated_after_rest=False) on a healthy book
+        REST_DEFAULTs as a real maker rest (finite ev) — only an ESCALATED family
+        whose taker is inadmissible no-trades."""
+        decision = _decide(minutes_to_event_end=20 * 60.0)  # escalated defaults False
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_REST_DEFAULT
+        assert decision.chosen_ev != float("-inf")
 
 
 class TestExceptionLanes:
@@ -329,6 +350,78 @@ class TestFixBConservativeQlcbCapOnCross:
         )
         assert decision.chosen_mode == "MAKER"
         assert decision.chosen_ev == float("-inf")  # trade-score gate rejects: no trade
+
+
+class TestDoubleSubmitSafetyPreserved:
+    """Single-flight double-submit safety is intact after the conversion fix: a
+    family with a genuinely-LIVE newer rest still HOLDs (no cross) even when the
+    escalation flag is also (inconsistently) set — the unexpired rest is the truth.
+    """
+
+    def test_live_competing_rest_holds_even_when_escalated(self):
+        decision = _decide(
+            unexpired_family_rest=True,   # a genuinely-LIVE newer same-family rest
+            escalated_after_rest=True,    # and a prior cancelled rest armed escalation
+            taker_all_in_cost=0.50,       # a perfectly admissible taker (ask <= q_lcb)
+            best_ask=0.50,
+            q_lcb=0.71,
+            minutes_to_event_end=20 * 60.0,
+        )
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_HOLD_REST_IN_PROGRESS
+        assert decision.chosen_ev == float("-inf")  # NO new order while a live rest exists
+
+
+class TestTakerQualityShadowGateCollapsed:
+    """SHADOW-GATE COLLAPSE (operator law = NO CAPS, 2026-06-20). A taker that
+    passes the conservative after-cost law (fresh ask + fee <= q_lcb, i.e.
+    taker_edge >= 0 — the same FIX-B bound) must NOT be aborted by the extra
+    0.03 / 0.05 / 1.20 / 0.60 thresholds. They are demoted to TELEMETRY: the
+    proof passes on the conservative surplus; the legacy thresholds still travel
+    on the receipt but no longer gate.
+    """
+
+    def _proof(self, *, q_lcb, ask):
+        from src.engine.event_reactor_adapter import (
+            _build_event_bound_taker_quality_proof,
+        )
+
+        return _build_event_bound_taker_quality_proof(
+            actionable_payload={
+                "direction": "buy_yes",
+                "q_live": q_lcb,
+                "q_lcb_5pct": q_lcb,
+                "live_cap_reserved_notional_usd": 10.0,
+                "proof_maker_limit_price": 0.45,
+                "proof_ev_maker": 0.01,
+            },
+            order_mode="TAKER",
+            fresh_best_bid=ask - 0.01,
+            fresh_best_ask=ask,
+        )
+
+    def test_positive_surplus_below_legacy_thresholds_passes(self):
+        """edge in [0, 0.03): conservative surplus positive but BELOW the 0.03
+        legacy edge cap. On the unfixed tree passed=False (aborts the cross). After
+        the fix passed=True with legacy_threshold_pass=False recorded as telemetry."""
+        proof = self._proof(q_lcb=0.52, ask=0.49)  # edge ~0.0175 in [0, 0.03)
+        assert proof is not None
+        assert float(proof["taker_fee_adjusted_edge"]) >= 0.0
+        assert float(proof["taker_fee_adjusted_edge"]) < float(
+            proof["min_taker_fee_adjusted_edge"]
+        )
+        assert proof["passed"] is True
+        # The legacy cap is recorded as telemetry only (it did NOT gate).
+        assert proof["legacy_threshold_pass"] is False
+        assert proof["passed_basis"] == "conservative_after_cost_surplus_nonnegative"
+
+    def test_negative_surplus_still_fails_closed(self):
+        """The conservative law is NEVER loosened: ask + fee > q_lcb (negative
+        after-cost edge) still fails closed — only the EXTRA cap was removed."""
+        proof = self._proof(q_lcb=0.50, ask=0.55)  # edge clearly negative
+        assert proof is not None
+        assert float(proof["taker_fee_adjusted_edge"]) < 0.0
+        assert proof["passed"] is False
 
 
 class TestConstantsProvenance:

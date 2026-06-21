@@ -10,7 +10,7 @@ Source: round2_verdict.md §1.1 #8 (task_boot_profiles → 7 SKILLs). Replaces `
 
 Trigger keywords: docs, authority, packet, registry, current_state, guidance.
 
-## Required reads (in order)
+## Reads (in order)
 
 1. AGENTS.md (root)
 2. workspace_map.md
@@ -25,7 +25,7 @@ Trigger keywords: docs, authority, packet, registry, current_state, guidance.
 
 - docs/operations/current_state.md
 
-## Required proofs (answer BEFORE editing)
+## Proof questions (answer BEFORE editing)
 
 1. **authority_context_history_layering**: Which surfaces are authority, derived context, current fact, or history?
    - Evidence: AGENTS.md, workspace_map.md, architecture/docs_registry.yaml

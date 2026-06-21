@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -244,6 +245,246 @@ def test_no_regression_new_process_uses_sanctioned_db_path_no_independent_cross_
         "the producer must not open a raw independent connection; cross-DB writes use the "
         "sanctioned ATTACH+SAVEPOINT path (INV-37)."
     )
+
+
+def test_open_position_tokens_are_market_channel_seed_priority():
+    from src.ingest.price_channel_ingest import _edli_held_position_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?)",
+        [
+            ("active-1", "active", "yes-active", "no-active"),
+            ("day0-1", "day0_window", None, "no-day0"),
+            ("exit-1", "pending_exit", "yes-exit", None),
+            ("closed-1", "economically_closed", "yes-closed", "no-closed"),
+        ],
+    )
+
+    assert _edli_held_position_priority_token_ids(conn) == {
+        "yes-active",
+        "no-active",
+        "no-day0",
+        "yes-exit",
+    }
+
+
+def test_market_channel_seed_first_prefers_held_positions_over_candidate_universe():
+    from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
+
+    assert _edli_market_channel_seed_first_token_ids(
+        held_priority_token_ids={"held-yes", "held-no"},
+        candidate_priority_token_ids={"candidate-yes", "candidate-no"},
+    ) == {"held-yes", "held-no"}
+
+
+def test_market_channel_seed_first_falls_back_to_candidates_without_open_positions():
+    from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
+
+    assert _edli_market_channel_seed_first_token_ids(
+        held_priority_token_ids=set(),
+        candidate_priority_token_ids={"candidate-yes", "candidate-no"},
+    ) == {"candidate-yes", "candidate-no"}
+
+
+def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_trade_only
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.commit()
+    trade_conn.close()
+
+    trade = sqlite3.connect(trade_path)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, direction, strategy_key,
+            updated_at, temperature_metric, token_id, no_token_id, condition_id
+        ) VALUES (
+            'pos-1', 'active', 'Paris', '2026-06-20', 'buy_no',
+            'opening_inertia', '2026-06-19T10:00:00+00:00', 'low',
+            'yes-token', 'no-token', '0xcondition'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (
+            'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
+            'question-1', 'yes-token', 'no-token', 1, 1, 0,
+            '2026-06-21T00:00:00+00:00', '0.01', '5', '{}',
+            '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-19T10:00:00+00:00',
+            '2026-06-19T10:05:00+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_held_position_quote_evidence()
+
+    assert result["held_priority_token_ids"] == 2
+    assert result["held_token_metadata"] == 2
+    assert result["held_quote_refresh_events"] == 2
+    check = sqlite3.connect(trade_path)
+    try:
+        assert (
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            == 4
+        )
+    finally:
+        check.close()
+
+
+def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_trade_only
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason,
+            regret_bucket, token_id, decision_time, city, target_date, metric,
+            family_id, bin_label, direction, created_at, schema_version
+        ) VALUES (
+            'regret-1', 'event-1', 'EXECUTOR_EXPRESSIBILITY',
+            'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING',
+            'BOOK_GAP', 'no-token', '2026-06-19T10:00:00+00:00',
+            'Paris', '2026-06-20', 'low', 'family-paris-low',
+            'Will the lowest temperature in Paris be 19C?', 'buy_no',
+            '2026-06-19T10:00:00+00:00', 1
+        )
+        """
+    )
+    world_conn.commit()
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (
+            'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
+            'question-1', 'yes-token', 'no-token', 1, 1, 0,
+            '2026-06-21T00:00:00+00:00', '0.01', '5', '{}',
+            '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-19T10:00:00+00:00',
+            '2026-06-19T10:05:00+00:00'
+        )
+        """
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_candidate_priority_quote_evidence(limit=4)
+
+    assert result["candidate_priority_token_ids"] == 1
+    assert result["candidate_token_metadata"] == 1
+    assert result["candidate_quote_refresh_events"] == 1
+    check = sqlite3.connect(trade_path)
+    try:
+        assert (
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            == 2
+        )
+    finally:
+        check.close()
 
 
 # ===========================================================================
@@ -542,6 +783,15 @@ def test_no_regression_lifted_reconcile_cycle_invokable_in_new_host():
     # cycle consults through _settings_section.
     assert hasattr(lane, "settings")
     assert hasattr(lane, "_settings_section")
+
+
+def test_price_channel_settings_section_accepts_live_edli_alias(monkeypatch):
+    """Live settings use `edli`; the lifted lane must not silently no-op on old `edli_v1`."""
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane, "settings", {"edli": {"enabled": True}})
+
+    assert lane._settings_section("edli_v1") == {"enabled": True}
 
 
 def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module():

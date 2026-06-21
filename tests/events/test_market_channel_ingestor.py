@@ -24,13 +24,18 @@ from src.events.triggers.market_channel_ingestor import (
     invalidate_executable_snapshots_for_market_channel_action,
     insert_execution_feasibility_evidence,
 )
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.strategy.live_inference.executable_cost import ExecutableCostError, quote_book_from_depth_json, executable_cost
 
 
 def _conn_writer():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
+    # Most ingestor unit tests use a single in-memory connection to exercise
+    # parsing/coalescing behavior. Live wiring is covered separately by
+    # test_market_channel_can_write_feasibility_to_trade_connection.
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+    ensure_table(conn)
     return conn, EventWriter(conn)
 
 
@@ -161,6 +166,60 @@ def test_insert_execution_feasibility_evidence():
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 1
 
 
+def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
+    conn, _writer = _conn_writer()
+    row = {
+        "event_id": "event-static-book",
+        "condition_id": "0xcondition",
+        "token_id": "token-1",
+        "outcome_label": "NO",
+        "direction": "buy_no",
+        "quote_seen_at": "2026-05-24T10:00:00+00:00",
+        "book_hash_before": "hash-1",
+        "best_bid_before": 0.74,
+        "best_ask_before": 0.75,
+        "depth_before_json": '{"bids":[],"asks":[]}',
+        "order_intent_time": None,
+        "submit_time": None,
+        "accepted_or_rejected": None,
+        "venue_order_id": None,
+        "fok_full_fill": None,
+        "fak_partial_fill": None,
+        "filled_shares": None,
+        "fill_price": None,
+        "cancel_remainder_status": None,
+        "book_hash_after": None,
+        "latency_ms": None,
+        "maker_cancel_before_submit": None,
+        "would_have_edge_after_fee": 1,
+        "fill_truth_source": "evidence_only",
+        "created_at": "2026-05-24T10:00:01+00:00",
+    }
+    insert_execution_feasibility_evidence(conn, row)
+    refreshed = {
+        **row,
+        "book_hash_before": "hash-2",
+        "best_bid_before": 0.73,
+        "best_ask_before": 0.76,
+        "created_at": "2026-05-24T10:02:01+00:00",
+    }
+    insert_execution_feasibility_evidence(conn, refreshed)
+
+    rows = conn.execute(
+        """
+        SELECT quote_seen_at, created_at, book_hash_before, best_bid_before, best_ask_before
+          FROM execution_feasibility_evidence
+        """
+    ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "2026-05-24T10:00:00+00:00"
+    assert rows[0][1] == "2026-05-24T10:02:01+00:00"
+    assert rows[0][2] == "hash-2"
+    assert rows[0][3] == pytest.approx(0.73)
+    assert rows[0][4] == pytest.approx(0.76)
+
+
 def test_quote_cache_seeded_from_rest_on_connect():
     conn, writer = _conn_writer()
     cache = QuoteCache()
@@ -188,6 +247,191 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0] == 1
 
 
+def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    metadata = {
+        "token-1": _metadata("token-1")["token-1"],
+        "token-2": _metadata("token-2")["token-2"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1", "token-2"},
+        token_metadata=metadata,
+        quote_cache=cache,
+    )
+    fetch_calls: list[str] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    results = ingestor.seed_from_rest(
+        fetch,
+        received_at="2026-05-24T10:00:00+00:00",
+        token_ids={"token-2"},
+    )
+
+    assert len(results) == 1
+    assert fetch_calls == ["token-2"]
+    assert cache.get("token-2") is not None
+    assert cache.get("token-1") is None
+    rows = conn.execute(
+        "SELECT token_id FROM execution_feasibility_evidence ORDER BY token_id"
+    ).fetchall()
+    assert rows == [("token-2",), ("token-2",)]
+
+
+def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[
+            f"token-{idx}"
+        ]
+        for idx in range(5)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=cache,
+    )
+    fetch_calls: list[str] = []
+    commit_counts: list[int] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=lambda: commit_counts.append(
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        ),
+        chunk_size=2,
+    )
+
+    assert written == 5
+    assert fetch_calls == [f"token-{idx}" for idx in range(5)]
+    # Two evidence rows per token (buy/sell for the canonical side), committed
+    # after each bounded batch rather than only after the full universe.
+    assert commit_counts == [4, 8, 10]
+
+
+def test_rest_seed_deadline_stops_before_fetching_more_tokens():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-1": _metadata("token-1")["token-1"],
+        "token-2": _metadata("token-2")["token-2"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+    )
+    fetch_calls: list[str] = []
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: fetch_calls.append(token_id) or {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+        deadline_monotonic=0.0,
+    )
+
+    assert written == 0
+    assert fetch_calls == []
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressively():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[
+            f"token-{idx}"
+        ]
+        for idx in range(5)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=QuoteCache(),
+    )
+    fetch_calls: list[str] = []
+    commit_counts: list[int] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "event_type": "book",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+    service.connected = False
+    service.gap_start = "2026-05-24T09:58:00+00:00"
+
+    written = service.reconnect_rest_books_in_chunks(
+        token_ids=set(metadata),
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=lambda: commit_counts.append(
+            conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0]
+        ),
+        chunk_size=2,
+    )
+
+    assert written == 5
+    assert fetch_calls == [f"token-{idx}" for idx in range(5)]
+    assert commit_counts == [2, 4, 5]
+    assert service.connected is True
+    assert service.gap_start is None
+
+
 def test_market_channel_quote_writes_feasibility_evidence_only():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
@@ -207,6 +451,43 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
     )
 
     rows = conn.execute(
+        "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
+    ).fetchall()
+    assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
+
+
+def test_market_channel_can_write_feasibility_to_trade_connection():
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    writer = EventWriter(world_conn)
+    trade_conn = sqlite3.connect(":memory:")
+    init_schema_trade_only(trade_conn)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        feasibility_conn=trade_conn,
+    )
+
+    ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "outcome_label": "YES",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "hash-1",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    )
+
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+    assert world_conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
+    ).fetchone()[0] == 0
+    rows = trade_conn.execute(
         "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
     ).fetchall()
     assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
@@ -630,13 +911,17 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
     )
     assert "yes-cand" in token_metadata
 
-    # World DB with the REAL execution_feasibility_evidence schema + witness reads.
+    # World DB owns opportunity events; trade DB owns execution_feasibility_evidence
+    # and is the same book-evidence connection the pre-submit witness reads in live.
     world_conn = sqlite3.connect(":memory:")
     init_schema(world_conn)
+    trade_conn = sqlite3.connect(":memory:")
+    init_schema_trade_only(trade_conn)
     ingestor = MarketChannelIngestor(
         EventWriter(world_conn),
         active_token_ids=set(token_metadata),
         token_metadata=token_metadata,
+        feasibility_conn=trade_conn,
     )
 
     seed_time = "2026-05-31T12:00:00+00:00"
@@ -665,11 +950,12 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
 
     ingestor.seed_from_rest(_fetch_orderbook, received_at=seed_time)
     world_conn.commit()
+    trade_conn.commit()
 
     # Decision time strictly AFTER the seed quote — causal witness must accept it.
     decision_time = datetime(2026, 5, 31, 12, 0, 30, tzinfo=timezone.utc)
     row = _edli_latest_pre_submit_book_row(
-        world_conn, token_id="yes-cand", decision_time=decision_time
+        trade_conn, token_id="yes-cand", decision_time=decision_time
     )
     assert row is not None, "witness must find a fresh evidence row for the candidate token"
     quote_seen_at, book_hash_before, best_bid_before, best_ask_before = row
@@ -682,7 +968,7 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
     past_decision = datetime(2026, 5, 31, 11, 59, 0, tzinfo=timezone.utc)
     assert (
         _edli_latest_pre_submit_book_row(
-            world_conn, token_id="yes-cand", decision_time=past_decision
+            trade_conn, token_id="yes-cand", decision_time=past_decision
         )
         is None
     ), "causal guard must still reject quotes seen after the decision time"

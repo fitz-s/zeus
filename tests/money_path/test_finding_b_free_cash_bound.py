@@ -43,6 +43,7 @@ def _isolate_edli_settings(monkeypatch):
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
 

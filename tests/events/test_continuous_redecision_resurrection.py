@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-06-19
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -865,6 +865,58 @@ def test_open_rest_families_are_priority_warm_inputs_without_fact_window_scan():
     assert "ROW_NUMBER" not in statements
     assert "PARTITION BY" not in statements
     assert "WHERE VENUE_ORDER_ID = ?" in statements
+
+
+def test_open_rest_priority_uses_snapshot_family_before_position_projection():
+    import src.main as main
+
+    trade = _mem_trade()
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN event_id TEXT")
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, position_id TEXT, venue_order_id TEXT, intent_kind TEXT, "
+        "token_id TEXT, snapshot_id TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE TABLE position_current ("
+        "position_id TEXT PRIMARY KEY, city TEXT, target_date TEXT, "
+        "temperature_metric TEXT, phase TEXT)"
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, yes_token_id, no_token_id,
+            selected_outcome_token_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, event_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "snap-chongqing-no",
+            "condition-chongqing",
+            "yes-token",
+            "no-token",
+            "no-token",
+            "0.67",
+            "0.68",
+            "2026-06-19T12:40:00+00:00",
+            "2026-06-19T12:30:00+00:00",
+            "highest-temperature-in-chongqing-on-june-21-2026",
+        ),
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?)",
+        ("cmd-live", "pos-not-yet-projected", "order-live", "ENTRY", "no-token", "snap-chongqing-no"),
+    )
+    trade.execute("INSERT INTO venue_order_facts VALUES (?,?,?)", ("order-live", "LIVE", 1))
+    trade.commit()
+
+    families = main._open_rest_family_rows_for_refresh(trade)
+
+    assert families == [("Chongqing", "2026-06-21", "high")]
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────

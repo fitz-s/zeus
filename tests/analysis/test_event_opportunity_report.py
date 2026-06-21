@@ -27,6 +27,7 @@ def test_event_opportunity_report_counts_regret_and_violations():
     )
     report = build_event_opportunity_report(conn)
     assert report["blocked_by_stage"] == {"FDR": 1}
+    assert report["execution_feasibility_rows"] == 0
     assert report["violations"]["midpoint_cost_uses"] == 0
     assert report["violations"]["no_complement_cost_uses"] == 0
 

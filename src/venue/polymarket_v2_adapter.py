@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -271,6 +272,7 @@ class PolymarketV2Adapter:
         q1_egress_evidence_path: Path | None = DEFAULT_Q1_EGRESS_EVIDENCE,
         client_factory: Optional[Callable[..., Any]] = None,
         sdk_version: Optional[str] = None,
+        network_timeout_seconds: float | None = None,
     ) -> None:
         self.host = host.rstrip("/")
         self.funder_address = funder_address
@@ -279,12 +281,30 @@ class PolymarketV2Adapter:
         self.chain_id = chain_id
         self.signature_type = _normalize_signature_type(signature_type)
         self.polygon_rpc_url = polygon_rpc_url
-        self._rpc_call = rpc_call or _json_rpc_call
+        self.network_timeout_seconds = (
+            float(network_timeout_seconds)
+            if network_timeout_seconds is not None and float(network_timeout_seconds) > 0
+            else None
+        )
+        if rpc_call is None:
+            self._rpc_call = lambda rpc_url, method, params: _json_rpc_call(
+                rpc_url,
+                method,
+                params,
+                timeout_seconds=self._network_timeout(20.0),
+            )
+        else:
+            self._rpc_call = rpc_call
         self.builder_code = builder_code
         self.q1_egress_evidence_path = q1_egress_evidence_path
         self._client_factory = client_factory or self._default_client_factory
         self._client = None
         self.sdk_version = sdk_version or _sdk_version()
+
+    def _network_timeout(self, default: float) -> float:
+        if self.network_timeout_seconds is None:
+            return default
+        return max(0.01, float(self.network_timeout_seconds))
 
     def _default_client_factory(self, **kwargs: Any) -> Any:
         from py_clob_client_v2.client import ClobClient
@@ -303,9 +323,13 @@ class PolymarketV2Adapter:
             import httpx as _httpx
             from py_clob_client_v2.http_helpers import helpers as _pcc_helpers
 
-            _pcc_helpers._http_client = _httpx.Client(
-                http2=False, timeout=_httpx.Timeout(15.0, connect=8.0)
-            )
+            sdk_timeout = kwargs.get("network_timeout_seconds")
+            if sdk_timeout is not None:
+                sdk_timeout = max(0.01, float(sdk_timeout))
+                timeout = _httpx.Timeout(sdk_timeout, connect=sdk_timeout)
+            else:
+                timeout = _httpx.Timeout(15.0, connect=8.0)
+            _pcc_helpers._http_client = _httpx.Client(http2=False, timeout=timeout)
         except Exception:  # noqa: BLE001 - non-fatal; library default retained
             pass
 
@@ -381,6 +405,7 @@ class PolymarketV2Adapter:
                 signature_type=self.signature_type,
                 funder_address=self.funder_address,
                 builder_code=self.builder_code,
+                network_timeout_seconds=self.network_timeout_seconds,
             )
         return self._client
 
@@ -408,18 +433,34 @@ class PolymarketV2Adapter:
             evidence_result = _validate_q1_egress_evidence(self.q1_egress_evidence_path)
             if not evidence_result.ok:
                 return evidence_result
-        try:
-            client = self._sdk_client()
-            get_ok = getattr(client, "get_ok", None)
-            if callable(get_ok):
-                get_ok()
-            return PreflightResult(ok=True)
-        except Exception as exc:
-            return PreflightResult(
-                ok=False,
-                error_code="V2_PREFLIGHT_FAILED",
-                message=str(exc),
-            )
+        max_attempts = max(
+            1,
+            int(float(os.environ.get("ZEUS_V2_PREFLIGHT_MAX_ATTEMPTS", "2") or "2")),
+        )
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                client = self._sdk_client()
+                get_ok = getattr(client, "get_ok", None)
+                if callable(get_ok):
+                    get_ok()
+                if attempt > 1:
+                    logger.warning(
+                        "VENUE_PREFLIGHT_RECOVERED_AFTER_RETRY: attempt=%s max_attempts=%s",
+                        attempt,
+                        max_attempts,
+                    )
+                return PreflightResult(ok=True)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= max_attempts:
+                    break
+                time.sleep(min(0.25 * attempt, 1.0))
+        return PreflightResult(
+            ok=False,
+            error_code="V2_PREFLIGHT_FAILED",
+            message=str(last_exc) if last_exc is not None else "unknown preflight failure",
+        )
 
 
     def get_clob_market_info(self, condition_id: str) -> ClobMarketInfo:
@@ -639,7 +680,7 @@ class PolymarketV2Adapter:
             headers={"user-agent": "zeus-readonly/1.0"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(request, timeout=self._network_timeout(15.0)) as response:
                 decoded = json.loads(response.read())
         except Exception as exc:
             raise V2ReadUnavailable(f"data-api position enumeration failed: {exc}") from exc
@@ -658,14 +699,7 @@ class PolymarketV2Adapter:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
 
-    def get_collateral_payload(self) -> dict[str, Any]:
-        """Return SDK-derived collateral facts for CollateralLedger.refresh().
-
-        All py_clob_client_v2 imports stay confined to this adapter. The state
-        ledger receives plain dictionaries and never depends on SDK types.
-        """
-
-        raw = self._collateral_balance_allowance_raw()
+    def _pusd_collateral_payload_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
@@ -683,6 +717,32 @@ class PolymarketV2Adapter:
                 authority_tier = "DEGRADED"
                 allowance_source = "chain_erc20_unavailable_clob_zero"
 
+        return {
+            "pusd_balance_micro": raw.get("balance", 0),
+            "pusd_allowance_micro": pusd_allowance_raw if pusd_allowance_raw is not None else 0,
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": {},
+            "ctf_token_allowances_units": {},
+            "authority_tier": authority_tier,
+            "signature_type": self.signature_type,
+            "pusd_allowance_source": allowance_source,
+        }
+
+    def get_pusd_collateral_payload(self) -> dict[str, Any]:
+        """Return pUSD balance/allowance facts without CTF position enumeration."""
+
+        raw = self._collateral_balance_allowance_raw()
+        return self._pusd_collateral_payload_from_raw(raw)
+
+    def get_collateral_payload(self) -> dict[str, Any]:
+        """Return SDK-derived collateral facts for CollateralLedger.refresh().
+
+        All py_clob_client_v2 imports stay confined to this adapter. The state
+        ledger receives plain dictionaries and never depends on SDK types.
+        """
+
+        raw = self._collateral_balance_allowance_raw()
+        payload = self._pusd_collateral_payload_from_raw(raw)
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
         # CTF position enumeration goes through a separate read surface (the
@@ -736,16 +796,9 @@ class PolymarketV2Adapter:
                 allowance_units = 0
             allowances[token_key] = allowances.get(token_key, 0) + allowance_units
 
-        return {
-            "pusd_balance_micro": raw.get("balance", 0),
-            "pusd_allowance_micro": pusd_allowance_raw if pusd_allowance_raw is not None else 0,
-            "usdc_e_legacy_balance_micro": 0,
-            "ctf_token_balances_units": balances,
-            "ctf_token_allowances_units": allowances,
-            "authority_tier": authority_tier,
-            "signature_type": self.signature_type,
-            "pusd_allowance_source": allowance_source,
-        }
+        payload["ctf_token_balances_units"] = balances
+        payload["ctf_token_allowances_units"] = allowances
+        return payload
 
     def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
         """Read the CLOB collateral balance/allowance surface once."""
@@ -2591,7 +2644,13 @@ def _eth_call_uint(
     return int(str(raw or "0x0"), 16)
 
 
-def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
+def _json_rpc_call(
+    rpc_url: str,
+    method: str,
+    params: list[Any],
+    *,
+    timeout_seconds: float = 20.0,
+) -> Any:
     # CATEGORY ANTIBODY (2026-06-04): the single on-chain RPC entrypoint. A
     # blocking eth_call here while the world write mutex is held is the M5 /
     # STEP-7 / #95 starvation disease — fail loud and located, never wedge.
@@ -2608,7 +2667,7 @@ def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
             "user-agent": "zeus-readonly/1.0",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=max(0.01, float(timeout_seconds))) as response:
         decoded = json.loads(response.read())
     if "error" in decoded:
         raise V2AdapterError(f"polygon rpc error: {decoded['error']}")

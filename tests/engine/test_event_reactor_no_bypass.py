@@ -77,6 +77,7 @@ def _isolate_edli_settings(monkeypatch):
     monkeypatch.setitem(settings._data, "edli", edli)
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = False
+    feature_flags["qkernel_spine_enabled"] = False
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
 
@@ -1166,6 +1167,7 @@ def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
 
     feature_flags = dict(settings._data["feature_flags"])
     feature_flags["openmeteo_ecmwf_ifs9_bayes_fusion_live_enabled"] = True
+    feature_flags["qkernel_spine_enabled"] = False
     settings._data["feature_flags"] = feature_flags
     conn = _trade_conn_with_snapshot(
         selected_ask="0.68",
@@ -2370,6 +2372,63 @@ def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READINESS_BLOCKED" in receipt.reason
 
 
+def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monkeypatch):
+    """Day0 hard facts use the latest safe snapshot as a seed, not entry-reader TTL.
+
+    A realized DAY0_EXTREME_UPDATED payload has already passed live source/station/date
+    authority. The executable forecast reader's runtime readiness expiry licenses the
+    forecast-entry lane, not this observation-aware Day0 mask.
+    """
+    from types import SimpleNamespace
+
+    from src.data import executable_forecast_reader
+    from src.engine.event_reactor_adapter import (
+        _forecast_authority_payload_and_clock,
+        _forecast_snapshot_row_for_event,
+    )
+
+    conn = _trade_conn_with_snapshot()
+    day0 = _day0_event()
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
+    calls = []
+
+    def _expired_reader(*_args, **_kwargs):
+        calls.append("reader")
+        return SimpleNamespace(ok=False, bundle=None, reason_code="READINESS_EXPIRED")
+
+    monkeypatch.setattr(executable_forecast_reader, "read_executable_forecast", _expired_reader)
+    decision_time = datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc)
+
+    row = _forecast_snapshot_row_for_event(
+        conn,
+        event=day0,
+        family=family,
+        allow_latest=True,
+        decision_time=decision_time,
+    )
+    payload, _clock = _forecast_authority_payload_and_clock(
+        conn,
+        event=day0,
+        family=family,
+        payload=json.loads(day0.payload_json),
+        decision_time=decision_time,
+    )
+
+    assert row is not None
+    assert calls == []
+    assert payload["reader_authority"] == "day0_latest_forecast_snapshot_seed"
+    assert payload["reader_status"] == "VERIFIED"
+    assert payload["coverage_readiness_status"] == "LIVE_ELIGIBLE"
+    assert payload["day0_entry_readiness_expiry_not_applied"] is True
+
+
 def test_adapter_computes_on_reader_elected_snapshot_not_causal_pin(monkeypatch):
     """RELATIONSHIP: the reactor computes inference on the executable-forecast reader's
     ELECTED snapshot, never on the causal-pinned seed with an equality assertion.
@@ -3310,8 +3369,8 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
-    assert ":priced=0" in receipt.reason
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
+    assert "native YES ask ladder is empty" in receipt.reason
     assert receipt.proof_accepted is False
 
 
@@ -3333,8 +3392,8 @@ def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
-    assert ":priced=0" in receipt.reason
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
+    assert "synthetic_clob_market_info_substrate_only" in receipt.reason
     assert receipt.proof_accepted is False
 
 
@@ -3458,6 +3517,32 @@ def test_runtime_bankroll_for_sizing_uses_total_equity_not_spendable_cash(monkey
     assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(1043.0)
     # Free cash is the SEPARATE one-time bound the kernel clamps to.
     assert _runtime_free_cash_usd(cached_only=True) == pytest.approx(241.0)
+
+
+def test_runtime_bankroll_accepts_collateral_snapshot_canonical_source(monkeypatch):
+    """The live daemon consumes wallet truth warmed from the capital sidecar."""
+    from src.engine.event_reactor_adapter import (
+        _runtime_bankroll_usd,
+        _runtime_free_cash_usd,
+    )
+    from src.runtime import bankroll_provider
+    from src.runtime.bankroll_provider import BankrollOfRecord
+
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda **_kwargs: BankrollOfRecord(
+            value_usd=1045.0,
+            spendable_cash_usd=245.0,
+            equity_for_new_entry_sizing_usd=1045.0,
+            fetched_at="2026-06-19T21:00:00+00:00",
+            source="collateral_ledger_snapshot",
+            authority="canonical",
+        ),
+    )
+
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(1045.0)
+    assert _runtime_free_cash_usd(cached_only=True) == pytest.approx(245.0)
 
 
 def test_runtime_bankroll_basis_excludes_blip_held_phantom(monkeypatch):
@@ -3590,8 +3675,8 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     )
 
     assert receipt.submitted is False
-    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
-    assert ":priced=0" in receipt.reason
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING:")
+    assert "native YES ask ladder is empty" in receipt.reason
 
 
 def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():

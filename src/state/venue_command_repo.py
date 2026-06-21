@@ -57,6 +57,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     # from INTENT_CREATED
     ("INTENT_CREATED", "SNAPSHOT_BOUND"):      "SNAPSHOT_BOUND",
     ("INTENT_CREATED", "SUBMIT_REQUESTED"):   "SUBMITTING",
+    ("INTENT_CREATED", "SUBMIT_REJECTED"):    "SUBMIT_REJECTED",
     ("INTENT_CREATED", "CANCEL_REQUESTED"):   "CANCEL_PENDING",
     ("INTENT_CREATED", "REVIEW_REQUIRED"):    "REVIEW_REQUIRED",
 
@@ -1501,6 +1502,39 @@ def _validate_review_no_exposure_payload(
         raise ValueError("review no-exposure review_required_proof reason does not match DB")
 
 
+def _latest_payload_is_cancel_unknown(payload: dict) -> bool:
+    if (
+        str(payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
+        and payload.get("requires_m5_reconcile") is True
+    ):
+        return True
+    return str(payload.get("reason") or "") == "post_cancel_unknown_possible_side_effect"
+
+
+_POINT_ORDER_LIVE_DATA_KEYS = (
+    "size",
+    "original_size",
+    "originalSize",
+    "size_matched",
+    "sizeMatched",
+    "matched",
+    "matched_size",
+    "matchedSize",
+    "matched_amount",
+    "price",
+    "side",
+    "remaining",
+    "remaining_size",
+    "remainingSize",
+)
+
+
+def _point_order_has_live_data(point_order: object) -> bool:
+    if not isinstance(point_order, dict):
+        return False
+    return any(point_order.get(key) not in (None, "") for key in _POINT_ORDER_LIVE_DATA_KEYS)
+
+
 def _validate_review_cancel_unknown_no_fill_payload(
     *,
     conn: sqlite3.Connection,
@@ -1518,7 +1552,6 @@ def _validate_review_cancel_unknown_no_fill_payload(
         "semantic_cancel_status_cancel_unknown",
         "requires_m5_reconcile",
         "venue_order_id_present",
-        "venue_order_id_matches_point_read",
         "point_order_terminal_no_fill",
         "point_order_matched_size_zero",
         "no_trade_facts",
@@ -1528,6 +1561,14 @@ def _validate_review_cancel_unknown_no_fill_payload(
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"cancel-unknown no-fill predicates are not proven true: {missing}")
+    point_order_matches = required_predicates.get("venue_order_id_matches_point_read") is True
+    point_order_absent = required_predicates.get("point_order_absent") is True
+    point_order_no_live_record = required_predicates.get("point_order_no_live_record") is True
+    if not point_order_matches and not point_order_absent and not point_order_no_live_record:
+        raise ValueError(
+            "cancel-unknown no-fill clearance requires point order match, authenticated absence, "
+            "or authenticated no-live-record proof"
+        )
     if payload.get("side_effect_boundary_crossed") != "unknown":
         raise ValueError("cancel-unknown no-fill clearance requires side_effect_boundary_crossed=unknown")
     if payload.get("sdk_submit_attempted") != "unknown":
@@ -1600,9 +1641,7 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill latest payload is invalid") from exc
     if not isinstance(latest_payload, dict):
         raise ValueError("cancel-unknown no-fill latest payload is invalid")
-    if latest_payload.get("requires_m5_reconcile") is not True:
-        raise ValueError("cancel-unknown no-fill latest payload must require M5 reconcile")
-    if str(latest_payload.get("semantic_cancel_status") or "").upper() != "CANCEL_UNKNOWN":
+    if not _latest_payload_is_cancel_unknown(latest_payload):
         raise ValueError("cancel-unknown no-fill latest payload must be CANCEL_UNKNOWN")
     if fact is None:
         raise ValueError("cancel-unknown no-fill clearance requires terminal order fact")
@@ -1622,6 +1661,29 @@ def _validate_review_cancel_unknown_no_fill_payload(
     venue_proof = payload.get("venue_absence_proof")
     if not isinstance(venue_proof, dict):
         raise ValueError("cancel-unknown no-fill clearance requires venue_absence_proof")
+    if point_order_absent and (
+        str(venue_proof.get("point_order_status") or "").upper() != "NOT_FOUND"
+        or venue_proof.get("point_order") is not None
+    ):
+        raise ValueError("cancel-unknown no-fill point_order_absent proof is invalid")
+    if point_order_no_live_record:
+        point_order = venue_proof.get("point_order")
+        status = str(venue_proof.get("point_order_status") or "").upper()
+        if status not in {"UNKNOWN", "NOT_FOUND", ""}:
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record status is invalid")
+        if not isinstance(point_order, dict):
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record requires point_order payload")
+        point_order_id = str(
+            point_order.get("orderID")
+            or point_order.get("orderId")
+            or point_order.get("order_id")
+            or point_order.get("id")
+            or ""
+        )
+        if point_order_id and point_order_id != str(command["venue_order_id"] or ""):
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record order id mismatch")
+        if _point_order_has_live_data(point_order):
+            raise ValueError("cancel-unknown no-fill point_order_no_live_record contains live order data")
     if venue_proof.get("owner_scope") != "authenticated_funder":
         raise ValueError("cancel-unknown no-fill clearance requires authenticated_funder owner_scope")
     for key in ("open_orders_checked", "trades_checked", "open_orders_query_complete", "trades_query_complete"):
@@ -1668,7 +1730,11 @@ def _validate_review_cancel_unknown_no_fill_payload(
     for key in ("source_commit", "source_function", "source_reason"):
         if not str(source.get(key) or "").strip():
             raise ValueError(f"cancel-unknown no-fill source_proof missing {key}")
-    if source.get("source_reason") != "cancel_unknown_point_order_terminal_no_fill":
+    if source.get("source_reason") not in {
+        "cancel_unknown_point_order_terminal_no_fill",
+        "cancel_unknown_point_order_absent_terminal_no_fill",
+        "cancel_unknown_point_order_no_live_record_terminal_no_fill",
+    }:
         raise ValueError("cancel-unknown no-fill source_reason is unsupported")
 
 
@@ -2347,10 +2413,8 @@ def _actual_review_confirmed_fill_predicates(
     return {
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
         "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
-        "semantic_cancel_status_cancel_unknown": (
-            str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
-        ),
-        "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
+        "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
+        "requires_m5_reconcile": _latest_payload_is_cancel_unknown(latest_payload),
         "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
         "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
@@ -2491,10 +2555,8 @@ def _actual_review_venue_order_live_predicates(
             "exit_ack_persistence_failed_after_side_effect",
         },
         "review_reason_recovery_no_venue_order_id": latest_reason == "recovery_no_venue_order_id",
-        "semantic_cancel_status_cancel_unknown": (
-            str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
-        ),
-        "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
+        "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
+        "requires_m5_reconcile": _latest_payload_is_cancel_unknown(latest_payload),
         "venue_order_id_present": bool(command_venue_order_id),
         "venue_order_id_absent_before_recovery": not command_venue_order_id,
         "proof_venue_order_id_present": bool(proof_venue_order_id),
@@ -3160,9 +3222,52 @@ def find_unresolved_commands(conn: sqlite3.Connection) -> Iterable[dict]:
     values = tuple(state.value for state in _IN_FLIGHT_STATES)
     placeholders = ",".join("?" for _ in values)
     with _row_factory_as(conn, sqlite3.Row):
+        has_envelopes = _review_clearance_table_exists(conn, "venue_submission_envelopes")
+        has_snapshots = _review_clearance_table_exists(conn, "executable_market_snapshots")
+        env_select = (
+            """
+            env.condition_id AS env_condition_id,
+            env.yes_token_id AS env_yes_token_id,
+            env.no_token_id AS env_no_token_id,
+            env.selected_outcome_token_id AS env_selected_outcome_token_id,
+            env.outcome_label AS env_outcome_label,
+            """
+            if has_envelopes
+            else ""
+        )
+        env_join = (
+            "LEFT JOIN venue_submission_envelopes env ON env.envelope_id = cmd.envelope_id"
+            if has_envelopes
+            else ""
+        )
+        snapshot_select = (
+            """
+            snap.condition_id AS snapshot_condition_id,
+            snap.yes_token_id AS snapshot_yes_token_id,
+            snap.no_token_id AS snapshot_no_token_id,
+            snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id,
+            snap.outcome_label AS snapshot_outcome_label,
+            """
+            if has_snapshots
+            else ""
+        )
+        snapshot_join = (
+            "LEFT JOIN executable_market_snapshots snap ON snap.snapshot_id = cmd.snapshot_id"
+            if has_snapshots
+            else ""
+        )
         rows = conn.execute(
-            "SELECT * FROM venue_commands "
-            f"WHERE state IN ({placeholders})",
+            f"""
+            SELECT
+              cmd.*,
+              {env_select}
+              {snapshot_select}
+              cmd.command_id AS command_id
+            FROM venue_commands cmd
+            {env_join}
+            {snapshot_join}
+            WHERE cmd.state IN ({placeholders})
+            """,
             values,
         ).fetchall()
     return [_row_to_dict(r) for r in rows]

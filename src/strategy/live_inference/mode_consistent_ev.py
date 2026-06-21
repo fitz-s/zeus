@@ -1,5 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-20 (lifecycle conversion fix: no-identical-re-rest
+#   on escalated-but-inadmissible — src/strategy/live_inference/mode_consistent_ev.py:608)
 # Authority basis: FIX C for incident 0b5c305e26524042 (Milan 24C first fill;
 #   docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md §3) + operator
 #   directive 2026-06-10: mode-consistent evaluation. The system is structurally
@@ -594,10 +595,20 @@ def select_rest_then_cross_mode(
         if raw_taker_edge >= float(fleeting_edge_threshold):
             return _as_taker(POLICY_TAKER_FLEETING_EDGE)
 
-    # 6. THE DEFAULT: rest post_only GTC with the measured escalation deadline.
-    #    (Also the escalated/taker-forbidden case: the spread guard stays lawful;
-    #    the rest re-posts and the next escalation re-evaluates.)
-    policy = POLICY_MAKER_TAKER_FORBIDDEN if (
-        escalated_after_rest and not taker_admissible
-    ) else POLICY_REST_DEFAULT
-    return _as_maker(policy, deadline=float(escalation_deadline_minutes))
+    # 6a. ESCALATED-but-INADMISSIBLE (2026-06-20, no-identical-re-rest fix). The rest
+    #    already expired UNFILLED at its deadline and the FRESH taker is inadmissible
+    #    (ask + fee > q_lcb — FIX B). Re-posting the IDENTICAL unfillable limit is
+    #    exactly the rest->pull->re-rest loop that produced 0 crosses and MATCHED
+    #    19->0 by 06-20 (operator doctrine: a proven-unfillable rest must NEVER be
+    #    re-posted identically). Return a NO-TRADE (chosen_ev=-inf) so the trade-score
+    #    gate rejects this cycle and the family re-evaluates on a FRESH book next
+    #    cycle: it CROSSES the moment the ask drops to <= q_lcb (still capped by FIX
+    #    B), else it cleanly no-trades. This adds no cap — it REMOVES a forced
+    #    re-post. The verdict still travels as MAKER_TAKER_FORBIDDEN for receipt
+    #    provenance, but it no longer constructs a new identical rest.
+    if escalated_after_rest and not taker_admissible:
+        return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
+
+    # 6b. THE DEFAULT: the genuine FIRST rest for a family (no prior cancelled-unfilled
+    #    rest) rests post_only GTC with the measured escalation deadline.
+    return _as_maker(POLICY_REST_DEFAULT, deadline=float(escalation_deadline_minutes))

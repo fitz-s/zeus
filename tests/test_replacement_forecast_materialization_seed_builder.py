@@ -17,6 +17,7 @@ from pathlib import Path
 from src.data.ecmwf_aifs_sampled_2t_localday import HIGH_DATA_VERSION as AIFS_HIGH_DATA_VERSION
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest
+from src.data.replacement_forecast_cycle_policy import replacement_readiness_expires_at
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
     latest_baseline_coverage_for_replacement_seed,
@@ -89,6 +90,37 @@ def _market_bins_f() -> list[dict[str, object]]:
     ]
 
 
+def test_seed_builder_expiry_uses_replacement_cycle_policy(tmp_path: Path) -> None:
+    openmeteo_manifest = load_manifest_with_path(
+        _manifest(
+            tmp_path,
+            source_id="openmeteo_ecmwf_ifs_9km",
+            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            name="openmeteo",
+        )
+    )
+
+    result = build_replacement_forecast_materialization_seed(
+        city="NYC",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        market_bins=_market_bins_f(),
+        baseline_coverage=_baseline_coverage(),
+        openmeteo_manifest=openmeteo_manifest,
+        openmeteo_payload_json=tmp_path / "openmeteo_payload.json",
+        precision_metadata_json=tmp_path / "precision_metadata.json",
+        computed_at="2026-06-06T04:00:00+00:00",
+        base_dir=tmp_path,
+    )
+
+    assert result.ok is True
+    assert result.seed is not None
+    assert result.seed["expires_at"] == replacement_readiness_expires_at(
+        openmeteo_manifest.source_cycle_time
+    ).isoformat()
+
+
 def test_seed_builder_uses_real_market_bins_and_fahrenheit_step(tmp_path: Path) -> None:
     aifs_manifest = load_manifest_with_path(
         _manifest(
@@ -135,7 +167,6 @@ def test_seed_builder_uses_real_market_bins_and_fahrenheit_step(tmp_path: Path) 
     middle = seed["bins"][1]
     assert round(middle["lower_c"], 6) == round((70.0 - 32.0) * 5.0 / 9.0, 6)
     assert round(middle["upper_c"], 6) == round((71.0 - 32.0) * 5.0 / 9.0, 6)
-
 
 def test_seed_builder_preserves_celsius_display_bins_when_settlement_source_is_fahrenheit(tmp_path: Path) -> None:
     aifs_manifest = load_manifest_with_path(

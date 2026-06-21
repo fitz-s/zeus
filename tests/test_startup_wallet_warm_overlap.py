@@ -1,8 +1,8 @@
 # Created: 2026-06-05
-# Last reused/audited: 2026-06-05
-# Authority basis: efficiency #3 boot wallet warm-overlap (background warm → join → gate)
-# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
-# Purpose: Relationship/concurrency antibody — boot warms bankroll_provider.current() on a background thread, joins it, then the wallet gate consumes the joined record (warm + gate = exactly ONE on-chain fetch; None → fail-closed).
+# Last reused/audited: 2026-06-19
+# Authority basis: efficiency #3 boot wallet warm-overlap (background warm -> join -> gate) + live monitor continuity on wallet RPC faults
+# Lifecycle: created=2026-06-05; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Purpose: Relationship/concurrency antibody — boot warms bankroll_provider.current() on a background thread, joins it, then the wallet gate consumes the joined record (warm + gate = exactly ONE on-chain fetch; None -> submit fail-closed without killing monitor).
 # Reuse: Re-run when _start_boot_wallet_warm / _join_boot_wallet_warm / _startup_wallet_check or the bankroll_provider warm-cache TTL changes.
 """Relationship test — boot wallet warm-overlap (concurrency invariant).
 
@@ -31,11 +31,11 @@ Boundary properties asserted here (the three the brief enumerates):
       (deterministic; no race). We prove the thread is finished at join return
       and that the gate sees the warm record (current() not re-invoked).
 
-  (3) WARM EXCEPTION DOES NOT CRASH BOOT, gate still fail-closes — if the warm
+  (3) WARM EXCEPTION DOES NOT CRASH BOOT, gate still fail-closes submit — if the warm
       thread's current() raises, the exception is swallowed+logged (boot never
       dies in the warm thread), the handed record is None, and the gate's
-      None-record path fail-closes (SystemExit). This is the correct fail-safe:
-      a warm-thread failure just means a cold cache and the gate refuses boot.
+      None-record path keeps daemon startup alive while downstream submit/sizing
+      remains fail-closed on the cold bankroll cache.
 
 It also asserts the STRUCTURAL overlap exists on the production main() body
 (warm spawn after the heartbeat, before the schema-ready gate; join immediately
@@ -144,11 +144,11 @@ def test_warm_thread_is_joined_before_gate(monkeypatch):
 # ---------------------------------------------------------------------------
 # (3) WARM EXCEPTION DOES NOT CRASH BOOT; gate fail-closes on cold cache.
 # ---------------------------------------------------------------------------
-def test_warm_exception_does_not_crash_boot_and_gate_fail_closes(monkeypatch):
+def test_warm_exception_does_not_crash_boot_and_submit_stays_fail_closed(monkeypatch):
     """Warm thread current() raises → exception swallowed+logged (thread/join do
     NOT propagate) → holder.record is None (cold cache) → gate's None-record path
-    fail-closes with SystemExit. Correct fail-safe; boot dies at the gate, never
-    in the warm thread."""
+    does not crash monitoring/redecision, and the cold bankroll cache keeps
+    submit/sizing fail-closed."""
     counter = _CurrentCounter(raises=True)
     monkeypatch.setattr(bankroll_provider, "current", counter)
 
@@ -159,9 +159,8 @@ def test_warm_exception_does_not_crash_boot_and_gate_fail_closes(monkeypatch):
     assert not thread.is_alive()
     assert holder.record is None, "warm exception must leave a cold (None) record"
 
-    # Gate fail-closes on the cold record.
-    with pytest.raises(SystemExit):
-        main_mod._startup_wallet_check(clob=None, bankroll_record=holder.record)
+    main_mod._startup_wallet_check(clob=None, bankroll_record=holder.record)
+    assert bankroll_provider.cached() is None
 
 
 # ---------------------------------------------------------------------------

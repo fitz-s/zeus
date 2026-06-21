@@ -33,7 +33,7 @@ import time
 import faulthandler
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -111,6 +111,60 @@ _SUBSTRATE_REFRESH_CURSOR = 0
 # DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
 # (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
+
+
+def _substrate_refresh_family_text_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return " ".join(text.replace("-", " ").replace("_", " ").split())
+
+
+def _substrate_refresh_city_alias_to_name() -> dict[str, str]:
+    from src.config import cities_by_name as _refresh_cities_by_name
+
+    alias_to_name: dict[str, str] = {}
+    for _city in _refresh_cities_by_name.values():
+        for _surface in (
+            _city.name,
+            *_city.aliases,
+            *_city.slug_names,
+        ):
+            _key = _substrate_refresh_family_text_key(_surface)
+            if _key:
+                alias_to_name[_key] = _city.name
+    return alias_to_name
+
+
+def _substrate_refresh_canonical_city_name(city: object) -> str:
+    raw = str(city or "").strip()
+    return _substrate_refresh_city_alias_to_name().get(
+        _substrate_refresh_family_text_key(raw),
+        raw,
+    )
+
+
+def _substrate_refresh_canonical_metric(metric: object) -> str:
+    text = _substrate_refresh_family_text_key(metric)
+    if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
+        return "low"
+    if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
+        return "high"
+    return text
+
+
+def _substrate_refresh_family_key(
+    city: object,
+    target_date: object,
+    metric: object,
+) -> tuple[str, str, str]:
+    return (
+        _substrate_refresh_family_text_key(
+            _substrate_refresh_canonical_city_name(city)
+        ),
+        str(target_date or "").strip(),
+        _substrate_refresh_canonical_metric(metric),
+    )
+
+
 # New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
 # not yet been seen at the head of the substrate-warmer rotation.  The warmer
 # reads + clears this set and prepends matching families so new markets are warmed
@@ -769,10 +823,10 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         world_db_path=str(_settings_section("state", {}).get("world_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         trade_db_path=str(_settings_section("state", {}).get("trade_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
         forecasts_db_path=str(_settings_section("state", {}).get("forecasts_db", "")) if isinstance(_settings_section("state", {}), dict) else None,
-        loaded_sha_file=str(edli_cfg.get("edli_stage_loaded_sha_file") or ""),
+        loaded_sha_file=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_loaded_sha_file")),
         promotion_artifact_path=str(edli_cfg.get("edli_live_promotion_artifact_path") or ""),
-        source_health_json=str(edli_cfg.get("edli_stage_source_health_json") or ""),
-        status_json=str(edli_cfg.get("edli_stage_status_json") or ""),
+        source_health_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_source_health_json")),
+        status_json=_resolve_edli_stage_runtime_path(edli_cfg.get("edli_stage_status_json")),
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
     if stage == "edli_live":
@@ -842,6 +896,20 @@ def _require_stage_file_paths(edli_cfg: dict, stage: str) -> None:
     ]
     if missing:
         raise RuntimeError(f"{stage.upper()}_REQUIRES_STAGE_EVIDENCE_FILES:{','.join(missing)}")
+
+
+def _resolve_edli_stage_runtime_path(raw_path: object) -> str:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return ""
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return str(path)
+    from src.config import RUNTIME_ROOT, STATE_DIR
+
+    if path.parts and path.parts[0] == "state":
+        return str(STATE_DIR.joinpath(*path.parts[1:]))
+    return str(RUNTIME_ROOT / path)
 
 
 def _edli_stage_pending_reconcile_count(conn) -> int:
@@ -1314,6 +1382,12 @@ def _assert_cascade_liveness_contract(scheduler) -> None:
     missing: list[tuple[str, str]] = []
     for sm in contract.get("state_machines", []) or []:
         for poller in sm.get("required_pollers", []) or []:
+            owner_daemon = str(poller.get("owner_daemon") or "").strip()
+            owner = str(poller.get("owner") or "")
+            if owner_daemon and owner_daemon != "main":
+                continue
+            if not owner_daemon and "post_trade_capital" in owner:
+                continue
             if poller["id"] not in job_ids:
                 missing.append((sm["table"], poller["id"]))
     if missing:
@@ -1521,13 +1595,47 @@ def _refresh_global_collateral_snapshot_if_due(
         ):
             return False
         _last_collateral_heartbeat_refresh_attempt_at = current
-        ledger.refresh(adapter)
+        refreshed = ledger.refresh(adapter)
+        logger.info(
+            "CollateralLedger heartbeat refresh: authority=%s captured_at=%s "
+            "reserved_pusd_micro=%s reserved_token_count=%s",
+            refreshed.authority_tier,
+            refreshed.captured_at.isoformat(),
+            refreshed.reserved_pusd_for_buys_micro,
+            len(refreshed.reserved_tokens_for_sells),
+        )
         return True
     except Exception as exc:
         logger.warning("CollateralLedger heartbeat refresh failed closed: %s", exc)
         return False
     finally:
         _collateral_background_refresh_lock.release()
+
+
+def _global_collateral_snapshot_needs_refresh(
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether collateral is too stale/degraded to defer behind backlog."""
+
+    try:
+        from src.state.collateral_ledger import get_global_ledger
+
+        ledger = get_global_ledger()
+        if ledger is None:
+            return False
+        snapshot = ledger.snapshot()
+        if snapshot.authority_tier == "DEGRADED":
+            return True
+        current = now or datetime.now(timezone.utc)
+        captured_at = snapshot.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        age_seconds = (current - captured_at.astimezone(timezone.utc)).total_seconds()
+        return age_seconds >= COLLATERAL_HEARTBEAT_REFRESH_SECONDS
+    except Exception as exc:
+        logger.warning("CollateralLedger refresh-need check failed closed: %s", exc)
+        return True
 
 
 def _run_ws_gap_reconcile_if_required(
@@ -1915,33 +2023,14 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
         "status": "ok",
         "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
         "reconcile_findings_refresh": reconcile_findings_refresh,
-        "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
+        "collateral_refreshed": "owned_by_post_trade_capital",
     }
 
 
 def _start_collateral_background_refresh_async(adapter=None) -> str:
-    """Refresh collateral on an independent lane from slower venue maintenance."""
+    """Compatibility no-op: collateral refresh is owned by post-trade-capital."""
 
-    if _cycle_lock.locked() or _edli_reactor_active():
-        return "deferred_cycle_running"
-    active_adapter = adapter or _venue_heartbeat_adapter
-    if active_adapter is None:
-        return "adapter_unavailable"
-    if _edli_reactor_pending_backlog_exists():
-        return "deferred_edli_pending_backlog"
-    if _collateral_background_refresh_lock.locked():
-        return "already_running"
-
-    def _runner() -> None:
-        _refresh_global_collateral_snapshot_if_due(active_adapter)
-
-    thread = threading.Thread(
-        target=_runner,
-        name="collateral-background-refresh",
-        daemon=True,
-    )
-    thread.start()
-    return "started"
+    return "owned_by_post_trade_capital"
 
 
 def _start_venue_background_maintenance_async(adapter=None) -> str:
@@ -2421,9 +2510,15 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
     from src.execution.maker_rest_escalation import OPEN_REST_FACT_STATES
 
     try:
+        command_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+        token_select = "token_id" if "token_id" in command_cols else "'' AS token_id"
+        snapshot_select = "snapshot_id" if "snapshot_id" in command_cols else "'' AS snapshot_id"
         commands = trade_conn.execute(
-            """
-            SELECT command_id, position_id, venue_order_id
+            f"""
+            SELECT command_id, position_id, venue_order_id, {token_select}, {snapshot_select}
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
@@ -2455,8 +2550,7 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         if fact is None or str(fact[0] or "") not in open_states:
             continue
         position_id = str(row[1] or "")
-        if not position_id:
-            continue
+        family: tuple[str, str, str] | None = None
         try:
             pos = trade_conn.execute(
                 """
@@ -2467,20 +2561,141 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
                  LIMIT 1
                 """,
                 (position_id,),
-            ).fetchone()
+            ).fetchone() if position_id else None
         except Exception:  # noqa: BLE001
-            continue
-        if pos is None:
-            continue
-        family = (
-            str(pos[0] or "").strip(),
-            str(pos[1] or "").strip(),
-            str(pos[2] or "").strip(),
-        )
-        if all(family) and family not in seen:
+            pos = None
+        if pos is not None:
+            family = (
+                str(pos[0] or "").strip(),
+                str(pos[1] or "").strip(),
+                str(pos[2] or "").strip(),
+            )
+        if not family or not all(family):
+            family = _open_rest_family_from_snapshot(
+                trade_conn,
+                token_id=str(row[3] or ""),
+                snapshot_id=str(row[4] or ""),
+            )
+        if family and all(family) and family not in seen:
             seen.add(family)
             out.append(family)
     return out
+
+
+def _open_rest_family_from_snapshot(
+    trade_conn,
+    *,
+    token_id: str,
+    snapshot_id: str,
+) -> tuple[str, str, str] | None:
+    """Resolve an ACKED rest's family even before position_current projection exists."""
+
+    try:
+        snap_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()
+        }
+    except Exception:  # noqa: BLE001
+        return None
+    slug_cols = [col for col in ("event_id", "event_slug") if col in snap_cols]
+    if not slug_cols:
+        return None
+    select_slug = slug_cols[0] if len(slug_cols) == 1 else "COALESCE(" + ", ".join(slug_cols) + ")"
+    predicates: list[str] = []
+    params: list[str] = []
+    if snapshot_id and "snapshot_id" in snap_cols:
+        predicates.append("snapshot_id = ?")
+        params.append(snapshot_id)
+    if token_id:
+        for col in ("selected_outcome_token_id", "yes_token_id", "no_token_id"):
+            if col in snap_cols:
+                predicates.append(f"{col} = ?")
+                params.append(token_id)
+    if not predicates:
+        return None
+    snapshot_order = "CASE WHEN snapshot_id = ? THEN 0 ELSE 1 END" if "snapshot_id" in snap_cols else "1"
+    query_params = [*params]
+    if "snapshot_id" in snap_cols:
+        query_params.append(snapshot_id)
+    try:
+        row = trade_conn.execute(
+            f"""
+            SELECT {select_slug} AS market_slug
+              FROM executable_market_snapshots
+             WHERE {" OR ".join(predicates)}
+             ORDER BY
+               {snapshot_order},
+               captured_at DESC
+             LIMIT 1
+            """,
+            tuple(query_params),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    return _weather_family_from_market_slug(str(row[0] or ""))
+
+
+def _weather_family_from_market_slug(slug: str) -> tuple[str, str, str] | None:
+    text = str(slug or "").strip().lower()
+    prefixes = (
+        ("highest-temperature-in-", "high"),
+        ("lowest-temperature-in-", "low"),
+    )
+    metric = ""
+    rest = ""
+    for prefix, candidate_metric in prefixes:
+        if text.startswith(prefix):
+            metric = candidate_metric
+            rest = text[len(prefix):]
+            break
+    if not rest or "-on-" not in rest:
+        return None
+    city_slug, date_slug = rest.rsplit("-on-", 1)
+    parts = date_slug.split("-")
+    if len(parts) != 3:
+        return None
+    month_name, day_text, year_text = parts
+    month_map = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+    try:
+        target_date = date(
+            int(year_text),
+            month_map[month_name],
+            int(day_text),
+        ).isoformat()
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_by_slug: dict[str, str] = {}
+        for name, city in runtime_cities_by_name().items():
+            aliases = set(getattr(city, "slug_names", ()) or ())
+            aliases.add(str(name).lower().replace(" ", "-"))
+            aliases.add(str(getattr(city, "name", name)).lower().replace(" ", "-"))
+            for alias in aliases:
+                if alias:
+                    city_by_slug[str(alias).lower()] = str(getattr(city, "name", name) or name)
+        city = city_by_slug.get(city_slug)
+    except Exception:  # noqa: BLE001
+        city = None
+    if not city:
+        city = city_slug.replace("-", " ").title()
+    return (city, target_date, metric)
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
@@ -2704,39 +2919,14 @@ def _refresh_pending_family_snapshots(
 
     from src.config import cities_by_name as _refresh_cities_by_name
 
-    def _refresh_family_text_key(value: object) -> str:
-        text = str(value or "").strip().lower()
-        return " ".join(text.replace("-", " ").replace("_", " ").split())
-
-    _refresh_city_alias_to_name: dict[str, str] = {}
-    for _city in _refresh_cities_by_name.values():
-        for _surface in (
-            _city.name,
-            *_city.aliases,
-            *_city.slug_names,
-        ):
-            _key = _refresh_family_text_key(_surface)
-            if _key:
-                _refresh_city_alias_to_name[_key] = _city.name
-
     def _canonical_refresh_city_name(city: object) -> str:
-        raw = str(city or "").strip()
-        return _refresh_city_alias_to_name.get(_refresh_family_text_key(raw), raw)
+        return _substrate_refresh_canonical_city_name(city)
 
     def _canonical_refresh_metric(metric: object) -> str:
-        text = _refresh_family_text_key(metric)
-        if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
-            return "low"
-        if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
-            return "high"
-        return text
+        return _substrate_refresh_canonical_metric(metric)
 
     def _refresh_family_key(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
-        return (
-            _refresh_family_text_key(_canonical_refresh_city_name(city)),
-            str(target_date or "").strip(),
-            _canonical_refresh_metric(metric),
-        )
+        return _substrate_refresh_family_key(city, target_date, metric)
 
     pending_families: list[tuple[str, str, str]] = []
     for row in pending_rows:
@@ -3053,6 +3243,37 @@ def _refresh_pending_family_snapshots(
         ) % max(1, n_ordinary_families)
 
         if not gamma_refresh_families and not cached_topology_markets:
+            if venue_closed_skipped:
+                no_work_status = (
+                    "venue_closed"
+                    if venue_closed_skipped == len(families)
+                    else "no_refreshable_families"
+                )
+                logger.info(
+                    "refresh_pending_family_snapshots: no refreshable families, skipped. "
+                    "status=%s families=%d fresh_skipped=%d venue_closed_skipped=%d "
+                    "no_topology=%d no_topology_backed_off=%d cached_topology_incomplete=%d",
+                    no_work_status,
+                    len(families),
+                    fresh_skipped,
+                    venue_closed_skipped,
+                    no_topology,
+                    no_topology_backed_off,
+                    cached_topology_incomplete,
+                )
+                return {
+                    "status": no_work_status,
+                    "families_checked": len(families),
+                    "explicit_priority_families": len(explicit_priority_families),
+                    "include_pending_families": bool(include_pending_families),
+                    "open_rest_priority_families": len(open_rest_priority_families),
+                    "held_position_priority_families": len(held_position_priority_families),
+                    "fresh_skipped": fresh_skipped,
+                    "no_topology": no_topology,
+                    "venue_closed_skipped": venue_closed_skipped,
+                    "no_topology_backed_off": no_topology_backed_off,
+                    "cached_topology_incomplete": cached_topology_incomplete,
+                }
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
                 "families=%d fresh_skipped=%d no_topology=%d venue_closed_skipped=%d "
@@ -4096,8 +4317,9 @@ def _startup_freshness_check() -> None:
     §3.7 gate split:
     - Data freshness gate: degrade-or-warn on STALE. Operator may override
       individual sources via state/control_plane.json::force_ignore_freshness.
-    - Wallet gate (_startup_wallet_check): NEVER overridable; hard exit on
-      failure.
+    - Wallet reachability warm-up (_startup_wallet_check): NEVER synthesizes
+      bankroll truth; missing wallet truth leaves new submit/sizing fail-closed
+      while monitor/redecision continues.
 
     Boot behavior (driven by evaluate_freshness_at_boot):
     - FRESH: log at INFO, proceed.
@@ -4413,7 +4635,7 @@ _WALLET_RECORD_UNSET = object()
 
 
 def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
-    """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
+    """P7: Startup wallet reachability warm-up.
 
     Accepts an optional clob for testing. In production, creates a live
     PolymarketClient.
@@ -4425,7 +4647,13 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
     immediately poisoned the singleton, blocking every downstream
     `assert_buy_preflight` / `assert_sell_preflight` with
     `collateral_ledger_unconfigured` or `sqlite3.ProgrammingError`.
+
+    Wallet unreachability is fail-closed for new live submit, not fatal for the
+    whole daemon. Held-position monitoring, redecision, settlement, and later
+    bankroll warm retries must continue; submit/sizing paths consume
+    bankroll_provider.cached() and already fail closed when it is unavailable.
     """
+    balance = None
     if clob is not None:
         # TEST-INJECTION PATH: an explicit clob was supplied. Use it directly
         # and keep the same fail-closed semantics. Production never reaches here.
@@ -4433,8 +4661,11 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
             balance = float(clob.get_balance())
             logger.info("Startup wallet check: $%.2f pUSD available", balance)
         except Exception as exc:
-            logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
-            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+            logger.critical(
+                "STARTUP_WALLET_UNAVAILABLE: wallet query failed at daemon start; "
+                "continuing monitor/redecision while new submit remains fail-closed: %s",
+                exc,
+            )
     else:
         # PRODUCTION PATH: route the fail-closed wallet-reachability gate through
         # bankroll_provider.current() instead of constructing a SECOND
@@ -4450,24 +4681,35 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
         # tests / a boot path without the warm thread) the gate self-fetches via
         # current(). Efficiency #1 still holds: Site A warmed the 30s cache, so
         # current() here is a fresh CACHE HIT with no additional on-chain RPC; on
-        # a cold cache it does a real fetch and still fail-closes on None.
-        if bankroll_record is _WALLET_RECORD_UNSET:
-            from src.runtime.bankroll_provider import current as _bankroll_current
+        # a cold cache it does a real fetch. None keeps the submit lane
+        # fail-closed via bankroll_provider.cached() consumers, but no longer
+        # kills monitoring/redecision.
+        try:
+            if bankroll_record is _WALLET_RECORD_UNSET:
+                from src.runtime.bankroll_provider import current as _bankroll_current
 
-            rec = _bankroll_current()
-        else:
-            rec = bankroll_record
+                rec = _bankroll_current()
+            else:
+                rec = bankroll_record
+        except Exception as exc:
+            rec = None
+            logger.critical(
+                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider.current() raised; "
+                "continuing monitor/redecision while new submit remains fail-closed: %s",
+                exc,
+            )
         if rec is None:
             logger.critical(
-                "FAIL-CLOSED: wallet query failed at daemon start "
-                "(bankroll_provider returned None)"
+                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider returned None at daemon "
+                "start; continuing monitor/redecision while new submit remains "
+                "fail-closed until a later bankroll warm succeeds."
             )
-            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
-        balance = rec.value_usd
-        logger.info(
-            "Startup wallet check: $%.2f pUSD available (source=%s cached=%s)",
-            balance, rec.source, rec.cached,
-        )
+        else:
+            balance = rec.value_usd
+            logger.info(
+                "Startup wallet check: $%.2f pUSD available (source=%s cached=%s)",
+                balance, rec.source, rec.cached,
+            )
 
     # Install the process-wide collateral ledger singleton with a ledger-owned
     # persistent conn so downstream executor / riskguard preflight callers do
@@ -5030,24 +5272,21 @@ def _edli_event_reactor_cycle() -> None:
         conn.close()
         _edli_reactor_active_lock.release()
         raise
-    # Warm the in-process bankroll-of-record cache once per cycle so the per-event no-submit
-    # Kelly proof can read bankroll_provider.cached() (it must NOT live-fetch per decision).
-    # The on-chain wallet is the only bankroll truth; this is a cycle-level refresh, not a
-    # per-event side effect. Non-fatal — Kelly fails closed (KELLY_PROOF_MISSING) if unwarm.
+    # Warm the in-process bankroll-of-record cache from the durable collateral
+    # ledger snapshot so the per-event no-submit Kelly proof can read
+    # bankroll_provider.cached() without performing venue/RPC I/O inside the
+    # reactor. The post-trade-capital sidecar owns wallet refreshes; this live
+    # scheduler consumes only local fresh truth. Non-fatal — Kelly fails closed
+    # (KELLY_PROOF_MISSING) if the ledger is absent/stale/degraded.
     try:
         from src.runtime import bankroll_provider as _bankroll_provider
 
-        # 2026-05-31: FORCE a fresh on-chain fetch each cycle (max_age_seconds=0.0) so the
-        # per-event no-submit Kelly read (bankroll_provider.cached(), 300s window) always sees
-        # a fresh value. The prior plain current() used the default 30s freshness and could
-        # return a stale cache-hit without re-fetching, letting _last_fetched_at age past 300s
-        # → cached() None → KELLY_PROOF_MISSING:bankroll_provider_unavailable on every event.
-        # Cycle-level (not per-decision) — preserves #45's "no per-decision wallet fetch".
-        _bk_warm = _bankroll_provider.current(max_age_seconds=0.0)
+        _bk_warm = _bankroll_provider.warm_from_collateral_snapshot()
         if _bk_warm is None:
             logger.error(
-                "EDLI reactor: bankroll warm current() returned None — cache cold, Kelly will "
-                "fail closed (KELLY_PROOF_MISSING). On-chain wallet fetch is failing."
+                "EDLI reactor: bankroll ledger warm returned None — cache cold, Kelly will "
+                "fail closed (KELLY_PROOF_MISSING). Collateral snapshot is missing, stale, "
+                "or degraded."
             )
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
@@ -5159,22 +5398,32 @@ def _edli_event_reactor_cycle() -> None:
             ):
                 _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
                 try:
-                    _edli_emit_day0_extreme_events(
-                        conn,
-                        _day0_trade_conn,
-                        decision_time=now,
-                        received_at=received_at,
-                        limit=day0_emit_limit,
-                        # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
-                        # (_day0_fast_prefetch above, before acquire); this call
-                        # is the pure write phase.
-                        fast_prefetch=_day0_fast_prefetch,
-                        # Stamp scope-aware emission priority. Production live
-                        # scope makes Day0 tradeable.
-                        day0_is_tradeable=day0_is_tradeable_for_scope(
-                            str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
-                        ),
-                    )
+                    try:
+                        _edli_emit_day0_extreme_events(
+                            conn,
+                            _day0_trade_conn,
+                            decision_time=now,
+                            received_at=received_at,
+                            limit=day0_emit_limit,
+                            # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                            # (_day0_fast_prefetch above, before acquire); this call
+                            # is the pure write phase.
+                            fast_prefetch=_day0_fast_prefetch,
+                            # Stamp scope-aware emission priority. Production live
+                            # scope makes Day0 tradeable.
+                            day0_is_tradeable=day0_is_tradeable_for_scope(
+                                str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
+                            ),
+                        )
+                    except sqlite3.OperationalError as _day0_emit_lock_exc:
+                        if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
+                            logger.warning(
+                                "EDLI reactor: day0 emit still locked after bounded retry "
+                                "(%r) — skipping Day0 emit this cycle and draining already-queued candidates.",
+                                _day0_emit_lock_exc,
+                            )
+                        else:
+                            raise
                 finally:
                     _day0_trade_conn.close()
             # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
@@ -5322,14 +5571,16 @@ def _edli_event_reactor_cycle() -> None:
         _decision_family_snapshot_refresher = _edli_decision_family_snapshot_refresher(
             forecasts_conn
         )
-        # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): the reactor itself must make a
-        # blocked event's substrate fresh, so a transient SUBSTRATE block can never requeue
-        # forever without a refresh attempt. The SAME decision-time refresher is threaded INTO the
-        # reactor (Build 1: executable-snapshot blocks AT the reactor gate now invoke it), plus a
-        # single-family cycle-advance reseed enqueuer (Build 2: stale/absent replacement-posterior
-        # blocks enqueue a targeted re-materialization). Both run from the reactor's end-of-cycle
-        # drain — outside any world/trade txn (three-phase law), debounced, fail-soft.
+        # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): a blocked event must
+        # create visible refresh work, but the live reactor is a consumer, not the
+        # executable-substrate producer. Requeueing the event keeps its family on the
+        # substrate-observer sidecar's pending-family work surface; the reactor drain
+        # records the nudge and stays out of Gamma/CLOB producer I/O.
+        _reactor_family_snapshot_refresher = _edli_reactor_family_snapshot_refresher()
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
+        _reactor_family_market_absence_provider = (
+            _edli_reactor_family_market_absence_provider()
+        )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5349,8 +5600,8 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_refit_decision=replacement_forecast_refit_decision,
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
-                    conn,
+                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_book_evidence_conn(
+                    trade_conn,
                     edli_cfg,
                     # GATE #84: in live-submit mode the pre-submit authority pulls a
                     # just-in-time live book for the selected candidate so quote_age
@@ -5412,11 +5663,14 @@ def _edli_event_reactor_cycle() -> None:
             # family's substrate as part of the SAME handling (Build 1 snapshot refresher + Build 2
             # single-family cycle-advance reseed), so requeue-without-refresh is structurally
             # impossible for refreshable substrate classes.
-            family_snapshot_refresher=_decision_family_snapshot_refresher,
+            family_snapshot_refresher=_reactor_family_snapshot_refresher,
             cycle_advance_enqueuer=_reactor_cycle_advance_enqueuer,
             # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
             # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
             held_family_provider=_edli_reactor_held_family_provider(),
+            # Current Gamma-empty/no-listed-market proof terminalizes only the blocked event; a
+            # future event for the same family can still process if the venue lists later.
+            family_market_absence_provider=_reactor_family_market_absence_provider,
             config=ReactorConfig(
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,
@@ -5502,7 +5756,7 @@ def _edli_event_reactor_cycle() -> None:
 
 @_scheduler_job("edli_bankroll_warm")
 def _edli_bankroll_warm_cycle() -> None:
-    """Dedicated frequent (~60s) on-chain bankroll-of-record cache warmer.
+    """Dedicated frequent (~60s) bankroll-of-record cache warmer.
 
     STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
     proof and the live-bridge allocator refresh both read
@@ -5515,18 +5769,12 @@ def _edli_bankroll_warm_cycle() -> None:
     ``KELLY_PROOF_MISSING:bankroll_provider_unavailable``. Bankroll freshness was
     structurally COUPLED to the slow reactor cycle.
 
-    This job DECOUPLES freshness from the reactor cycle: it runs on its own ~60s
-    cadence and forces a fresh on-chain fetch (``current(max_age_seconds=0.0)``),
-    advancing ``_last_fetched_at`` so ``cached()`` (300s window) always resolves
-    regardless of how long the reactor cycle takes. It does NOT widen the
-    ``cached()`` window or weaken any fail-closed semantics — the consumers still
-    fail-closed correctly when bankroll is genuinely unavailable.
-
-    Not a DB writer (no table owned) — the @_scheduler_job decorator is the only
-    wiring needed (B047 observability). Fail-soft: a transient wallet-RPC failure
-    logs an ERROR but never crashes this job; a failed warm simply means this tick's
-    freshness did not advance (the next tick retries in ~60s, and consumers stay
-    fail-closed in the interim).
+    This job DECOUPLES freshness from the reactor cycle without doing live venue
+    I/O in the trading daemon. It consumes the durable CollateralLedger snapshot
+    maintained by the post-trade-capital sidecar and advances the in-process
+    cache from that local truth. It does NOT widen the ``cached()`` window or
+    weaken fail-closed semantics — stale/degraded/missing collateral snapshots
+    leave consumers fail-closed.
     """
 
     edli_cfg = _settings_section("edli", {})
@@ -5535,19 +5783,40 @@ def _edli_bankroll_warm_cycle() -> None:
     from src.runtime import bankroll_provider as _bankroll_provider
 
     try:
-        warm = _bankroll_provider.current(max_age_seconds=0.0)
+        warm = _bankroll_provider.warm_from_collateral_snapshot()
     except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
         logger.error(
-            "EDLI bankroll warm: on-chain wallet fetch raised (non-fatal, freshness "
+            "EDLI bankroll warm: collateral snapshot warm raised (non-fatal, freshness "
             "did not advance this tick): %r",
             exc,
         )
         return
     if warm is None:
         logger.error(
-            "EDLI bankroll warm: current() returned None — on-chain wallet fetch is "
-            "failing; cached() will fail closed (KELLY_PROOF_MISSING) until it recovers."
+            "EDLI bankroll warm: collateral snapshot warm returned None — cached() will "
+            "fail closed (KELLY_PROOF_MISSING) until post-trade-capital publishes a fresh "
+            "non-degraded collateral snapshot."
         )
+
+
+def _command_recovery_summary_mutated_allocator_inputs(summary: object) -> bool:
+    """Return True when command recovery changed facts used by submit gating."""
+
+    if not isinstance(summary, dict):
+        return False
+    mutation_keys = {"advanced", "corrected", "projected", "exit_projected"}
+    for key, value in summary.items():
+        if isinstance(value, dict):
+            if _command_recovery_summary_mutated_allocator_inputs(value):
+                return True
+            continue
+        if key in mutation_keys:
+            try:
+                if int(value or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 @_scheduler_job("edli_command_recovery")
@@ -5571,10 +5840,21 @@ def _edli_command_recovery_cycle() -> None:
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
     from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.db import get_trade_connection_with_world_required
 
     summary = reconcile_unresolved_commands()
     if summary.get("scanned"):
         logger.info("edli_command_recovery: %s", summary)
+    if _command_recovery_summary_mutated_allocator_inputs(summary):
+        trade_conn = get_trade_connection_with_world_required(write_class=None)
+        try:
+            allocator_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+        finally:
+            trade_conn.close()
+        logger.info(
+            "edli_command_recovery: refreshed allocator after recovery mutation: %s",
+            allocator_refresh,
+        )
 
 
 def _escalation_families_from_cancelled(
@@ -5835,13 +6115,21 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         fact_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()}
     except Exception:  # noqa: BLE001
         fact_cols = set()
+    try:
+        command_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
+    except Exception:  # noqa: BLE001
+        command_cols = set()
     matched_select = "matched_size" if "matched_size" in fact_cols else "NULL AS matched_size"
+    command_state_filter = (
+        "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
+    )
     command_rows = trade_conn.execute(
-        """
+        f"""
         SELECT command_id, venue_order_id, token_id, market_id,
                side, price, snapshot_id, created_at
           FROM venue_commands
          WHERE intent_kind = 'ENTRY'
+           {command_state_filter}
            AND venue_order_id IS NOT NULL AND venue_order_id != ''
         """
     ).fetchall()
@@ -6088,13 +6376,39 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 now_utc=now,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if confirm_status == "skipped_lock_busy" or confirm_status.startswith("error"):
+            if _edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary):
+                fresh_confirmed_families = _edli_families_with_fresh_executable_substrate(
+                    confirm_families,
+                    now_utc=now,
+                )
+                confirmed_entry_scope &= fresh_confirmed_families
+                confirmed_rest_scope &= fresh_confirmed_families
+                confirm_families &= fresh_confirmed_families
+                logger.info(
+                    "edli_redecision_screen: partial confirmation refresh admitted "
+                    "fresh families=%d/%d entry_scope=%d rest_scope=%d summary=%r",
+                    len(fresh_confirmed_families),
+                    len(set(all_families) | set(held_families)),
+                    len(confirmed_entry_scope),
+                    len(confirmed_rest_scope),
+                    confirm_refresh_summary,
+                )
+                if not confirmed_entry_scope and not confirmed_rest_scope:
+                    logger.info(
+                        "edli_redecision_screen: confirmation refresh partial but no "
+                        "screened family has complete fresh substrate; skipping emit "
+                        "this tick rather than queueing stale redecision families=%d",
+                        len(set(all_families) | set(held_families)),
+                    )
+                    return
+            elif _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
                 logger.info(
                     "edli_redecision_screen: confirmation refresh not available; "
                     "skipping emit this tick rather than queueing stale redecision "
-                    "families=%d status=%s summary=%r",
+                    "families=%d status=%s coverage=%s summary=%r",
                     len(confirm_families),
                     confirm_status,
+                    confirm_refresh_summary.get("executable_substrate_coverage_status"),
                     confirm_refresh_summary,
                 )
                 return
@@ -6566,7 +6880,7 @@ def _edli_refresh_continuous_money_path_families(
     This is not the broad pending-event warmer. It exists so continuous
     redecision confirms fresh executable prices for families that already have
     cheap-screen value, a live rest needing reprice, or chain-confirmed exposure.
-    If the shared substrate lock is busy, the caller must skip emit this tick
+    If its confirmation lock is busy, the caller must skip emit this tick
     rather than queueing decisions from stale prices.
     """
 
@@ -6596,39 +6910,176 @@ def _edli_refresh_continuous_money_path_families(
         get_world_connection,
     )
 
-    world = get_world_connection()
-    forecasts_ro = get_forecasts_connection_read_only()
     try:
-        try:
-            attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
-            if "forecasts" not in attached:
-                world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-        except Exception as exc:  # noqa: BLE001
+        retry_delays = _edli_confirmation_refresh_lock_retry_delays()
+        for attempt in range(len(retry_delays) + 1):
+            world = get_world_connection()
+            forecasts_ro = get_forecasts_connection_read_only()
+            try:
+                try:
+                    attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
+                    if "forecasts" not in attached:
+                        world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
+                        exc,
+                    )
+                summary = _refresh_pending_family_snapshots(
+                    world,
+                    forecasts_ro,
+                    consumer_name="edli_redecision_confirm",
+                    now_utc=now_utc,
+                    extra_priority_families=clean_families,
+                    include_pending_families=False,
+                )
+            finally:
+                try:
+                    forecasts_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    world.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if not _edli_refresh_summary_has_sqlite_lock_failures(summary) or attempt >= len(retry_delays):
+                return summary
+            delay_s = retry_delays[attempt]
             logger.warning(
-                "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
-                exc,
+                "edli_redecision_screen: confirm-refresh hit sqlite lock; "
+                "retrying with fresh connections in %.1fs (attempt %d/%d) summary=%r",
+                delay_s,
+                attempt + 1,
+                len(retry_delays) + 1,
+                summary,
             )
-        return _refresh_pending_family_snapshots(
-            world,
-            forecasts_ro,
-            consumer_name="edli_redecision_confirm",
-            now_utc=now_utc,
-            extra_priority_families=clean_families,
-            include_pending_families=False,
-        )
+            time.sleep(delay_s)
+        return summary
+    finally:
+        try:
+            _edli_redecision_confirm_refresh_lock.release()
+        except RuntimeError:
+            pass
+
+
+def _edli_confirmation_refresh_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "2.0,5.0")
+    delays: list[float] = []
+    for piece in raw.split(","):
+        text = piece.strip()
+        if not text:
+            continue
+        try:
+            delay_s = float(text)
+        except ValueError:
+            continue
+        if delay_s > 0:
+            delays.append(delay_s)
+    return tuple(delays)
+
+
+def _edli_refresh_summary_has_sqlite_lock_failures(summary: dict | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    fields: list[object] = [summary.get("reason"), summary.get("error")]
+    for sample in summary.get("failure_samples") or ():
+        if isinstance(sample, dict):
+            fields.append(sample.get("error"))
+        else:
+            fields.append(sample)
+    return any("database is locked" in str(field or "").lower() for field in fields)
+
+
+def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
+    if not isinstance(summary, dict):
+        return True
+    status = str(summary.get("status") or "")
+    if status == "skipped_lock_busy" or status.startswith("error"):
+        return True
+    if _edli_refresh_summary_has_sqlite_lock_failures(summary):
+        return True
+    coverage = str(summary.get("executable_substrate_coverage_status") or "")
+    if coverage in {"NONE", "PARTIAL"}:
+        return True
+    return False
+
+
+def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    return (
+        str(summary.get("status") or "") == "refreshed"
+        and str(summary.get("executable_substrate_coverage_status") or "") == "PARTIAL"
+        and not _edli_refresh_summary_has_sqlite_lock_failures(summary)
+    )
+
+
+def _edli_families_with_fresh_executable_substrate(
+    families: set[tuple[str, str, str]],
+    *,
+    now_utc: datetime,
+) -> set[tuple[str, str, str]]:
+    """Families whose complete market topology has fresh executable snapshots.
+
+    This is the family-level confirmation proof for continuous redecision. A
+    partial capture must not freeze every current money-path family, but it also
+    must not queue decisions from stale prices. Each family is admitted only when
+    every known condition has fresh YES and NO buy-side executable substrate.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in families or set()
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return set()
+    from src.data.market_topology_rows import _event_family_market_topology_rows
+    from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+    fresh_at_iso = now_utc.isoformat()
+    out: set[tuple[str, str, str]] = set()
+    forecasts_ro = get_forecasts_connection_read_only()
+    trade_ro = get_trade_connection_read_only()
+    try:
+        for family in sorted(clean_families):
+            city, target_date, metric = family
+            try:
+                topology_rows = _event_family_market_topology_rows(
+                    forecasts_ro,
+                    {"city": city, "target_date": target_date, "metric": metric},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "edli_redecision_screen: family freshness topology read failed; "
+                    "family not admitted this tick city=%r target_date=%r metric=%r error=%r",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
+            condition_ids = {
+                str(row.get("condition_id") or "").strip()
+                for row in topology_rows
+                if str(row.get("condition_id") or "").strip()
+            }
+            if not condition_ids:
+                continue
+            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
+                out.add(family)
     finally:
         try:
             forecasts_ro.close()
         except Exception:  # noqa: BLE001
             pass
         try:
-            world.close()
+            trade_ro.close()
         except Exception:  # noqa: BLE001
             pass
-        try:
-            _edli_redecision_confirm_refresh_lock.release()
-        except RuntimeError:
-            pass
+    return out
 
 
 def _edli_reemittable_forecast_family_keys(
@@ -7194,6 +7645,25 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
+        _invalid_fsr_archived = store.archive_invalid_forecast_snapshot_events(
+            batch_limit=batch_limit,
+        )
+        if _invalid_fsr_archived:
+            logger.info(
+                "EDLI reactor: archived %d invalid forecast-snapshot/redecision "
+                "events with impossible carrier counts → 'expired'; malformed live "
+                "carriers removed from active decision working set (batch_limit=%d)",
+                _invalid_fsr_archived,
+                batch_limit,
+            )
+    except Exception as _invalid_fsr_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_invalid_forecast_snapshot_events sweep failed "
+            "(non-fatal): %r",
+            _invalid_fsr_sweep_exc,
+        )
+
+    try:
         _fsr_archived = store.archive_superseded_forecast_snapshot_events(
             batch_limit=batch_limit,
         )
@@ -7309,16 +7779,9 @@ def _edli_emit_day0_extreme_events(
         day0_is_tradeable=day0_is_tradeable,
         suppress_recent_no_value_refutations=True,
     )
-    authority_results = trigger.scan_authority_rows(
-        observation_conn=trade_conn,
-        settlement_semantics=_edli_day0_settlement_semantics,
-        decision_time=decision_time,
-        received_at=received_at,
-        limit=limit,
-    )
-    observation_results = trigger.scan_observation_instants_rows(
-        observation_conn=trade_conn,
-        settlement_semantics=_edli_day0_settlement_semantics,
+    authority_results, observation_results = _edli_scan_day0_with_lock_retry(
+        trigger=trigger,
+        trade_conn=trade_conn,
         decision_time=decision_time,
         received_at=received_at,
         limit=limit,
@@ -7330,6 +7793,84 @@ def _edli_emit_day0_extreme_events(
         fast_emitted, len(authority_results), len(observation_results),
     )
     return fast_emitted + len(authority_results) + len(observation_results)
+
+
+def _edli_scan_day0_with_lock_retry(
+    *,
+    trigger,
+    trade_conn,
+    decision_time: datetime,
+    received_at: str,
+    limit: int,
+) -> tuple[list, list]:
+    import sqlite3
+
+    retry_delays = _edli_day0_emit_lock_retry_delays()
+    for attempt in range(1, len(retry_delays) + 2):
+        try:
+            authority_results = trigger.scan_authority_rows(
+                observation_conn=trade_conn,
+                settlement_semantics=_edli_day0_settlement_semantics,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+            )
+            observation_results = trigger.scan_observation_instants_rows(
+                observation_conn=trade_conn,
+                settlement_semantics=_edli_day0_settlement_semantics,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+            )
+            return authority_results, observation_results
+        except sqlite3.OperationalError as exc:
+            if not _edli_is_sqlite_lock_error(exc) or attempt > len(retry_delays):
+                raise
+            logger.warning(
+                "EDLI day0 emit hit transient world-DB lock; retrying in %.1fs "
+                "(attempt %d/%d): %r",
+                retry_delays[attempt - 1],
+                attempt,
+                len(retry_delays) + 1,
+                exc,
+            )
+            time.sleep(retry_delays[attempt - 1])
+    raise RuntimeError("unreachable day0 emit retry state")
+
+
+def _edli_day0_emit_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get("ZEUS_DAY0_EMIT_LOCK_RETRY_SECONDS", "1.0,2.0")
+    delays: list[float] = []
+    for piece in raw.split(","):
+        text = piece.strip()
+        if not text:
+            continue
+        try:
+            delay_s = float(text)
+        except ValueError:
+            continue
+        if delay_s > 0:
+            delays.append(min(delay_s, 10.0))
+    return tuple(delays)
+
+
+def _edli_is_sqlite_lock_error(exc: Exception) -> bool:
+    import sqlite3
+
+    if isinstance(exc, sqlite3.OperationalError):
+        lock_codes = {
+            getattr(sqlite3, "SQLITE_BUSY", 5),
+            getattr(sqlite3, "SQLITE_LOCKED", 6),
+        }
+        code = getattr(exc, "sqlite_errorcode", None)
+        if code is not None and code in lock_codes:
+            return True
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database is busy" in message
+    )
 
 
 def _edli_day0_settlement_semantics(observation: dict):
@@ -7380,16 +7921,56 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
 def _edli_pre_submit_clob_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
     if raw in (None, ""):
-        return 3.0
+        return 6.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
-        return 3.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
-        return 3.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     return value
+
+
+def _edli_pre_submit_inner_io_timeout_seconds() -> float:
+    """Network timeout used inside the outer pre-submit timeout guard.
+
+    The outer guard is a daemon-protection circuit breaker.  Inner venue/RPC
+    calls must time out first; otherwise the guard returns while the worker
+    thread keeps blocking in TLS/SDK I/O and the live reactor eventually skips
+    cycles with leaked pre-submit workers.
+    """
+
+    outer = _edli_pre_submit_clob_timeout_seconds()
+    raw = os.environ.get("ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS")
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS=%r; deriving from outer timeout",
+                raw,
+            )
+        else:
+            if value > 0 and (value * 2.0) < outer:
+                return value
+            logger.warning(
+                "Invalid ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS=%r; must be positive and < half outer timeout %.3fs",
+                raw,
+                outer,
+            )
+    return max(0.01, min(2.0, outer * 0.35))
+
+
+def _edli_run_pre_submit_clob_call(label: str, fn):
+    from src.runtime.timeout_guard import run_with_timeout
+
+    return run_with_timeout(
+        fn,
+        seconds=_edli_pre_submit_clob_timeout_seconds(),
+        label=f"pre_submit_{label}",
+    )
 
 
 def _edli_pre_submit_jit_book_quote_provider():
@@ -7406,8 +7987,11 @@ def _edli_pre_submit_jit_book_quote_provider():
     def _fetch(token_id: str) -> dict:
         from src.data.polymarket_client import PolymarketClient
 
-        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-            return clob.get_orderbook_snapshot(token_id)
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
+            return _edli_run_pre_submit_clob_call(
+                "jit_book",
+                lambda: clob.get_orderbook_snapshot(token_id),
+            )
 
     return _fetch
 
@@ -7491,6 +8075,17 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             1.0,
             float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
         )
+        lock_timeout_s = max(
+            0.0,
+            float(os.environ.get("ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS", "2.0")),
+        )
+        acquired = _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s)
+        if not acquired:
+            logger.warning(
+                "decision family refresh: substrate refresh lock busy for %s/%s/%s",
+                city, target_date, metric,
+            )
+            return False
         write_conn = get_trade_connection(write_class="live")
         try:
             market = reconstruct_weather_market_from_static_topology(
@@ -7526,8 +8121,56 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             return False
         finally:
             write_conn.close()
+            try:
+                _market_substrate_refresh_lock.release()
+            except RuntimeError:
+                pass
 
     return _refresh
+
+
+def _edli_reactor_family_snapshot_refresher():
+    """Build the reactor-drain substrate nudge.
+
+    The reactor is a live decision consumer, not the executable-substrate producer.
+    A transient snapshot block is already requeued in ``opportunity_event_processing``;
+    the substrate-observer sidecar reads that pending-family surface and performs
+    Gamma/CLOB capture out-of-process. Returning False here preserves honest retry
+    accounting without blocking the reactor on producer I/O.
+    """
+
+    def _refresh(*, city, target_date, metric, **_ignored):
+        family = (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
+        )
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            return False
+        logger.info(
+            "reactor family refresh delegated to substrate-observer sidecar via pending event: %s/%s/%s",
+            family[0], family[1], family[2],
+        )
+        return False
+
+    return _refresh
+
+
+def _edli_reactor_family_market_absence_provider():
+    """Build the reactor's live venue-listing absence proof provider.
+
+    The only authority this provider exposes is the daemon warm lane's current Gamma-empty backoff:
+    a family was explicitly probed and Gamma returned no event list / no parseable listed market for
+    that exact (city, target_date, metric). Plain missing topology, lock-busy, time-boxed probes, or
+    network errors do not set the backoff and therefore do not terminalize reactor events.
+    """
+
+    def _is_absent(*, city, target_date, metric, **_ignored):
+        key = _substrate_refresh_family_key(city, target_date, metric)
+        until = _GAMMA_EMPTY_BACKOFF_UNTIL.get(key, 0.0)
+        return until > time.monotonic()
+
+    return _is_absent
 
 
 def _edli_reactor_held_family_provider():
@@ -7660,8 +8303,8 @@ def _edli_book_best_price(levels, *, best: str):
     return max(parsed) if best == "bid" else min(parsed)
 
 
-def _edli_pre_submit_authority_provider_from_world_conn(
-    world_conn, edli_cfg, *, book_quote_provider=None
+def _edli_pre_submit_authority_provider_from_book_evidence_conn(
+    book_evidence_conn, edli_cfg, *, book_quote_provider=None
 ):
     """Build EDLI's production pre-submit authority provider.
 
@@ -7684,7 +8327,8 @@ def _edli_pre_submit_authority_provider_from_world_conn(
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
     balance_check_enabled = bool(edli_cfg.get("pre_submit_balance_allowance_check_enabled", True))
     venue_summary_cache: dict[str, object] | None = None
-    collateral_payload_cache: dict[str, object] | None = None
+    pusd_collateral_payload_cache: dict[str, object] | None = None
+    full_collateral_payload_cache: dict[str, object] | None = None
 
     def _cached_venue_summary(checked_at: datetime) -> dict[str, object]:
         nonlocal venue_summary_cache
@@ -7692,14 +8336,37 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             venue_summary_cache = _edli_venue_connectivity_authority_summary(checked_at)
         return venue_summary_cache
 
-    def _cached_collateral_payload() -> dict[str, object]:
-        nonlocal collateral_payload_cache
-        if collateral_payload_cache is None:
+    def _cached_collateral_payload(side: str) -> dict[str, object]:
+        nonlocal full_collateral_payload_cache, pusd_collateral_payload_cache
+        normalized_side = str(side or "").upper()
+        if normalized_side == "BUY" and pusd_collateral_payload_cache is None:
             from src.data.polymarket_client import PolymarketClient
 
-            with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-                collateral_payload_cache = dict(clob._ensure_v2_adapter().get_collateral_payload())
-        return collateral_payload_cache
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
+                adapter = clob._ensure_v2_adapter()
+                pusd_payload_fn = getattr(adapter, "get_pusd_collateral_payload", None)
+                if not callable(pusd_payload_fn):
+                    pusd_payload_fn = adapter.get_collateral_payload
+                pusd_collateral_payload_cache = dict(
+                    _edli_run_pre_submit_clob_call(
+                        "collateral_payload",
+                        pusd_payload_fn,
+                    )
+                )
+        if normalized_side == "BUY":
+            return pusd_collateral_payload_cache
+        if full_collateral_payload_cache is None:
+            from src.data.polymarket_client import PolymarketClient
+
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
+                adapter = clob._ensure_v2_adapter()
+                full_collateral_payload_cache = dict(
+                    _edli_run_pre_submit_clob_call(
+                        "collateral_payload",
+                        adapter.get_collateral_payload,
+                    )
+                )
+        return full_collateral_payload_cache
 
     def _provider(final_intent, _executable_snapshot, decision_time):
         checked_at = decision_time.astimezone(timezone.utc)
@@ -7719,7 +8386,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             # row ONLY if it is itself within the freshness bound; a venue-stale row
             # (the GATE #84 pathology) must NOT be emitted as a fresh quote.
             row = _edli_latest_pre_submit_book_row(
-                world_conn,
+                book_evidence_conn,
                 token_id=token_id,
                 decision_time=checked_at,
             )
@@ -7751,7 +8418,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(
             final_intent,
             checked_at,
             enabled=balance_check_enabled,
-            collateral_payload=_cached_collateral_payload(),
+            collateral_payload=_cached_collateral_payload(str(intent.get("side") or "")),
         )
 
         return PreSubmitAuthorityWitness(
@@ -7783,8 +8450,8 @@ def _edli_pre_submit_authority_provider_from_world_conn(
     return _provider
 
 
-def _edli_latest_pre_submit_book_row(world_conn, *, token_id: str, decision_time: datetime):
-    return world_conn.execute(
+def _edli_latest_pre_submit_book_row(book_evidence_conn, *, token_id: str, decision_time: datetime):
+    return book_evidence_conn.execute(
         """
         SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
         FROM execution_feasibility_evidence
@@ -7823,8 +8490,8 @@ def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:
 def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str, object]:
     from src.data.polymarket_client import PolymarketClient
 
-    with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-        clob.v2_preflight()
+    with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
+        _edli_run_pre_submit_clob_call("venue_preflight", clob.v2_preflight)
     return {
         "authority_id": "polymarket_v2_preflight",
         "allow_submit": True,
@@ -7849,8 +8516,12 @@ def _edli_balance_allowance_status(
     size = float(intent.get("size") or 0.0)
     notional = float(intent.get("notional_usd") or 0.0)
     if collateral_payload is None:
-        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-            collateral = clob._ensure_v2_adapter().get_collateral_payload()
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
+            adapter = clob._ensure_v2_adapter()
+            collateral = _edli_run_pre_submit_clob_call(
+                "collateral_payload",
+                adapter.get_collateral_payload,
+            )
     else:
         collateral = collateral_payload
     if side == "BUY":
@@ -8584,7 +9255,8 @@ def main():
     # Runs BEFORE strategy gate so operator sees freshness diagnostics even when
     # strategy gate refuses. GATE SPLIT (§3.7): data gate is operator-overridable
     # via state/control_plane.json::force_ignore_freshness: ["source_name"].
-    # Wallet gate (_startup_wallet_check below) is NEVER overridable.
+    # Wallet reachability (_startup_wallet_check below) is never overridden into
+    # fake bankroll truth.
     # Absent source_health.json → 5-min retry then FATAL (see freshness_gate.py).
     # Stale source_health.json → degrade per source family; trading continues.
     # Phase 3 will promote ABSENT result here to a hard FATAL (currently warn).
@@ -8632,10 +9304,11 @@ def main():
                 _capital_str,
                 settings["sizing"]["kelly_multiplier"] * 100)
 
-    # P7: Fail-closed wallet gate — must run before first cycle.
-    # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
+    # P7: Wallet reachability warm-up — must run before first cycle.
+    # GATE SPLIT (§3.7): wallet failure is NEVER converted into fake bankroll
+    # truth; new submit/sizing fail closed while monitor/redecision continues.
     # Consume the warm record (efficiency #3): warm + gate = exactly ONE
-    # current() acquisition. A None warm record → the gate fail-closes.
+    # current() acquisition.
     _startup_wallet_check(bankroll_record=_warm_rec)
 
     # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,

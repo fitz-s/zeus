@@ -418,6 +418,65 @@ def test_cycle_advance_gap_marker_heals_to_seed_when_artifact_arrives() -> None:
     assert row["reason"] is None
 
 
+def test_day0_observed_extreme_reseed_can_replace_moved_seed_file(tmp_path) -> None:
+    """A prior seed moved out of the live queue is not terminal for Day0 repair.
+
+    This is the automatic recovery path for a seed that reached the queue but
+    later failed materialization with DAY0_OBSERVED_EXTREME_REQUIRED. Once the
+    monitor has a real observed extreme, the same family/cycle may rewrite the
+    idempotency row with a fresh seed instead of staying stuck at
+    CYCLE_ADVANCE_ALREADY_ENQUEUED.
+    """
+    conn = _conn()
+    target_cycle = "2026-06-12T12:00:00+00:00"
+    moved_seed = tmp_path / "seed_failed" / "CityB.old.json"
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues
+            (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+             held_position, seed_file, reason)
+        VALUES ('t', 'CityB', '2026-06-13', 'high', 'NO_LIVE_POSTERIOR',
+                ?, 0, ?, 'MISSING_LIVE_POSTERIOR')
+        """,
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+
+    assert cycle_advance._already_enqueued(
+        conn,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        target_cycle_iso=target_cycle,
+        allow_missing_seed_file_reenqueue=True,
+    ) is False
+
+    new_seed = tmp_path / "seeds" / "CityB.new.json"
+    new_seed.parent.mkdir()
+    new_seed.write_text("{}", encoding="utf-8")
+    replaced = cycle_advance._record_enqueue(
+        conn,
+        city="CityB",
+        target_date="2026-06-13",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=target_cycle,
+        held_position=True,
+        seed_file=str(new_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        replace_existing_seed_file=True,
+    )
+    conn.commit()
+
+    assert replaced is True
+    row = conn.execute(
+        "SELECT held_position, seed_file, reason FROM cycle_advance_enqueues WHERE city = 'CityB'"
+    ).fetchone()
+    assert row["held_position"] == 1
+    assert row["seed_file"] == str(new_seed)
+    assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
 def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypatch) -> None:
     """Always-decidable repair: a held family with no BPF posterior is a first materialization,
     not CYCLE_ADVANCE_NOT_NEEDED."""
@@ -471,7 +530,7 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     check.row_factory = sqlite3.Row
     row = check.execute(
         """
-        SELECT consumed_cycle_time, target_cycle_time, seed_file, reason
+        SELECT consumed_cycle_time, target_cycle_time, held_position, seed_file, reason
         FROM cycle_advance_enqueues
         WHERE city = 'Shanghai' AND target_date = '2026-06-19' AND metric = 'high'
         """
@@ -479,8 +538,82 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     check.close()
     assert row["consumed_cycle_time"] == "NO_LIVE_POSTERIOR"
     assert row["target_cycle_time"] == cycle.isoformat()
+    assert row["held_position"] == 0
     assert row["seed_file"] == str(seed_file)
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
+def test_single_family_monitor_reseed_promotes_existing_enqueue_to_held_priority(
+    tmp_path, monkeypatch
+) -> None:
+    """A monitor-owned stale-belief repair must not stay behind a non-held idempotency row."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    consumed = datetime(2026, 6, 19, 6, tzinfo=UTC)
+    target = datetime(2026, 6, 20, 0, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=target.isoformat(),
+    )
+    _insert_posterior(
+        conn,
+        city="Kuala Lumpur",
+        target_date="2026-06-21",
+        metric="high",
+        cycle_iso=consumed.isoformat(),
+        computed_at="2026-06-20T00:03:09+00:00",
+    )
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues
+            (enqueued_at, city, target_date, metric, consumed_cycle_time,
+             target_cycle_time, held_position, seed_file, reason)
+        VALUES (?, 'Kuala Lumpur', '2026-06-21', 'high', ?, ?, 0, ?, NULL)
+        """,
+        (
+            "2026-06-20T05:54:42+00:00",
+            consumed.isoformat(),
+            target.isoformat(),
+            str(tmp_path / "seeds" / "Kuala_Lumpur.2026-06-21.high.seed.json"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target, ()),
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Kuala Lumpur",
+        target_date="2026-06-21",
+        metric="high",
+        computed_at=datetime(2026, 6, 20, 7, tzinfo=UTC),
+        held_position=True,
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+    assert report["held_position"] is True
+    assert report["held_priority_promoted"] is True
+    check = sqlite3.connect(db_path)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        """
+        SELECT held_position
+        FROM cycle_advance_enqueues
+        WHERE city = 'Kuala Lumpur' AND target_date = '2026-06-21' AND metric = 'high'
+        """
+    ).fetchone()
+    check.close()
+    assert row["held_position"] == 1
 
 
 # ===========================================================================

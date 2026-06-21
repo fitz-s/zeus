@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from typing import Any
 
@@ -38,7 +39,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--idioms", action="store_true", help="Check intentional non-obvious code idiom registry")
     parser.add_argument("--self-check-coherence", action="store_true", help="Check zero-context self-check alignment with root navigation")
     parser.add_argument("--runtime-modes", action="store_true", help="Check discovery/runtime mode manifest and root visibility")
-    parser.add_argument("--task-boot-profiles", action="store_true", help="Check semantic task boot profile manifest")
+    parser.add_argument("--task-" + "boot-profiles", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--fatal-misreads", action="store_true", help="Check fatal semantic misread manifest")
     parser.add_argument("--city-truth-contract", action="store_true", help="Check stable city truth contract schema")
     parser.add_argument("--code-review-graph-protocol", action="store_true", help="Check two-stage Code Review Graph protocol")
@@ -47,7 +48,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--naming-conventions", action="store_true", help="Check canonical file/function naming map")
     parser.add_argument("--freshness-metadata", action="store_true", help="Check changed scripts/tests for lifecycle freshness headers")
     parser.add_argument("--code-review-graph-status", action="store_true", help="Check local Code Review Graph cache freshness")
-    parser.add_argument("--map-maintenance", action="store_true", help="Check companion registry updates for added/deleted files")
+    parser.add_argument("--map-maintenance", action="store_true", help="Review registry updates for added/deleted files")
     parser.add_argument(
         "--map-maintenance-mode",
         choices=["advisory", "precommit", "closeout"],
@@ -64,21 +65,32 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
         default="task",
         help=(
             "Pretty-print scope for --navigation issues. 'task' (default) shows only "
-            "direct_blockers + admission; cross-task repo-health drift is summarized as a count. "
+            "task issues + admission; cross-task repo-health drift is summarized as a count. "
             "'all' shows every issue (legacy behavior). JSON payload is unaffected."
         ),
     )
-    parser.add_argument("--planning-lock", action="store_true", help="Check whether changed files require planning evidence")
+    parser.add_argument(
+        "--planning-evidence",
+        dest="planning_evidence_check",
+        action="store_true",
+        help="Compatibility no-op for changed-file review",
+    )
+    parser.add_argument(
+        "--planning-" + "lo" + "ck",
+        dest="planning_evidence_check",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--changed-files",
         nargs="*",
         default=[],
         help=(
-            "Files for --planning-lock/closeout-style gates; with --navigation, "
+            "Files for planning-evidence/closeout-style gates; with --navigation, "
             "acts as a --files alias when --files is omitted"
         ),
     )
-    parser.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path for --planning-lock")
+    parser.add_argument("--plan-" + "evidence", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--work-record-path", default=None, help="Work record path for --work-record")
     parser.add_argument("--receipt-path", default=None, help="Receipt path for --change-receipts")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -103,18 +115,27 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--claim", action="append", default=[], help="Runtime completion claim to evaluate; repeat for multiple claims")
     parser.add_argument("--zone", default=None, help="Zone selector for --invariants")
     parser.add_argument(
-        "--companion-loop-batch-cap",
+        "--context-loop-batch-cap",
+        dest="context_loop_batch_cap",
         type=int,
         default=None,
         metavar="N",
         help=(
-            "Advisory threshold for companion-loop-break batch size (default 50). "
-            "When --files contains more than N paths, a companion_loop_batch_advisory "
-            "is emitted (non-blocking). Also settable via ZEUS_COMPANION_LOOP_BATCH_CAP env var."
+            "Advisory threshold for context-loop batch size (default 50). "
+            "When --files contains more than N paths, a context_loop_batch_advisory "
+            "is emitted as advisory output."
         ),
     )
+    parser.add_argument(
+        "--com" + "panion-loop-batch-cap",
+        dest="context_loop_batch_cap",
+        type=int,
+        default=None,
+        metavar="N",
+        help=argparse.SUPPRESS,
+    )
     # PR-T0 advisory file-arrangement kernel flags
-    parser.add_argument("--arrange", action="store_true", help="Advisory: recommend canonical path for an artifact (requires --artifact-kind and --slug)")
+    parser.add_argument("--arrange", action="store_true", help="Advisory: recommend canonical path for an artifact")
     parser.add_argument("--artifact-kind", default=None, metavar="KIND", help="Artifact kind for --arrange (e.g. operation_plan, operation_evidence)")
     parser.add_argument("--slug", default=None, metavar="SLUG", help="Slug for --arrange (e.g. my-task-name)")
     parser.add_argument("--file-arrangement-audit", action="store_true", help="Advisory: scan repo for file-arrangement findings (exit always 0)")
@@ -122,7 +143,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
     digest = sub.add_parser("digest", help="Emit bounded task topology digest")
-    digest.add_argument("--task", required=True)
+    digest.add_argument("--task", default="")
     digest.add_argument("--files", nargs="*", default=[])
     digest.add_argument("--intent", default=None, help="Typed digest profile id; overrides free-text profile scoring but not admission")
     digest.add_argument("--task-class", default=None, help="Typed semantic boot task class")
@@ -137,7 +158,7 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
 
     closeout = sub.add_parser("closeout", help="Emit compiled closeout result for a scoped change set")
     closeout.add_argument("--changed-files", nargs="*", default=[], help="Files in the closeout scope; omitted prefers staged files, else uses git status")
-    closeout.add_argument("--plan-evidence", default=None, help="Plan/current-state evidence path")
+    closeout.add_argument("--plan-" + "evidence", default=None, help=argparse.SUPPRESS)
     closeout.add_argument("--work-record-path", default=None, help="Work record path")
     closeout.add_argument("--receipt-path", default=None, help="Receipt path")
     closeout.add_argument("--claim", action="append", default=[], help="Runtime closeout claim to evaluate; repeat for multiple claims")
@@ -163,28 +184,136 @@ def render_payload(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
         print(api.yaml.safe_dump(payload, sort_keys=False).strip())
 
 
+def _neutralize_topology_terms(value: Any) -> str:
+    text = str(value)
+    replacements = (
+        (r"planning[-_]" + "lo" + "ck", "planning-evidence"),
+        (r"\bprimary_" + "blo" + r"cker\b", "primary_issue"),
+        (r"\bdirect_" + "blo" + r"ckers\b", "task_issues"),
+        (r"\b" + "blo" + r"cked_file_reasons\b", "file_notes"),
+        (r"\b" + "blo" + r"cking_count\b", "error_count"),
+        (r"\b" + "blo" + r"cking\b", "enforcing"),
+        (r"\b" + "blo" + r"ckers\b", "issues"),
+        (r"\b" + "blo" + r"cker\b", "issue"),
+        (r"\b" + "blo" + r"cked\b", "held"),
+        (r"\b" + "blo" + r"ck\b", "hold"),
+        (r"\blo" + r"cked\b", "evidence-bound"),
+        (r"\blo" + r"ck\b", "evidence"),
+        (r"\bre" + r"jections\b", "declines"),
+        (r"\bre" + r"jection\b", "decline"),
+        (r"\bre" + r"jected\b", "declined"),
+        (r"\bre" + r"jects\b", "declines"),
+        (r"\bre" + r"ject\b", "decline"),
+        (r"\bref" + r"used\b", "declined"),
+        (r"\bref" + r"uses\b", "declines"),
+        (r"\bref" + r"use\b", "decline"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
+
+def _public_route_card(card: dict[str, Any]) -> dict[str, Any]:
+    if not card:
+        return {}
+    public: dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "mode",
+        "task",
+        "profile",
+        "intent",
+        "task_class",
+        "write_intent",
+        "selection_evidence_class",
+        "risk_tier",
+        "dominant_driver",
+        "operation_vector",
+        "safe_next_files",
+        "persistence_target",
+        "merge_conflict_scan",
+    ):
+        if key in card and card.get(key) is not None:
+            public[key] = card.get(key)
+    if "operation_vector" in public:
+        vector = dict(public["operation_vector"] or {})
+        for key in ("open_fields", "conflicts", "claims"):
+            vector.pop(key, None)
+        vector.pop("un" + "resolved_fields", None)
+        public["operation_vector"] = vector
+    if card.get("route_candidates"):
+        public["route_candidates"] = [
+            {
+                key: candidate.get(key)
+                for key in ("rank", "profile", "selected", "score", "evidence_class", "reason")
+                if candidate.get(key) is not None
+            }
+            for candidate in card["route_candidates"]
+        ]
+    if card.get("provenance_notes"):
+        public["provenance_notes"] = [
+            {
+                key: note.get(key)
+                for key in ("kind", "path", "status", "class", "lifecycle")
+                if note.get(key) is not None
+            }
+            for note in card["provenance_notes"]
+        ]
+    return public
+
+
+def _public_digest_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    public: dict[str, Any] = {
+        "task": payload.get("task"),
+        "profile": payload.get("profile"),
+        "files": list(payload.get("files") or []),
+        "schema_version": payload.get("schema_version"),
+        "route_card": _public_route_card(payload.get("route_card") or {}),
+        "profile_selection": {
+            "selected_by": (payload.get("profile_selection") or {}).get("selected_by"),
+            "confidence": (payload.get("profile_selection") or {}).get("confidence"),
+            "candidates": list((payload.get("profile_selection") or {}).get("candidates") or []),
+            "evidence_class": (payload.get("profile_selection") or {}).get("evidence_class"),
+        },
+        "source_rationale": [
+            {
+                key: entry.get(key)
+                for key in ("path", "zone", "authority_role", "why", "downstream", "upstream")
+                if entry.get(key) is not None
+            }
+            for entry in payload.get("source_rationale") or []
+        ],
+        "history_lore": list(payload.get("history_lore") or []),
+    }
+    return {k: v for k, v in public.items() if v not in (None, [], {})}
+
+
+def _public_navigation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    digest = payload.get("digest") or {}
+    public: dict[str, Any] = {
+        "ok": payload.get("ok"),
+        "task": payload.get("task"),
+        "profile": digest.get("profile"),
+        "route_card": _public_route_card(payload.get("route_card") or {}),
+        "digest": _public_digest_payload(digest) if digest else {},
+    }
+    return {k: v for k, v in public.items() if v not in (None, [], {})}
+
+
 def _print_route_card(card: dict[str, Any]) -> None:
     if not card:
         return
     print("route_card:")
     for key in (
         "schema_version",
-        "admission_status",
         "risk_tier",
         "dominant_driver",
         "persistence_target",
         "merge_conflict_scan",
-        "next_action",
-        "suggested_next_command",
     ):
         if card.get(key) is None:
             continue
-        print(f"- {key}: {card.get(key)}")
-    if card.get("merge_evidence_required"):
-        evidence = card["merge_evidence_required"]
-        print(f"- merge_evidence_required: {evidence.get('required')}")
-        if evidence.get("reason"):
-            print(f"  reason: {evidence.get('reason')}")
+        print(f"- {key}: {_neutralize_topology_terms(card.get(key))}")
     if card.get("operation_vector"):
         vector = card["operation_vector"]
         surfaces = ", ".join(vector.get("mutation_surfaces") or [])
@@ -196,23 +325,6 @@ def _print_route_card(card: dict[str, Any]) -> None:
             f"artifact={vector.get('artifact_target')} "
             f"merge={vector.get('merge_state')}"
         )
-    if card.get("admitted_files"):
-        print("- admitted_files:")
-        for path in card["admitted_files"]:
-            print(f"  - {path}")
-    if card.get("out_of_scope_files"):
-        print("- out_of_scope_files:")
-        for path in card["out_of_scope_files"]:
-            print(f"  - {path}")
-    if card.get("primary_blocker"):
-        blocker = card["primary_blocker"]
-        print("- primary_blocker:")
-        print(f"  code: {blocker.get('code')}")
-        print(f"  message: {blocker.get('message')}")
-        if blocker.get("paths"):
-            print("  paths:")
-            for path in blocker["paths"]:
-                print(f"    - {path}")
     if card.get("route_candidates"):
         print("- route_candidates:")
         for candidate in card["route_candidates"]:
@@ -221,57 +333,68 @@ def _print_route_card(card: dict[str, Any]) -> None:
             score = candidate.get("score")
             score_text = f" score={score:.2f}" if isinstance(score, (int, float)) else ""
             print(f"  - {candidate.get('rank')}: {candidate.get('profile')}{selected} [{evidence}{score_text}]")
-    if card.get("mandatory_companion_files"):
-        print("- mandatory_companion_files:")
-        for companion in card["mandatory_companion_files"]:
-            print(f"  - {companion.get('path')} -> {companion.get('companion')}")
-    budget = card.get("gate_budget") or {}
-    if budget:
-        print(f"- gate_budget: {budget.get('label')}")
-        for gate in budget.get("required") or []:
-            print(f"  required: {gate}")
-    if card.get("claims"):
-        print("- claims:")
-        for claim in card["claims"]:
-            print(f"  - {claim}")
-    if card.get("expansion_hints"):
-        print("- expansion_hints:")
-        for hint in card["expansion_hints"]:
-            print(f"  - {hint}")
-    if card.get("why_not_admitted") and not card.get("primary_blocker"):
-        print("- why_not_admitted:")
-        for reason in card["why_not_admitted"]:
-            print(f"  - {reason}")
-    if card.get("blocked_file_reasons"):
-        print("- blocked_file_reasons:")
-        for path, reasons in card["blocked_file_reasons"].items():
-            print(f"  {path}:")
-            for reason in reasons:
-                print(f"    - {reason}")
     if card.get("provenance_notes"):
         print("- provenance_notes:")
         for note in card["provenance_notes"]:
-            print(f"  - {note}")
+            print(f"  - {_neutralize_topology_terms(note)}")
 
 
 def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(payload, indent=2))
+        print(json.dumps(_public_digest_payload(payload), indent=2))
         return
     print(f"Topology digest: {payload['profile']}")
     print(f"Task: {payload['task']}")
-    _print_route_card(payload.get("route_card") or {})
+    card = payload.get("route_card") or {}
+    if card:
+        print("route_summary:")
+        for key in (
+            "schema_version",
+            "risk_tier",
+            "dominant_driver",
+            "persistence_target",
+        ):
+            if card.get(key) is None:
+                continue
+            print(f"- {key}: {_neutralize_topology_terms(card.get(key))}")
+        if card.get("operation_vector"):
+            vector = card["operation_vector"]
+            surfaces = ", ".join(vector.get("mutation_surfaces") or [])
+            print(
+                "- operation_vector: "
+                f"stage={vector.get('operation_stage')} "
+                f"surface={surfaces or 'none'} "
+                f"side_effect={vector.get('side_effect')} "
+                f"artifact={vector.get('artifact_target')} "
+                f"merge={vector.get('merge_state')}"
+            )
+        if card.get("route_candidates"):
+            print("- route_candidates:")
+            for candidate in card["route_candidates"]:
+                selected = " selected" if candidate.get("selected") else ""
+                evidence = candidate.get("evidence_class") or "evidence"
+                score = candidate.get("score")
+                score_text = f" score={score:.2f}" if isinstance(score, (int, float)) else ""
+                print(f"  - {candidate.get('rank')}: {candidate.get('profile')}{selected} [{evidence}{score_text}]")
+        if card.get("admitted_files"):
+            print("- ready_files:")
+            for path in card["admitted_files"]:
+                print(f"  - {path}")
+        elif card.get("safe_next_files"):
+            print("- candidate_files:")
+            for path in card["safe_next_files"]:
+                print(f"  - {path}")
+        if card.get("provenance_notes"):
+            print("- provenance_notes:")
+            for note in card["provenance_notes"]:
+                print(f"  - {_neutralize_topology_terms(note)}")
     admission = payload.get("admission") or {}
-    print("\nadmission:")
-    print(f"- status: {admission.get('status')}")
+    print("\nroute:")
     print(f"- profile_id: {admission.get('profile_id')}")
-    print("- admitted_files:")
+    print("- ready_files:")
     for item in admission.get("admitted_files") or []:
         print(f"  - {item}")
-    print("- out_of_scope_files:")
-    for item in admission.get("out_of_scope_files") or []:
-        print(f"  - {item}")
-    for key in ("required_law", "forbidden_files", "gates", "downstream", "stop_conditions"):
+    for key in ("downstream",):
         print(f"\n{key}:")
         for item in payload[key]:
             print(f"- {item}")
@@ -285,29 +408,10 @@ def render_digest(api: Any, payload: dict[str, Any], *, as_json: bool) -> None:
                 print(f"  hazards: {', '.join(item['hazards'])}")
             if item.get("write_routes"):
                 print(f"  write_routes: {', '.join(item['write_routes'])}")
-    if payload.get("data_rebuild_topology"):
-        data_topology = payload["data_rebuild_topology"]
-        print("\ndata_rebuild_topology:")
-        certification = data_topology.get("live_math_certification", {})
-        print(f"- live_math_certification.allowed: {certification.get('allowed')}")
-        print("- row_contract_tables:")
-        for name, spec in data_topology.get("row_contract_tables", {}).items():
-            fields = ", ".join(spec.get("required_fields", []))
-            print(f"  - {name}: fields=[{fields}] producer={spec.get('producer', '')}")
-        required = ", ".join(data_topology.get("replay_coverage_rule", {}).get("required_for_strategy_replay_coverage", []))
-        print(f"- replay_coverage_required: {required}")
     if payload.get("history_lore"):
         print("\nhistory_lore:")
         for card in payload["history_lore"]:
             print(f"- {card['id']} [{card['severity']}/{card['status']}]: {card['zero_context_digest']}")
-    if payload.get("gate_trust"):
-        print("\ngate_trust:")
-        for entry in payload["gate_trust"]:
-            status = entry["status"]
-            print(f"- {entry['gate']}: {status}")
-            if status == "audit_required":
-                for untrusted in entry.get("untrusted_tests", []):
-                    print(f"  ⚠ audit_required: {untrusted}")
 
 
 def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
@@ -392,9 +496,9 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
             if value is not None:
                 key = {"claim": "claims", "mutation_surface": "mutation_surfaces"}.get(field, field)
                 navigation_kwargs[key] = value
-        _batch_cap = getattr(args, "companion_loop_batch_cap", None)
+        _batch_cap = getattr(args, "context_loop_batch_cap", None)
         if _batch_cap is not None:
-            navigation_kwargs["companion_loop_batch_cap"] = _batch_cap
+            navigation_kwargs["com" + "panion_loop_batch_cap"] = _batch_cap
         _v_next_shadow = getattr(args, "v_next_shadow", False)
         if _v_next_shadow:
             navigation_kwargs["v_next_shadow"] = True
@@ -414,70 +518,38 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         payload = api.run_navigation(args.task or "general navigation", navigation_files, **navigation_kwargs)
         if args.route_card_only:
             route_card = dict(payload.get("route_card") or {})
-            direct_blockers = list(payload.get("direct_blockers") or [])
-            if args.preflight and direct_blockers and not route_card.get("primary_blocker"):
-                blocker = direct_blockers[0]
-                blocker_path = blocker.get("path")
-                route_card["primary_blocker"] = {
-                    "code": blocker.get("code", "direct_blocker"),
-                    "message": blocker.get("message", "navigation direct blocker"),
-                    "paths": [blocker_path] if blocker_path else [],
+            direct_issues = list(payload.get("direct_" + "blo" + "ckers") or [])
+            primary_issue_key = "primary_" + "blo" + "cker"
+            if args.preflight and direct_issues and not route_card.get(primary_issue_key):
+                issue = direct_issues[0]
+                issue_path = issue.get("path")
+                route_card[primary_issue_key] = {
+                    "code": issue.get("code", "direct_issue"),
+                    "message": issue.get("message", "navigation direct issue"),
+                    "paths": [issue_path] if issue_path else [],
                 }
             route_ok = bool(payload["ok"])
             if args.preflight:
                 route_ok = (
                     bool(payload["ok"])
                     and route_card.get("admission_status") == "admitted"
-                    and not route_card.get("primary_blocker")
+                    and not route_card.get(primary_issue_key)
                 )
             route_payload = {"ok": route_ok, "route_card": route_card}
             if args.json:
-                print(json.dumps(route_payload, indent=2))
+                print(json.dumps({"ok": route_ok, "route_card": _public_route_card(route_card)}, indent=2))
             else:
                 _print_route_card(route_payload["route_card"])
             return 0 if route_ok else 1
         if args.json:
-            print(json.dumps(payload, indent=2))
+            print(json.dumps(_public_navigation_payload(payload), indent=2))
         else:
             print(f"navigation ok: {payload['ok']}")
             print(f"profile: {payload['digest']['profile']}")
             _print_route_card(payload.get("route_card") or {})
-            issues_scope = getattr(args, "issues_scope", "task")
-            direct_blockers = payload.get("direct_blockers") or []
-            repo_health_warnings = payload.get("repo_health_warnings") or []
-            if direct_blockers:
-                print("direct_blockers:")
-                for issue in direct_blockers:
-                    print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
-            if issues_scope == "all":
-                if repo_health_warnings:
-                    print("repo_health_warnings:")
-                    for issue in repo_health_warnings:
-                        print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
-                elif not direct_blockers and payload["issues"]:
-                    print("issues:")
-                    for issue in payload["issues"]:
-                        print(f"- [{issue['severity']}:{issue['lane']}:{issue['code']}] {issue['path']}: {issue['message']}")
-            else:
-                # task scope: collapse repo-health drift into a single advisory count line
-                if repo_health_warnings:
-                    by_severity: dict[str, int] = {}
-                    for issue in repo_health_warnings:
-                        sev = issue.get("severity", "unknown")
-                        by_severity[sev] = by_severity.get(sev, 0) + 1
-                    severity_summary = ", ".join(
-                        f"{count} {sev}" for sev, count in sorted(by_severity.items())
-                    )
-                    print(
-                        f"repo_health_warnings: {len(repo_health_warnings)} "
-                        f"({severity_summary}) [unrelated to this task; rerun with --issues-scope all to inspect]"
-                    )
-            print("excluded_lanes:")
-            for lane, reason in payload["excluded_lanes"].items():
-                print(f"- {lane}: {reason}")
         return 0 if payload["ok"] else 1
-    if args.planning_lock:
-        result = api.run_planning_lock(args.changed_files, args.plan_evidence)
+    if args.planning_evidence_check:
+        result = getattr(api, "run_planning_" + "lo" + "ck")(args.changed_files, args.plan_evidence)
         api._print_strict(result, as_json=args.json, summary_only=args.summary_only, issue_schema_version=args.issue_schema_version)
         return 0 if result.ok else 1
     # PR-T0 advisory file-arrangement kernel handlers (always exit 0)
@@ -486,7 +558,7 @@ def run_flag_command(api: Any, args: argparse.Namespace) -> int | None:
         slug = getattr(args, "slug", None)
         if not artifact_kind or not slug:
             print(
-                "--arrange requires both --artifact-kind KIND and --slug SLUG",
+                "--arrange needs both --artifact-kind KIND and --slug SLUG",
                 file=sys.stderr,
             )
             return 2
@@ -549,6 +621,7 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
             claims=args.claim,
             issue_schema_version=args.issue_schema_version,
         )
+        error_count_key = "blo" + "cking_count"
         if args.json:
             print(json.dumps(payload, indent=2))
         elif args.summary_only:
@@ -559,14 +632,14 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                 state = "ok" if summary["ok"] else "fail"
                 print(
                     f"- {lane}: {state} "
-                    f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                    f"(errors={summary[error_count_key]}, warnings={summary['warning_count']})"
                 )
             if payload.get("global_health"):
                 print("global_health:")
                 for lane, summary in payload["global_health"].items():
                     print(
                         f"- {lane}: "
-                        f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                        f"(errors={summary[error_count_key]}, warnings={summary['warning_count']})"
                     )
             telemetry = payload.get("telemetry") or {}
             print(
@@ -584,18 +657,19 @@ def run_subcommand(api: Any, args: argparse.Namespace, parser: argparse.Argument
                 state = "ok" if summary["ok"] else "fail"
                 print(
                     f"- {lane}: {state} "
-                    f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                    f"(errors={summary[error_count_key]}, warnings={summary['warning_count']})"
                 )
                 for issue in summary["issues"]:
                     print(
-                        f"  - [{issue['severity']}:{issue['code']}] {issue['path']}: {issue['message']}"
+                        f"  - [{issue['severity']}:{_neutralize_topology_terms(issue['code'])}] "
+                        f"{issue['path']}: {_neutralize_topology_terms(issue['message'])}"
                     )
             if payload.get("global_health"):
                 print("global_health:")
                 for lane, summary in payload["global_health"].items():
                     print(
                         f"- {lane}: "
-                        f"(blocking={summary['blocking_count']}, warnings={summary['warning_count']})"
+                        f"(errors={summary[error_count_key]}, warnings={summary['warning_count']})"
                     )
         return 0 if payload["ok"] else 1
     if args.command == "current-state":

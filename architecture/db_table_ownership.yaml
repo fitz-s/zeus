@@ -983,10 +983,10 @@ tables:
       declared so cross-DB FK illusions cannot be introduced.
 
   - name: execution_feasibility_evidence
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
     pk_col: evidence_id
     required_columns:
       - {name: evidence_id, type: TEXT, nullable: false}
@@ -996,8 +996,10 @@ tables:
       - {name: direction, type: TEXT, nullable: false}
       - {name: quote_seen_at, type: TEXT, nullable: false}
     notes: >
-      EDLI v1 executable quote/book feasibility evidence. Public market channel
-      rows are evidence only and cannot assert accepted/fill truth.
+      EDLI v1 executable quote/book feasibility evidence. Public market-channel
+      and held-quote sidecars write these rows to zeus_trades.db; the live order
+      runtime reads them as the DB-mediated pre-submit book evidence seam. Rows
+      are evidence only and cannot assert accepted/fill truth.
 
   - name: no_trade_regret_events
     db: world
@@ -2370,12 +2372,12 @@ tables:
     notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
   - name: execution_feasibility_evidence
-    db: trade
+    db: world
     schema_class: legacy_archived
     schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
+    created_by: init_schema_pre_trade_repoint_residual
     pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
+    notes: Ghost on zeus-world.db from pre-trade-repoint schema drift. Live sidecars write zeus_trades.db and live pre-submit reads zeus_trades.db.
 
   - name: model_bias_ens
     db: trade
