@@ -8165,15 +8165,23 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
 
 
 def _proof_uses_qkernel_spine(proof: "_CandidateProof") -> bool:
+    # B3 residual (2026-06-20 re-review): the qkernel execution authority is the
+    # SELECTION STAMP, not the mere presence of a syntactically-valid cert. The old
+    # cert-alone branch let an UNSTAMPED (legacy-selected) proof that happened to
+    # carry a valid qkernel_execution_economics cert source its payoff_q_lcb from
+    # that cert in sizing/materialization (_qkernel_execution_economics ->
+    # _robust_marginal_utility_stake_and_price) without the spine actually being the
+    # selector — a money-path provenance gap. Every spine-selected proof carries the
+    # stamp (qkernel_spine_bridge sets selection_authority_applied="qkernel_spine"),
+    # so requiring the stamp keeps all legitimate qkernel sizing and only fails closed
+    # the unstamped-with-stray-cert case (correct: legacy proofs size on legacy q,
+    # never on an unbound qkernel cert). Cert validity/identity (route/side/bin) is
+    # still enforced downstream in _qkernel_execution_economics.
     if str(getattr(proof, "q_source", "") or "") == "qkernel_spine":
         return True
     if str(getattr(proof, "selection_authority_applied", "") or "") == "qkernel_spine":
         return True
-    cert = getattr(proof, "qkernel_execution_economics", None)
-    return _valid_qkernel_execution_economics_payload(
-        cert,
-        direction=str(getattr(proof, "direction", "") or ""),
-    ) is not None
+    return False
 
 
 def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:

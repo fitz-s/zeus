@@ -1552,6 +1552,43 @@ def _b3_payload(**overrides):
     return payload
 
 
+def test_unstamped_proof_with_stray_cert_is_not_qkernel_authority():
+    """B3 residual (re-review): an UNSTAMPED (legacy-selected) proof that carries a
+    valid qkernel execution-economics cert must NOT be treated as qkernel authority —
+    otherwise its payoff_q_lcb feeds sizing/materialization
+    (_qkernel_execution_economics -> _robust_marginal_utility_stake_and_price) without
+    the spine being the selector. RED-on-revert: restoring the cert-alone branch in
+    _proof_uses_qkernel_spine makes this return True.
+    """
+    from src.engine.event_reactor_adapter import _proof_uses_qkernel_spine
+
+    unstamped = SimpleNamespace(
+        q_source="legacy_calibrator",                  # NOT the qkernel stamp
+        selection_authority_applied=None,              # NOT stamped
+        qkernel_execution_economics=_qkernel_execution_cert(),  # stray VALID cert
+        direction="buy_yes",
+    )
+    assert _proof_uses_qkernel_spine(unstamped) is False, (
+        "an unstamped proof carrying a stray valid qkernel cert must not be treated "
+        "as qkernel authority — the cert alone is not the selection stamp"
+    )
+
+
+def test_spine_stamped_proof_is_qkernel_authority():
+    """No regression: a spine-selected (stamped) proof still uses the qkernel path,
+    which is how the bridge marks every legitimate qkernel selection
+    (selection_authority_applied == 'qkernel_spine')."""
+    from src.engine.event_reactor_adapter import _proof_uses_qkernel_spine
+
+    stamped = SimpleNamespace(
+        q_source=None,
+        selection_authority_applied="qkernel_spine",   # the stamp qkernel_spine_bridge sets
+        qkernel_execution_economics=None,
+        direction="buy_yes",
+    )
+    assert _proof_uses_qkernel_spine(stamped) is True
+
+
 class TestB3QkernelCertAuthorityAndIdentityGuard:
     """B3 (PR415): the taker-quality proof may consume the qkernel payoff_q_lcb ONLY
     when the payload carries the qkernel AUTHORITY STAMP (q_source == qkernel_spine)
