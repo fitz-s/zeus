@@ -1,4 +1,9 @@
-"""EDLI live profit audit projection helpers."""
+"""EDLI live profit audit projection helpers.
+
+# Created: 2026-05-26
+# Last audited: 2026-06-21
+# Authority basis: q-provenance stamping for settlement skill attribution (lifecycle-alpha mission).
+"""
 
 from __future__ import annotations
 
@@ -419,6 +424,15 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     )
     if computed is not None:
         expected_cost_basis = computed["expected_cost_basis"]
+    # Stamp q_live / q_lcb_5pct from the expected-edge certificate so the
+    # settlement grader can attribute SKILL_WIN vs LUCKY_WIN.  The cert payload
+    # (ActionableTradeCertificate) carries both keys directly.  We reuse the
+    # existing helper to avoid a second DB connection (INV-37).
+    edge_cert_payload = _load_verified_certificate_payload(
+        conn, str(expected_edge_source_certificate_hash or "")
+    )
+    q_live_stamp = _float_or_none((edge_cert_payload or {}).get("q_live"))
+    q_lcb_5pct_stamp = _float_or_none((edge_cert_payload or {}).get("q_lcb_5pct"))
     promotion_eligible = (
         state == "CONFIRMED"
         and lifecycle_type == "UserTradeObserved"
@@ -439,6 +453,8 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         token_id=pre_submit.get("token_id"),
         direction=pre_submit.get("direction"),
         side=pre_submit.get("side"),
+        q_live=q_live_stamp,
+        q_lcb_5pct=q_lcb_5pct_stamp,
         expected_cost_basis=expected_cost_basis,
         expected_fee=pre_submit.get("expected_fee"),
         expected_spread_cost=pre_submit.get("expected_spread_cost"),

@@ -1,6 +1,6 @@
 # Created: 2026-05-26
-# Last reused/audited: 2026-05-26
-# Authority basis: PR332 EDLI live profit-audit promotion package.
+# Last reused/audited: 2026-06-21
+# Authority basis: PR332 EDLI live profit-audit promotion package; q-provenance stamping (lifecycle-alpha mission).
 from __future__ import annotations
 
 import json
@@ -550,6 +550,32 @@ def test_missing_cost_basis_certificate_keeps_audit_non_promotion_eligible():
     assert ledger.get_projection("event-1:intent-1").current_state == "CAP_TRANSITIONED"
 
 
+def test_q_provenance_stamped_from_expected_edge_certificate():
+    """q_live and q_lcb_5pct must be populated on audit rows from the ActionableTradeCertificate.
+
+    Antibody: without the fix, q_live and q_lcb_5pct are NULL on every audit row
+    (verified: 1379 live rows, q_live populated = 0). This test fails when the
+    write site passes None for those columns instead of resolving from the cert.
+    """
+    conn = _conn()
+    # Seed edge cert WITH q_lcb_5pct (the provenance field absent in prior fixture).
+    _seed_authority_certificates(conn, edge_extra={"q_lcb_5pct": 0.82})
+    _seed_confirmed_aggregate(conn, seed_certificates=False)
+
+    row = conn.execute(
+        """
+        SELECT q_live, q_lcb_5pct
+        FROM edli_live_profit_audit
+        WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
+        """,
+        ("event-1:intent-1",),
+    ).fetchone()
+
+    assert row is not None
+    assert row["q_live"] == pytest.approx(0.45), "q_live must be stamped from the edge certificate"
+    assert row["q_lcb_5pct"] == pytest.approx(0.82), "q_lcb_5pct must be stamped from the edge certificate"
+
+
 def _seed_confirmed_aggregate(
     conn: sqlite3.Connection,
     *,
@@ -719,6 +745,7 @@ def _seed_authority_certificates(
     *,
     include_cost: bool = True,
     cert_overrides: dict[tuple[str, str], object] | None = None,
+    edge_extra: dict[str, object] | None = None,
 ) -> None:
     ensure_decision_certificate_tables(conn)
     cert_overrides = cert_overrides or {}
@@ -732,6 +759,8 @@ def _seed_authority_certificates(
         "native_token_side": "YES",
         "order_policy": "maker_post_only",
     }
+    if edge_extra:
+        edge_payload.update(edge_extra)
     # Phase 3 W1 (2026-06-20): a live CostModelCertificate payload carries
     # ``c_fee_adjusted`` (the fee-adjusted MarketPrice = expected per-share cost
     # basis), NOT a synthetic ``expected_cost_basis``. This fixture now mirrors the
