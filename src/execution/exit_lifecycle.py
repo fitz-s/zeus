@@ -1838,45 +1838,45 @@ def _execute_live_exit(
         position.last_exit_order_id = order_id
         position.exit_state = "sell_placed"
         if conn is not None:
-                # FIX 2d (2026-06-20): canonical EXIT_ORDER_POSTED dual-write.
-                # log_pending_exit_recovery_event below only writes the legacy
-                # execution_fact row; it does NOT append a canonical
-                # position_events.EXIT_ORDER_POSTED. Before this fix every
-                # canonical EXIT_ORDER_POSTED row carried
-                # source_module=command_recovery (5/5), so the live spine
-                # emitter's own posts were invisible to the canonical audit and
-                # RANK 2 could not be graded on the event store. Stamp the
-                # canonical post here (source_module=src.execution.exit_lifecycle)
-                # while the position is still phase=pending_exit / sell_placed so
-                # transition_phase's projection resolves correctly.
-                _dual_write_canonical_pending_exit_if_available(
-                    conn,
-                    position,
-                    reason=exit_intent.reason or "EXIT_ORDER_POSTED",
-                    error="",
-                    event_type="EXIT_ORDER_POSTED",
-                )
-                log_pending_exit_recovery_event(
-                    conn,
-                    position,
-                    event_type="EXIT_ORDER_POSTED",
-                    reason=exit_intent.reason,
-                    error="",
-                )
-                log_exit_attempt_event(
-                    conn,
-                    position,
-                    order_id=order_id,
-                    status="placed",
-                    current_market_price=current_market_price,
-                    best_bid=best_bid,
-                    shares=exit_intent.shares,
-                    details={
-                        "token_id": token_id,
-                        "semantic_event": "EXIT_ORDER_POSTED",
-                        "sell_result": _serialize_sell_result(sell_result),
-                    },
-                )
+            # FIX 2d (2026-06-20): canonical EXIT_ORDER_POSTED dual-write.
+            # log_pending_exit_recovery_event below only writes the legacy
+            # execution_fact row; it does NOT append a canonical
+            # position_events.EXIT_ORDER_POSTED. Before this fix every
+            # canonical EXIT_ORDER_POSTED row carried
+            # source_module=command_recovery (5/5), so the live spine
+            # emitter's own posts were invisible to the canonical audit and
+            # RANK 2 could not be graded on the event store. Stamp the
+            # canonical post here (source_module=src.execution.exit_lifecycle)
+            # while the position is still phase=pending_exit / sell_placed so
+            # transition_phase's projection resolves correctly.
+            _dual_write_canonical_pending_exit_if_available(
+                conn,
+                position,
+                reason=exit_intent.reason or "EXIT_ORDER_POSTED",
+                error="",
+                event_type="EXIT_ORDER_POSTED",
+            )
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_POSTED",
+                reason=exit_intent.reason,
+                error="",
+            )
+            log_exit_attempt_event(
+                conn,
+                position,
+                order_id=order_id,
+                status="placed",
+                current_market_price=current_market_price,
+                best_bid=best_bid,
+                shares=exit_intent.shares,
+                details={
+                    "token_id": token_id,
+                    "semantic_event": "EXIT_ORDER_POSTED",
+                    "sell_result": _serialize_sell_result(sell_result),
+                },
+            )
 
         # Quick fill check (non-blocking — next cycle does full check)
         if order_id and clob:

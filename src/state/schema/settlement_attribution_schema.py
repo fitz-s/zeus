@@ -135,9 +135,8 @@ def _rebuild_stale_category_check(conn: sqlite3.Connection) -> None:
 
     Idempotent: if every current category already appears in the live table SQL,
     returns immediately without touching the table (the hot path stays a no-op).
-    The rebuild copies all existing rows via a SELECT * so no column is dropped,
-    runs under a SAVEPOINT for atomicity, and toggles legacy_alter_table off so
-    the trigger/index references are not silently rewritten.
+    The rebuild copies all existing rows via a SELECT * so no column is dropped
+    and runs under a SAVEPOINT for atomicity.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
