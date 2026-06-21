@@ -8908,6 +8908,77 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
 
 
 
+# FIX 2c (2026-06-20): monitor-cadence watchdog. exit_monitor runs on a 2-min
+# interval (see scheduler.add_job(..., minutes=2, id="exit_monitor")) and is the
+# sole writer of MONITOR_REFRESHED. The live book observed whole-book silences of
+# 8.8h and 11.8h (2026-06-18/19) during which belief AND the live bid collapsed
+# unobserved, killing the only realized reversal exit. The multi-hour cause is a
+# daemon/APScheduler process gap — that supervision is OPERATOR INFRA, out of
+# code. What code CAN do is flag the gap on the first cycle after recovery: if
+# the newest MONITOR_REFRESHED is older than ~2× the interval, the cadence broke.
+# This is detection only; it does not (and must not) re-drive the schedule.
+_EXIT_MONITOR_INTERVAL_SECONDS = 120.0
+_MONITOR_CADENCE_GAP_FACTOR = 2.0
+
+
+def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
+    """Flag when MONITOR_REFRESHED cadence has lapsed beyond ~2× the interval.
+
+    Reads the newest canonical MONITOR_REFRESHED occurred_at from position_events
+    (same trade DB this conn owns) and compares to now. Detection only — records
+    the gap in ``summary`` and logs a warning so operator supervision can act;
+    never restarts or back-fills. Returns the watchdog record dict when a gap is
+    flagged, else None. Fail-soft: any read/parse error returns None.
+    """
+    if conn is None:
+        return None
+    threshold_seconds = _EXIT_MONITOR_INTERVAL_SECONDS * _MONITOR_CADENCE_GAP_FACTOR
+    try:
+        row = conn.execute(
+            """
+            SELECT MAX(occurred_at)
+              FROM position_events
+             WHERE event_type = 'MONITOR_REFRESHED'
+            """
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None or row[0] is None:
+        return None
+    last_refresh_raw = str(row[0])
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if last_refresh.tzinfo is None:
+        last_refresh = last_refresh.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    gap_seconds = (now - last_refresh.astimezone(timezone.utc)).total_seconds()
+    summary["monitor_cadence_gap_seconds"] = round(gap_seconds, 1)
+    if gap_seconds <= threshold_seconds:
+        return None
+    record = {
+        "last_monitor_refreshed_at": last_refresh_raw,
+        "observed_at": now.isoformat(),
+        "gap_seconds": round(gap_seconds, 1),
+        "interval_seconds": _EXIT_MONITOR_INTERVAL_SECONDS,
+        "threshold_seconds": threshold_seconds,
+        "gap_factor": round(gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS, 2),
+    }
+    summary["monitor_cadence_gap_flagged"] = record
+    logger.warning(
+        "MONITOR_CADENCE_GAP: last MONITOR_REFRESHED was %s (%.1fs ago, %.1f× the "
+        "%.0fs interval > %.1f× threshold). exit_monitor cadence lapsed — likely a "
+        "daemon/scheduler process gap (operator supervision, out of code).",
+        last_refresh_raw,
+        gap_seconds,
+        gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS,
+        _EXIT_MONITOR_INTERVAL_SECONDS,
+        _MONITOR_CADENCE_GAP_FACTOR,
+    )
+    return record
+
+
 @_scheduler_job("exit_monitor")
 def _exit_monitor_cycle() -> None:
     """Standalone exit-lifecycle monitoring job owned by the order daemon.
@@ -8944,6 +9015,13 @@ def _exit_monitor_cycle() -> None:
         return
 
     summary: dict = {"monitors": 0, "exits": 0}
+    # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
+    # silence) on the first cycle after recovery. Detection only; the underlying
+    # daemon supervision is operator infra.
+    try:
+        _check_monitor_cadence_watchdog(conn, summary)
+    except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
+        logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
     try:
         portfolio = load_portfolio()
         held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(

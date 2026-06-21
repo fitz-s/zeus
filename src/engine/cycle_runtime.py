@@ -3754,6 +3754,17 @@ def execute_monitoring_phase(
             if pending_exit_resolution["action"] == "skip":
                 summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
                 continue
+            if pending_exit_resolution["action"] == "evaluate":
+                # FIX 2a (2026-06-20): chain-truth confirmed the position is
+                # still held (balance > dust) with no resting sell order, so it
+                # was released from the pending_exit pre-emption to reach the
+                # live exit emitter THIS cycle. Do NOT continue — fall through to
+                # the full refresh_position → evaluate_exit → execute_exit lane
+                # below so a reversal caught while a bid exists reaches
+                # place_sell_order instead of looping on EXIT_CHAIN_MISSING.
+                summary["exit_pending_missing_routed_to_evaluate"] = (
+                    summary.get("exit_pending_missing_routed_to_evaluate", 0) + 1
+                )
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
@@ -3947,6 +3958,24 @@ def execute_monitoring_phase(
                     conn,
                     decision_time=deps._utcnow(),
                 )
+            # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
+            # evidence source.
+            #   * source="clob_market_info" → the VENUE itself reports
+            #     closed=True AND accepting_orders=False. This is authoritative
+            #     "will-not-accept-a-sell" truth → terminal stamp now, as before.
+            #   * source="executable_snapshot_market_end" → a STATIC time
+            #     heuristic (market_close_at/market_end_at passed). The venue may
+            #     still be accepting orders with a live bid, so a reversal caught
+            #     just before close must get one real shot at place_sell_order.
+            #     Defer the terminal stamp: run the full refresh→evaluate_exit→
+            #     execute_exit lane below, and only stamp MARKET_CLOSED if the
+            #     market is genuinely untradeable (no finite executable best_bid).
+            deferred_static_closed_market_info = None
+            if closed_market_info is not None:
+                _closed_source = str(closed_market_info.get("source") or "")
+                if _closed_source == "executable_snapshot_market_end":
+                    deferred_static_closed_market_info = closed_market_info
+                    closed_market_info = None
             if closed_market_info is not None:
                 from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
 
@@ -4224,6 +4253,46 @@ def execute_monitoring_phase(
                         tracker_dirty = True
                     summary["exits"] += 1
                     portfolio_dirty = True
+
+            # FIX 2b (2026-06-20): apply the DEFERRED static-time closed-market
+            # stamp only now that the live exit lane has run. The terminal stamp
+            # is correct ONLY for a genuinely untradeable market — i.e. one with
+            # no finite executable best_bid. If a bid still exists the position
+            # stays monitored (it already took its real shot at place_sell_order
+            # above when should_exit fired, and can exit a later cycle while a
+            # bid persists); a reversal caught just before the static close is no
+            # longer pre-empted into MARKET_CLOSED_AWAITING_SETTLEMENT.
+            if (
+                deferred_static_closed_market_info is not None
+                and not ExitContext._is_finite(getattr(exit_context, "best_bid", None))
+            ):
+                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+
+                mark_market_closed_awaiting_settlement(
+                    pos,
+                    reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+                    error=str(
+                        deferred_static_closed_market_info.get("source")
+                        or "market_closed_non_accepting_orders"
+                    ),
+                    conn=conn,
+                )
+                portfolio_dirty = True
+                summary["monitor_closed_market_pending_settlement_after_eval"] = (
+                    summary.get("monitor_closed_market_pending_settlement_after_eval", 0) + 1
+                )
+                summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
+                summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
+                    {
+                        "position_id": pos.trade_id,
+                        "reason": "market_closed_no_executable_bid",
+                        **deferred_static_closed_market_info,
+                    }
+                )
+            elif deferred_static_closed_market_info is not None:
+                summary["day0_static_closed_market_tradable_bid_preserved"] = (
+                    summary.get("day0_static_closed_market_tradable_bid_preserved", 0) + 1
+                )
         except Exception as e:
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e, exc_info=True)
             summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1

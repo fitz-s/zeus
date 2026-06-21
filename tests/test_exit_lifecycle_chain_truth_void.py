@@ -163,19 +163,47 @@ class TestChainTruthVoidOnZeroBalance:
 
 
 # ---------------------------------------------------------------------------
-# Antibody 2: balance > 0 → NOT voided, mark_exit_retry called
+# Antibody 2: balance > 0 → NOT voided.
+# FIX 2a (2026-06-20): when there is NO resting exit order, a still-held position
+# now routes into the live exit-evaluation path the SAME cycle (action="evaluate")
+# instead of arming a cooldown + re-stamping EXIT_CHAIN_MISSING (the 1067×
+# re-stamp loop). A position that DOES have a resting order keeps the old
+# single-flight "retry" deferral. The invariant preserved here: balance>0 must
+# never void.
 # ---------------------------------------------------------------------------
 
 class TestChainTruthRetryOnPositiveBalance:
-    """Antibody 2: on-chain balance > 0 must NOT void; must mark_exit_retry."""
+    """Antibody 2: on-chain balance > 0 must NOT void; with no resting order it
+    routes to the live exit lane (evaluate), not a cooldown re-stamp."""
 
-    def test_balance_positive_returns_retry_action(self, monkeypatch):
+    def test_balance_positive_no_resting_order_routes_to_evaluate(self, monkeypatch):
         monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
         pos = _make_position(
             trade_id="london-test",
             token_id=_ASSET_ID_LONDON,
             condition_id=_CONDITION_ID_LONDON,
             city="London",
+            exit_state="",  # no resting sell order
+        )
+        portfolio = _make_portfolio(pos)
+
+        result = handle_exit_pending_missing(
+            portfolio, pos, conn=None, rpc_call=_rpc_returning(6_000_000)
+        )
+
+        # FIX 2a: still-held with no resting order → live exit evaluation.
+        assert result["action"] == "evaluate", f"expected 'evaluate', got {result['action']!r}"
+
+    def test_balance_positive_with_resting_order_retries(self, monkeypatch):
+        """Single-flight: a sell already on the book must defer (retry), NOT be
+        re-routed into a fresh evaluate→execute pass (double-submit hazard)."""
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="london-test-resting",
+            token_id=_ASSET_ID_LONDON,
+            condition_id=_CONDITION_ID_LONDON,
+            city="London",
+            exit_state="sell_placed",  # resting sell order on the book
         )
         portfolio = _make_portfolio(pos)
 
@@ -224,13 +252,16 @@ class TestChainTruthRetryOnPositiveBalance:
                 "balance>0 path must NOT transition to voided state"
             )
 
-    def test_balance_positive_increments_retry_count(self, monkeypatch):
+    def test_balance_positive_with_resting_order_increments_retry_count(self, monkeypatch):
+        """The retry/cooldown path (and its counter) is now reserved for the
+        in-flight (resting-order) branch — the only branch that still defers."""
         monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
         pos = _make_position(
-            trade_id="london-test",
+            trade_id="london-test-resting",
             token_id=_ASSET_ID_LONDON,
             condition_id=_CONDITION_ID_LONDON,
             city="London",
+            exit_state="sell_placed",
             exit_retry_count=0,
         )
         portfolio = _make_portfolio(pos)
@@ -241,6 +272,32 @@ class TestChainTruthRetryOnPositiveBalance:
 
         assert pos.exit_retry_count >= 1, (
             f"exit_retry_count should be >= 1 after retry, got {pos.exit_retry_count}"
+        )
+
+    def test_balance_positive_no_resting_order_arms_no_cooldown(self, monkeypatch):
+        """The no-resting-order route must NOT arm a cooldown or bump retry_count
+        — that cooldown is exactly what skipped the position before it could
+        reach place_sell_order."""
+        monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", _SAFE_ADDRESS)
+        pos = _make_position(
+            trade_id="london-test",
+            token_id=_ASSET_ID_LONDON,
+            condition_id=_CONDITION_ID_LONDON,
+            city="London",
+            exit_state="",
+            exit_retry_count=0,
+        )
+        portfolio = _make_portfolio(pos)
+
+        handle_exit_pending_missing(
+            portfolio, pos, conn=None, rpc_call=_rpc_returning(6_000_000)
+        )
+
+        assert pos.exit_retry_count == 0, (
+            f"no-resting-order route must NOT bump retry_count, got {pos.exit_retry_count}"
+        )
+        assert not pos.next_exit_retry_at, (
+            f"no-resting-order route must NOT arm a cooldown, got {pos.next_exit_retry_at!r}"
         )
 
     def test_raw_ctf_dust_balance_enters_dust_hold_not_retry(self, monkeypatch):

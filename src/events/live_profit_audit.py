@@ -488,7 +488,7 @@ def compute_realized_edge_from_authorities(
 
     if not cost_model_cert_hash or not expected_edge_cert_hash or not fill_event_hash:
         return None
-    cost_payload = _load_verified_certificate_payload(conn, cost_model_cert_hash)
+    cost_payload = _load_verified_cost_model_payload(conn, cost_model_cert_hash)
     edge_payload = _load_verified_certificate_payload(conn, expected_edge_cert_hash)
     if cost_payload is None or edge_payload is None:
         return None
@@ -499,7 +499,7 @@ def compute_realized_edge_from_authorities(
     side = str(pre_submit.get("side") or "").upper()
     if side not in {"BUY", "SELL"}:
         return None
-    expected_cost_basis = _float_or_none(cost_payload.get("expected_cost_basis"))
+    expected_cost_basis = _expected_cost_basis_from_cost_payload(cost_payload)
     if expected_cost_basis is None:
         return None
     q_live = _float_or_none(edge_payload.get("q_live"))
@@ -553,6 +553,48 @@ def _load_verified_certificate_payload(conn: sqlite3.Connection, certificate_has
         return None
 
 
+def _load_verified_cost_model_payload(conn: sqlite3.Connection, cost_hash: str) -> dict[str, Any] | None:
+    """Resolve the VERIFIED CostModelCertificate payload for an audit cost hash.
+
+    Phase 3 W1 sub-fix 1 (2026-06-20): the value stamped into the audit row's
+    ``cost_basis_source_certificate_hash`` is the cost authority's INNER
+    ``cost_basis_hash`` (the identity hash of the CostBasis sub-object), NOT the
+    persisted ``decision_certificates.certificate_hash``. Verified against the live
+    DB: 0/682 distinct audit cost hashes match a ``certificate_hash`` row, while
+    653/682 (96%) equal the ``cost_basis_hash`` payload field of a VERIFIED
+    CostModelCertificate. The edge leg resolves because its stamped value
+    (``actionable_certificate_hash``) IS a real certificate_hash; only the cost
+    leg's key differs. This resolver keys on the field that the audit row actually
+    carries — the CostModelCertificate's own ``cost_basis_hash`` — which is the
+    authority's stable identity. A direct ``certificate_hash`` match is tried first
+    so the resolver stays correct if upstream is ever changed to stamp the primary
+    key (single source of truth, no behaviour change for that case).
+    """
+    if not cost_hash or not _table_exists(conn, "decision_certificates"):
+        return None
+    direct = _load_verified_certificate_payload(conn, cost_hash)
+    if direct is not None:
+        return direct
+    row = conn.execute(
+        """
+        SELECT payload_json
+        FROM decision_certificates
+        WHERE certificate_type = 'CostModelCertificate'
+          AND verifier_status = 'VERIFIED'
+          AND json_extract(payload_json, '$.cost_basis_hash') = ?
+        ORDER BY rowid DESC
+        LIMIT 1
+        """,
+        (cost_hash,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]))
+    except json.JSONDecodeError:
+        return None
+
+
 def _certificate_identity_matches_pre_submit(payload: dict[str, Any], pre_submit: dict[str, Any]) -> bool:
     for field in ("condition_id", "token_id"):
         if str(payload.get(field) or "") != str(pre_submit.get(field) or ""):
@@ -568,6 +610,25 @@ def _certificate_identity_matches_pre_submit(payload: dict[str, Any], pre_submit
         elif str(value) != str(expected or ""):
             return False
     return True
+
+
+def _expected_cost_basis_from_cost_payload(cost_payload: dict[str, Any]) -> float | None:
+    """Derive the expected per-share cost basis from a CostModelCertificate payload.
+
+    Phase 3 W1 sub-fix 2 (2026-06-20): the realized-edge cost leg previously read
+    ``cost_payload.get("expected_cost_basis")`` — a key that exists in NO live
+    CostModelCertificate (verified against the live DB: the cert payload keys are
+    exactly ``c_fee_adjusted / c_cost_95pct / price_fee_deducted / cost_source /
+    execution_price_type / cost_basis_hash / cost_basis_id / condition_id /
+    token_id``, with ``expected_cost_basis`` absent on every row). The canonical
+    expected per-share cost basis the model priced against is ``c_fee_adjusted``,
+    the fee-adjusted MarketPrice — the SAME quantity the decision-time edge axis
+    used (``alpha_gap = q_live - c_fee_adjusted``; see no_submit_receipts.py).
+    ``price_fee_deducted`` is a BOOLEAN flag (whether the fee was already removed),
+    never a price, so it is not a candidate. Returns None (fail-closed) when the
+    cert carries no ``c_fee_adjusted``.
+    """
+    return _float_or_none(cost_payload.get("c_fee_adjusted"))
 
 
 def _float_or_none(value: Any) -> float | None:

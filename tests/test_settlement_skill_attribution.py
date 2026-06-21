@@ -334,16 +334,25 @@ def _attach_forecasts(world_conn: sqlite3.Connection) -> sqlite3.Connection:
 
 
 def test_F3_end_to_end_db_grade(tmp_path) -> None:
-    """A FILLED position + market_events bin + VERIFIED settlement grades and
-    persists one settlement_attribution row through the real load path."""
-    import os
+    """W3: grades trades.position_current (the real ledger) + W2: writes
+    settlement-derived pnl onto the audit row, through the real load path.
 
+    Phase 3 (2026-06-20): the grader now reads ``trades.position_current`` instead
+    of the ``edli_live_profit_audit`` filled-fill subset, and the same tick writes
+    ``pnl_usd``/``settlement_outcome`` back onto the audit row from the SAME
+    grade_receipt payoff. RED on revert: against the audit-subset grader the
+    settlement_attribution row is keyed ``aud-1`` (audit grain); against this fix it
+    is keyed ``pos-1`` (position_current grain), and pnl_usd is NULL on revert.
+    """
     world_path = str(tmp_path / "world.db")
     fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
     wconn = sqlite3.connect(world_path)
     init_schema(wconn)
     fconn = sqlite3.connect(fcst_path)
     init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path)
+    init_schema(tconn)  # creates trade-class tables incl. position_current
 
     # market_events: condition_id → city/date/metric/range (the traded bin 50-51F).
     fconn.execute(
@@ -366,36 +375,112 @@ def test_F3_end_to_end_db_grade(tmp_path) -> None:
     fconn.commit()
     fconn.close()
 
-    # FILLED buy_no position on cond-1.
+    # W3: the REAL ledger row — a buy_no position on cond-1 in position_current.
+    tconn.execute(
+        """INSERT INTO position_current
+           (position_id, phase, strategy_key, condition_id, direction, entry_price,
+            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("pos-1", "settled", "center_buy", "cond-1", "buy_no", 0.35, 10.0, 3.5,
+         "Denver", "2026-06-12", "high", "2026-06-11T12:00:00Z"),
+    )
+    tconn.commit()
+    tconn.close()
+
+    # W2: an audit fill on the same market — pnl_usd starts NULL, gets written back.
     wconn.execute(
         """INSERT INTO edli_live_profit_audit
            (audit_id, event_id, aggregate_id, condition_id, token_id, direction,
-            avg_fill_price, filled_size, q_live, order_lifecycle_state,
+            avg_fill_price, filled_size, fees, q_live, order_lifecycle_state,
             created_at, schema_version)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         ("aud-1", "evt-1", "agg-1", "cond-1", "tok-1", "buy_no",
-         0.35, 10.0, 0.72, "FILLED", "2026-06-11T12:00:00Z", 1),
+         0.35, 10.0, 0.0, 0.72, "FILLED", "2026-06-11T12:00:00Z", 1),
     )
+    assert wconn.execute(
+        "SELECT pnl_usd FROM edli_live_profit_audit WHERE audit_id='aud-1'"
+    ).fetchone()[0] is None
     wconn.commit()
     wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
 
     stats = run_settlement_skill_attribution(world_conn=wconn, only_new=True)
     assert stats["total_settled_positions"] == 1
     assert stats["graded"] == 1
+    # W3: the graded row is keyed by the position_current grain (pos-1), NOT the
+    # audit fill (aud-1). On revert to the audit-subset grader this would be aud-1.
     row = wconn.execute(
         "SELECT position_id, direction, won, category FROM settlement_attribution"
     ).fetchone()
-    assert row[0] == "aud-1"
+    assert row[0] == "pos-1"
     assert row[1] == "buy_no"
     assert row[2] == 1  # won
-    # No fresh posterior in this fixture → win is uncertifiable → LUCKY_WIN
-    # (conservative: an uncertifiable win earns no skill credit). With q_live=0.72
-    # NO and no fresh lane, decision-q fallback: in-bin = 0.28 < 0.5 → supported →
-    # SKILL_WIN. Assert it is one of the win categories and counts correctly.
     assert row[3] in ("SKILL_WIN", "LUCKY_WIN")
 
-    # Idempotent: re-run grades nothing new.
+    # W2: pnl_usd written from settlement payoff. buy_no WON → payoff=1.0;
+    # pnl = (1.0 - 0.35) * 10.0 - 0.0 = 6.5. Derived from settlement, not price.
+    assert stats["settlement_pnl_written"] == 1
+    audit = wconn.execute(
+        "SELECT pnl_usd, settlement_outcome FROM edli_live_profit_audit WHERE audit_id='aud-1'"
+    ).fetchone()
+    assert audit[0] == pytest.approx(6.5)
+    assert audit[1] == "WON"
+
+    # Idempotent: re-run grades nothing new (pnl writeback re-runs harmlessly).
     stats2 = run_settlement_skill_attribution(world_conn=wconn, only_new=True)
     assert stats2["graded"] == 0
     assert stats2["skipped_existing"] == 1
+    wconn.close()
+
+
+def test_W2_unverified_settlement_yields_null_pnl(tmp_path) -> None:
+    """W2 negative: an audit fill on a market whose settlement is NOT VERIFIED
+    must leave pnl_usd NULL — settlement truth is never fabricated."""
+    from src.analysis.settlement_skill_attribution import writeback_settlement_pnl_to_audit
+
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    wconn = sqlite3.connect(world_path)
+    init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path)
+    init_schema_forecasts(fconn)
+    fconn.execute(
+        """INSERT INTO market_events
+           (market_slug, condition_id, city, target_date, temperature_metric,
+            range_low, range_high, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        ("denver-high-50-51-06-12", "cond-1", "Denver", "2026-06-12", "high",
+         50.0, 51.0, "2026-06-11T00:00:00Z"),
+    )
+    # Settlement present but UNVERIFIED (authority != 'VERIFIED').
+    fconn.execute(
+        """INSERT INTO settlement_outcomes
+           (city, target_date, temperature_metric, settlement_value,
+            settlement_unit, settled_at, authority, provenance_json, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        ("Denver", "2026-06-12", "high", 47.0, "F", "2026-06-12T20:00:00Z",
+         "UNVERIFIED", "{}", "2026-06-12T20:00:00Z"),
+    )
+    fconn.commit()
+    fconn.close()
+
+    wconn.execute(
+        """INSERT INTO edli_live_profit_audit
+           (audit_id, event_id, aggregate_id, condition_id, token_id, direction,
+            avg_fill_price, filled_size, fees, order_lifecycle_state,
+            created_at, schema_version)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("aud-1", "evt-1", "agg-1", "cond-1", "tok-1", "buy_no",
+         0.35, 10.0, 0.0, "FILLED", "2026-06-11T12:00:00Z", 1),
+    )
+    wconn.commit()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+
+    written = writeback_settlement_pnl_to_audit(wconn)
+    assert written == 0
+    pnl = wconn.execute(
+        "SELECT pnl_usd, settlement_outcome FROM edli_live_profit_audit WHERE audit_id='aud-1'"
+    ).fetchone()
+    assert pnl[0] is None
+    assert pnl[1] is None
     wconn.close()

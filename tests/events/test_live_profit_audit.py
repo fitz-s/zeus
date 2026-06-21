@@ -343,6 +343,96 @@ def test_realized_edge_partial_fill_uses_filled_size_not_requested_size():
     assert realized["edge_value_usd"] == pytest.approx(0.02)
 
 
+def test_W1_realized_edge_resolves_cost_cert_via_inner_cost_basis_hash():
+    """W1 sub-fix 1+2 (RED on revert): the audit's cost hash is the INNER
+    cost_basis_hash, not the cert's primary certificate_hash. The cost cert is a
+    CostModelCertificate carrying the real c_fee_adjusted field (no
+    expected_cost_basis). Both fixes are required for non-NULL realized_edge.
+
+    On the unfixed tree _load_verified_certificate_payload only matches
+    certificate_hash → returns None → realized_edge NULL → RED. And even resolved,
+    the old reader of cost_payload['expected_cost_basis'] (absent here) → None → RED.
+    """
+    conn = _conn()
+    ensure_decision_certificate_tables(conn)
+    # Edge cert resolves by its real certificate_hash (the working leg).
+    _insert_cert(
+        conn, "actionable-cert-1", "ActionableTradeCertificate", "actionable-hash-1",
+        {
+            "q_live": 0.45, "condition_id": "condition-1", "token_id": "token-1",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+    # Cost cert: certificate_hash is a DIFFERENT value; the audit-stamped hash
+    # ('inner-cost-basis-hash-1') equals only the inner cost_basis_hash field — the
+    # exact production mismatch. Real field is c_fee_adjusted (= expected cost basis).
+    _insert_cert(
+        conn, "cost-cert-1", "CostModelCertificate", "cost-model-cert-hash-REAL",
+        {
+            "cost_basis_hash": "inner-cost-basis-hash-1",
+            "c_fee_adjusted": 0.421, "c_cost_95pct": 0.431, "price_fee_deducted": True,
+            "condition_id": "condition-1", "token_id": "token-1",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+
+    realized = compute_realized_edge_from_authorities(
+        conn=conn,
+        cost_model_cert_hash="inner-cost-basis-hash-1",   # the audit-stamped inner hash
+        expected_edge_cert_hash="actionable-hash-1",
+        fill_event_hash="fill-event-hash-1",
+        pre_submit={
+            "condition_id": "condition-1", "token_id": "token-1", "side": "BUY",
+            "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+        fill_payload={"avg_fill_price": 0.44, "filled_size": 10.0, "fees": 0.0},
+    )
+    assert realized is not None  # RED on revert (cost lookup returns None)
+    assert realized["expected_cost_basis"] == pytest.approx(0.421)  # from c_fee_adjusted
+    assert realized["realized_edge"] == pytest.approx(0.45 - 0.44)  # q_live - avg_fill
+    assert realized["edge_value_usd"] == pytest.approx((0.45 - 0.44) * 10.0)
+
+
+def test_W1_cost_cert_identity_mismatch_still_yields_null():
+    """W1 negative: a resolvable cost cert whose identity does not match the
+    pre_submit (wrong condition) is rejected by the authority check → NULL."""
+    conn = _conn()
+    ensure_decision_certificate_tables(conn)
+    _insert_cert(
+        conn, "actionable-cert-1", "ActionableTradeCertificate", "actionable-hash-1",
+        {
+            "q_live": 0.45, "condition_id": "condition-1", "token_id": "token-1",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+    _insert_cert(
+        conn, "cost-cert-1", "CostModelCertificate", "cost-model-cert-hash-REAL",
+        {
+            "cost_basis_hash": "inner-cost-basis-hash-1", "c_fee_adjusted": 0.421,
+            "condition_id": "OTHER-condition", "token_id": "token-1",
+            "side": "BUY", "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+    )
+    realized = compute_realized_edge_from_authorities(
+        conn=conn,
+        cost_model_cert_hash="inner-cost-basis-hash-1",
+        expected_edge_cert_hash="actionable-hash-1",
+        fill_event_hash="fill-event-hash-1",
+        pre_submit={
+            "condition_id": "condition-1", "token_id": "token-1", "side": "BUY",
+            "direction": "YES", "native_token_side": "YES",
+            "order_policy": "maker_post_only",
+        },
+        fill_payload={"avg_fill_price": 0.44, "filled_size": 10.0, "fees": 0.0},
+    )
+    assert realized is None
+
+
 @pytest.mark.parametrize(
     ("cert_kind", "field", "value"),
     (
@@ -531,6 +621,43 @@ def _seed_confirmed_aggregate(
     return ledger
 
 
+def _insert_cert(
+    conn: sqlite3.Connection,
+    certificate_id: str,
+    certificate_type: str,
+    certificate_hash: str,
+    payload: dict,
+) -> None:
+    """Insert one VERIFIED decision certificate with a given type/hash/payload."""
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO decision_certificates (
+            certificate_id, certificate_type, schema_version,
+            canonicalization_version, semantic_key, claim_type, mode,
+            decision_time, source_available_at, agent_received_at,
+            persisted_at, max_parent_source_available_at,
+            max_parent_agent_received_at, max_parent_persisted_at,
+            authority_id, authority_version, algorithm_id, algorithm_version,
+            config_hash, model_version_hash, payload_json, payload_hash,
+            certificate_hash, verifier_status, created_at
+        ) VALUES (
+            ?, ?, 1, 'canonical-json-v1', ?, 'edli_live_profit_authority', 'LIVE',
+            '2026-05-26T12:00:00+00:00', NULL, NULL, NULL, NULL, NULL, NULL,
+            'test_authority', 'v1', 'test_algorithm', 'v1',
+            NULL, NULL, ?, ?, ?, 'VERIFIED', '2026-05-26T12:00:00+00:00'
+        )
+        """,
+        (
+            certificate_id,
+            certificate_type,
+            certificate_id,
+            json.dumps(payload, sort_keys=True),
+            f"payload-{certificate_id}",
+            certificate_hash,
+        ),
+    )
+
+
 def _seed_authority_certificates(
     conn: sqlite3.Connection,
     *,
@@ -549,8 +676,16 @@ def _seed_authority_certificates(
         "native_token_side": "YES",
         "order_policy": "maker_post_only",
     }
+    # Phase 3 W1 (2026-06-20): a live CostModelCertificate payload carries
+    # ``c_fee_adjusted`` (the fee-adjusted MarketPrice = expected per-share cost
+    # basis), NOT a synthetic ``expected_cost_basis``. This fixture now mirrors the
+    # real persisted cert so the test exercises the production field, not a
+    # fabricated one. ``c_fee_adjusted=0.421`` is the expected cost basis.
     cost_payload = {
-        "expected_cost_basis": 0.421,
+        "c_fee_adjusted": 0.421,
+        "c_cost_95pct": 0.431,
+        "price_fee_deducted": True,
+        "cost_basis_hash": "cost-basis-hash-1",
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,
         "visible_depth_fill_lcb": 0.95,
@@ -633,7 +768,10 @@ def _pre_submit_payload(**overrides):
         "current_best_ask": 0.43,
         "limit_price": 0.42,
         "q_live": 0.45,
-        "expected_cost_basis": 0.421,
+        # Phase 3 W1 (2026-06-20): the live PreSubmitRevalidated event does NOT
+        # carry ``expected_cost_basis`` (0/734 on the live DB); the realized cost
+        # basis is derived from the CostModelCertificate's ``c_fee_adjusted`` by
+        # compute_realized_edge_from_authorities and written back onto the row.
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,
         "visible_depth_fill_lcb": 0.95,

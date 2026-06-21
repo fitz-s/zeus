@@ -640,37 +640,70 @@ def _bin_yes_mass_from_q_json(q_json, bin_obj) -> Optional[float]:
 # Load + grade every settled position
 # ---------------------------------------------------------------------------
 
+def _ensure_trades_attached(world_conn: sqlite3.Connection) -> bool:
+    """ATTACH zeus_trades.db as 'trades' (read-only join) on the single conn.
+
+    W3 (2026-06-20): the grader reads ``trades.position_current``, which lives in
+    zeus_trades.db. INV-37 requires cross-DB access on a SINGLE connection (ATTACH),
+    never an independent connection. This join is READ-ONLY (the grader's only
+    write target is WORLD.settlement_attribution), so no trades write-lock is taken;
+    the canonical lock order (zeus-forecasts < zeus-world < zeus_trades) is honoured
+    because WORLD already holds the bulk lock and trades is attached for reads only.
+    Idempotent: a no-op when 'trades' is already attached. Returns True when the
+    schema is available.
+    """
+    from src.state.db import _zeus_trade_db_path
+
+    attached = {row[1] for row in world_conn.execute("PRAGMA database_list").fetchall()}
+    if "trades" not in attached:
+        world_conn.execute("ATTACH DATABASE ? AS trades", (str(_zeus_trade_db_path()),))
+    return True
+
+
 def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
-    """Grade every settled FILLED position into a skill category.
+    """Grade every settled position in the real ledger into a skill category.
 
-    Joins edli_live_profit_audit (FILLED rows) → forecasts.market_events (bin) →
+    W3 (2026-06-20): grades the real position ledger ``trades.position_current``
+    (305 rows / 138 conditions on the live DB), NOT the 58-fill
+    ``edli_live_profit_audit`` subset it formerly read. The audit subset capped the
+    grader's visibility at the EDLI filled-fills it happened to record; the dollar
+    ledger and far more settled positions live in ``position_current``. Joins
+    position_current → forecasts.market_events (bin range) →
     forecasts.settlement_outcomes (VERIFIED). Grades win/loss via the canonical
-    grade_receipt (the ONE truth function), then classifies skill quality by
-    comparing the three quantities. The freshest settlement-eve posterior and the
-    decision-time posterior are looked up per family.
+    grade_receipt (the ONE truth function), then classifies skill quality. The
+    freshest settlement-eve posterior and the decision-time posterior are looked up
+    per family. q_live is absent on position_current, so grade_position falls back
+    to the decision-time posterior (its documented behaviour).
 
-    Caller must have 'forecasts' ATTACHed (open_world_with_forecasts).
+    Caller must have 'forecasts' ATTACHed (open_world_with_forecasts); 'trades' is
+    ATTACHed here (read-only, INV-37 single-connection).
     """
     from src.contracts.graded_receipt import grade_receipt
     from src.types.temperature import UnitMismatchError
 
+    _ensure_trades_attached(world_conn)
     market_meta = _load_market_meta(world_conn)
     settlements, settled_at = _load_settlements(world_conn)
 
     out: list[SkillGrade] = []
     for (
-        audit_id, condition_id, direction, avg_fill_price, filled_size,
-        q_live, q_lcb_5pct, created_at,
+        position_id, condition_id, direction, entry_price, shares, created_at,
     ) in world_conn.execute(
         """
-        SELECT audit_id, condition_id, direction, avg_fill_price, filled_size,
-               q_live, q_lcb_5pct, created_at
-        FROM edli_live_profit_audit
-        WHERE filled_size > 0
-          AND avg_fill_price IS NOT NULL
+        SELECT position_id, condition_id, direction, entry_price, shares, updated_at
+        FROM trades.position_current
+        WHERE entry_price IS NOT NULL
           AND direction IS NOT NULL
+          AND condition_id IS NOT NULL
         """
     ).fetchall():
+        # position_current's per-share avg fill is ``entry_price``; ``shares`` is the
+        # filled size. (There is no avg_fill_price column on this ledger.)
+        audit_id = position_id
+        avg_fill_price = entry_price
+        filled_size = shares
+        q_live = None       # not stored on position_current — posterior fallback
+        q_lcb_5pct = None
         meta = market_meta.get(condition_id)
         if meta is None:
             continue
@@ -752,6 +785,87 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
         out.append(grade)
 
     return out
+
+
+def writeback_settlement_pnl_to_audit(world_conn: sqlite3.Connection) -> int:
+    """W2 (Phase 3, 2026-06-20): write settlement-derived pnl onto audit rows.
+
+    The realized-profit loop previously left ``pnl_usd`` / ``settlement_outcome``
+    NULL on every ``edli_live_profit_audit`` row (1345/1345 on the live DB): no
+    event in PROFIT_AUDIT_TRIGGER_EVENTS ever carries market-settlement pnl (the
+    only settlement-ish member, ``Reconciled``, is venue-order existence
+    reconciliation). This closes that wire from the settlement side.
+
+    For every FILLED audit row on a market with a VERIFIED ``settlement_outcomes``
+    row, the settled payoff is taken from the SAME ``grade_receipt`` truth function
+    the grader uses (``settled_payoff = 1.0 if won else 0.0``), and::
+
+        pnl_usd = (settled_payoff - avg_fill_price) * filled_size - fees
+
+    ``pnl_usd`` is therefore derived from settlement payoff ONLY — never from a
+    market price or win-rate (operator settlement-only-truth law). UNVERIFIED /
+    absent settlements are skipped (never fabricated). The audit table is in the
+    WORLD MAIN schema, so this UPDATE runs on the single ``world_conn`` (INV-37:
+    no independent connection, no cross-DB write). Returns the row count written.
+
+    Caller must have 'forecasts' ATTACHed (open_world_with_forecasts) and is
+    responsible for the enclosing SAVEPOINT/commit.
+    """
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.temperature import UnitMismatchError
+
+    market_meta = _load_market_meta(world_conn)
+    settlements, _settled_at = _load_settlements(world_conn)
+
+    written = 0
+    for (
+        audit_id, condition_id, direction, avg_fill_price, filled_size, fees,
+    ) in world_conn.execute(
+        """
+        SELECT audit_id, condition_id, direction, avg_fill_price, filled_size, fees
+        FROM edli_live_profit_audit
+        WHERE filled_size > 0
+          AND avg_fill_price IS NOT NULL
+          AND direction IS NOT NULL
+        """
+    ).fetchall():
+        meta = market_meta.get(condition_id)
+        if meta is None:
+            continue
+        key = (meta["city"], meta["target_date"], meta["metric"])
+        s = settlements.get(key)
+        if s is None:
+            continue  # no VERIFIED settlement — not gradeable, never fabricated
+
+        bin_obj = _bin_from_market_event(
+            meta["range_low"], meta["range_high"], s["settlement_unit"]
+        )
+        if bin_obj is None:
+            continue
+
+        class _S:
+            settlement_value = s["settlement_value"]
+            settlement_unit = s["settlement_unit"]
+
+        try:
+            graded = grade_receipt(bin_obj, direction, _S())
+        except (UnitMismatchError, ValueError):
+            continue
+
+        settled_payoff = 1.0 if graded.won else 0.0
+        fee_total = float(fees) if fees is not None else 0.0
+        pnl_usd = (settled_payoff - float(avg_fill_price)) * float(filled_size) - fee_total
+        settlement_outcome = "WON" if graded.won else "LOST"
+        world_conn.execute(
+            """
+            UPDATE edli_live_profit_audit
+            SET pnl_usd = ?, settlement_outcome = ?
+            WHERE audit_id = ?
+            """,
+            (pnl_usd, settlement_outcome, audit_id),
+        )
+        written += 1
+    return written
 
 
 def _held_q_from_in_bin(direction: str, in_bin_yes: Optional[float]) -> Optional[float]:
@@ -973,6 +1087,7 @@ def _run_with_conn(
     skipped = 0
     by_category: dict[str, int] = {}
 
+    pnl_written = 0
     world_conn.execute("SAVEPOINT skill_attr_batch")
     try:
         for g in grades:
@@ -982,6 +1097,10 @@ def _run_with_conn(
             persist_grade(world_conn, g, now_utc=now_utc)
             graded += 1
             by_category[g.category] = by_category.get(g.category, 0) + 1
+        # W2 (2026-06-20): settlement->audit pnl writeback runs in the same batch
+        # so a graded settlement and its audit-row pnl are committed atomically.
+        # Always runs (independent of only_new) so re-grades refresh pnl in place.
+        pnl_written = writeback_settlement_pnl_to_audit(world_conn)
         world_conn.execute("RELEASE skill_attr_batch")
     except Exception:
         world_conn.execute("ROLLBACK TO SAVEPOINT skill_attr_batch")
@@ -1004,6 +1123,7 @@ def _run_with_conn(
         "skill_win_rate": rate.skill_win_rate,
         "naive_win_rate": rate.naive_win_rate,
         "skill_denominator": rate.skill_denominator,
+        "settlement_pnl_written": pnl_written,
     }
 
 

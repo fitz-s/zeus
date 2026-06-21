@@ -226,6 +226,11 @@ PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_FILLED", "PARTIALLY_MAT
 VOID_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
 EXIT_LIFECYCLE_OWNED_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 EXIT_LIFECYCLE_RECOVERY_STATES = frozenset({"exit_intent", "retry_pending", "backoff_exhausted"})
+# FIX 2a (2026-06-20): an exit order that is already on the book. The still-held
+# chain-truth branch must NOT route such a position into a fresh evaluate→execute
+# pass — that would risk a second place_sell_order (single-flight law). It keeps
+# the existing in-flight handling instead.
+_EXIT_LIFECYCLE_IN_FLIGHT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending"})
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -1024,39 +1029,97 @@ def handle_exit_pending_missing(
                 )
                 return {"action": "dust_hold", "position": position}
             else:
-                # Position still held on-chain. Re-queue for sell retry.
+                # Position still held on-chain (balance > dust). FIX 2a
+                # (2026-06-20): chain-truth confirms the position is genuinely
+                # held, so it must reach the LIVE sell emitter this cycle — NOT
+                # get re-stamped as EXIT_ORDER_REJECTED(EXIT_CHAIN_MISSING) with
+                # last_exit_order_id=null and skipped on a cooldown. The prior
+                # _mark_exit_retry armed an exponential cooldown that the monitor
+                # loop then honored (is_exit_cooldown_active → continue), so the
+                # position never reached evaluate_exit/execute_exit/place_sell_order
+                # — one live position re-stamped an identical reject 1067×.
+                #
+                # Single-flight law: if a sell order is already on the book
+                # (exit_state in exit_intent/sell_placed/sell_pending) we must NOT
+                # route a fresh evaluate→execute pass (it could double-submit).
+                # Keep the legacy in-flight handling for that case.
+                # exit_state is a str-Enum (ExitState); str(member) yields the
+                # enum repr ("ExitState.EXIT_INTENT"), so normalize to .value
+                # before the membership test — otherwise the single-flight guard
+                # silently never fires.
+                _exit_state_value = getattr(
+                    getattr(position, "exit_state", ""), "value", getattr(position, "exit_state", "")
+                ) or ""
+                in_flight = _exit_state_value in _EXIT_LIFECYCLE_IN_FLIGHT_STATES
+                if in_flight:
+                    logger.info(
+                        "CHAIN_TRUTH_RETRY %s: on-chain balance=%s units "
+                        "(%s shares) for asset_id=%s; exit already in flight "
+                        "(exit_state=%s) → defer to existing exit lane",
+                        position.trade_id,
+                        on_chain_balance,
+                        chain_balance_shares,
+                        asset_id,
+                        position.exit_state,
+                    )
+                    _mark_exit_retry(
+                        position,
+                        reason="EXIT_CHAIN_MISSING_STILL_HELD",
+                        error=(
+                            f"chain_balance_units={on_chain_balance};"
+                            f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+                        ),
+                        conn=conn,
+                    )
+                    return {"action": "retry", "position": position}
+                # No resting order: release the pending_exit pre-emption so the
+                # normal monitor path runs the full evaluate_exit → execute_exit →
+                # place_sell_order lane THIS cycle. No reject stamp and no
+                # cooldown — the canonical record of this state change is the
+                # EXIT_INTENT / EXIT_ORDER_POSTED the live lane writes if it
+                # decides to sell (or MONITOR_REFRESHED if it holds). chain_state
+                # is left as the reconciliation lane owns it (settlement-only
+                # truth: balance>dust is not the same claim as full share-parity
+                # 'synced'); next cycle's chain-truth gate re-confirms and re-
+                # routes identically, so the sell is attempted every cycle a bid
+                # exists instead of being buried under a reject loop.
                 logger.info(
-                    "CHAIN_TRUTH_RETRY %s: on-chain balance=%s units "
-                    "(%s shares) for asset_id=%s → retry exit",
+                    "CHAIN_TRUTH_STILL_HELD_EVALUATE %s: on-chain balance=%s units "
+                    "(%s shares) for asset_id=%s → routing to live exit evaluation",
                     position.trade_id,
                     on_chain_balance,
                     chain_balance_shares,
                     asset_id,
                 )
-                _mark_exit_retry(
-                    position,
-                    reason="EXIT_CHAIN_MISSING_STILL_HELD",
-                    error=(
-                        f"chain_balance_units={on_chain_balance};"
-                        f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
-                    ),
-                    conn=conn,
-                )
-                return {"action": "retry", "position": position}
+                position.last_exit_error = (
+                    f"chain_balance_units={on_chain_balance};"
+                    f"chain_balance_shares={chain_balance_shares};asset_id={asset_id}"
+                )[:500]
+                position.next_exit_retry_at = ""
+                if _exit_state_value == "retry_pending":
+                    position.exit_state = ""
+                _release_pending_exit(position)
+                return {"action": "evaluate", "position": position}
         # on_chain_balance is None → RPC failure; fall through to legacy logic
         logger.warning(
             "CHAIN_TRUTH_RPC_FAIL %s: RPC unreachable, falling back to legacy exit_state logic",
             position.trade_id,
         )
-    # ── Legacy exit_state branch logic (unchanged) ───────────────────────────
+    # ── Legacy exit_state branch logic ───────────────────────────────────────
     _mark_pending_exit(position)
-    _dual_write_canonical_pending_exit_if_available(
-        conn,
-        position,
-        reason="EXIT_CHAIN_MISSING",
-        error=getattr(position, "last_exit_error", "") or "exit_pending_missing",
-        event_type="EXIT_ORDER_REJECTED",
-    )
+    # FIX 2a (2026-06-20): the canonical payload's exit_reason is
+    # `position.exit_reason or reason` (see canonical_write.transition_phase), so
+    # dedupe against that effective value — NOT the bare `reason` arg — or the
+    # epoch check would never match when a prior exit_reason is set.
+    _legacy_reject_reason = str(getattr(position, "exit_reason", "") or "EXIT_CHAIN_MISSING")
+    if not _latest_exit_reject_is_identical(conn, position, reason=_legacy_reject_reason):
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason="EXIT_CHAIN_MISSING",
+            error=getattr(position, "last_exit_error", "") or "exit_pending_missing",
+            event_type="EXIT_ORDER_REJECTED",
+        )
     if position.exit_state == "backoff_exhausted":
         closed = mark_admin_closed(portfolio, position.trade_id, "EXIT_CHAIN_MISSING_REVIEW_REQUIRED")
         if closed is not None:
@@ -1172,6 +1235,54 @@ def _void_chain_confirmed_zero(
 def _is_below_min_order_sell_error(error: str) -> bool:
     text = str(error or "").lower()
     return "below" in text and "min_order_size" in text
+
+
+def _latest_exit_reject_is_identical(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+) -> bool:
+    """Return True when the MOST RECENT canonical event is an identical reject.
+
+    FIX 2a (2026-06-20): the RPC-fall-through legacy branch wrote a fresh
+    EXIT_ORDER_REJECTED(EXIT_CHAIN_MISSING) every 2-min cycle. Because
+    transition_phase keys idempotency on a monotonic sequence_no, each write
+    is a distinct row — one live position accreted 1067 identical rejects with
+    last_exit_order_id=null. Dedupe by state-epoch: suppress the re-stamp iff
+    the single newest position_events row is already an EXIT_ORDER_REJECTED
+    carrying this exit_reason. Any intervening state-change event (EXIT_INTENT,
+    CHAIN_*, MONITOR_REFRESHED, a different reject, a backoff/admin escalation)
+    becomes the newest row and re-opens the epoch, so a genuine escalation is
+    never hidden — only the back-to-back identical re-stamp is dropped.
+    """
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position.trade_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    try:
+        event_type = str(row["event_type"] or "")
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except (TypeError, ValueError, IndexError, KeyError):
+        return False
+    if event_type != "EXIT_ORDER_REJECTED":
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("exit_reason") or "") == str(reason or "")
 
 
 def _dust_hold_event_already_recorded(
@@ -1720,6 +1831,24 @@ def _execute_live_exit(
         position.last_exit_order_id = order_id
         position.exit_state = "sell_placed"
         if conn is not None:
+                # FIX 2d (2026-06-20): canonical EXIT_ORDER_POSTED dual-write.
+                # log_pending_exit_recovery_event below only writes the legacy
+                # execution_fact row; it does NOT append a canonical
+                # position_events.EXIT_ORDER_POSTED. Before this fix every
+                # canonical EXIT_ORDER_POSTED row carried
+                # source_module=command_recovery (5/5), so the live spine
+                # emitter's own posts were invisible to the canonical audit and
+                # RANK 2 could not be graded on the event store. Stamp the
+                # canonical post here (source_module=src.execution.exit_lifecycle)
+                # while the position is still phase=pending_exit / sell_placed so
+                # transition_phase's projection resolves correctly.
+                _dual_write_canonical_pending_exit_if_available(
+                    conn,
+                    position,
+                    reason=exit_intent.reason or "EXIT_ORDER_POSTED",
+                    error="",
+                    event_type="EXIT_ORDER_POSTED",
+                )
                 log_pending_exit_recovery_event(
                     conn,
                     position,
