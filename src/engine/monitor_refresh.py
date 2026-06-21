@@ -393,6 +393,48 @@ def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
 _BELIEF_STALE_FAULT_THRESHOLD = 3
 _belief_stale_cycles: dict[str, int] = {}
 
+# LAYER 2 belief-debt ledger (2026-06-21 held-belief freeze fix). When the
+# synchronous same-authority read-through CANNOT honestly recompute a held
+# family's belief (no current single_runs / no on-disk anchor artifact), the
+# fail-closed HOLD is correct but MUST be durably recorded so it is never a silent
+# permanent freeze. We track (family -> first_failed_at, attempts) in process and
+# stamp the structured marker onto the position's applied_validations, which
+# cycle_runtime persists to position_events (TRADES state, INV-37 — the monitor
+# writes only order-lifecycle state). The existing same-family reseed enqueue is
+# the repair lane; the read-through retries every cycle, so the debt is RETRYABLE.
+_belief_debt_first_failed_at: dict[str, str] = {}
+_belief_debt_attempts: dict[str, int] = {}
+
+
+def _record_belief_debt(pos: "Position", *, city: str, target_date: str, metric: str, reason: str) -> str:
+    """Stamp a durable, retryable belief-debt marker on the position.
+
+    Returns the marker string (also appended to applied_validations). The marker
+    carries family + reason + first_failed_at + attempt count so a held position
+    can never be silently frozen — the operator/audit can query position_events
+    for ``belief_debt`` and the read-through retries it next cycle.
+    """
+    from datetime import datetime, timezone
+
+    key = f"{city}|{target_date}|{metric}|{getattr(pos, 'trade_id', '') or id(pos)}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    first = _belief_debt_first_failed_at.setdefault(key, now_iso)
+    attempts = _belief_debt_attempts.get(key, 0) + 1
+    _belief_debt_attempts[key] = attempts
+    marker = (
+        f"belief_debt;city={city};target_date={target_date};metric={metric};"
+        f"reason={reason};first_failed_at={first};attempts={attempts}"
+    )
+    _append_monitor_validation(pos, marker)
+    return marker
+
+
+def _clear_belief_debt(*, city: str, target_date: str, metric: str, pos: "Position") -> None:
+    """A successful read-through clears the family's belief-debt counters."""
+    key = f"{city}|{target_date}|{metric}|{getattr(pos, 'trade_id', '') or id(pos)}"
+    _belief_debt_first_failed_at.pop(key, None)
+    _belief_debt_attempts.pop(key, None)
+
 
 def _track_belief_staleness(pos: Position) -> None:
     key = str(getattr(pos, "trade_id", "") or id(pos))
@@ -499,6 +541,155 @@ def _enqueue_single_family_belief_reseed_failsoft(
         logger.warning(
             "monitor belief reseed FAILED (fail-soft) city=%s target_date=%s metric=%s exc=%s",
             city, target_date, metric, exc,
+        )
+        return None
+
+
+def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
+    """Return (Path, payload) of the freshest on-disk materialization seed for the
+    family, or None. Reads ONLY already-written seed files (pending + processed) —
+    NO seed is written, NO network fetch, NO DB write. The seed carries the
+    Open-Meteo anchor payload + precision metadata paths the read-through needs.
+
+    The seed name is ``{city}.{target_date}.{metric}.{stamp}.json``; we pick the
+    lexicographically-latest stamp (ISO-ordered) across the configured seed dirs.
+    """
+    import json as _json
+    from pathlib import Path
+
+    try:
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+    except Exception:  # noqa: BLE001 — lane not configured / import failure -> not eligible
+        return None
+    # Normalize the family file-name segments the seed builder uses (spaces -> '_').
+    city_seg = str(city).replace(" ", "_")
+    prefix = f"{city_seg}.{target_date}.{metric}."
+    candidate_dirs = [
+        cfg.get("seed_dir"),
+        cfg.get("seed_processed_dir"),
+        cfg.get("processed_dir"),
+    ]
+    best_path = None
+    best_stamp = ""
+    for d in candidate_dirs:
+        if not d:
+            continue
+        base = Path(str(d))
+        if not base.exists():
+            continue
+        try:
+            for path in base.glob(f"{prefix}*.json"):
+                name = path.name
+                if name.endswith(".receipt.json"):
+                    continue
+                # Compare by the trailing stamp portion (ISO timestamps sort lexically).
+                stamp = name[len(prefix):]
+                if stamp > best_stamp:
+                    best_stamp = stamp
+                    best_path = path
+        except OSError:
+            continue
+    if best_path is None:
+        return None
+    try:
+        payload = _json.loads(best_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return best_path, payload
+
+
+def _attempt_held_belief_readthrough(
+    pos: "Position", *, city, target_d, metric: str
+) -> float | None:
+    """LAYER 2 — synchronous single-family read-through recompute (held-belief freeze fix).
+
+    Recompute THIS held family's replacement posterior via the SAME canonical
+    Bayes-precision fusion the live write path uses, against whatever single_runs
+    are CURRENTLY persisted, WITHOUT writing forecast_posteriors. Returns the
+    fresh HELD-SIDE probability for the position's bin, or None when the family
+    cannot be honestly recomputed (no on-disk anchor seed / no current single_runs
+    / not live-eligible). Fewer providers ⇒ honestly wider fusion CI (correct).
+
+    INV-37: reads forecasts via a dedicated READ-ONLY forecasts-MAIN connection
+    (``get_forecasts_connection_read_only``) — the SAME pattern this module already
+    uses for bare ``raw_model_forecasts`` reads — NEVER the trades lifecycle conn
+    (whose MAIN is zeus_trades, where the fusion's bare forecast-table names would
+    not resolve) and NEVER an independent WRITE connection. Writes nothing.
+
+    Fail-soft: ANY error / missing input returns None so the caller fail-closes to
+    HOLD + belief_debt (never a fabricated belief, never a monitor crash).
+    """
+    try:
+        target_date = str(getattr(pos, "target_date", "") or "")
+        if not target_date:
+            return None
+        seed = _freshest_family_seed_on_disk(
+            city=str(pos.city), target_date=target_date, metric=metric
+        )
+        if seed is None:
+            return None
+        seed_path, seed_payload = seed
+
+        from src.data.replacement_forecast_materialization_request_builder import (
+            build_materialize_request_dataclass,
+            build_replacement_forecast_materialization_request,
+        )
+
+        build = build_replacement_forecast_materialization_request(
+            seed_payload, base_dir=seed_path.parent
+        )
+        if not build.ok or build.request is None:
+            return None
+        request = build_materialize_request_dataclass(
+            build.request, base_dir=seed_path.parent
+        )
+
+        from src.data.replacement_forecast_materializer import (
+            compute_replacement_posterior_readonly,
+        )
+        from src.state.db import get_forecasts_connection_read_only
+
+        fc_conn = get_forecasts_connection_read_only()
+        try:
+            fc_conn.row_factory = sqlite3.Row
+            result = compute_replacement_posterior_readonly(fc_conn, request)
+        finally:
+            fc_conn.close()
+        if result is None or not result.live_eligible:
+            return None
+        # Index the held bin by its venue range-label, exactly like load_replacement_belief.
+        from src.engine.position_belief import _match_bin  # noqa: PLC0415
+
+        matched = _match_bin(result.q, str(pos.bin_label))
+        if matched is None:
+            return None
+        _bin_key, q_yes = matched
+        if not (0.0 <= float(q_yes) <= 1.0):
+            return None
+        held = _held_side_probability_from_yes_bin_probability(
+            float(q_yes), str(getattr(pos.direction, "value", pos.direction))
+        )
+        if not (0.0 <= float(held) <= 1.0):
+            return None
+        logger.info(
+            "monitor held-belief READ-THROUGH recompute OK city=%s target_date=%s metric=%s "
+            "providers=%d/%d q_held=%.4f (exit organ regains fresh same-authority belief)",
+            pos.city, target_date, metric,
+            result.decorrelated_providers_served, result.decorrelated_providers_expected,
+            float(held),
+        )
+        return float(held)
+    except Exception as exc:  # noqa: BLE001 — read-through MUST NOT crash the monitor
+        logger.warning(
+            "monitor held-belief read-through FAILED (fail-soft -> fail-close) "
+            "city=%s target_date=%s metric=%s exc=%s",
+            getattr(pos, "city", "?"), getattr(pos, "target_date", "?"), metric, exc,
         )
         return None
 
@@ -2819,13 +3010,47 @@ def monitor_probability_refresh(
     # source. The same-family reseed is the only repair lane; the ensemble
     # registry below is retained ONLY as applied-list telemetry.
     if not _would_use_day0_lane:
+        _metric_for_family = resolve_position_metric(pos)[0]
+        # LAYER 2 (2026-06-21 held-belief freeze fix): BEFORE fail-closing, attempt a
+        # SYNCHRONOUS single-family read-through recompute of THIS family's replacement
+        # posterior via the SAME canonical fusion authority, using whatever single_runs
+        # are CURRENTLY persisted. This is NOT a loosening of the BELIEF_AUTHORITY_FAULT
+        # guard: it makes the belief FRESH legitimately (canonical fusion, honestly wider
+        # CI when fewer providers) instead of substituting the cold legacy ENS center.
+        # If it yields a fresh posterior, the exit organ regains a fresh same-authority
+        # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
+        # before AND record a durable, retryable belief_debt marker (never a silent freeze).
+        readthrough_prob = _attempt_held_belief_readthrough(
+            pos, city=city, target_d=target_d, metric=_metric_for_family
+        )
+        if readthrough_prob is not None:
+            fresh_pos = replace(pos)
+            setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+            _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+            _append_monitor_validation(
+                fresh_pos,
+                "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
+            )
+            _set_monitor_probability_fresh(fresh_pos, True)
+            _clear_belief_debt(
+                city=str(pos.city), target_date=str(pos.target_date),
+                metric=_metric_for_family, pos=fresh_pos,
+            )
+            return float(readthrough_prob), fresh_pos, True
         _set_monitor_probability_fresh(pos, False)
         _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
         _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
+        # Durable, retryable belief-debt: the read-through could not honestly recompute
+        # (no current single_runs / no on-disk anchor) — record it so a held position is
+        # never silently frozen. The reseed below is the repair lane.
+        _record_belief_debt(
+            pos, city=str(pos.city), target_date=str(pos.target_date),
+            metric=_metric_for_family, reason="readthrough_inputs_insufficient",
+        )
         _enqueue_single_family_belief_reseed_failsoft(
             city=str(pos.city),
             target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
+            metric=_metric_for_family,
         )
         # Return the stored entry-time posterior as the value carrier but with
         # is_fresh=False so refresh_position records NaN current_p_posterior and

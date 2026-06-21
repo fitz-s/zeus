@@ -974,6 +974,53 @@ class _BayesPrecisionFusionFusionOverride:
     precision_basis_hash: str | None = None
 
 
+@dataclass(frozen=True)
+class _PosteriorComputeResult:
+    """The pure (no-DB-write) product of the posterior compute.
+
+    Extracted from ``_insert_posterior`` so the SAME canonical fusion compute can
+    be reused on a READ-ONLY path (the monitor held-belief read-through, LAYER 2
+    of the 2026-06-21 freeze fix) without writing ``forecast_posteriors``.
+
+    Contract: this struct is returned by ``_compute_posterior_payload`` ALWAYS
+    (even when not live-eligible) so a read-only caller can distinguish
+    "computed a fresh but non-live-eligible posterior" from "compute blocked".
+    ``_insert_posterior`` maps ``not live_eligible -> None`` to preserve the
+    historical write-path contract byte-for-byte. Every field below is exactly a
+    value the INSERT (or its identity hash / provenance payload) consumes; nothing
+    here is recomputed by the caller.
+    """
+
+    live_eligible: bool
+    # Point distribution + the certified bootstrap band (may be None when not live).
+    q: dict[str, float]
+    q_lcb_map: dict[str, float] | None
+    q_ucb_map: dict[str, float] | None
+    # The fused center (mu*) and predictive spread — carried so a read-only caller
+    # can audit belief WIDTH (honestly wider when fewer providers). None when no
+    # multi-model fused center was produced (single-anchor fallback).
+    mu_star: float | None
+    predictive_sigma_c: float | None
+    # K3 provider completeness so the caller sees when the CI is honestly wider.
+    decorrelated_providers_complete: bool
+    decorrelated_providers_served: int
+    decorrelated_providers_expected: int
+    capture_status: str
+    replacement_q_mode: str
+    # The remaining values the INSERT + identity hash + provenance payload consume.
+    data_version: str
+    source_cycle_time: str
+    available_at: str
+    computed_at: str
+    runtime_layer: str | None
+    dependency_payload: dict[str, object]
+    dependency_hash: str
+    bin_topology_hash: str
+    posterior_config_hash: str
+    family_id: str
+    provenance_payload: dict[str, object] | None
+
+
 def _read_persisted_current_capture(
     conn: "sqlite3.Connection",
     *,
@@ -1688,13 +1735,30 @@ def _build_fused_q_bounds(
     return q_lcb_map, q_ucb_map
 
 
-def _insert_posterior(
+def _compute_posterior_payload(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
     *,
     metric: str,
     anchor_id: int,
-) -> int | None:
+) -> _PosteriorComputeResult:
+    """Pure (no-DB-write) posterior compute extracted from ``_insert_posterior``.
+
+    Runs the SAME canonical multi-model Bayes-precision fusion + fused-q shape +
+    certified bootstrap bounds the write path always ran, and returns the result
+    as a ``_PosteriorComputeResult``. It performs ZERO ``forecast_posteriors``
+    writes — only the read paths inside the fusion override (persisted single_runs
+    + walk-forward history) touch ``conn``, all read-only. The boundary is exact:
+    everything that historically lived in ``_insert_posterior`` BEFORE the INSERT
+    (the value build + the ``not live_layer -> return`` gate + the provenance
+    payload assembly) is here; the INSERT itself stays in ``_insert_posterior``.
+
+    Live-eligibility: the historical write path did ``if not live_layer: return
+    None`` (no row, no provenance). Here we instead return the struct with
+    ``live_eligible=False`` so the read-only monitor caller can tell "fresh but
+    not live-eligible" from "compute blocked"; ``_insert_posterior`` maps
+    ``not live_eligible -> None`` to keep the write contract byte-identical.
+    """
     # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center was
     # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
     # audit, commit ff7f33dd5b) because it was fit on the thin live single_runs anchor
@@ -2288,8 +2352,55 @@ def _insert_posterior(
         q_ucb_map=q_ucb_map,
         q_lcb_basis=q_lcb_basis,
     )
+    # Shared provider/center provenance carried on the result either way so a
+    # read-only caller can audit belief width / honesty even when not live.
+    _mu_star = (
+        float(bayes_precision_fusion_override.anchor_value_c)
+        if bayes_precision_fusion_override is not None
+        else None
+    )
+    _pred_sigma = (
+        bayes_precision_fusion_override.predictive_sigma_c
+        if bayes_precision_fusion_override is not None
+        else None
+    )
+    _prov_complete = bool(
+        bayes_precision_fusion_override.decorrelated_providers_complete
+    ) if bayes_precision_fusion_override is not None else False
+    _prov_served = int(
+        bayes_precision_fusion_override.decorrelated_providers_served
+    ) if bayes_precision_fusion_override is not None else 0
+    _prov_expected = int(
+        bayes_precision_fusion_override.decorrelated_providers_expected
+    ) if bayes_precision_fusion_override is not None else 0
     if not live_layer:
-        return None
+        # Historical write path returned None here (no row, no provenance). The
+        # read path needs the computed values to decide; return the struct flagged
+        # not-eligible. ``_insert_posterior`` maps this to None (byte-identical).
+        return _PosteriorComputeResult(
+            live_eligible=False,
+            q=q,
+            q_lcb_map=q_lcb_map,
+            q_ucb_map=q_ucb_map,
+            mu_star=_mu_star,
+            predictive_sigma_c=(None if _pred_sigma is None else float(_pred_sigma)),
+            decorrelated_providers_complete=_prov_complete,
+            decorrelated_providers_served=_prov_served,
+            decorrelated_providers_expected=_prov_expected,
+            capture_status=capture_status,
+            replacement_q_mode=replacement_q_mode,
+            data_version=data_version,
+            source_cycle_time=source_cycle_time,
+            available_at=available_at,
+            computed_at=computed_at,
+            runtime_layer=None,
+            dependency_payload=dependency_payload,
+            dependency_hash=dependency_hash,
+            bin_topology_hash=bin_topology_hash,
+            posterior_config_hash=posterior_config_hash,
+            family_id=family_id,
+            provenance_payload=None,
+        )
     runtime_layer = LIVE_RUNTIME_LAYER
     if bayes_precision_fusion_override is not None:
         _prov_anchor_value_c = float(bayes_precision_fusion_override.anchor_value_c)
@@ -2429,6 +2540,64 @@ def _insert_posterior(
             ),
             "runtime_layer": runtime_layer,
         }
+    return _PosteriorComputeResult(
+        live_eligible=True,
+        q=q,
+        q_lcb_map=q_lcb_map,
+        q_ucb_map=q_ucb_map,
+        mu_star=_mu_star,
+        predictive_sigma_c=(None if _pred_sigma is None else float(_pred_sigma)),
+        decorrelated_providers_complete=_prov_complete,
+        decorrelated_providers_served=_prov_served,
+        decorrelated_providers_expected=_prov_expected,
+        capture_status=capture_status,
+        replacement_q_mode=replacement_q_mode,
+        data_version=data_version,
+        source_cycle_time=source_cycle_time,
+        available_at=available_at,
+        computed_at=computed_at,
+        runtime_layer=runtime_layer,
+        dependency_payload=dependency_payload,
+        dependency_hash=dependency_hash,
+        bin_topology_hash=bin_topology_hash,
+        posterior_config_hash=posterior_config_hash,
+        family_id=family_id,
+        provenance_payload=provenance_payload,
+    )
+
+
+def _insert_posterior(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    anchor_id: int,
+) -> int | None:
+    """Compute the posterior payload then INSERT it (the live write path).
+
+    Behavior-preserving wrapper around ``_compute_posterior_payload``: the value
+    build is identical (single source of truth shared with the read-only path),
+    and the historical ``not live_layer -> return None`` contract is preserved by
+    mapping a not-live-eligible compute result to ``None`` (no row written).
+    """
+    result = _compute_posterior_payload(conn, request, metric=metric, anchor_id=anchor_id)
+    if not result.live_eligible:
+        return None
+    target_date = _date_text(request.target_date)
+    data_version = result.data_version
+    source_cycle_time = result.source_cycle_time
+    available_at = result.available_at
+    computed_at = result.computed_at
+    q = result.q
+    q_lcb_map = result.q_lcb_map
+    q_ucb_map = result.q_ucb_map
+    dependency_payload = result.dependency_payload
+    dependency_hash = result.dependency_hash
+    bin_topology_hash = result.bin_topology_hash
+    posterior_config_hash = result.posterior_config_hash
+    family_id = result.family_id
+    provenance_payload = result.provenance_payload
+    runtime_layer = result.runtime_layer
     posterior_identity_hash = _json_hash(
         {
             "source_id": SOURCE_ID,
@@ -2514,6 +2683,47 @@ def _insert_posterior(
             f"{posterior_identity_hash}"
         )
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
+
+
+def compute_replacement_posterior_readonly(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> _PosteriorComputeResult | None:
+    """READ-ONLY single-family replacement posterior recompute (LAYER 2).
+
+    Runs the SAME canonical multi-model Bayes-precision fusion the live write
+    path runs, against whatever single_runs are CURRENTLY persisted on ``conn``,
+    and returns the fused posterior (q point + certified q_lcb/q_ucb band + fused
+    center/spread + provider provenance) WITHOUT writing ``forecast_posteriors``.
+
+    Purpose: the monitor's held-belief read-through (2026-06-21 freeze fix). When
+    a held position's cached posterior is stale/missing, the monitor recomputes
+    the SAME-authority belief here rather than fail-closing on a frozen row or
+    substituting a cold legacy center. Fewer providers ⇒ the fusion's CI is
+    honestly wider (conservative), which is correct, not a failure.
+
+    INV-37 / connection contract: ``conn`` MUST be a forecasts-MAIN connection
+    (e.g. ``get_forecasts_connection_read_only()``) because the fusion override's
+    current-value + walk-forward readers query BARE forecast-class table names
+    (``raw_model_forecasts``, ``settlement_outcomes``, ...). This function issues
+    ZERO writes; the only DB access is the override's read paths.
+
+    Returns:
+        ``_PosteriorComputeResult`` with ``live_eligible`` set, or ``None`` when a
+        pure pre-compute guard (request well-formedness / precision guard) blocks
+        the family — an honest "cannot compute", never a fabricated belief.
+    """
+    # Pure pre-compute guards (no DB write): the same well-formedness + precision
+    # checks the write path runs FIRST. A blocked request is not an honest
+    # posterior, so report it as not-computable (None) — the caller fail-closes.
+    if _prewrite_block_reasons(request):
+        return None
+    if _precision_guard_block_reason(request):
+        return None
+    # anchor_id is consumed ONLY by the write-path identity hash (not built here),
+    # so a sentinel is safe; the read path never persists a posterior row.
+    metric = _metric(request.temperature_metric)
+    return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
 def _build_readiness(
