@@ -1,6 +1,15 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last audited: 2026-06-21
 # Authority basis: docs/rebuild/consult_build_spec.md
+#   + Option C raw-precision representativeness center warming (consult
+#   REQ-20260621-033315; forecast-gap-is-data-precision). The shared
+#   raw_precision_center / raw_second_moment_weights helper threads per-model
+#   grid-representativeness variance into the RAW diagonal precision denominator
+#   that produces the SERVED traded center _mu_diagonal (Σ w_m·z_m). Form A:
+#   denom_m = max(base_m2, floor_m2) + repr_m2_native (floor the residual FIRST,
+#   THEN add the INDEPENDENT representativeness observation-variance, per
+#   representativeness_variance.py rule 5: Sigma_source = Sigma_resid + sigma_repr²).
+#   Repr enters the MEAN weights ONLY — never predictive_sigma_c / Kelly width.
 #   ("Create src/forecast/center.py" block lines 220-271: CenterEstimate dataclass
 #   224-234, the center algorithm 236-270, the envelope-enforcement code 256-268)
 #   + Stage 3 block (lines 1072-1090, RED-on-revert names, live signal). Reconciled
@@ -189,6 +198,14 @@ def walk_forward_model_weights(
     for i, member in enumerate(members):
         raw_m2 = getattr(member, "walk_forward_raw_m2_native", None)
         n_train = int(getattr(member, "walk_forward_n", 0) or 0)
+        # Option C: grid-representativeness variance in the member's native unit²
+        # (already serving-unit-scaled by the producer). 0.0 / non-finite ⇒ no penalty.
+        try:
+            repr_native = float(getattr(member, "representativeness_m2_native", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            repr_native = 0.0
+        if not np.isfinite(repr_native) or repr_native <= 0.0:
+            repr_native = 0.0
         try:
             raw_m2_f = float(raw_m2) if raw_m2 is not None else None
         except (TypeError, ValueError):
@@ -197,6 +214,10 @@ def walk_forward_model_weights(
             # No usable raw second-moment signal for this member -> equal-precision
             # floor (it cannot dominate; the set shrinks toward equal 1/n).
             m2_eff = equal_m2
+            if repr_native > 0.0:
+                # Cold-start (Option C §4): a positive repr IS a precision signal even
+                # with no raw history — equal prior + repr (geometry breaks the tie).
+                have_any_signal = True
         else:
             have_any_signal = True
             if n_train < MIN_TRAIN:
@@ -206,9 +227,10 @@ def walk_forward_model_weights(
                 m2_eff = lam * raw_m2_f + (1.0 - lam) * equal_m2
             else:
                 m2_eff = raw_m2_f
-        # Precision = 1 / max(E[r^2], SIGMA_FLOOR^2). The floor is on the raw second
-        # moment itself (a sub-floor realized error is the floor's certainty cap).
-        precisions[i] = 1.0 / max(m2_eff, floor_m2)
+        # Precision = 1 / (max(E[r^2], SIGMA_FLOOR^2) + sigma_repr²). The floor is on
+        # the raw second moment itself; the INDEPENDENT representativeness variance is
+        # added AFTER the floor (Form A — rule 5: Sigma_source = Sigma_resid + repr).
+        precisions[i] = 1.0 / (max(m2_eff, floor_m2) + repr_native)
 
     # No member carried any precision signal at all -> exact equal weights (the
     # absent-history posture; the spine's dormant seam before history is threaded).
@@ -236,6 +258,7 @@ def raw_second_moment_weights(
     raw_m2_and_n: "dict[str, tuple[float | None, int]]",
     *,
     unit: str = "C",
+    repr_m2_by_model: "dict[str, float] | None" = None,
 ) -> "dict[str, float]":
     """Non-negative weights summing to 1 — RAW diagonal precision basis.
 
@@ -252,8 +275,35 @@ def raw_second_moment_weights(
     degC).  ``unit`` is the SERVING unit: "F" scales the floor / shrink target by
     (9/5)² (the same fix operator landed in f06d2176bc).
 
+    ``repr_m2_by_model`` (Option C, 2026-06-21): optional per-model grid-
+    representativeness variance, **in the SAME unit² basis as ``raw_m2_native``**
+    (the CALLER supplies it pre-converted, exactly as it supplies ``raw_m2_native``).
+    When supplied, each model's denominator becomes
+
+        ``denom_m = max(base_m2, floor_m2) + repr_m2``
+
+    i.e. the residual second moment is floored FIRST, then the INDEPENDENT
+    representativeness observation-variance is ADDED (Form A — per
+    ``representativeness_variance.py`` rule 5: ``Sigma_source = Sigma_resid +
+    sigma_repr²``).  Adding AFTER the floor is what makes a small-but-real repr
+    penalty on a sub-floor-residual member still bite (it would be swallowed if
+    added before the floor).  The helper does NOT unit-scale repr: just as
+    ``raw_m2_native`` is the caller's responsibility (the EXIT seam supplies degC²,
+    the ENTRY seam supplies native²·(9/5)²), the caller supplies repr in the matching
+    basis so the add stays unit-consistent regardless of which seam calls it.
+
+    A model absent from ``repr_m2_by_model`` (or with a non-positive / non-finite
+    value) contributes repr = 0.0 — byte-identical to the pre-Option-C helper for
+    that model.  ``repr_m2_by_model=None`` is byte-identical to the old signature.
+
+    COLD-START (Option C §4): "no signal" is now ``no raw m2 AND no positive finite
+    repr`` ⇒ exact equal 1/n.  A member with NO raw m2 but a POSITIVE repr is a real
+    precision signal: its base becomes the equal-precision prior ``equal_m2`` and the
+    repr is added, so a geometry-derived penalty can break equal weights even on a
+    no-history (thin/cold-start) cell.
+
     Returns {model: weight}.  Falls back to equal 1/n when no model has a usable
-    precision signal (no history, all thin, or non-finite).
+    precision signal (no history, all thin/non-finite, AND no positive repr).
     """
     models = list(raw_m2_and_n.keys())
     n = len(models)
@@ -262,16 +312,36 @@ def raw_second_moment_weights(
     _u = (9.0 / 5.0) ** 2 if unit == "F" else 1.0
     floor_m2 = (SIGMA_FLOOR * SIGMA_FLOOR) * _u
     equal_m2 = ((SIGMA_FLOOR * LOWN_INFLATE) ** 2) * _u
+    _repr = repr_m2_by_model or {}
+
+    def _repr_native(model: str) -> float:
+        # Repr is supplied in the SAME basis as raw_m2 (caller's responsibility — no
+        # scaling here). Absent / non-positive / non-finite repr is 0.0 (byte-identical
+        # for that model).
+        try:
+            r = float(_repr.get(model, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        if not np.isfinite(r) or r <= 0.0:
+            return 0.0
+        return r
+
     precisions: dict[str, float] = {}
     have_any_signal = False
     for model in models:
         raw_m2, n_train = raw_m2_and_n[model]
+        repr_native = _repr_native(model)
         try:
             raw_m2_f = float(raw_m2) if raw_m2 is not None else None
         except (TypeError, ValueError):
             raw_m2_f = None
         if raw_m2_f is None or not np.isfinite(raw_m2_f) or raw_m2_f <= 0.0 or n_train <= 0:
+            # No usable raw second-moment history for this member.
             m2_eff = equal_m2
+            if repr_native > 0.0:
+                # Cold-start (Option C §4): a positive repr IS a precision signal even
+                # with no raw history — equal prior + repr (geometry breaks the tie).
+                have_any_signal = True
         else:
             have_any_signal = True
             if n_train < MIN_TRAIN:
@@ -279,7 +349,12 @@ def raw_second_moment_weights(
                 m2_eff = lam * raw_m2_f + (1.0 - lam) * equal_m2
             else:
                 m2_eff = raw_m2_f
-        precisions[model] = 1.0 / max(m2_eff, floor_m2)
+        # Form A: floor the residual second moment FIRST, then ADD the independent
+        # representativeness observation-variance. The floor is the minimum residual
+        # error; repr is a SEPARATE noise channel (rule 5), so it must not be swallowed
+        # by the residual floor.
+        denom = max(m2_eff, floor_m2) + repr_native
+        precisions[model] = 1.0 / denom
     if not have_any_signal:
         eq = 1.0 / n
         return {m: eq for m in models}
@@ -293,6 +368,42 @@ def raw_second_moment_weights(
         eq = 1.0 / n
         return {m: eq for m in models}
     return {m: v / s for m, v in w.items()}
+
+
+def raw_precision_center(
+    raw_m2_and_n: "dict[str, tuple[float | None, int]]",
+    z_by_model: "dict[str, float]",
+    *,
+    unit: str = "C",
+    repr_m2_by_model: "dict[str, float] | None" = None,
+) -> "tuple[dict[str, float], float]":
+    """Shared RAW-precision center: returns (weights_by_model, mu_diagonal).
+
+    THE single served-center functional (METHOD UNIFY 2026-06-18 + Option C). Both
+    the materializer EXIT seam and the spine ENTRY path call THIS so the weights AND
+    the arithmetic center ``_mu_diagonal = Σ_m w_m · z_m`` are computed identically
+    from the same inputs — a shared center FUNCTIONAL, not only a shared weight
+    formula (closing the #135 two-center split at the center level, not just weights).
+
+    ``raw_m2_and_n`` / ``unit`` / ``repr_m2_by_model`` are as in
+    ``raw_second_moment_weights``. ``z_by_model`` maps model → RAW member value z_m
+    in the SERVING unit. The center is the convex combination Σ w_m·z_m, so it stays
+    inside the member envelope [min z, max z] (non-negative weights summing to 1) —
+    no-debias, no invented value.
+
+    Returns ``({} , nan)`` when there are no models with a z value.
+    """
+    weights = raw_second_moment_weights(
+        raw_m2_and_n, unit=unit, repr_m2_by_model=repr_m2_by_model
+    )
+    if weights and z_by_model:
+        mu = float(sum(weights.get(m, 0.0) * z for m, z in z_by_model.items()))
+        return weights, mu
+    if z_by_model:
+        # No precision signal at all → equal-weight RAW mean (pure RAW, never invented).
+        mu = float(sum(z_by_model.values()) / len(z_by_model))
+        return weights, mu
+    return weights, float("nan")
 
 
 # ---------------------------------------------------------------------------

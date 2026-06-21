@@ -460,6 +460,12 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     # 1/E[r²] weight. Absent (None) ⇒ equal-weight (the dormant-seam behavior, unchanged).
     raw_m2_by_index = _coerce_optional_float_list(payload.get("_edli_spine_raw_m2_by_index"))
     n_by_index = _coerce_int_list(payload.get("_edli_spine_n_by_index"))
+    # Option C (2026-06-21): grid-representativeness variance sigma_repr² (native²),
+    # threaded index-aligned by the producer (the model name is lost downstream). Lifted
+    # so build_fresh_model_set can attach it to RawModelMember.representativeness_m2_native
+    # and walk_forward_model_weights adds it AFTER the residual floor (Form A). Absent ⇒
+    # all-zero ⇒ byte-identical (no geometry penalty).
+    repr_m2_by_index = _coerce_optional_float_list(payload.get("_edli_spine_repr_m2_by_index"))
     return {
         "mu_native": mu_f,
         "sigma_native": sigma_f,
@@ -468,6 +474,7 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
         "source_cycle_time_utc": source_cycle,
         "raw_m2_by_index": raw_m2_by_index,
         "n_by_index": n_by_index,
+        "repr_m2_by_index": repr_m2_by_index,
     }
 
 
@@ -574,6 +581,10 @@ def build_fresh_model_set(
         and isinstance(_n_by, (tuple, list))
         and len(_n_by) == int(arr.size)
     )
+    # Option C: index-aligned grid-representativeness variance (native²). Independent of
+    # _have_precision — a member can carry repr even with no raw m2 history (cold-start).
+    _repr_by = served.get("repr_m2_by_index")
+    _have_repr = isinstance(_repr_by, (tuple, list)) and len(_repr_by) == int(arr.size)
 
     def _member_m2(i: int) -> float | None:
         if not _have_precision:
@@ -588,6 +599,15 @@ def build_fresh_model_set(
         except (TypeError, ValueError):
             return 0
 
+    def _member_repr(i: int) -> float:
+        if not _have_repr:
+            return 0.0
+        try:
+            r = float(_repr_by[i])
+        except (TypeError, ValueError):
+            return 0.0
+        return r if (r == r and r > 0.0) else 0.0  # NaN-safe; non-positive → 0.0
+
     members = tuple(
         RawModelMember(
             model_id=f"reactor_served_{i}",
@@ -601,6 +621,7 @@ def build_fresh_model_set(
             data_version="reactor_served",
             walk_forward_raw_m2_native=_member_m2(i),
             walk_forward_n=_member_n(i),
+            representativeness_m2_native=_member_repr(i),
         )
         for i, v in enumerate(arr.tolist())
     )

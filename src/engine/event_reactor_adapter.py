@@ -9131,10 +9131,15 @@ def _generate_candidate_proofs(
                     # weight. None entries (no walk-forward history) stay equal-weighted.
                     if _spine_precision and len(_spine_precision) == len(_spine_lst):
                         payload["_edli_spine_raw_m2_by_index"] = [
-                            (None if _m2 is None else float(_m2)) for (_mid, _m2, _n) in _spine_precision
+                            (None if _m2 is None else float(_m2))
+                            for (_mid, _m2, _n, _rr) in _spine_precision
                         ]
                         payload["_edli_spine_n_by_index"] = [
-                            int(_n) for (_mid, _m2, _n) in _spine_precision
+                            int(_n) for (_mid, _m2, _n, _rr) in _spine_precision
+                        ]
+                        # Option C: index-aligned grid-representativeness variance (native²).
+                        payload["_edli_spine_repr_m2_by_index"] = [
+                            float(_rr) for (_mid, _m2, _n, _rr) in _spine_precision
                         ]
                     _spine_mean = sum(_spine_lst) / len(_spine_lst)
                     payload["_edli_spine_mu_native"] = float(_spine_mean)
@@ -12854,18 +12859,49 @@ def _spine_multimodel_members_for_event(
         raw_m2_by_model = {}
 
     _c2_to_native_var = 1.0 if unit == "C" else (9.0 / 5.0) ** 2  # degC²→native² scale
+    # Option C (2026-06-21): per-model grid-representativeness variance sigma_repr²
+    # (degC²) for THIS family's (city, model), threaded as an index-aligned channel
+    # alongside the raw m2. The downstream RawModelMember at build_fresh_model_set has
+    # model_id="reactor_served_{i}" (the model NAME is lost there), so repr MUST be
+    # computed HERE where the real model name + family.city are in scope, then carried
+    # by index. Converted to native² by the SAME _c2_to_native_var as the raw m2 so it
+    # adds in the member-value unit basis. FAIL-SOFT: a city/model absent from the grid
+    # table yields 0.0 (byte-identical for that member, no fabricated penalty, no flag).
+    # Enters the MEAN weights ONLY — never the predictive σ / Kelly width.
+    try:
+        from src.forecast.grid_representativeness_loader import (  # noqa: PLC0415
+            sigma_repr_sq_for as _sigma_repr_sq_for,
+        )
+    except Exception:  # noqa: BLE001
+        _sigma_repr_sq_for = None  # type: ignore[assignment]
+
+    def _repr_native_for(model: str) -> float:
+        if _sigma_repr_sq_for is None:
+            return 0.0
+        try:
+            _r_c2 = float(_sigma_repr_sq_for(str(family.city), str(model)))
+        except Exception:  # noqa: BLE001 — geometry is best-effort; absence == 0.0
+            return 0.0
+        if not (_r_c2 == _r_c2) or _r_c2 <= 0.0:  # NaN-safe; non-positive == no penalty
+            return 0.0
+        return _r_c2 * _c2_to_native_var
+
     members_native: list[float] = []
-    precision_by_index: list[tuple[str, float | None, int]] = []
+    # 4-tuple entries: (model, raw_m2_native|None, n, repr_m2_native). The repr is a
+    # SEPARATE channel (Form A: floored residual + repr at the consumer) — NOT folded
+    # into raw_m2 here, which would let it be swallowed by the residual floor / EB shrink.
+    precision_by_index: list[tuple[str, float | None, int, float]] = []
     # Deterministic order (best is dict-ordered by insertion = the SQL model order).
     for _model, _val_c in best.items():
         members_native.append(_c_to_native(_val_c))
+        _repr_native = _repr_native_for(_model)
         _hit = raw_m2_by_model.get(_model)
         if _hit is not None:
             _m2_c2, _n = _hit
             _m2_native = float(_m2_c2) * _c2_to_native_var
-            precision_by_index.append((str(_model), _m2_native, int(_n)))
+            precision_by_index.append((str(_model), _m2_native, int(_n), _repr_native))
         else:
-            precision_by_index.append((str(_model), None, 0))
+            precision_by_index.append((str(_model), None, 0, _repr_native))
     return members_native, str(_causal_sct), precision_by_index
 
 

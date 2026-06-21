@@ -883,6 +883,46 @@ def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequ
         return "C"
 
 
+def _build_sigma_repr_by_model(
+    city: str,
+    models: "Sequence[str]",
+    *,
+    anchor_model: str,
+) -> dict[str, float]:
+    """Option C — per-model grid-representativeness variance sigma_repr² (degC²) for the
+    materializer EXIT center.
+
+    Reads geometry via ``grid_representativeness_loader.sigma_repr_sq_for(city, model)``,
+    which is FAIL-SOFT: a city/model/cell absent from config/grid_representativeness.json
+    yields 0.0, so that member is byte-identical to today (no fabricated penalty). The
+    returned dict is in **degC²** to match the materializer's degC² ``raw_m2`` basis (the
+    shared helper adds repr in the same unit basis as raw_m2, no scaling). The ANCHOR
+    member is keyed by the same ``anchor_model`` sentinel the center uses; the loader maps
+    it to the anchor's OM grid cell when present (else 0.0). Only models with a positive
+    finite repr are kept (0.0 entries are equivalent to absence and stay byte-identical).
+
+    Entirely best-effort: any loader/engine error → empty dict → byte-identical center.
+    """
+    out: dict[str, float] = {}
+    try:
+        from src.forecast.grid_representativeness_loader import (  # noqa: PLC0415
+            sigma_repr_sq_for,
+        )
+    except Exception:  # noqa: BLE001
+        return out
+    for _model in models:
+        try:
+            _v = float(sigma_repr_sq_for(str(city), str(_model)))
+        except Exception:  # noqa: BLE001 — geometry is best-effort; absence == 0.0
+            _v = 0.0
+        if math.isfinite(_v) and _v > 0.0:
+            out[str(_model)] = _v
+    # The anchor sentinel may differ from the loader's anchor model name; both keys are
+    # tried by the caller, so a 0.0 for an unmapped anchor is simply byte-identical.
+    del anchor_model  # kept for call-site clarity / future anchor-cell mapping
+    return out
+
+
 @dataclass(frozen=True)
 class _BayesPrecisionFusionFusionOverride:
     """The BAYES_PRECISION_FUSION fused center/spread that replace the single-anchor in the soft-anchor build,
@@ -925,6 +965,13 @@ class _BayesPrecisionFusionFusionOverride:
     # provider whose selected cycle has no single_runs row, e.g. JMA at 06Z-cadence cycles) is
     # therefore RECORDED in the posterior provenance, never silent.
     current_value_serving: Mapping[str, Mapping[str, object]] | None = None
+    # Option C (2026-06-21): RAW-precision center basis provenance so the served center is
+    # RECONSTRUCTIBLE even when geometry variances change the weights under the same model
+    # set. Per-model {raw_m2, n, repr_m2 (degC²), denom, weight} + a precision_basis_hash
+    # over the full basis (model→(raw_m2, n, repr_m2, weight)). repr_m2=0.0 for every model
+    # when the grid table is absent ⇒ precision_center_basis is the same as before Option C.
+    precision_center_basis: Mapping[str, Mapping[str, float]] | None = None
+    precision_basis_hash: str | None = None
 
 
 def _read_persisted_current_capture(
@@ -1180,7 +1227,7 @@ def _replacement_bayes_precision_fusion_override(
         #  3. Compute weights via the shared raw_second_moment_weights helper (same unit
         #     scaling, same EB-shrink, same equal-weight fallback as the spine).
         #  4. mu_diagonal = Σ_m w_m · z_m, where z_m = ins.z (already RAW via _raw_instrument).
-        from src.forecast.center import raw_second_moment_weights as _raw_w  # noqa: PLC0415
+        from src.forecast.center import raw_precision_center as _raw_center  # noqa: PLC0415
         from src.forecast.model_selection import ANCHOR_MODEL as _ANCHOR  # noqa: PLC0415
 
         _raw_m2_and_n: dict[str, tuple[float | None, int]] = {}
@@ -1200,15 +1247,55 @@ def _replacement_bayes_precision_fusion_override(
         # in train_residuals are always in degC so the unit scaling only affects the floor/shrink
         # target — matching the spine's _u logic and the operator's f06d2176bc fix).
         _serving_unit = _city_settlement_unit_from_bins(request)
-        _weights = _raw_w(_raw_m2_and_n, unit=_serving_unit)
+        # Option C (2026-06-21): per-model grid-representativeness variance sigma_repr²
+        # (degC², from the persisted native-cell d_eff/delta_z table) threaded into the
+        # RAW precision denominator that produces the served center. train_residuals are
+        # degC, so _raw_m2_and_n here is degC²; repr must be supplied in the SAME degC²
+        # basis (the helper does no scaling). The loader is fail-soft: a city/model absent
+        # from config/grid_representativeness.json yields 0.0 -> byte-identical center for
+        # that member (no fabricated penalty, no flag). Enters the MEAN weights ONLY —
+        # predictive_sigma_c / anchor_sigma_c (fused.sd) are UNTOUCHED (no Kelly double-
+        # count). This is LIVE-DIRECT: the warming is active wherever the table has a cell;
+        # rollout is controlled by populating config/grid_representativeness.json + the
+        # deploy commit, never by a dormant code flag (operator no-shadow law).
+        _sigma_repr_by_model = _build_sigma_repr_by_model(
+            request.city, list(_raw_m2_and_n.keys()), anchor_model=_ANCHOR
+        )
+        _weights, _mu_from_center = _raw_center(
+            _raw_m2_and_n, _z_by_model, unit=_serving_unit,
+            repr_m2_by_model=_sigma_repr_by_model,
+        )
         if _weights and _z_by_model:
-            _mu_diagonal = float(sum(_weights.get(m, 0.0) * z for m, z in _z_by_model.items()))
+            _mu_diagonal = float(_mu_from_center)
         elif _z_by_model:
             # No precision signal at all → equal-weight RAW mean (pure RAW, never T2 BLUE).
             _mu_diagonal = float(sum(_z_by_model.values()) / len(_z_by_model))
         else:
             # No instruments: unreachable after the has_extras guard above; use anchor RAW value.
             _mu_diagonal = float(anchor_value_corrected_c)
+
+        # Option C provenance (§7): per-model RAW-precision basis so the served center is
+        # reconstructible — raw_m2 (degC²), n, repr_m2 (degC²), and the final weight. The
+        # effective denom is reconstructable from (raw_m2, n, repr_m2, unit); we persist the
+        # weight directly (the one served quantity) + a hash over the basis. When the grid
+        # table is absent, every repr_m2 is 0.0 and this is the same basis as before Option C.
+        _precision_center_basis: dict[str, dict[str, float]] = {}
+        for _m, (_rm2, _rn) in _raw_m2_and_n.items():
+            _precision_center_basis[str(_m)] = {
+                "raw_m2": (float("nan") if _rm2 is None else float(_rm2)),
+                "n": float(int(_rn)),
+                "repr_m2": float(_sigma_repr_by_model.get(str(_m), 0.0)),
+                "weight": float(_weights.get(str(_m), 0.0)),
+            }
+        _precision_basis_hash = _json_hash(
+            {
+                "unit": _serving_unit,
+                "basis": {
+                    k: [v["raw_m2"], v["n"], v["repr_m2"], v["weight"]]
+                    for k, v in sorted(_precision_center_basis.items())
+                },
+            }
+        )
 
         used_models = tuple(fused.used_models)
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
@@ -1337,6 +1424,8 @@ def _replacement_bayes_precision_fusion_override(
             decorrelated_providers_served=_decorrelated_served,
             decorrelated_providers_expected=_decorrelated_expected,
             current_value_serving=_current_value_serving,
+            precision_center_basis=_precision_center_basis or None,
+            precision_basis_hash=_precision_basis_hash,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -2163,6 +2252,13 @@ def _insert_posterior(
                 "bayes_precision_fusion_lead_bucket": bayes_precision_fusion_override.lead_bucket,
                 "bayes_precision_fusion_anchor_value_c": float(bayes_precision_fusion_override.anchor_value_c),
                 "bayes_precision_fusion_anchor_sigma_c": float(bayes_precision_fusion_override.anchor_sigma_c),
+                # Option C (§7): the RAW-precision basis hash makes the served center
+                # reconstructible even when geometry variances change the weights under the
+                # same model set (model_set_hash alone does not prove the precision basis).
+                # None when no override basis was computed.
+                "bayes_precision_fusion_precision_basis_hash": (
+                    bayes_precision_fusion_override.precision_basis_hash
+                ),
             }
         )
     posterior_config_hash = _json_hash(posterior_config)

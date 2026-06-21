@@ -1,8 +1,12 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last audited: 2026-06-21
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Forecast center mu*" section, src/forecast/types.py — verbatim dataclass
 #   fields). Foundation forecast data contracts for the q-kernel rebuild Stage 1.
+#   + Option C raw-precision representativeness center warming (consult
+#   REQ-20260621-033315; forecast-gap-is-data-precision): RawModelMember carries
+#   ``representativeness_m2_native`` (grid sigma_repr², native unit²) threaded into
+#   the RAW diagonal precision denominator that produces the served center.
 """Forecast foundation types: ForecastCase, RawModelMember, FreshModelSet.
 
 These are the frozen-dataclass contracts that feed the new forecast spine
@@ -88,6 +92,16 @@ class RawModelMember:
     # no precision signal ⇒ equal 1/n for this member.
     walk_forward_raw_m2_native: float | None = None
     walk_forward_n: int = 0
+    # Option C (2026-06-21): grid-representativeness variance sigma_repr² for THIS
+    # model's native cell at the family's (city, model), in the SAME native unit² as
+    # ``walk_forward_raw_m2_native`` (the producer converts the loader's degC² by the
+    # (9/5)² serving-unit scale for F). It is ADDED to the floored residual second
+    # moment in the precision denominator (Form A: max(m2, floor) + repr) so a
+    # coarse/distant cell is down-weighted in the served center. 0.0 ⇒ no geometry
+    # penalty (byte-identical) — the fail-soft default for a city/model absent from
+    # the grid-representativeness table. Enters the MEAN weights ONLY, never the
+    # predictive σ / Kelly width (no double-count).
+    representativeness_m2_native: float = 0.0
 
 
 @dataclass(frozen=True)
