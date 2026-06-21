@@ -9602,39 +9602,84 @@ def _family_rest_state(
         ).fetchall()
     except Exception:
         return (False, False)
-    unexpired_rest = False
-    escalated = False
+    # Normalise the rows ONCE (the per-row reads are identical for both passes).
+    parsed_rows = []
     for row in rows:
         command_state = str(row["command_state"] if isinstance(row, sqlite3.Row) else row[0] or "")
         created_at = _parse_utc(row["created_at"] if isinstance(row, sqlite3.Row) else row[1])
         fact_state = row["fact_state"] if isinstance(row, sqlite3.Row) else row[2]
         observed_at = _parse_utc(row["observed_at"] if isinstance(row, sqlite3.Row) else row[3])
-        matched = row["matched_size"] if isinstance(row, sqlite3.Row) else row[4]
-        fact_state_s = str(fact_state or "")
-        if fact_state_s in open_fact_states:
-            unexpired_rest = True
-            continue
-        if fact_state is None and command_state in nonterminal_command_states:
-            # Order acknowledged/in flight but no order fact yet: treat as open.
-            unexpired_rest = True
-            continue
+        parsed_rows.append((command_state, created_at, str(fact_state or ""), fact_state, observed_at))
+
+    # PASS 1 — escalation arming. A family ENTRY rest cancelled/expired UNFILLED
+    # after a real maker window (>= escalation_arm_floor_seconds) LICENSES the
+    # deadline cross. `escalation_arm_time` is the LATEST such arming observation
+    # (the cancel/expire observed_at): an OPEN rest posted AFTER it is a redundant
+    # serial re-rest, not a genuine new first rest (the GAP-4 race).
+    #
+    # 2026-06-16: REMOVED the `matched <= 0` disqualifier. A rest that took a
+    # PARTIAL fill and was then cancelled at the deadline (the escalation job
+    # cancels the REMAINDER — maker_rest_escalation.py) must STILL license the
+    # cross of the unfilled remainder; disqualifying it forfeited the residual
+    # edge (settlement counterfactual: 49 settled day-ahead NO picks, 84% won,
+    # +$88 vs $0 captured — the admissible cross is +EV). The re-cert sizes
+    # against existing exposure (extra_exposure_by_bin), so the partial position
+    # is not double-counted. Fully-filled orders terminate as MATCHED (not in
+    # terminal_unfilled_states), so this never re-crosses a completed order.
+    escalated = False
+    escalation_arm_time: datetime | None = None
+    for command_state, created_at, fact_state_s, _fact_state, observed_at in parsed_rows:
         if (
             fact_state_s in terminal_unfilled_states
-            # 2026-06-16: REMOVED the `matched <= 0` disqualifier. A rest that took a
-            # PARTIAL fill and was then cancelled at the deadline (the escalation job
-            # cancels the REMAINDER — maker_rest_escalation.py) must STILL license the
-            # cross of the unfilled remainder; disqualifying it forfeited the residual
-            # edge (settlement counterfactual: 49 settled day-ahead NO picks, 84% won,
-            # +$88 vs $0 captured — the admissible cross is +EV). The re-cert sizes
-            # against existing exposure (extra_exposure_by_bin), so the partial
-            # position is not double-counted. Fully-filled orders terminate as MATCHED
-            # (not in terminal_unfilled_states), so this never re-crosses a completed
-            # order. `matched` is retained on the row read for receipt provenance.
             and created_at is not None
             and observed_at is not None
             and (observed_at - created_at).total_seconds() >= escalation_arm_floor_seconds
         ):
             escalated = True
+            if escalation_arm_time is None or observed_at > escalation_arm_time:
+                escalation_arm_time = observed_at
+
+    # PASS 2 — the single-flight antibody (unexpired_rest), with the GAP-4
+    # re-rest exemption. An OPEN ENTRY rest (latest fact LIVE/RESTING/
+    # PARTIALLY_MATCHED, or acknowledged with no fact yet) normally blocks ANY new
+    # family order (operator antibody, double-submit safety). EXCEPTION
+    # (2026-06-21 GAP-4 fix): when an escalation is ARMED and this open rest was
+    # posted (created_at) STRICTLY AFTER the arming cancellation, it is a
+    # redundant SERIAL re-rest (real chain: 2-5 sequential cancelled rests per
+    # family) — it must NOT shadow the armed cross. Dropping unexpired_rest for it
+    # lets `select_rest_then_cross_mode` reach the TAKER_ESCALATED_AFTER_REST lane
+    # (line ~571) instead of being pre-empted by the HOLD antibody (line ~561).
+    #
+    # FAIL-CLOSED on ambiguity: a genuine live rest that PRE-DATES the arming
+    # cancel (created_at <= arm time), or whose created_at is null/unparseable,
+    # still sets unexpired_rest=True (HOLD) — never dropped. The double-submit
+    # guarantee does not rest on this exemption alone: the executor's own
+    # `_entry_duplicate_same_token_component` (src/execution/executor.py) is the
+    # authoritative backstop and BLOCKS a cross whenever a same-token ENTRY
+    # command is still in an OPEN state (POSTING/ACKED/CANCEL_PENDING/PARTIAL/...);
+    # it admits a new entry only once the competing command is CANCELLED/EXPIRED
+    # with no fill — and a venue-live order is never in that terminal-no-exposure
+    # set (CANCELLED is written only after a venue-confirmed cancel ack). So the
+    # cross will frequently still be rejected at submit while the re-rest is truly
+    # live, and proceed only once it is genuinely cancelled-unfilled — exactly the
+    # safe ordering, with no double-submit window.
+    unexpired_rest = False
+    for command_state, created_at, fact_state_s, fact_state, _observed_at in parsed_rows:
+        is_open = fact_state_s in open_fact_states or (
+            fact_state is None and command_state in nonterminal_command_states
+        )
+        if not is_open:
+            continue
+        is_redundant_rerest = (
+            escalated
+            and escalation_arm_time is not None
+            and created_at is not None
+            and created_at > escalation_arm_time
+        )
+        if is_redundant_rerest:
+            # Post-escalation serial re-rest: do NOT let it shadow the armed cross.
+            continue
+        unexpired_rest = True
     return (unexpired_rest, escalated)
 
 
