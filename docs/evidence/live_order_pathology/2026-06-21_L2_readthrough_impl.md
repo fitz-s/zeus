@@ -222,6 +222,34 @@ Regression suites (run from worktree, `.venv/bin/python3 -m pytest ... -q -p no:
   (stale test fixtures referencing removed `aifs_samples_json` / `_QLCB_SOFT_ANCHOR_BASIS`
   symbols + missing data artifacts, unrelated to this change).
 
+## REAL-CHAIN VERIFICATION (2026-06-21, live data — not test, not replay)
+
+The operator's bar is "only real market chain evidence can satisfy this." Ran the
+production read-through logic (commit 883c9e71: seed → request →
+`replace(request, computed_at=NOW)` → `compute_replacement_posterior_readonly` →
+held-side extraction) against the LIVE `state/zeus-forecasts.db` (immutable RO) for
+the documented frozen family **Panama City 2026-06-22 high**:
+
+- BEFORE the decision-instant fix (seed's stale `computed_at`=12:09:08): the fusion
+  arrival guard excludes the single_runs that landed at 14:10 → ZERO extras →
+  `STALE_HISTORY_ONLY`, `live_eligible=False`, uniform q → read-through returns None
+  → **the freeze is reproduced** (the bug real-chain caught; all unit tests were green).
+- AFTER the fix (`computed_at`=NOW): `live_eligible=True`, `capture_status=FULL_CURRENT`,
+  **2/2 providers fused**, `mu*=30.89°C`, `q_yes(32°C)=0.2019 → q_held(buy_no)=0.7981`
+  (entry p_post=0.867). A real multi-provider fused belief recovered from live inputs.
+
+VERDICT: the read-through CURES the freeze on the real chain. The fresh belief (0.80)
+is NOT a decisive reversal from entry (0.87) → correct decision is HOLD → the fix
+supplies fresh belief and correctly does NOT false-exit (the "no false exit" law,
+demonstrated on live data). This proves the BELIEF-RECOMPUTE half of the lifecycle.
+The ORDER/MONITOR/EXIT/SETTLE half requires the operator to resume the (deliberately
+paused) auto-trader; it cannot be real-chain-verified while trading is halted.
+
+NOTE the harness caveat: run from a worktree, the config resolves state to a
+worktree-relative empty dir, so the production `_attempt_held_belief_readthrough`
+returns None there (empty DB / no seed found) — a HARNESS artifact, not a code bug.
+The verification above points the compute at the real live DB + live seed explicitly.
+
 ## Open risks / live forward verification (auto-trader paused)
 
 Live order/exit evidence is unavailable until the operator resumes the auto-trader.
