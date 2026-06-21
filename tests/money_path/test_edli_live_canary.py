@@ -1503,6 +1503,10 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
     proof = adapter._build_event_bound_taker_quality_proof(
         actionable_payload={
             "q_source": "qkernel_spine",
+            # B3: the authority stamp (q_source) AND the selected-candidate identity
+            # (candidate_id matching the cert) are now mandatory to reach the qkernel
+            # payoff path — this test exercises that path, so it supplies both.
+            "candidate_id": "DIRECT_YES:bin-1",
             "direction": "buy_yes",
             "q_live": 0.90,
             "q_lcb_5pct": 0.90,
@@ -1523,6 +1527,86 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
     assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
     assert proof["passed"] is False
     assert float(proof["taker_fee_adjusted_edge"]) < 0.0
+
+
+def _b3_payload(**overrides):
+    """An ADMISSIBLE taker payload (positive after-cost edge) carrying a qkernel cert.
+
+    Base: q_source stamped, candidate_id matching the cert, payoff_q_lcb 0.72 vs a
+    fresh ask 0.50 -> a clearly POSITIVE edge so a CONSUMED cert yields passed=True.
+    The B3 guard only changes WHETHER the cert is consumed (authority + identity);
+    the surplus math is unchanged.
+    """
+    payload = {
+        "q_source": "qkernel_spine",
+        "candidate_id": "DIRECT_YES:bin-1",  # matches _qkernel_execution_cert default
+        "direction": "buy_yes",
+        "q_live": 0.72,
+        "q_lcb_5pct": 0.72,
+        "qkernel_execution_economics": _qkernel_execution_cert(),  # candidate_id DIRECT_YES:bin-1
+        "live_cap_reserved_notional_usd": 10.0,
+        "proof_maker_limit_price": 0.45,
+        "proof_ev_maker": 0.01,
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestB3QkernelCertAuthorityAndIdentityGuard:
+    """B3 (PR415): the taker-quality proof may consume the qkernel payoff_q_lcb ONLY
+    when the payload carries the qkernel AUTHORITY STAMP (q_source == qkernel_spine)
+    AND the cert is bound to the SELECTED candidate (cert.candidate_id ==
+    payload.candidate_id). RED-on-revert: on the unfixed tree a mismatched/unstamped
+    cert is consumed (q_lcb_source == qkernel path, edge computed); after the fix it
+    fails closed with a typed reason and never sizes off the foreign cert's q.
+    """
+
+    def _proof(self, **overrides):
+        from src.engine import event_reactor_adapter as adapter
+
+        return adapter._build_event_bound_taker_quality_proof(
+            actionable_payload=_b3_payload(**overrides),
+            order_mode="TAKER",
+            fresh_best_bid=0.49,
+            fresh_best_ask=0.50,
+        )
+
+    def test_matched_stamped_cert_is_consumed(self):
+        """The happy path is UNCHANGED: stamped + identity-matched cert is consumed."""
+        proof = self._proof()
+        assert proof is not None
+        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+        # positive after-cost surplus (0.72 payoff vs 0.50 ask) -> passes
+        assert float(proof["taker_fee_adjusted_edge"]) > 0.0
+        assert proof["passed"] is True
+
+    def test_candidate_identity_mismatch_fails_closed(self):
+        """RED-ON-REVERT. Cert.candidate_id (DIRECT_YES:bin-1) != payload.candidate_id
+        (a DIFFERENT selected candidate). On the unfixed tree the foreign cert is
+        consumed (q_lcb_source == qkernel path). After the fix it fails closed and the
+        cert's q never drives the proof."""
+        proof = self._proof(candidate_id="DIRECT_YES:bin-OTHER")
+        assert proof is not None
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_cert_candidate_identity_mismatch"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
+
+    def test_cert_without_authority_stamp_fails_closed(self):
+        """RED-ON-REVERT. A qkernel cert present but the payload is NOT under qkernel
+        authority (q_source != qkernel_spine). On the unfixed tree the cert is consumed
+        anyway; after the fix it fails closed."""
+        proof = self._proof(q_source="legacy_calibrator")
+        assert proof is not None
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_cert_present_without_qkernel_authority_stamp"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
+
+    def test_missing_candidate_id_fails_closed(self):
+        """A stamped cert with NO payload candidate_id cannot prove identity -> closed."""
+        proof = self._proof(candidate_id="")
+        assert proof is not None
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_cert_candidate_identity_mismatch"
 
 
 def test_live_execution_command_requires_opportunity_book_selection_match():

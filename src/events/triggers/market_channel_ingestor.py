@@ -97,11 +97,19 @@ class MarketChannelIngestor:
         active_token_ids: set[str],
         token_metadata: dict[str, MarketTokenMetadata] | None = None,
         feasibility_conn: sqlite3.Connection | None = None,
+        feasibility_schema: str = "",
         quote_cache: QuoteCache | None = None,
         coalescer: EventCoalescer | None = None,
     ) -> None:
         self._writer = writer
         self._feasibility_conn = feasibility_conn or writer.conn
+        # INV-37 (PR415 B5): when feasibility writes share the EventWriter's
+        # connection (single-connection atomic cross-DB path, feasibility_conn=None or
+        # the same conn), that connection is world-MAIN with zeus_trades.db ATTACHed as
+        # 'trades', so the feasibility insert must be schema-qualified 'trades' to reach
+        # the runtime-read table and never the world shadow. Default "" (own trade
+        # connection, unqualified) preserves every other caller.
+        self._feasibility_schema = feasibility_schema
         self._active_token_ids = active_token_ids
         self._token_metadata = token_metadata or {}
         self.quote_cache = quote_cache or QuoteCache()
@@ -328,6 +336,7 @@ class MarketChannelIngestor:
             insert_execution_feasibility_evidence(
                 self._feasibility_conn,
                 feasibility_evidence_from_quote(event, direction=direction),
+                schema=self._feasibility_schema,
             )
 
     def _new_market_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
@@ -1134,8 +1143,27 @@ def assert_user_channel_fill_authority(*, source: str) -> None:
         raise MarketChannelAuthorityError("user channel or reconcile is required for fill truth")
 
 
-def insert_execution_feasibility_evidence(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+# INV-37 (PR415 B5, 2026-06-20): the schemas this insert may target. When the
+# write runs on a world-MAIN connection with zeus_trades.db ATTACHed as 'trades'
+# (the price-channel atomic cross-DB path), the caller passes schema='trades' so
+# the row lands in the runtime-read trades.execution_feasibility_evidence and NEVER
+# the populated-but-not-read world shadow table. Allowlisted (never interpolate a
+# caller string into SQL) and defaulted to "" = unqualified for all other callers.
+_FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS = {"", "trades", "main"}
+
+
+def insert_execution_feasibility_evidence(
+    conn: sqlite3.Connection,
+    row: dict[str, Any],
+    *,
+    schema: str = "",
+) -> None:
     assert_market_channel_not_fill_authority(source=str(row.get("fill_truth_source", "")))
+    if schema not in _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS:
+        raise ValueError(
+            f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
+        )
+    table = "execution_feasibility_evidence" if not schema else f"{schema}.execution_feasibility_evidence"
     values = dict(row)
     values.setdefault("schema_version", 1)
     values.setdefault("created_at", datetime.now(UTC).isoformat())
@@ -1149,8 +1177,8 @@ def insert_execution_feasibility_evidence(conn: sqlite3.Connection, row: dict[st
         ),
     )
     conn.execute(
-        """
-        INSERT INTO execution_feasibility_evidence (
+        f"""
+        INSERT INTO {table} (
             evidence_id, event_id, condition_id, token_id, outcome_label, direction,
             quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
             depth_before_json, order_intent_time, submit_time, accepted_or_rejected,

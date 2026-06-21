@@ -311,11 +311,17 @@ def _check_armed_live_no_submit_receipts(
             except Exception:
                 pass
     except Exception as exc:  # noqa: BLE001
+        # B6 (2026-06-20): FAIL CLOSED. An unreadable receipt table under armed-live
+        # must NOT suppress the dead-submit RED. The prior `return False` let the
+        # detector be silenced by its OWN query failure (a false-green): armed-live
+        # could avoid RED simply because venue_command_events was unreadable. Treat an
+        # unreadable query as "cannot confirm a recent submit receipt" -> surface the
+        # consistency issue -> RED. Detection-only; this never blocks an order.
         logger.warning(
-            "armed_live submit-receipt DB query failed (treating as no receipt): %s", exc
+            "armed_live submit-receipt DB query UNREADABLE under armed-live "
+            "(surfacing as a consistency issue, NOT suppressing): %s", exc
         )
-        # Fail open: if we can't query, don't falsely alarm.
-        return False
+        return True
 
     return not recent_submit_receipt
 

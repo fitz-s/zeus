@@ -1379,21 +1379,29 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
             "skipped": "no_held_token_metadata",
         }
 
-    world_conn = get_world_connection(write_class="live")
-    feasibility_conn = get_trade_connection(write_class="live")
+    # INV-37 (PR415 B5, 2026-06-20): write the world event (opportunity_events) AND
+    # the trade-owned book witness (execution_feasibility_evidence) through ONE
+    # connection with a SINGLE atomic commit, never two independent connections
+    # committed separately. world.db is MAIN (so the EventStore's unqualified
+    # opportunity_events + its sqlite_master guard resolve to the real world log)
+    # and zeus_trades.db is ATTACHed as 'trades' (so the schema-qualified feasibility
+    # insert reaches the runtime-read trades table, never the world shadow). A single
+    # conn.commit() on the ATTACHed connection is atomic across BOTH databases — the
+    # same INV-37 atomic-commit shape the EDLI position bridge uses.
+    from src.state.db import world_connection_with_trades_flocked
 
-    def _commit_event_and_feasibility() -> None:
-        world_conn.commit()
-        feasibility_conn.commit()
+    with world_connection_with_trades_flocked(write_class="live") as conn:
+        def _commit_atomic_cross_db() -> None:
+            conn.commit()
 
-    try:
         with PolymarketClient() as clob:
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
-                    EventWriter(world_conn),
+                    EventWriter(conn),
                     active_token_ids=set(token_metadata),
                     token_metadata=token_metadata,
-                    feasibility_conn=feasibility_conn,
+                    feasibility_conn=conn,
+                    feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
@@ -1402,7 +1410,7 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
                 token_ids=set(token_metadata),
                 received_at=datetime.now(timezone.utc).isoformat(),
                 world_mutex=_world_write_mutex(),
-                commit=_commit_event_and_feasibility,
+                commit=_commit_atomic_cross_db,
                 logger=logger,
             )
         return {
@@ -1410,11 +1418,6 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_events": int(written),
         }
-    finally:
-        try:
-            feasibility_conn.close()
-        finally:
-            world_conn.close()
 
 
 def _edli_refresh_candidate_priority_quote_evidence(
@@ -1471,21 +1474,24 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "skipped": "no_candidate_token_metadata",
         }
 
-    world_conn = get_world_connection(write_class="live")
-    feasibility_conn = get_trade_connection(write_class="live")
+    # INV-37 (PR415 B5, 2026-06-20): single connection + single atomic commit for the
+    # world-event + trade-feasibility cross-DB pair (see the held-priority twin above
+    # for the full rationale + the shadow-table hazard this world-MAIN + ATTACHed
+    # 'trades' + schema-qualified-feasibility shape avoids).
+    from src.state.db import world_connection_with_trades_flocked
 
-    def _commit_event_and_feasibility() -> None:
-        world_conn.commit()
-        feasibility_conn.commit()
+    with world_connection_with_trades_flocked(write_class="live") as conn:
+        def _commit_atomic_cross_db() -> None:
+            conn.commit()
 
-    try:
         with PolymarketClient() as clob:
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
-                    EventWriter(world_conn),
+                    EventWriter(conn),
                     active_token_ids=set(token_metadata),
                     token_metadata=token_metadata,
-                    feasibility_conn=feasibility_conn,
+                    feasibility_conn=conn,
+                    feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
@@ -1494,7 +1500,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 token_ids=set(token_metadata),
                 received_at=datetime.now(timezone.utc).isoformat(),
                 world_mutex=_world_write_mutex(),
-                commit=_commit_event_and_feasibility,
+                commit=_commit_atomic_cross_db,
                 logger=logger,
                 deadline_monotonic=deadline,
             )
@@ -1507,11 +1513,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
         }
-    finally:
-        try:
-            feasibility_conn.close()
-        finally:
-            world_conn.close()
 
 
 def _edli_held_quote_refresh_cycle() -> dict:
@@ -1653,20 +1654,28 @@ def _edli_market_channel_ingestor_cycle() -> None:
             invalidate_executable_snapshots_for_market_channel_action,
             run_market_channel_service_forever,
         )
-        from src.state.db import get_trade_connection, get_world_connection
+        from src.state.db import get_world_connection_with_trades_required
 
-        world_conn = get_world_connection(write_class="live")
-        feasibility_conn = get_trade_connection(write_class="live")
+        # INV-37 (PR415 B5, 2026-06-20): the long-lived market-channel ingestor writes
+        # the world event (opportunity_events) AND the trade-owned feasibility witness
+        # (execution_feasibility_evidence) atomically per unit through ONE connection
+        # (world.db MAIN + zeus_trades.db ATTACHed as 'trades'), never two independent
+        # connections committed separately. The NON-flocked helper is used here because
+        # this connection lives for the whole forever-loop — holding cross-DB writer
+        # flocks for that lifetime would starve every other writer; each per-unit
+        # commit is still atomic across both DBs (single connection) and serialized on
+        # zeus-world.db by the world write mutex inside the service loop. The
+        # feasibility insert is schema-qualified 'trades' (feasibility_schema below) so
+        # it reaches the runtime-read trades table, never the world shadow.
+        conn = get_world_connection_with_trades_required(write_class="live")
+        world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
+        feasibility_conn = conn
 
         def _commit_event_and_feasibility() -> None:
-            world_conn.commit()
-            feasibility_conn.commit()
+            conn.commit()
 
         def _rollback_event_and_feasibility() -> None:
-            try:
-                world_conn.rollback()
-            finally:
-                feasibility_conn.rollback()
+            conn.rollback()
 
         try:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
@@ -1749,6 +1758,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         active_token_ids=token_ids,
                         token_metadata=token_metadata,
                         feasibility_conn=feasibility_conn,
+                        feasibility_schema="trades",
                         coalescer=EventCoalescer(max_market_keys=1000),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
@@ -1770,10 +1780,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     rollback=_rollback_event_and_feasibility,
                 )
         finally:
-            try:
-                feasibility_conn.close()
-            finally:
-                world_conn.close()
+            conn.close()
 
     _edli_market_channel_thread = threading.Thread(
         target=_runner,

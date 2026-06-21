@@ -755,6 +755,133 @@ def forecasts_connection_with_trades_flocked(
                     pass
 
 
+def get_world_connection_with_trades_required(
+    *, write_class: WriteClass | str | None = None,
+) -> sqlite3.Connection:
+    """World connection (zeus-world.db MAIN) with zeus_trades.db ATTACHed as 'trades'.
+
+    INV-37 price-channel fix (PR415 review B5, 2026-06-20) — the NON-flocked sibling
+    of ``world_connection_with_trades_flocked``, for callers that must hold the
+    connection across a LONG-LIVED loop (the forever market-channel ingestor thread)
+    where holding cross-DB writer flocks for the whole lifetime would starve every
+    other writer. Atomicity of each write unit still comes from the single connection
+    + single ``commit()`` (SQLite commits the MAIN + ATTACHed databases atomically —
+    the same shape ``get_trade_connection_with_world_required`` relies on); the
+    per-commit world-WAL serialization is provided by the caller's world write mutex.
+
+    world.db is MAIN so the EventStore's UNQUALIFIED ``opportunity_events`` (and its
+    ``sqlite_master`` table-presence guard) resolve to the REAL world log; the
+    feasibility write is schema-qualified ``trades.`` by the caller so it reaches the
+    runtime-read trades table and never the world shadow (see
+    ``world_connection_with_trades_flocked`` for the full shadow-table rationale).
+
+    Fail closed: if ``trades`` cannot be ATTACHed, close and raise.
+
+    Created: 2026-06-20
+    Last audited: 2026-06-20
+    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    """
+    resolved = _resolve_write_class(write_class)
+    conn = get_world_connection(write_class=resolved)
+    try:
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "trades" not in attached:
+            conn.execute("ATTACH DATABASE ? AS trades", (str(_zeus_trade_db_path()),))
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+@contextlib.contextmanager
+def world_connection_with_trades_flocked(
+    *,
+    write_class: WriteClass | str = "live",
+):
+    """Context manager: zeus-world.db as MAIN with zeus_trades.db ATTACHed as 'trades'.
+
+    INV-37 price-channel fix (PR415 review B5, 2026-06-20): the held/candidate
+    quote-evidence ingest must write BOTH the world event (``opportunity_events``,
+    world-class, via EventWriter/EventStore) AND the trade-owned book witness
+    (``execution_feasibility_evidence``, trade-class) in a SINGLE atomic SAVEPOINT.
+    The prior shape opened two independent connections (``get_world_connection`` +
+    ``get_trade_connection``) and committed them SEPARATELY — a crash/busy/kill
+    between the two commits left divergent state, violating INV-37.
+
+    SHADOW-TABLE HAZARD (why this helper is world-MAIN, not trade-MAIN, and why the
+    feasibility write must be schema-QUALIFIED): BOTH databases physically contain
+    BOTH tables. ``world.opportunity_events`` is the real ~9.5M-row log while
+    ``trades.opportunity_events`` is an empty shadow; conversely
+    ``trades.execution_feasibility_evidence`` is the real ~4.3M-row table the live
+    runtime reads (via the trade connection) while ``world.execution_feasibility_
+    evidence`` is a populated-but-not-read legacy table (~12.9M rows). So UNQUALIFIED
+    name resolution on a single ATTACHed connection is AMBIGUOUS — it resolves to the
+    MAIN schema's copy, and ``EventStore._require_world_event_tables`` queries plain
+    ``sqlite_master`` (MAIN-only), so a trade-MAIN+world-ATTACHed connection would
+    silently write ``opportunity_events`` to the EMPTY trade shadow AND falsely pass
+    the presence guard. The repo's existing flocked helpers
+    (``forecasts_connection_with_trades_flocked``) only work because the non-MAIN
+    table is ABSENT from MAIN — which is FALSE here. This helper therefore:
+
+      - opens world.db as MAIN, so the EventStore's UNQUALIFIED ``opportunity_events``
+        (and its ``sqlite_master`` guard) resolve to the REAL world log — NO
+        EventStore change.
+      - ATTACHes zeus_trades.db as ``trades`` so the feasibility write can target
+        ``trades.execution_feasibility_evidence`` EXPLICITLY (the caller passes the
+        ``trades`` qualifier), reaching the runtime-read table and NEVER the world
+        shadow.
+
+    Single SAVEPOINT / single commit spanning both writes makes the pair
+    all-or-nothing per INV-37.
+
+    Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
+    (``zeus-world.db`` before ``zeus_trades.db``) — the SAME order as
+    ``get_trade_connection_with_world_required`` /
+    ``forecasts_connection_with_trades_flocked`` (both go through
+    ``canonical_lock_order``), so there is no cross-writer lock-order inversion.
+
+    Callers MUST use this as a context manager and MUST NOT close the connection
+    themselves — the ``finally`` block handles it.
+
+    Created: 2026-06-20
+    Last audited: 2026-06-20
+    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    """
+    from src.state.db_writer_lock import (
+        canonical_lock_order,
+        db_writer_lock,
+    )
+
+    resolved = _resolve_write_class(write_class)
+    if resolved is None:
+        from src.state.db_writer_lock import WriteClass as _WC
+        resolved = _WC.LIVE
+    # Canonical alphabetical sort: zeus-world.db < zeus_trades.db
+    ordered_paths = canonical_lock_order([ZEUS_WORLD_DB_PATH, _zeus_trade_db_path()])
+    with db_writer_lock(ordered_paths[0], resolved):
+        with db_writer_lock(ordered_paths[1], resolved):
+            conn = _connect(ZEUS_WORLD_DB_PATH, write_class=resolved)
+            try:
+                attached = {
+                    row[1]
+                    for row in conn.execute("PRAGMA database_list").fetchall()
+                }
+                if "trades" not in attached:
+                    conn.execute(
+                        "ATTACH DATABASE ? AS trades",
+                        (str(_zeus_trade_db_path()),),
+                    )
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 — best-effort close
+                    pass
+
+
 def get_backtest_connection(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:

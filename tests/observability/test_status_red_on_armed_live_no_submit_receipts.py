@@ -27,7 +27,11 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
-_NOW = datetime(2026, 6, 20, 12, 0, 0, tzinfo=timezone.utc)
+# Relative to real wall-clock so the in-window/out-of-window logic is deterministic
+# regardless of the calendar date the suite runs on. The function under test compares
+# against `datetime.now(timezone.utc)`, so a hardcoded date would go stale (the "recent"
+# receipt falls outside the 30-min window once real-now advances past it).
+_NOW = datetime.now(timezone.utc)
 _RECENT_TS = (_NOW - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 _OLD_TS = (_NOW - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -371,3 +375,77 @@ def test_no_alarm_when_no_final_intents_built():
         "_check_armed_live_no_submit_receipts must return False when no intents were built"
     )
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# B6 FAIL-CLOSED: armed-live + receipt query UNREADABLE → RED (not false-green)
+# ---------------------------------------------------------------------------
+
+def test_red_when_armed_live_and_receipt_query_unreadable():
+    """B6 antibody: if the receipt query RAISES under armed-live, the detector must
+    FAIL CLOSED (return True → RED), not be silenced by its own query failure.
+
+    RED-on-revert: reverting the except-branch in status_summary.py to `return False`
+    flips ``armed`` to False and drops the RED issue → this test FAILS.
+    """
+    from src.observability.status_summary import (
+        _check_armed_live_no_submit_receipts,
+        _refresh_pulse_infrastructure_status,
+    )
+
+    status: dict = {
+        "execution_capability": {"entry": {"global_allow_submit": True}},
+        "execution": {},
+    }
+    cycle: dict = {"final_intents_built": 1}
+
+    with patch(
+        "src.observability.status_summary.get_trade_connection_with_world",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ):
+        armed = _check_armed_live_no_submit_receipts(
+            status=status, cycle=cycle, window_seconds=1800
+        )
+    assert armed is True, (
+        "armed-live + unreadable receipt query must FAIL CLOSED (return True), "
+        "not be silenced by the query failure"
+    )
+
+    with patch(
+        "src.observability.status_summary.get_trade_connection_with_world",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ), patch(
+        "src.observability.status_summary._get_risk_level", return_value="GREEN"
+    ), patch(
+        "src.observability.status_summary._get_risk_details", return_value={}
+    ):
+        _refresh_pulse_infrastructure_status(status, cycle)
+
+    risk = status.get("risk", {})
+    assert risk.get("infrastructure_level") == "RED", (
+        f"unreadable receipt query under armed-live must drive RED, "
+        f"got {risk.get('infrastructure_level')!r}"
+    )
+    assert "armed_live_no_recent_submit_receipts" in risk.get("infrastructure_issues", [])
+
+
+def test_not_armed_live_with_unreadable_query_stays_clean():
+    """Edge: not-armed-live short-circuits BEFORE the query, so even an unreadable
+    receipt table stays clean (the fail-closed is scoped to armed-live)."""
+    from src.observability.status_summary import _check_armed_live_no_submit_receipts
+
+    status: dict = {
+        "execution_capability": {"entry": {"global_allow_submit": False}},
+    }
+    cycle: dict = {"final_intents_built": 5}
+    with patch(
+        "src.observability.status_summary.get_trade_connection_with_world",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ):
+        armed = _check_armed_live_no_submit_receipts(
+            status=status, cycle=cycle, window_seconds=1800
+        )
+    assert armed is False, (
+        "not-armed-live must short-circuit before the query → stays clean even if "
+        "the receipt table is unreadable"
+    )

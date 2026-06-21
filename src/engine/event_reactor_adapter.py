@@ -4413,6 +4413,32 @@ def _build_event_bound_taker_quality_proof(
     touch = fresh_best_ask if direction.startswith("buy_") else fresh_best_bid
     q_lcb_source = "q_lcb_5pct"
     if actionable_payload.get("qkernel_execution_economics") is not None:
+        # B3 (PR415, 2026-06-20) — MANDATORY authority stamp + STRICT selected-candidate
+        # identity match BEFORE the qkernel payoff_q_lcb may drive the money-path taker
+        # proof. A syntactically-valid qkernel economics cert is NOT sufficient: it must
+        # ALSO be (a) under qkernel execution authority for THIS payload
+        # (q_source == "qkernel_spine"), and (b) bound to the SELECTED candidate the
+        # payload is for (cert.candidate_id == payload.candidate_id). The cert's own
+        # source/route/side/bin consistency is enforced by
+        # _valid_qkernel_execution_economics_payload. Any absence OR mismatch FAILS
+        # CLOSED here (passed=False with a typed reason) — it does NOT silently fall
+        # through to the q_lcb_5pct path, because a present-but-unbound/unstamped cert is
+        # a provenance fault, not a license to size off a different authority's q. This
+        # mirrors the consume-time guard _qkernel_execution_economics() (bin/route/side
+        # identity) and the receipt-time _assert_receipt_qkernel_execution_economics()
+        # (hash-equality vs the book) — closing the money-path gap where the taker proof
+        # consumed the cert WITHOUT the authority+identity pair.
+        if str(actionable_payload.get("q_source") or "").strip() != "qkernel_spine":
+            return {
+                "schema_version": 1,
+                "passed": False,
+                "reason": "qkernel_cert_present_without_qkernel_authority_stamp",
+                "model_confidence": "0",
+                "taker_fee_adjusted_edge": "0",
+                "taker_expected_profit_usd": "0",
+                "maker_expected_profit_usd": "0",
+                "incremental_expected_profit_usd": "0",
+            }
         qkernel_cert = _valid_qkernel_execution_economics_payload(
             actionable_payload.get("qkernel_execution_economics"),
             direction=direction,
@@ -4422,6 +4448,23 @@ def _build_event_bound_taker_quality_proof(
                 "schema_version": 1,
                 "passed": False,
                 "reason": "qkernel_execution_economics_missing_or_invalid",
+                "model_confidence": "0",
+                "taker_fee_adjusted_edge": "0",
+                "taker_expected_profit_usd": "0",
+                "maker_expected_profit_usd": "0",
+                "incremental_expected_profit_usd": "0",
+            }
+        cert_candidate_id = str(qkernel_cert.get("candidate_id") or "").strip()
+        payload_candidate_id = str(actionable_payload.get("candidate_id") or "").strip()
+        if (
+            not payload_candidate_id
+            or not cert_candidate_id
+            or cert_candidate_id != payload_candidate_id
+        ):
+            return {
+                "schema_version": 1,
+                "passed": False,
+                "reason": "qkernel_cert_candidate_identity_mismatch",
                 "model_confidence": "0",
                 "taker_fee_adjusted_edge": "0",
                 "taker_expected_profit_usd": "0",
