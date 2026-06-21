@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: 123 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_phase2_exit_emitter_revival.py: {created: "2026-06-20", last_used: "2026-06-21", note: "Phase 2 live exit-POST emitter revival RED-on-revert antibodies: break exit_pending_missing re-stamp loop (still-held -> evaluate, non-mutating in-flight skip, RPC reject dedupe), defer day0 static-close pre-emption when a bid exists, canonical EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog."}
     tests/test_p2_substrate_observer_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P2 relationship tests: substrate observer producers move out of src.main, keep shared snapshot lock, remove reactor-backlog gates, and register in substrate-observer daemon."}
     tests/test_p3_price_channel_ingest_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P3 relationship tests: price/user channel ingest and durable fill bridge move out of src.main into price-channel daemon while order runtime keeps only DB read/boot recovery seams."}
     tests/test_p4_post_trade_capital_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P4 relationship tests: post-trade capital lifecycle and chain-sync READ move out of order daemon while exit-SUBMIT phase stays in src.main."}

@@ -730,6 +730,13 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
     entry_times = _load_position_entry_times(world_conn)
 
     out: list[SkillGrade] = []
+    # Grade ONLY genuinely-held TERMINAL positions: phase IN
+    # (settled, economically_closed, admin_closed). position_current.phase is
+    # constrained to lifecycle values; without this filter the query also returned
+    # ``voided`` rows (no real position was ever held) and OPEN rows
+    # (``pending_exit`` / ``day0_window`` — not settled from our side) whose MARKET
+    # merely happened to carry a VERIFIED settlement_outcome, mis-grading them and
+    # writing incorrect settlement_attribution. (PR #416 review fix 2026-06-21.)
     for (
         position_id, condition_id, direction, entry_price, shares,
     ) in world_conn.execute(
@@ -739,6 +746,7 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
         WHERE entry_price IS NOT NULL
           AND direction IS NOT NULL
           AND condition_id IS NOT NULL
+          AND phase IN ('settled', 'economically_closed', 'admin_closed')
         """
     ).fetchall():
         # position_current's per-share avg fill is ``entry_price``; ``shares`` is the

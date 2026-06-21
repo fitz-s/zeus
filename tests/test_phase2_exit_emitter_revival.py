@@ -1,5 +1,10 @@
+# Lifecycle: created=2026-06-20; last_reviewed=2026-06-21; last_reused=2026-06-21
+# Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
+#   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
+#   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
+# Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last audited: 2026-06-20
+# Last reused or audited: 2026-06-21
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -375,18 +380,12 @@ class TestDay0StaticClosedDefersTerminalStamp:
     """The day0 closed-market pre-emption must only defer for the static-time
     source, and the deferred terminal stamp must require NO executable bid."""
 
-    def test_static_source_is_classified_deferrable(self):
-        from src.engine import cycle_runtime
-
-        # The fix routes ONLY the executable_snapshot_market_end source through
-        # the deferred lane (the venue clob_market_info source stays terminal).
-        src = cycle_runtime.__file__
-        text = open(src, "r", encoding="utf-8").read()
-        assert "deferred_static_closed_market_info" in text, (
-            "FIX 2b deferred static-closed routing missing from cycle_runtime"
-        )
-        # The discriminator must key on the static-time source string.
-        assert 'executable_snapshot_market_end' in text
+    # NOTE: the static-source-vs-venue-source discrimination is covered
+    # BEHAVIORALLY by TestDay0StaticClosedBehavioral
+    # (test_static_close_with_live_bid_is_not_pre_empted /
+    # test_static_close_with_no_bid_still_stamps_terminal). A prior source-text
+    # assertion that read cycle_runtime.__file__ was removed (PR #416 review
+    # 2026-06-21): it was brittle to refactors and bypassed the behavioral contract.
 
     def test_deferred_stamp_requires_no_executable_bid(self):
         """The deferred terminal stamp fires only when best_bid is not finite —
