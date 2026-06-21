@@ -1241,11 +1241,14 @@ def _settlement_skill_attribution_tick() -> None:
 
     A profitable settlement is NOT proof of skill. This tick grades each settled
     position into SKILL_WIN / LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS /
-    STALE_DECISION by comparing our position + decision-time q + the freshest
+    STALE_DECISION / UNATTRIBUTABLE_Q_MISSING by comparing our position + the
+    IMMUTABLE decision-time q (ActionableTradeCertificate) + the freshest
     settlement-eve posterior + the settled outcome + market price. A LUCKY_WIN
     (won but our own freshest data disagreed — the Denver-if-92 shape) counts as a
-    MISS so a lucky win can no longer masquerade as system health. The skill
-    win-rate = SKILL_WIN / (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS).
+    MISS so a lucky win can no longer masquerade as system health. A position
+    whose immutable decision-q certificate is unresolvable grades
+    UNATTRIBUTABLE_Q_MISSING (never SKILL/LUCK). The skill win-rate = SKILL_WIN /
+    (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS).
 
     Runs after the settlement harvesting tick (settlement truth already landed).
     Idempotent per position (UNIQUE(position_id)); backfills every
@@ -9669,10 +9672,11 @@ def main():
     )
     # Settlement skill-attribution — 09:30 UTC, after settlement harvesting.
     # Grades each settled position into a skill category (SKILL_WIN / LUCKY_WIN /
-    # SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION) so a lucky win can no
-    # longer fake system health (operator 2026-06-12 law). Idempotent per
-    # position; backfills history on first run. Sole writer of
-    # settlement_attribution.
+    # SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION / UNATTRIBUTABLE_Q_MISSING)
+    # so a lucky win can no longer fake system health (operator 2026-06-12 law).
+    # Skill is attributed off the immutable decision-q certificate; an unresolvable
+    # cert grades UNATTRIBUTABLE_Q_MISSING (2026-06-21). Idempotent per position;
+    # backfills history on first run. Sole writer of settlement_attribution.
     scheduler.add_job(
         _settlement_skill_attribution_tick, "cron", hour=9, minute=30,
         id="settlement_skill_attribution", max_instances=1, coalesce=True,

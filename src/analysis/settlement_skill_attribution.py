@@ -1,6 +1,12 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
-# Authority basis:
+# Last audited: 2026-06-21
+# Authority basis: immutable decision-q certificate authority for settlement skill
+#   attribution (lifecycle-alpha) — the grader resolves q_live/q_lcb_5pct from the
+#   immutable ActionableTradeCertificate (decision_certificates, VERIFIED) reached
+#   via the audit row's expected_edge_source_certificate_hash, NOT from a
+#   time-reconstructed posterior. A position whose decision-q certificate is
+#   unresolvable grades UNATTRIBUTABLE_Q_MISSING and is never SKILL/LUCK.
+# Prior authority basis:
 #   - Operator skill-vs-luck law 2026-06-12 (verbatim): "wu预测92不是结算在92就算赢了
 #     说明这是一单完全运气获胜跟我们的系统无关 甚至会假装我们的系统正常因为'盈利了'
 #     昨天3单全部刚好踩在结算哪一个温度上就已经说明问题". A LUCKY win masquerades as
@@ -36,8 +42,8 @@ quantities:
   (3) the settled outcome (grade_receipt) + the market's final price (the fill
       price IS the market-implied probability).
 
-THE FIVE CATEGORIES
--------------------
+THE SIX CATEGORIES
+------------------
   SKILL_WIN          won AND our fresh-data q supported the position.
   LUCKY_WIN          won BUT our own freshest data disagreed (Denver-if-92) —
                      a MISS in skill accounting.
@@ -49,11 +55,30 @@ THE FIVE CATEGORIES
                      freshness budget / a strictly-fresher cycle existed
                      unconsumed (born-stale gets its own brand regardless of
                      outcome).
+  UNATTRIBUTABLE_Q_MISSING
+                     the immutable decision-q certificate is unresolvable, so the
+                     system's ACTUAL decision-time q is unknown. Without it the
+                     outcome cannot be attributed to skill or luck — the position
+                     is NEVER graded SKILL_WIN/LUCKY_WIN and is excluded from the
+                     skill denominator (never silently time-reconstructed as the
+                     skill authority).
+
+THE DECISION-Q AUTHORITY (provenance, 2026-06-21)
+-------------------------------------------------
+The skill authority is the IMMUTABLE decision-time q the system committed at
+entry, carried in the ActionableTradeCertificate (decision_certificates,
+verifier_status='VERIFIED') reached via the audit row's
+expected_edge_source_certificate_hash. q_live + q_lcb_5pct live directly in that
+cert's payload_json. The time-reconstructed posterior (the latest
+forecast_posteriors cycle at/<= decision_time) is a DEBUG aid ONLY — it is NOT
+the skill authority and never grades a position SKILL/LUCK on its own.
 
 The skill win-rate that matters:
     SKILL_WIN / (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS)
 STALE_DECISION rows are excluded from the denominator (the decision was born
-stale — its outcome carries no skill signal either way).
+stale — its outcome carries no skill signal either way). UNATTRIBUTABLE_Q_MISSING
+rows are likewise excluded (no immutable decision-q means no attributable skill
+signal).
 
 THRESHOLD DERIVATION (no bare magic numbers)
 --------------------------------------------
@@ -91,6 +116,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+# The 6th category: the immutable decision-q certificate is unresolvable, so the
+# system's actual decision-time q is unknown. The outcome cannot be attributed to
+# skill or luck — never SKILL_WIN/LUCKY_WIN, excluded from the skill denominator.
+UNATTRIBUTABLE_Q_MISSING = "UNATTRIBUTABLE_Q_MISSING"
 
 # Lower edge of the operator's directly-observed 2.0-2.5x market-vs-q band on the
 # 06-12 settled losses. A MISCALIBRATED_LOSS requires the market to have priced
@@ -349,7 +379,25 @@ def grade_position(
         f" freshness_budget={freshness_budget_hours:.1f}h."
     )
 
-    if born_stale:
+    # --- UNATTRIBUTABLE gate (evaluated FIRST) ---
+    # The skill authority is the IMMUTABLE decision-q certificate (q_live). When
+    # neither the cert q (q_live) nor an explicit decision-q-in-bin is available,
+    # the system's actual decision-time belief is unknown: the outcome cannot be
+    # attributed to skill OR luck. Brand it UNATTRIBUTABLE_Q_MISSING — NEVER
+    # SKILL_WIN/LUCKY_WIN, excluded from the skill denominator. We do NOT
+    # substitute a time-reconstructed posterior here (that is a debug aid only).
+    decision_q_missing = q_live is None and decision_q_in_bin is None
+
+    if decision_q_missing:
+        category = UNATTRIBUTABLE_Q_MISSING
+        counts_as_skill_win = False
+        rationale = (
+            "immutable decision-q certificate unresolvable (no q_live from the "
+            "ActionableTradeCertificate); the system's decision-time belief is "
+            "unknown so the outcome cannot be attributed to skill or luck — "
+            "excluded from the skill denominator (never time-reconstructed)."
+        )
+    elif born_stale:
         category = "STALE_DECISION"
         counts_as_skill_win = False
         rationale = (
@@ -529,6 +577,128 @@ def _load_settlements(world_conn: sqlite3.Connection) -> tuple[dict, dict]:
             }
             settled_at[key] = s_at
     return settlements, settled_at
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _resolve_cert_hash_for_position(
+    world_conn: sqlite3.Connection,
+    condition_id: Optional[str],
+    direction: Optional[str],
+) -> Optional[str]:
+    """Bridge a position_current row to its decision-q certificate hash.
+
+    The grader iterates ``trades.position_current`` (the dollar ledger, #416),
+    which carries NO certificate hash. The immutable decision-q lives on the
+    ActionableTradeCertificate reached via ``edli_live_profit_audit``'s
+    ``expected_edge_source_certificate_hash``. The audit ledger records the venue
+    fill(s) for a given market + side, so the bridge key is
+    (condition_id, direction): the same condition + side the position was held on.
+
+    Bridge key derivation (verified read-only against the live world+trades DBs,
+    2026-06-21): of 76 terminal-held positions, (condition_id, direction)
+    resolves the cert for all 53 that have one; token_id is NOT a usable key (the
+    audit fill row records the NO-outcome token, which equals position.no_token_id
+    on 51/53 and position.token_id on only 2/53, so matching on position.token_id
+    would wrongly strand 51 positions). 14 (condition, direction) pairs map to >1
+    distinct cert hash (re-decisions on the same market); 12 of those carry an
+    identical q_live and the other 2 differ only at the 3rd decimal (same side of
+    every threshold), so the SKILL/LUCK grade is invariant to the pick. ``ORDER BY
+    created_at DESC LIMIT 1`` (latest entry decision) is the deterministic, stable
+    choice.
+
+    Returns the most recent non-empty ``expected_edge_source_certificate_hash`` for
+    the (condition_id, direction) match, or None when no audit row carries one —
+    the position is then UNATTRIBUTABLE_Q_MISSING (never time-reconstructed).
+    Reuses the grader's world_conn (INV-37: no new DB connection); the audit table
+    lives in the world MAIN schema alongside decision_certificates.
+    """
+    cid = str(condition_id or "").strip()
+    dirn = str(direction or "").strip()
+    if not cid or not dirn or not _table_exists(world_conn, "edli_live_profit_audit"):
+        return None
+    row = world_conn.execute(
+        """
+        SELECT expected_edge_source_certificate_hash
+        FROM edli_live_profit_audit
+        WHERE condition_id = ?
+          AND direction = ?
+          AND expected_edge_source_certificate_hash IS NOT NULL
+          AND expected_edge_source_certificate_hash <> ''
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (cid, dirn),
+    ).fetchone()
+    if row is None:
+        return None
+    h = str(row[0] or "").strip()
+    return h or None
+
+
+def _resolve_decision_q_from_certificate(
+    world_conn: sqlite3.Connection,
+    certificate_hash: Optional[str],
+) -> Optional[dict]:
+    """Resolve the IMMUTABLE decision-time q from the expected-edge certificate.
+
+    Reads the VERIFIED ActionableTradeCertificate from decision_certificates by
+    its certificate_hash (the audit row's expected_edge_source_certificate_hash)
+    and extracts q_live + q_lcb_5pct from its payload_json. This is the SAME cert
+    + key path the writer side stamps onto edli_live_profit_audit
+    (src/events/live_profit_audit.py:_load_verified_certificate_payload), so the
+    grader and writer agree on the decision-q authority.
+
+    Returns None when the hash is empty, the cert is absent, the cert is not
+    VERIFIED, the payload is unparseable, or it carries no q_live (the position
+    is then UNATTRIBUTABLE — never time-reconstructed as the skill authority).
+    Reuses the grader's existing world_conn (INV-37: no new DB connection).
+    """
+    h = str(certificate_hash or "").strip()
+    if not h or not _table_exists(world_conn, "decision_certificates"):
+        return None
+    row = world_conn.execute(
+        """
+        SELECT payload_json
+        FROM decision_certificates
+        WHERE certificate_hash = ?
+          AND verifier_status = 'VERIFIED'
+        LIMIT 1
+        """,
+        (h,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row[0]
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    q_live = payload.get("q_live")
+    if q_live is None:
+        return None  # cert carries no decision-q — unattributable, never guessed
+    try:
+        q_live_f = float(q_live)
+    except (TypeError, ValueError):
+        return None
+    q_lcb = payload.get("q_lcb_5pct")
+    try:
+        q_lcb_f = float(q_lcb) if q_lcb is not None else None
+    except (TypeError, ValueError):
+        q_lcb_f = None
+    return {
+        "q_live": q_live_f,
+        "q_lcb_5pct": q_lcb_f,
+        "certificate_hash": h,
+    }
 
 
 def _fresh_posterior_for_family(
@@ -754,8 +924,18 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
         audit_id = position_id
         avg_fill_price = entry_price
         filled_size = shares
-        q_live = None       # not stored on position_current — posterior fallback
+        q_live = None       # not stored on position_current — cert is the authority
         q_lcb_5pct = None
+        # Decision-q PROVENANCE bridge (2026-06-21, lifecycle-alpha): position_current
+        # carries NO certificate hash. The immutable decision-q lives on the
+        # ActionableTradeCertificate reached via the matching edli_live_profit_audit
+        # row's ``expected_edge_source_certificate_hash`` (same world.db, single
+        # world_conn — INV-37). Bridge by (condition_id, direction); when no audit
+        # row / cert exists the hash is None and the position grades
+        # UNATTRIBUTABLE_Q_MISSING below (never time-reconstructed).
+        expected_edge_source_certificate_hash = _resolve_cert_hash_for_position(
+            world_conn, condition_id, direction
+        )
         # BLOCKER 2 fix (2026-06-21): the decision-time bound MUST be the IMMUTABLE
         # entry timestamp from position_events (MIN occurred_at over the entry events),
         # NOT position_current.updated_at — updated_at is mutable projection time that a
@@ -793,11 +973,35 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
         except ValueError:
             continue
 
+        # --- Decision-q AUTHORITY: the immutable ActionableTradeCertificate ---
+        # Resolve q_live/q_lcb from the cert reached via the audit row's
+        # expected_edge_source_certificate_hash. This is the system's ACTUAL
+        # decision-time q and the SOLE skill authority. The cert is authoritative
+        # over the audit column (which is NULL on pre-writer-fix rows); when the
+        # column IS already stamped by the writer it agrees with the cert.
+        cert_q = _resolve_decision_q_from_certificate(
+            world_conn, expected_edge_source_certificate_hash
+        )
+        if cert_q is not None:
+            q_live = cert_q["q_live"]
+            q_lcb_5pct = cert_q["q_lcb_5pct"]
+            decision_q_certificate_hash = cert_q["certificate_hash"]
+        else:
+            # No resolvable immutable decision-q. Do NOT fall back to the
+            # column value when the cert is unresolvable — without the cert the
+            # decision-q is unknown and the position is UNATTRIBUTABLE.
+            q_live = None
+            q_lcb_5pct = None
+            decision_q_certificate_hash = None
+
         # Quantity 2b — freshest posterior at settlement-eve (latest cycle).
         fresh = _fresh_posterior_for_family(
             world_conn, meta["city"], meta["target_date"], meta["metric"], bin_obj
         )
         # Quantity 2a — decision-time posterior (latest at/<= decision_time).
+        # DEBUG AID ONLY: the time-reconstructed posterior provides provenance for
+        # observability but is NEVER the skill authority (decision_q_in_bin is no
+        # longer passed to grade_position as a q fallback — see below).
         decision_post = _fresh_posterior_for_family(
             world_conn, meta["city"], meta["target_date"], meta["metric"], bin_obj,
             before=created_at,
@@ -833,7 +1037,10 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
             decision_time=created_at,
             decision_posterior_id=(decision_post.get("posterior_id") if decision_post else None),
             decision_posterior_computed_at=(decision_post.get("computed_at") if decision_post else None),
-            decision_q_in_bin=(decision_post.get("in_bin_yes") if decision_post else None),
+            # decision_q_in_bin is DELIBERATELY NOT passed: the time-reconstructed
+            # posterior is a DEBUG aid (recorded via decision_posterior_id /
+            # _computed_at for observability) but must never act as the skill q
+            # authority. The ONLY skill q is the immutable cert q (q_live above).
             fresh_posterior_id=(fresh.get("posterior_id") if fresh else None),
             fresh_posterior_computed_at=(fresh.get("computed_at") if fresh else None),
             fresh_q_held=fresh_q_held,
@@ -1047,10 +1254,15 @@ class SkillWinRate:
     skill_loss: int
     miscalibrated_loss: int
     stale_decision: int
+    unattributable_q_missing: int = 0
 
     @property
     def skill_denominator(self) -> int:
-        """SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS (excludes STALE)."""
+        """SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS.
+
+        Excludes STALE_DECISION (born-stale) AND UNATTRIBUTABLE_Q_MISSING (no
+        immutable decision-q): neither carries an attributable skill signal.
+        """
         return self.skill_win + self.lucky_win + self.skill_loss + self.miscalibrated_loss
 
     @property
@@ -1075,6 +1287,7 @@ def compute_skill_win_rate(world_conn: sqlite3.Connection) -> SkillWinRate:
     counts = {
         "SKILL_WIN": 0, "LUCKY_WIN": 0, "SKILL_LOSS": 0,
         "MISCALIBRATED_LOSS": 0, "STALE_DECISION": 0,
+        UNATTRIBUTABLE_Q_MISSING: 0,
     }
     for category, n in world_conn.execute(
         "SELECT category, COUNT(*) FROM settlement_attribution GROUP BY category"
@@ -1087,6 +1300,7 @@ def compute_skill_win_rate(world_conn: sqlite3.Connection) -> SkillWinRate:
         skill_loss=counts["SKILL_LOSS"],
         miscalibrated_loss=counts["MISCALIBRATED_LOSS"],
         stale_decision=counts["STALE_DECISION"],
+        unattributable_q_missing=counts[UNATTRIBUTABLE_Q_MISSING],
     )
 
 
@@ -1100,7 +1314,8 @@ def skill_win_rate_log_line(rate: SkillWinRate) -> str:
         f"settlement_skill_attribution: SKILL win-rate={swr_s} "
         f"(naive={nwr_s}) | SKILL_WIN={rate.skill_win} LUCKY_WIN={rate.lucky_win} "
         f"SKILL_LOSS={rate.skill_loss} MISCALIBRATED_LOSS={rate.miscalibrated_loss} "
-        f"STALE={rate.stale_decision} (denom={rate.skill_denominator})"
+        f"STALE={rate.stale_decision} UNATTRIBUTABLE_Q={rate.unattributable_q_missing} "
+        f"(denom={rate.skill_denominator})"
     )
 
 
@@ -1197,8 +1412,8 @@ def _cli(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Grade every settled position into a skill category "
         "(SKILL_WIN / LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS / "
-        "STALE_DECISION) and compute the skill-attributed win-rate. The sole "
-        "writer of settlement_attribution.",
+        "STALE_DECISION / UNATTRIBUTABLE_Q_MISSING) and compute the "
+        "skill-attributed win-rate. The sole writer of settlement_attribution.",
     )
     parser.add_argument(
         "--full-regrade", action="store_true", default=False,

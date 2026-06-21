@@ -1359,11 +1359,17 @@ tables:
     notes: >
       Skill-vs-luck grade ledger (2026-06-12, operator skill-not-luck law). One
       row per SETTLED position graded into a typed category (SKILL_WIN /
-      LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION) by comparing
-      our position + decision-time q + freshest settlement-eve data + the settled
-      outcome + market price. A LUCKY_WIN (won but our own freshest data
-      disagreed — the Denver-if-92 shape) counts as a MISS in skill accounting so
-      a lucky win can no longer masquerade as system health. The skill win-rate =
+      LUCKY_WIN / SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION /
+      UNATTRIBUTABLE_Q_MISSING) by comparing our position + decision-time q +
+      freshest settlement-eve data + the settled outcome + market price. The
+      decision-time q is the IMMUTABLE ActionableTradeCertificate q (resolved via
+      the audit row's expected_edge_source_certificate_hash, 2026-06-21
+      lifecycle-alpha); when that cert is unresolvable the position grades
+      UNATTRIBUTABLE_Q_MISSING and is never SKILL/LUCK (the category CHECK is
+      upgraded in place by a guarded rebuild for pre-existing live tables). A
+      LUCKY_WIN (won but our own freshest data disagreed — the Denver-if-92 shape)
+      counts as a MISS in skill accounting so a lucky win can no longer masquerade
+      as system health. The skill win-rate =
       SKILL_WIN / (SKILL_WIN + LUCKY_WIN + SKILL_LOSS + MISCALIBRATED_LOSS).
       Sole writer = src/analysis/settlement_skill_attribution.py (the daily
       attribution job wired in src.main, runs after settlement harvesting,

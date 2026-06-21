@@ -387,15 +387,26 @@ def test_F3_end_to_end_db_grade(tmp_path) -> None:
     tconn.commit()
     tconn.close()
 
+    # q-provenance (2026-06-21): the grader resolves the immutable decision-q from
+    # the ActionableTradeCertificate bridged off the audit row (condition_id,
+    # direction). Seed a VERIFIED cert carrying q_live=0.72 and stamp its hash on
+    # the audit fill so the position grades SKILL/LUCK (not UNATTRIBUTABLE).
+    f3_cert_hash = "f3" + "0" * 62
+    _seed_belief_certificate(
+        wconn, certificate_hash=f3_cert_hash, condition_id="cond-1",
+        token_id="tok-1", q_live=0.72, q_lcb_5pct=0.60,
+    )
     # W2: an audit fill on the same market — pnl_usd starts NULL, gets written back.
     wconn.execute(
         """INSERT INTO edli_live_profit_audit
            (audit_id, event_id, aggregate_id, condition_id, token_id, direction,
-            avg_fill_price, filled_size, fees, q_live, order_lifecycle_state,
+            avg_fill_price, filled_size, fees, q_live,
+            expected_edge_source_certificate_hash, order_lifecycle_state,
             created_at, schema_version)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         ("aud-1", "evt-1", "agg-1", "cond-1", "tok-1", "buy_no",
-         0.35, 10.0, 0.0, 0.72, "FILLED", "2026-06-11T12:00:00Z", 1),
+         0.35, 10.0, 0.0, None, f3_cert_hash, "FILLED",
+         "2026-06-11T12:00:00Z", 1),
     )
     assert wconn.execute(
         "SELECT pnl_usd FROM edli_live_profit_audit WHERE audit_id='aud-1'"
@@ -614,3 +625,281 @@ def test_INV37_trades_attached_read_only_blocks_writes(tmp_path) -> None:
     finally:
         dbmod._zeus_trade_db_path = orig
         wconn.close()
+
+
+# ---------------------------------------------------------------------------
+# Q-PROVENANCE (the GRADER side of the immutable decision-q fix, 2026-06-21)
+# ---------------------------------------------------------------------------
+#
+# Ground truth (verified read-only against zeus-world.db + zeus_trades.db on
+# 2026-06-21): of 76 terminal-held trades.position_current rows, the immutable
+# decision-q is reachable via the matching edli_live_profit_audit row's
+# expected_edge_source_certificate_hash bridged by (condition_id, direction).
+# 53/76 resolve a VERIFIED ActionableTradeCertificate carrying q_live + q_lcb_5pct
+# directly; 23 have no resolvable cert. The grader must read the REAL decision-q
+# from the cert (not a time-rebuilt posterior) when resolvable, and brand the
+# unresolvable UNATTRIBUTABLE_Q_MISSING — never SKILL/LUCK.
+#
+# These tests assert the GRADER side over the #416 position_current loader: the
+# grader bridges position_current -> edli_live_profit_audit (cert hash) ->
+# decision_certificates, NOT the obsolete audit-only loader.
+
+
+def _seed_belief_certificate(
+    wconn: sqlite3.Connection,
+    *,
+    certificate_hash: str,
+    condition_id: str,
+    token_id: str,
+    q_live: float,
+    q_lcb_5pct: float,
+    verifier_status: str = "VERIFIED",
+) -> None:
+    """Seed an ActionableTradeCertificate carrying the immutable decision-time q.
+
+    Mirrors the real cert shape: payload_json holds q_live + q_lcb_5pct (verified
+    against a live cert 2026-06-21). The grader resolves this off the audit row's
+    expected_edge_source_certificate_hash.
+    """
+    payload = json.dumps({
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "q_live": q_live,
+        "q_lcb_5pct": q_lcb_5pct,
+    })
+    wconn.execute(
+        """INSERT INTO decision_certificates
+           (certificate_id, certificate_type, schema_version,
+            canonicalization_version, semantic_key, claim_type, mode,
+            decision_time, authority_id, authority_version, algorithm_id,
+            algorithm_version, payload_json, payload_hash, certificate_hash,
+            verifier_status, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"cert-{certificate_hash[:8]}", "ActionableTradeCertificate", 1,
+         "v1", f"sk-{certificate_hash[:8]}", "actionable_trade", "LIVE",
+         "2026-06-21T00:00:00Z", "auth", "1", "algo", "1", payload,
+         f"ph-{certificate_hash[:8]}", certificate_hash, verifier_status,
+         "2026-06-21T00:00:00Z"),
+    )
+
+
+def _seed_audit_bridge_row(
+    wconn: sqlite3.Connection,
+    *,
+    audit_id: str,
+    condition_id: str,
+    direction: str,
+    token_id: str,
+    expected_edge_source_certificate_hash,
+) -> None:
+    """Seed the edli_live_profit_audit fill row the grader bridges to.
+
+    q_live is NULL on the row (the live posture); the cert reached via
+    expected_edge_source_certificate_hash + (condition_id, direction) is the
+    authority. This is the bridge the position_current loader walks.
+    """
+    wconn.execute(
+        """INSERT INTO edli_live_profit_audit
+           (audit_id, event_id, aggregate_id, condition_id, token_id, direction,
+            avg_fill_price, filled_size, q_live, q_lcb_5pct,
+            expected_edge_source_certificate_hash, order_lifecycle_state,
+            created_at, schema_version)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (audit_id, f"evt-{audit_id}", f"agg-{audit_id}", condition_id, token_id,
+         direction, 0.30, 10.0, None, None,
+         expected_edge_source_certificate_hash, "FILLED",
+         "2026-06-21T06:00:00Z", 1),
+    )
+
+
+def _seed_q_market_and_settlement(
+    fconn: sqlite3.Connection,
+    *,
+    condition_id: str,
+    city: str,
+    target_date: str,
+    range_low: float,
+    range_high: float,
+    settlement_value: float,
+) -> None:
+    """Seed one market_events bin + VERIFIED settlement on the forecasts DB."""
+    fconn.execute(
+        """INSERT INTO market_events
+           (market_slug, condition_id, city, target_date, temperature_metric,
+            range_low, range_high, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (f"{city}-{condition_id}", condition_id, city, target_date, "high",
+         range_low, range_high, "2026-06-20T00:00:00Z"),
+    )
+    fconn.execute(
+        """INSERT INTO settlement_outcomes
+           (city, target_date, temperature_metric, settlement_value,
+            settlement_unit, settled_at, authority, provenance_json, recorded_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (city, target_date, "high", settlement_value, "F",
+         "2026-06-21T00:00:00Z", "VERIFIED", "{}", "2026-06-21T00:00:00Z"),
+    )
+
+
+def _seed_q_position(
+    tconn: sqlite3.Connection,
+    *,
+    position_id: str,
+    condition_id: str,
+    direction: str,
+    city: str,
+    target_date: str,
+) -> None:
+    """Seed a settled trades.position_current row (the ledger the grader reads)."""
+    tconn.execute(
+        """INSERT INTO position_current
+           (position_id, phase, strategy_key, condition_id, direction, entry_price,
+            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (position_id, "settled", "center_buy", condition_id, direction, 0.30, 10.0,
+         3.0, city, target_date, "high", "2026-06-21T06:00:00Z"),
+    )
+
+
+def test_Q1_grader_populates_q_from_resolvable_certificate(tmp_path) -> None:
+    """When the decision-q cert IS resolvable (bridged from position_current via
+    the audit row's expected_edge_source_certificate_hash), the grader populates
+    q_live / q_lcb_5pct from the cert payload (NOT from a time-reconstructed
+    posterior) and grades SKILL/LUCK on that REAL decision-q.
+
+    Fixture: a buy_no on the 90-91F bin that WON (settle 87, OUT of bin). The
+    cert's q_live=0.80 means our NO held-token q=0.80 > 0.5 -> decision-q supports
+    the NO -> SKILL_WIN, and the grade carries the cert's q values.
+    """
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="condQ1", city="Phoenix", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,  # OUT -> NO wins
+    )
+    fconn.commit(); fconn.close()
+
+    cert_hash = "a" * 64
+    _seed_belief_certificate(
+        wconn, certificate_hash=cert_hash, condition_id="condQ1", token_id="tokQ1",
+        q_live=0.80, q_lcb_5pct=0.70,
+    )
+    _seed_audit_bridge_row(
+        wconn, audit_id="audQ1", condition_id="condQ1", direction="buy_no",
+        token_id="tokQ1", expected_edge_source_certificate_hash=cert_hash,
+    )
+    wconn.commit()
+    _seed_q_position(
+        tconn, position_id="posQ1", condition_id="condQ1", direction="buy_no",
+        city="Phoenix", target_date="2026-06-20",
+    )
+    tconn.commit(); tconn.close()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    # q resolved from the cert (the position ledger carries no q at all).
+    assert g.q_live == pytest.approx(0.80, abs=1e-9), (
+        "q_live must be resolved from the immutable decision-q certificate"
+    )
+    assert g.q_lcb_5pct == pytest.approx(0.70, abs=1e-9)
+    # The real decision-q (NO held-token q 0.80 > 0.5) supports the NO -> SKILL_WIN.
+    assert g.category == "SKILL_WIN", g.rationale
+    assert g.counts_as_skill_win is True
+    wconn.close()
+
+
+def test_Q2_unresolvable_cert_grades_unattributable_never_skill_or_lucky(
+    tmp_path,
+) -> None:
+    """When the decision-q cert is missing / unresolvable, the position grades
+    UNATTRIBUTABLE_Q_MISSING — NEVER SKILL_WIN / LUCKY_WIN, and is NEVER silently
+    time-reconstructed as the skill authority (excluded from the skill
+    denominator).
+
+    Fixture: a WON buy_no whose bridging audit row points at a cert hash that does
+    not resolve (no decision_certificates row). Without the cert there is no
+    immutable decision-q, so the win cannot be attributed to skill or luck.
+    """
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="condQ2", city="Dallas", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,  # OUT -> NO wins
+    )
+    fconn.commit(); fconn.close()
+
+    # Bridging audit row references a cert hash with NO matching cert row.
+    _seed_audit_bridge_row(
+        wconn, audit_id="audQ2", condition_id="condQ2", direction="buy_no",
+        token_id="tokQ2", expected_edge_source_certificate_hash="deadbeef" * 8,
+    )
+    wconn.commit()
+    _seed_q_position(
+        tconn, position_id="posQ2", condition_id="condQ2", direction="buy_no",
+        city="Dallas", target_date="2026-06-20",
+    )
+    tconn.commit(); tconn.close()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.category == "UNATTRIBUTABLE_Q_MISSING", g.rationale
+    assert g.category not in ("SKILL_WIN", "LUCKY_WIN"), (
+        "an unresolvable decision-q must never be classified as a win category"
+    )
+    assert g.counts_as_skill_win is False
+    # q stays None — never invented from a time-reconstructed posterior.
+    assert g.q_live is None
+    # Persisting it must succeed (the CHECK accepts the new category) and it must
+    # be excluded from the skill denominator.
+    persist_grade(wconn, g)
+    rate = compute_skill_win_rate(wconn)
+    assert rate.skill_denominator == 0, (
+        "UNATTRIBUTABLE_Q_MISSING must be excluded from the skill denominator"
+    )
+    wconn.close()
+
+
+def test_Q3_no_audit_bridge_grades_unattributable(tmp_path) -> None:
+    """A settled position with NO bridging edli_live_profit_audit row at all (so no
+    path to the immutable decision-q) grades UNATTRIBUTABLE_Q_MISSING — there is no
+    cert hash to resolve."""
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="condQ3", city="Austin", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,
+    )
+    fconn.commit(); fconn.close()
+
+    # No edli_live_profit_audit row for condQ3 -> no cert hash bridge.
+    _seed_q_position(
+        tconn, position_id="posQ3", condition_id="condQ3", direction="buy_no",
+        city="Austin", target_date="2026-06-20",
+    )
+    tconn.commit(); tconn.close()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    assert grades[0].category == "UNATTRIBUTABLE_Q_MISSING", grades[0].rationale
+    assert grades[0].counts_as_skill_win is False
+    wconn.close()
