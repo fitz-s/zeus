@@ -68,6 +68,28 @@ def test_readonly_entrypoint_returns_finite_posterior_and_ci_without_writing(
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
+def test_readonly_compute_runs_under_query_only_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense-in-depth (critic 2026-06-21, MEDIUM-1): the read-only compute must issue
+    ZERO writes to ANY forecasts table — not just forecast_posteriors / readiness_state.
+    Run it under a SQLite query_only=ON connection: any inadvertent write through the read
+    path (now, or a future edit to a reader in the deep fusion call tree) raises instead of
+    silently corrupting forecast truth during the live monitor loop. This mirrors the
+    enforcement the production read-through sets in _attempt_held_belief_readthrough; it is
+    strictly stronger than counting rows on two named tables."""
+    conn = base._conn()
+    base._install_live_fusion(monkeypatch)
+    request = base._request(source_cycle_time=_dt(6), computed_at=_dt(10), expires_at=_dt(12))
+    conn.execute("PRAGMA query_only=ON")
+
+    # If the compute attempted ANY write through this conn, query_only raises here.
+    result = compute_replacement_posterior_readonly(conn, request)
+
+    assert result is not None and result.live_eligible is True
+    assert set(result.q) == {"cool", "warm", "hot"}
+
+
 def test_readonly_entrypoint_reports_not_eligible_when_inputs_insufficient() -> None:
     """No fusion override (missing current single_runs capture) → not live-eligible
     and still no row written. Honest insufficiency, not a fabricated belief."""

@@ -658,6 +658,14 @@ def _attempt_held_belief_readthrough(
         fc_conn = get_forecasts_connection_read_only()
         try:
             fc_conn.row_factory = sqlite3.Row
+            # Enforce the read-only contract at the SQLite level, not just by the
+            # factory's name (critic 2026-06-21, MEDIUM-1): query_only turns the
+            # no-write guarantee from convention into enforcement. Any inadvertent
+            # write through this connection — e.g. a future edit to a reader deep in
+            # the fusion call tree — raises instead of silently corrupting forecast
+            # truth during the live monitor loop. The compute path is provably
+            # write-free today; this is defense-in-depth on a live 51GB forecasts DB.
+            fc_conn.execute("PRAGMA query_only=ON")
             result = compute_replacement_posterior_readonly(fc_conn, request)
         finally:
             fc_conn.close()

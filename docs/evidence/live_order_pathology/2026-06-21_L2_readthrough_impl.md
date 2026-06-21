@@ -28,6 +28,22 @@ belief (is_fresh=True) so the exit organ can arm CI_SEPARATED_REVERSAL this cycl
 Insufficient inputs → fail-closed HOLD + durable retryable belief-debt marker +
 existing reseed enqueue (never a silent permanent freeze).
 
+REACH — read this before over-expecting coverage (critic 2026-06-21, MEDIUM-2). The
+SYNCHRONOUS recompute recovers belief THIS cycle only in the window where the
+family's anchor SEED is on disk AND the current single_runs are persisted (e.g. the
+posterior row is stale/expired/un-materialized but its inputs are present — the
+Panama City 06-22 case: its BLOCKED 12:09 seed sits in seeds_processed/ with the
+anchor payload, and the 06:00 single_runs landed 14:10). It does NOT synchronously
+cover the diagnosis's DOMINANT cause — "single_runs capture MISSING" (74% of blocked
+materializations): with single_runs absent the fusion is not live-eligible, so the
+read-through honestly returns None → fail-close + belief_debt. That case recovers
+ASYNCHRONOUSLY via LAYER 1's marker re-heal + the reseed enqueue landing single_runs
+over subsequent cycles (a delay of cycles, not this-cycle). So Layer 2 is the
+synchronous half of a two-layer fix, not a standalone cure; its belief_debt marker
+makes the residual gap OBSERVABLE rather than a silent freeze. Forward-verify the
+split: of live held-freezes, what fraction fall in L2's synchronous window vs the
+L1-async window.
+
 ## Files + functions changed (file:line)
 
 ### 1. Read-only compute entrypoint (the extraction)
