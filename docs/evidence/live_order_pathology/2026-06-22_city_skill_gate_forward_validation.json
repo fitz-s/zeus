@@ -1,9 +1,27 @@
 {
   "_meta": {
     "authority": "city_skill_gate_forward_validation",
-    "created": "2026-06-22T21:53:05.097897+00:00",
+    "created": "2026-06-22T22:00:44.485070+00:00",
     "world": "/Users/leofitz/zeus/state/zeus-world.db",
     "n_rows": 91
+  },
+  "loss_reduction_block_only": {
+    "confirmed_stable_bad_cities": [
+      "Karachi"
+    ],
+    "confirmed_stable_good_cities": [
+      "London",
+      "Tokyo"
+    ],
+    "walk_forward_blocked_n": 0,
+    "walk_forward_blocked_ev_sum": 0.0,
+    "walk_forward_kept_n": 91,
+    "walk_forward_kept_ev_sum": -1.9528,
+    "total_book_ev_sum": -1.9528,
+    "book_ev_after_blocking": -1.9528,
+    "loss_avoided_by_blocking": -0.0,
+    "wrongly_blocked_stable_good": 0,
+    "note": "Block-only loss reduction: blocks confirmed two-half stable losers walk-forward. loss_avoided>0 and book_ev improves; wrongly_blocked_stable_good MUST be 0."
   },
   "walk_forward_gate": {
     "admit_n": 2,

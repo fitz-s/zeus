@@ -122,9 +122,17 @@ def apply_city_skill_gate(
     city: str,
     artifact: Optional[Mapping] = None,
     expected_posterior_version: str = DEFAULT_POSTERIOR_VERSION,
+    require_stable_bad_to_block: bool = False,
 ) -> CitySkillVerdict:
     """Apply the per-city historical-skill gate. Fail-closed everywhere; admit only a reliably-skilled
-    city with enough prior track record. Decides from skill ONLY — never alters q, never uses price."""
+    city with enough prior track record. Decides from skill ONLY — never alters q, never uses price.
+
+    ``require_stable_bad_to_block`` (LOSS-REDUCTION mode, the deployable-today posture): a city is
+    HARD-BLOCKED only when its record confirms it is a TEMPORALLY-STABLE loser (negative skill in BOTH
+    time halves, ``stable_bad=True``). A city merely negative in aggregate but NOT confirmed
+    stable-bad still never ADMITS (negative skill), but its basis is ``CITY_SKILL_NEGATIVE_UNCONFIRMED``
+    so the loss-reduction gate does not LIST it as a confirmed block (insufficient two-half evidence).
+    This is the team-lead's "confirm each holds negative skill in BOTH halves before listing it"."""
     art = artifact if artifact is not None else load_artifact()
     if not isinstance(art, Mapping):
         return _no(city, "FAIL_CLOSED_NO_ARTIFACT")
@@ -153,6 +161,12 @@ def apply_city_skill_gate(
 
     # Reliably bad -> BLOCK (distinct basis for observability).
     if prior_skill <= 0.0:
+        if require_stable_bad_to_block:
+            # Loss-reduction mode: hard-block ONLY a CONFIRMED two-half stable loser.
+            if bool(cell.get("stable_bad", False)):
+                return _no(city, "CITY_SKILL_BLOCKED_STABLE_BAD", prior_skill, prior_n)
+            # Negative in aggregate but not two-half-confirmed -> no admit, marked unconfirmed.
+            return _no(city, "CITY_SKILL_NEGATIVE_UNCONFIRMED", prior_skill, prior_n)
         return _no(city, "CITY_SKILL_BLOCKED_NEGATIVE", prior_skill, prior_n)
     # Positive but too short a track record -> ABSTAIN (the noisy middle).
     if prior_n < min_track:
@@ -164,6 +178,19 @@ def apply_city_skill_gate(
         admit=True, abstained=False, city=city, prior_skill=prior_skill, prior_n=prior_n,
         basis="CITY_SKILL_ADMIT",
     )
+
+
+def confirmed_blocked_cities(*, artifact: Optional[Mapping] = None) -> list[str]:
+    """The cities the loss-reduction gate hard-blocks: those confirmed TEMPORALLY-STABLE losers
+    (``stable_bad=True``). Sorted. The honest, forward-valid block list."""
+    art = artifact if artifact is not None else load_artifact()
+    if not isinstance(art, Mapping):
+        return []
+    cities = art.get("cities")
+    if not isinstance(cities, Mapping):
+        return []
+    out = [c for c, v in cities.items() if isinstance(v, Mapping) and bool(v.get("stable_bad", False))]
+    return sorted(out)
 
 
 # ---------------------------------------------------------------------------

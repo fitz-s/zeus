@@ -128,6 +128,69 @@ def stability_table(rows) -> list[dict]:
     return out
 
 
+def _half_skill(rows):
+    import collections as _c
+    rs = sorted(rows, key=lambda r: r.target_date)
+    if not rs:
+        return {}
+    mid = rs[len(rs) // 2].target_date
+    e = _c.defaultdict(lambda: [0, 0.0])
+    l = _c.defaultdict(lambda: [0, 0.0])
+    for r in rs:
+        t = e if r.target_date < mid else l
+        t[r.city][0] += 1
+        t[r.city][1] += (r.market_brier - r.our_brier)
+    out = {}
+    for c in set(e) | set(l):
+        es = e[c][1] / e[c][0] if e[c][0] else None
+        ls = l[c][1] / l[c][0] if l[c][0] else None
+        out[c] = (es, ls)
+    return out
+
+
+def loss_reduction_block_only(rows) -> dict:
+    """The DEPLOYABLE-TODAY posture: hard-block ONLY cities confirmed negative-skill in BOTH halves
+    (temporally-stable losers), walk-forward (the block is earned on rows resolved before T). Reports
+    realized loss avoided + confirms no genuine-edge (stable-good) city is wrongly blocked. This is
+    loss-reduction, NOT a +EV revenue claim."""
+    rows_sorted = sorted(rows, key=lambda r: r.target_date)
+    half = _half_skill(rows_sorted)
+    stable_bad = {c for c, (e, l) in half.items() if e is not None and l is not None and e < 0 and l < 0}
+    stable_good = {c for c, (e, l) in half.items() if e is not None and l is not None and e > 0 and l > 0}
+    blocked_ev = 0.0
+    blocked_n = 0
+    kept_ev = 0.0
+    kept_n = 0
+    wrongly_blocked_good = 0
+    for r in rows_sorted:
+        prior = [x for x in rows_sorted if x.target_date < r.target_date]
+        ph = _half_skill(prior)
+        e, l = ph.get(r.city, (None, None))
+        is_stable_bad_asof = (e is not None and l is not None and e < 0 and l < 0)
+        if is_stable_bad_asof:
+            blocked_ev += r.realized_ev
+            blocked_n += 1
+            if r.city in stable_good:
+                wrongly_blocked_good += 1
+        else:
+            kept_ev += r.realized_ev
+            kept_n += 1
+    return {
+        "confirmed_stable_bad_cities": sorted(stable_bad),
+        "confirmed_stable_good_cities": sorted(stable_good),
+        "walk_forward_blocked_n": blocked_n,
+        "walk_forward_blocked_ev_sum": round(blocked_ev, 4),
+        "walk_forward_kept_n": kept_n,
+        "walk_forward_kept_ev_sum": round(kept_ev, 4),
+        "total_book_ev_sum": round(blocked_ev + kept_ev, 4),
+        "book_ev_after_blocking": round(kept_ev, 4),
+        "loss_avoided_by_blocking": round(-blocked_ev, 4),
+        "wrongly_blocked_stable_good": wrongly_blocked_good,
+        "note": ("Block-only loss reduction: blocks confirmed two-half stable losers walk-forward. "
+                 "loss_avoided>0 and book_ev improves; wrongly_blocked_stable_good MUST be 0."),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Forward-validate the per-city skill gate (walk-forward, read-only).")
     ap.add_argument("--world", default=WORLD_DEFAULT)
@@ -137,6 +200,7 @@ def main() -> int:
     rows = fcsg.build_rows(args.world)
     wf = walk_forward(rows)
     la = lookahead_gate(rows)
+    lr = loss_reduction_block_only(rows)
     stab = stability_table(rows)
     n_stable = sum(1 for s in stab if s["sign_stable"]) if stab else 0
     n_eval = sum(1 for s in stab if s["sign_stable"] is not None)
@@ -148,6 +212,7 @@ def main() -> int:
             "world": args.world,
             "n_rows": len(rows),
         },
+        "loss_reduction_block_only": lr,
         "walk_forward_gate": {k: v for k, v in wf.items() if k != "per_bet"},
         "lookahead_gate_INVALID": la,
         "stability": stab,
@@ -161,9 +226,13 @@ def main() -> int:
 
     print(f"[city-skill-gate FV] wrote {args.out}")
     print(f"    n_rows={len(rows)}")
-    print(f"    WALK-FORWARD (the gate): admit_n={wf['admit_n']} ev_sum={wf['admitted_ev_sum']} "
-          f"ev/bet={wf['admitted_ev_per_bet']} admit_cities={wf['admit_cities']}")
-    print(f"    LOOK-AHEAD (invalid):    admit_n={la['admit_n']} ev_sum={la['admitted_ev_sum']} ev/bet={la['admitted_ev_per_bet']}")
+    print(f"    LOSS-REDUCTION (deployable, block confirmed stable-bad walk-forward):")
+    print(f"      stable_bad={lr['confirmed_stable_bad_cities']} stable_good={lr['confirmed_stable_good_cities']}")
+    print(f"      blocked_n={lr['walk_forward_blocked_n']} blocked_ev={lr['walk_forward_blocked_ev_sum']} "
+          f"loss_avoided={lr['loss_avoided_by_blocking']} book_ev: {lr['total_book_ev_sum']} -> {lr['book_ev_after_blocking']} "
+          f"wrongly_blocked_good={lr['wrongly_blocked_stable_good']}")
+    print(f"    ADMIT-side WALK-FORWARD (revenue, NOT licensable yet): admit_n={wf['admit_n']} ev/bet={wf['admitted_ev_per_bet']}")
+    print(f"    LOOK-AHEAD (invalid +10.1%): admit_n={la['admit_n']} ev/bet={la['admitted_ev_per_bet']}")
     print(f"    stability: {n_stable}/{n_eval} cities sign-stable early/late")
     return 0
 

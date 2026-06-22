@@ -119,3 +119,43 @@ def test_seam_helper_live_blocks_bad_city(monkeypatch):
     assert g.city_skill_gate_admits(city="Karachi", artifact=art) is False
     art2 = _artifact({"Tokyo": {"prior_skill": 0.06, "prior_n": 7}})
     assert g.city_skill_gate_admits(city="Tokyo", artifact=art2) is True
+
+
+# --------------------------------------------------------------------------------------------------
+# Both-halves-confirmed BLOCK (loss-reduction mode): only block a TEMPORALLY-STABLE loser.
+# --------------------------------------------------------------------------------------------------
+
+def test_block_only_confirmed_stable_bad_city():
+    # Karachi negative in BOTH halves -> stable_bad=True -> blocked.
+    art = _artifact({"Karachi": {"prior_skill": -0.26, "prior_n": 5, "stable_bad": True}})
+    v = g.apply_city_skill_gate(city="Karachi", artifact=art, require_stable_bad_to_block=True)
+    assert v.admit is False and v.abstained is True
+    assert v.basis == "CITY_SKILL_BLOCKED_STABLE_BAD"
+
+
+def test_aggregate_negative_but_not_confirmed_stable_is_not_hard_blocked():
+    # A city negative in aggregate but NOT confirmed negative-both-halves (stable_bad False/absent):
+    # in block-only loss-reduction mode it is NOT a confirmed stable loser. It still does not ADMIT
+    # (negative skill), but its basis marks it UNCONFIRMED so the loss-reduction gate does not list it.
+    art = _artifact({"Houston": {"prior_skill": -0.4, "prior_n": 3, "stable_bad": False}})
+    v = g.apply_city_skill_gate(city="Houston", artifact=art, require_stable_bad_to_block=True)
+    assert v.admit is False  # negative skill still never admits
+    assert v.basis == "CITY_SKILL_NEGATIVE_UNCONFIRMED"
+
+
+def test_stable_good_city_never_blocked_in_loss_reduction_mode():
+    # Tokyo/London are stable-good -> must NEVER be blocked. (With require_stable_bad_to_block they
+    # admit normally since positive skill + track record.)
+    art = _artifact({"Tokyo": {"prior_skill": 0.06, "prior_n": 7, "stable_bad": False, "stable_good": True}})
+    v = g.apply_city_skill_gate(city="Tokyo", artifact=art, require_stable_bad_to_block=True)
+    assert v.admit is True and v.basis == "CITY_SKILL_ADMIT"
+
+
+def test_blocked_cities_helper_lists_only_confirmed_stable_bad():
+    art = _artifact({
+        "Karachi": {"prior_skill": -0.26, "prior_n": 5, "stable_bad": True},
+        "Houston": {"prior_skill": -0.4, "prior_n": 3, "stable_bad": False},
+        "Tokyo": {"prior_skill": 0.06, "prior_n": 7, "stable_good": True},
+    })
+    blocked = g.confirmed_blocked_cities(artifact=art)
+    assert blocked == ["Karachi"]

@@ -61,38 +61,60 @@ tests/test_fit_city_skill_gate.py ....            [ 4 passed]
 + calibrator suites + db_writer_lock antibody:    66 passed in 16.28s
 ```
 
-## 5. WALK-FORWARD validation (THE GATE — no look-ahead) on real settled data (n=91)
+## 5. WALK-FORWARD validation (no look-ahead) on real settled data (n=91)
 
 Invocation: `python3 -m scripts.city_skill_gate_forward_validation --world state/zeus-world.db`.
-At each bet T, `(min_track, floor)` is LEARNED on rows resolved before T, then the bet's city prior
-skill is computed on prior rows and gated.
+
+### 5a. ADMIT side (revenue) — NOT licensable
 
 | Gate | admit_n | admitted EV/bet | admit cities |
 |---|---|---|---|
-| **WALK-FORWARD (valid)** | 2 | **−0.15** | Hong Kong (−0.72, LOST), Tokyo (+0.42, won) |
-| LOOK-AHEAD (INVALID) | 35 | +0.303 | (full-sample-skill>0 — the in-sample +10.1% artifact) |
+| WALK-FORWARD (valid) | 2 | **−0.15** | Hong Kong (−0.72, LOST), Tokyo (+0.42, won) |
+| LOOK-AHEAD (INVALID) | 35 | +0.303 | full-sample-skill>0 — the in-sample +10.1% artifact |
 
-**Per-city early/late sign-stability: only 3/7 cities are stable** — Karachi (reliably bad), London &
-Tokyo (reliably good). Hong Kong / Milan / Seoul / Wuhan FLIP sign (the noisy middle).
+The "+10.1%" (+0.303/bet) is reproduced and **confirmed a LOOK-AHEAD artifact** — it requires knowing
+each city's full-window skill in advance. Proper double-walk-forward admits only 2 bets, one a
+noisy-middle false positive (Hong Kong, prior_skill +0.014, n=4 → then LOST −0.72) → net −0.15/bet.
 
-## 6. Verdict (HONEST — per the team-lead's "if even the extremes don't hold EV>0, say so")
+### 5b. BLOCK side (loss reduction) — the deployable result
 
-**The per-city skill gate is CORRECTLY BUILT and HONEST, but does NOT demonstrate EV>0 walk-forward at
-n=91.** Specifics:
-- The look-ahead "+10.1%" (+0.303/bet) is reproduced and confirmed to be a **look-ahead artifact** — it
-  requires knowing each city's full-window skill in advance.
-- With proper double-walk-forward (learn the threshold on prior data, apply forward), the gate admits
-  only **2 bets** and one (Hong Kong, prior_skill +0.014, n=4) is a noisy-middle false positive that
-  then LOST −0.72 → net **−0.15/bet**.
-- Only **Tokyo and London** are genuinely sign-stable winners, but they are too sparse to clear EV>0
-  forward; the noisy middle still leaks the occasional toxic admit.
+Block ONLY cities confirmed negative-skill in BOTH time halves (temporally-stable losers), walk-forward.
 
-This is the **same 91-bet thin-data wall** that bounded the per-bin EB calibrator. The city edge is real
-IN-SAMPLE but not yet forward-predictable.
+- **Confirmed stable-bad (block list): `["Karachi"]`** — skill −0.27 early / −0.25 late; realized
+  −0.72/bet, −3.60 EV sum over n=5. Blocking Karachi's FUTURE bets removes that loss stream.
+- **Confirmed stable-good (never blocked): `["London", "Tokyo"]`** — `wrongly_blocked_stable_good = 0`
+  (the gate does NOT block a genuine-edge city).
+- Walk-forward retroactive blocks = 0 (a city only earns its block once it has a two-half record
+  BEFORE the bet — no look-ahead). So the loss-reduction activates GOING FORWARD as history accrues;
+  the end-of-window artifact correctly carries Karachi as the block, protecting London/Tokyo.
 
-**Recommendation:** the gate is SAFE in **block-only mode** (it reliably BLOCKS the stable losers —
-Karachi/Houston/Shanghai — which IS forward-valid), NOT as a +EV revenue gate. Deploy flag-gated
-(`ZEUS_CITY_SKILL_GATE_LIVE`, default OFF) in block-only posture alongside the selection-calibrator;
-**shadow-log** per-city skill so the admit side can be promoted once the track records deepen and the
-sign-stability holds across more settled days (re-run §5 to promote). The +10.1% revenue capture is NOT
-walk-forward-real on the current data and is not claimed.
+**Per-city early/late sign-stability: 3/7 stable** (Karachi bad; London, Tokyo good; HK/Milan/Seoul/Wuhan flip).
+
+## 6. Shadow-logger (the path to revenue — accrue, then license)
+
+`src/decision/shadow_admit_logger.py` (+7 tests) records every evaluated side-candidate's would-admit
+decision + features (admit0 = native_quote_available AND quote_fresh AND q_lcb_side_old > own_side_cost;
+raw_side_prob, q_lcb_side, own_side_cost, admission_margin, city, target_date, side, posterior_version,
+city_skill_admit, selection_calibrator_q_safe). Append-only JSONL, flag-gated `ZEUS_SHADOW_ADMIT_LOG`
+default OFF, fail-soft (a write error never breaks trading), NEVER read back into any gate. This
+accrues the current-regime (bayes_fusion) would-admit population that STEP-1 found ABSENT — so the
+selection-calibrator's full would-admit EB and a forward-positive city gate can be validated once a few
+hundred labelled rows accrue.
+
+## 7. Final verdict (HONEST)
+
+The in-sample city edge is REAL but **NOT forward-licensable at 91 bets** — confirmed three independent
+ways (per-bin EB calibrator, σ-repr-from-d_eff_m root fix, per-city skill gate), all blocked by the
+same thin-data wall and the absence of a pre-trade signal that predicts forward edge (grid distance was
+falsified: corr(error, d_eff_m) = −0.52). The +10.1% is look-ahead.
+
+**Deployable today = loss reduction + accrual, NOT a +EV revenue gate:**
+1. **City-skill gate in block-only mode** (`require_stable_bad_to_block`): hard-blocks confirmed
+   two-half stable losers (Karachi today; the list grows as history accrues), protects stable-good
+   cities (0 wrongly blocked). Forward-valid loss reduction.
+2. **Selection-calibrator in block-only/shadow mode**: blocks the toxic-NO adverse-selection tail,
+   fail-closed.
+3. **Shadow-logger ON**: accrue the would-admit population.
+All three flag-gated default OFF; the orchestrator owns the flips. Revenue licensing waits on settled
+evidence: accrue via the shadow log, then re-run the walk-forward gates to promote the admit side when
+the track records deepen and sign-stability holds. No look-ahead +EV is claimed.

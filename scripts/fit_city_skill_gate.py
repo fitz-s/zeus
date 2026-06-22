@@ -140,17 +140,50 @@ def build_rows(world_path: str) -> list[SettledCityBet]:
     return out
 
 
+def _both_halves_skill(rows) -> dict[str, tuple]:
+    """Per-city (early_skill, late_skill) split at the median target_date. A city negative in BOTH
+    halves is a TEMPORALLY-STABLE loser (the only kind the loss-reduction gate hard-blocks)."""
+    rs = sorted(rows, key=lambda r: r.target_date)
+    if not rs:
+        return {}
+    mid = rs[len(rs) // 2].target_date
+    early: dict[str, list] = defaultdict(lambda: [0, 0.0])
+    late: dict[str, list] = defaultdict(lambda: [0, 0.0])
+    for r in rs:
+        tgt = early if r.target_date < mid else late
+        tgt[r.city][0] += 1
+        tgt[r.city][1] += (r.market_brier - r.our_brier)
+    out: dict[str, tuple] = {}
+    for city in set(early) | set(late):
+        e = early[city]
+        l = late[city]
+        es = e[1] / e[0] if e[0] else None
+        ls = l[1] / l[0] if l[0] else None
+        out[city] = (es, ls)
+    return out
+
+
 def fit_city_skill_gate(rows, *, posterior_version: str = g.DEFAULT_POSTERIOR_VERSION) -> dict:
     """Fit the artifact: learned (min_track, floor) + per-city end-of-window prior_skill/prior_n."""
     min_track, floor, learned_ev, admit_n = learn_hyperparameters(rows)
     # End-of-window per-city skill (boundary = after the last target_date so every row counts).
     max_td = max((r.target_date for r in rows), default="0000-00-00")
     boundary = "9999-12-31"
+    # Both-halves stability (team-lead: only LIST a stable loser confirmed negative in BOTH halves).
+    half_skill = _both_halves_skill(rows)
     cities: dict[str, dict] = {}
     seen = sorted({r.city for r in rows})
     for city in seen:
         sk, n = prior_skill(rows, city=city, boundary=boundary)
-        cities[city] = {"prior_skill": round(sk, 6), "prior_n": int(n)}
+        e, l = half_skill.get(city, (None, None))
+        stable_bad = (e is not None and l is not None and e < 0 and l < 0)
+        stable_good = (e is not None and l is not None and e > 0 and l > 0)
+        cities[city] = {
+            "prior_skill": round(sk, 6), "prior_n": int(n),
+            "early_skill": round(e, 6) if e is not None else None,
+            "late_skill": round(l, 6) if l is not None else None,
+            "stable_bad": bool(stable_bad), "stable_good": bool(stable_good),
+        }
     fitted_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
     return {
         "_meta": {
