@@ -7260,6 +7260,33 @@ class TestRecoveryResolutionTable:
         assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, "cmd-001") == "EXPIRED"
 
+    def test_partial_remainder_matched_point_order_routes_to_review_required(
+        self,
+        conn,
+        mock_client,
+    ):
+        # GATE #84 follow-up (2026-06-22): a PARTIAL remainder absent from open
+        # orders whose point order reports MATCHED means the remainder filled at the
+        # venue but the fill fact has not yet arrived. MATCHED is not a terminal
+        # no-fill status (it carries a live/fill record), so before the fix this
+        # looped "staying" forever and the PARTIALLY_MATCHED order fact kept the
+        # family's entry lane blocked (unexpired_family_rest=True; live market
+        # 2625913, 2026-06-22). It must route to REVIEW_REQUIRED for fill-fact
+        # reconciliation, identical to the FILLED case.
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "MATCHED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert "REVIEW_REQUIRED" in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+
     def test_partial_remainder_without_point_reader_fails_closed(
         self,
         conn,

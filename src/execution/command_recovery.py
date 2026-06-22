@@ -6008,7 +6008,16 @@ def reconcile_partial_remainders(
                 venue_order_id,
             )
             if not point_terminal:
-                if point_status == "FILLED":
+                # MATCHED is treated like FILLED here (GATE #84 follow-up, 2026-06-22):
+                # a partial remainder ABSENT from open orders whose point order reports
+                # MATCHED means the remainder filled at the venue but the fill fact has
+                # not yet arrived. MATCHED is not a terminal no-fill status (it carries a
+                # live/fill record, so it is not terminalized in
+                # _point_order_terminal_for_partial_remainder), so without this branch it
+                # looped "staying" forever and the PARTIALLY_MATCHED order fact kept the
+                # family's entry lane blocked (unexpired_family_rest=True). Route it to
+                # REVIEW_REQUIRED for fill-fact reconciliation, identical to FILLED.
+                if point_status in ("FILLED", "MATCHED"):
                     append_event(
                         conn,
                         command_id=command_id,
@@ -6023,9 +6032,10 @@ def reconcile_partial_remainders(
                         },
                     )
                     logger.warning(
-                        "recovery: command %s PARTIAL absent from open orders but point order is FILLED "
+                        "recovery: command %s PARTIAL absent from open orders but point order is %s "
                         "without complete trade-fact authority -> REVIEW_REQUIRED",
                         command_id,
+                        point_status,
                     )
                     summary["advanced"] += 1
                 else:
