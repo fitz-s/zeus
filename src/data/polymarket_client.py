@@ -35,6 +35,11 @@ CLOB_BASE = "https://clob.polymarket.com"
 DATA_API_BASE = "https://data-api.polymarket.com"
 PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS = 15.0
 PUBLIC_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
+# Dedicated limits for the submit-time JIT /book client (GATE #84). keepalive_expiry
+# is widened to 90s — longer than the 60s reactor cycle plus jitter — so a connection
+# warmed by the keepalive pinger survives between requeued submit candidates instead
+# of going cold (the shared 30s expiry above is shorter than one cycle).
+PRESUBMIT_JIT_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, max_connections=8, keepalive_expiry=90.0)
 
 # A2 throughput (2026-05-31): the executable-snapshot capture fetched /fee-rate PER TOKEN
 # on EVERY reactor cycle → hundreds of serial 15s-bounded calls → 10-30 min/cycle → fresh
@@ -272,11 +277,19 @@ def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
-    def __init__(self, *, public_http_timeout: "float | httpx.Timeout | None" = None):
+    def __init__(
+        self,
+        *,
+        public_http_timeout: "float | httpx.Timeout | None" = None,
+        public_http_limits: "httpx.Limits | None" = None,
+    ):
         self._clob_client = None
         self._v2_adapter = None
         self._pending_submission_envelope = None
         self._public_http_client = None
+        # Optional dedicated connection-pool limits (e.g. the wider keepalive_expiry
+        # of PRESUBMIT_JIT_CLOB_HTTP_LIMITS); defaults to PUBLIC_CLOB_HTTP_LIMITS.
+        self._public_http_limits = public_http_limits
         # When set, overrides PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS for the lazy
         # public HTTP client.  Discovery callers pass a short float timeout (≈5s)
         # so a full 50-city CLOB scan cannot block more than
@@ -303,10 +316,30 @@ class PolymarketClient:
                 timeout = PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS
             client = httpx.Client(
                 timeout=timeout,
-                limits=PUBLIC_CLOB_HTTP_LIMITS,
+                limits=self._public_http_limits or PUBLIC_CLOB_HTTP_LIMITS,
             )
             self._public_http_client = client
         return client
+
+    def warm_public_connection(self, *, timeout: "httpx.Timeout | float | None" = None) -> bool:
+        """Establish/keep-warm the public CLOB TLS connection without touching any
+        trading state (GATE #84 pre-warm + keepalive pinger).
+
+        Hits the public ``/time`` health endpoint (NOT ``/book``, which is
+        token-specific and must only ever be fetched as the per-candidate submit
+        witness). A per-request ``timeout`` override lets the caller use a generous
+        connect budget OUTSIDE the submit worker to absorb the cold handshake, so
+        the submit-time ``/book`` fetch reuses an already-warm connection. Fail-soft:
+        returns True on a 2xx, False on any error — never raises, never mutates state.
+        """
+
+        try:
+            client = self._public_http()
+            url = f"{CLOB_BASE}/time"
+            resp = client.get(url, timeout=timeout) if timeout is not None else client.get(url)
+            return 200 <= resp.status_code < 300
+        except Exception:  # noqa: BLE001 - warm-up is best-effort; never propagate
+            return False
 
     def close(self) -> None:
         """Close reusable public CLOB transports owned by this wrapper."""

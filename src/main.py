@@ -7977,25 +7977,42 @@ def _edli_run_pre_submit_clob_call(label: str, fn):
 
 
 def _edli_pre_submit_jit_book_timeout():
-    """Connect/read timeout for the submit-time JIT ``/book`` fetch (GATE #84).
+    """STRICT connect/read timeout for the submit-time JIT ``/book`` fetch (GATE #84).
 
-    A cold TLS handshake to clob.polymarket.com measures ~2.2-2.7s (forward,
-    2026-06-22). The prior path coupled connect=read=inner_io and clamped inner_io
-    to 2.0s, so 118 of 120 JIT fetches over 2026-06-17..06-22 failed with
-    "_ssl.c:1064: The handshake operation timed out" and ~84% of edge-positive
-    orders never reached the venue. Give the handshake a connect budget that
-    clears the measured floor while keeping connect+read strictly below the outer
-    daemon-protection guard so the inner venue IO still times out FIRST (the
-    invariant the 2026-06-19 "bound pre-submit venue reads" commit enforced).
+    Runs inside the pre-submit guard's worker thread, so it must fail-closed BEFORE
+    the outer daemon guard (the 2026-06-19 invariant). httpcore applies the connect
+    timeout to ``connect_tcp`` AND ``start_tls`` separately, so the worst-case connect
+    cost is ``2*connect``; bound ``2*connect + read + write + pool`` strictly under the
+    outer guard. With outer=6.0 this yields connect≈2.25 (worst case 2*2.25+0.85+0.25+
+    0.10 = 5.70 < 6.0). This connect budget is a FAIL-CLOSED bound, not the normal
+    path — the boot pre-warm + keepalive pinger keep the socket warm so the submit-time
+    fetch reuses an established connection (~0.66s, measured forward 2026-06-22) and
+    does not pay a cold handshake here. Cold handshakes (~2.2-2.7s) are absorbed by the
+    generous warmup timeout OUTSIDE the worker.
     """
 
     import httpx
 
     outer = _edli_pre_submit_clob_timeout_seconds()
-    read = _edli_pre_submit_inner_io_timeout_seconds()
-    # Headroom 0.5s keeps connect+read strictly under the outer circuit breaker.
-    connect = max(read, min(3.5, outer - read - 0.5))
-    return httpx.Timeout(connect=connect, read=read, write=read, pool=read)
+    read, write, pool = 0.85, 0.25, 0.10
+    # 0.3s headroom for Python overhead under the outer guard, halved for the
+    # TCP+TLS double-application of the connect budget.
+    connect = max(0.5, min(2.25, (outer - read - write - pool - 0.3) / 2.0))
+    return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
+def _edli_pre_submit_jit_warmup_timeout():
+    """GENEROUS connect timeout for the JIT client's boot pre-warm + keepalive ping.
+
+    Used ONLY by ``_edli_prewarm_pre_submit_jit_client`` / the pinger tick, which run
+    OUTSIDE the submit worker, so a connect budget large enough to absorb a cold TLS
+    handshake (~2.2-2.7s, with margin) does not threaten the pre-submit outer guard.
+    The read budget stays tight (the ``/time`` health probe is tiny).
+    """
+
+    import httpx
+
+    return httpx.Timeout(connect=4.5, read=0.75, write=0.25, pool=0.10)
 
 
 _PRE_SUBMIT_JIT_CLOB_CLIENT = None
@@ -8032,13 +8049,43 @@ def _edli_pre_submit_jit_clob_client():
         with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
             client = _PRE_SUBMIT_JIT_CLOB_CLIENT
             if client is None:
-                from src.data.polymarket_client import PolymarketClient
+                from src.data.polymarket_client import (
+                    PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+                    PolymarketClient,
+                )
 
                 client = PolymarketClient(
-                    public_http_timeout=_edli_pre_submit_jit_book_timeout()
+                    public_http_timeout=_edli_pre_submit_jit_book_timeout(),
+                    public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
                 )
                 _PRE_SUBMIT_JIT_CLOB_CLIENT = client
     return client
+
+
+def _edli_prewarm_pre_submit_jit_client() -> bool:
+    """Construct the warm JIT CLOB client and complete a cold TLS handshake OUTSIDE
+    the submit worker (boot + keepalive pinger). Uses the generous warmup timeout so
+    a slow cold handshake is absorbed here, never on the money path. Fail-soft."""
+
+    try:
+        client = _edli_pre_submit_jit_clob_client()
+        ok = client.warm_public_connection(timeout=_edli_pre_submit_jit_warmup_timeout())
+        return bool(ok)
+    except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block boot
+        return False
+
+
+def _edli_pre_submit_jit_keepalive_tick() -> None:
+    """Keepalive pinger: keep the submit-time JIT CLOB connection warm across reactor
+    cycles (keepalive_expiry=90s > 60s cycle) so an edge-positive submit candidate
+    never pays a cold TLS handshake at the pre-submit gate. Read-only /time probe;
+    touches NO trading state; logs success/failure only (GATE #84, 2026-06-22)."""
+
+    warmed = _edli_prewarm_pre_submit_jit_client()
+    if warmed:
+        logger.debug("pre-submit JIT keepalive: connection warm")
+    else:
+        logger.warning("pre-submit JIT keepalive: warm-up probe failed (will retry next tick)")
 
 
 def _edli_pre_submit_jit_book_quote_provider():
@@ -9566,6 +9613,22 @@ def main():
             max_instances=1,
             coalesce=True,
             executor="reactor",
+        )
+        # GATE #84 keepalive pinger (2026-06-22): keep the submit-time JIT /book CLOB
+        # connection warm so an edge-positive submit candidate never pays a cold TLS
+        # handshake (~2.2-2.7s) at the pre-submit authority gate — the regression that
+        # timed out 118/120 JIT fetches (06-17..06-22) and requeued ~84% of orders. 25s
+        # cadence stays inside the 90s keepalive_expiry; read-only /time probe, touches
+        # no trading state, fail-soft. Pre-warm fires ~immediately so the first submit
+        # after boot is already warm. max_instances=1/coalesce so a slow ping can't stack.
+        scheduler.add_job(
+            _edli_pre_submit_jit_keepalive_tick,
+            "interval",
+            seconds=25,
+            id="edli_presubmit_jit_keepalive",
+            next_run_time=_utc_run_time_after(15.0),
+            max_instances=1,
+            coalesce=True,
         )
         # STRUCTURAL FIX (2026-05-31, #45 follow-up): dedicated ~60s on-chain bankroll
         # cache warmer, DECOUPLED from the slow (~330s) reactor cycle. The reactor's

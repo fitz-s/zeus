@@ -52,7 +52,35 @@ must also clear the floor.
   `..._uses_short_http_timeout` (asserted the regression-causing coupled scalar <1.25s under an
   artificially tight outer=2.5) → `..._uses_decoupled_bounded_timeout`. 119 pre-submit tests pass.
 
-## Forward validation (post-deploy)
+## Hardening (frontier consult REQ-20260622-044035, Pro Extended — independently endorsed)
+The consult agreed (warm reuse + decoupled timeout, not a scalar bump) and found a real
+daemon-protection bug in the first cut: **httpcore applies the connect timeout to
+`connect_tcp` AND `start_tls` separately**, so a `connect=3.5` JIT budget can consume 7.0s
+worst-case > the 6.0s outer guard → reintroduces the leaked-worker pathology the 2026-06-19
+commit fixed. Corrected design (deployed):
+- **STRICT submit profile**: connect=2.25, read=0.85, write=0.25, pool=0.10 → worst case
+  `2*connect + read + write + pool = 5.70s < 6.0s` (inner fails closed FIRST).
+- **Boot pre-warm + 25s keepalive pinger** (`_edli_pre_submit_jit_keepalive_tick`, gated to
+  live mode): GET `/time` (NOT `/book`) on the dedicated warm client with a GENEROUS warmup
+  timeout (connect=4.5), OUTSIDE the submit worker, so cold handshakes are absorbed there and
+  the submit-time fetch always reuses a warm connection. Read-only, fail-soft, touches no
+  trading state, max_instances=1.
+- **Dedicated limits** `PRESUBMIT_JIT_CLOB_HTTP_LIMITS` keepalive_expiry=90s (> 60s cycle).
+- Lock only on singleton init/teardown, never around `/book` (no serialization of clustered
+  candidates). Witness semantics unchanged: every candidate still fetches `/book` for its
+  token; the pinger never supplies the book.
+
+## Forward proof on the deployed code path (live venue, 2026-06-22)
+| step | result |
+|---|---|
+| strict profile | connect=2.25, worst-case 5.70s < 6.0 ✓ |
+| pre-warm (generous, outside worker) | 2271ms, ok=True (absorbed the cold handshake) |
+| strict `/book` fetch ×3 (warm) | 659, 665, 655 ms — all OK; succeed under the 2.25s connect *because* warm |
+
+So the strict profile that would time out a cold handshake never pays one — the pinger keeps
+it warm; every submit fetch is ~0.66s.
+
+## Forward validation (post-deploy, in-vivo)
 Watch zeus-live.err for the disappearance of "JIT book fetch failed ... handshake operation
 timed out" and zeus-live.log for PreSubmitRevalidated rising vs PRE_SUBMIT_BOOK_AUTHORITY
 requeues falling — and an actual order reaching the venue. That live stream is the proof.

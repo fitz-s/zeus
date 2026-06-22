@@ -2673,11 +2673,15 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
     captured = {}
 
     class FakePolymarketClient:
-        def __init__(self, *, public_http_timeout=None):
+        def __init__(self, *, public_http_timeout=None, public_http_limits=None):
             captured["public_http_timeout"] = public_http_timeout
+            captured["public_http_limits"] = public_http_limits
 
         def get_orderbook_snapshot(self, token_id):
             return {"hash": "book-hash", "bids": [{"price": "0.40"}], "asks": [{"price": "0.42"}]}
+
+        def warm_public_connection(self, *, timeout=None):
+            return True
 
         def close(self):
             pass
@@ -2693,9 +2697,12 @@ def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkey
         assert provider("yes-1")["hash"] == "book-hash"
         t = captured["public_http_timeout"]
         assert isinstance(t, httpx.Timeout), "JIT client must receive an explicit httpx.Timeout"
-        assert t.connect > 2.7, f"connect {t.connect} must clear the cold-handshake floor (~2.7s)"
-        assert t.connect + t.read < 6.0, (
-            f"connect+read {t.connect + t.read} must stay under outer guard 6.0s"
+        # Strict submit profile: the boot pre-warm + keepalive pinger keep the socket
+        # warm, so this connect budget is a fail-closed bound. httpcore double-applies
+        # connect to TCP+TLS, so 2*connect+read+write+pool must stay under outer 6.0s.
+        assert 2 * t.connect + t.read + t.write + t.pool < 6.0, (
+            f"worst-case inner budget {2 * t.connect + t.read + t.write + t.pool:.2f}s "
+            "must stay under outer guard 6.0s"
         )
     finally:
         main._edli_reset_pre_submit_jit_clob_client()
