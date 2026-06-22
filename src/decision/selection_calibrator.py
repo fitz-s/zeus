@@ -82,9 +82,17 @@ _Z_95: float = 1.6448536269514722
 _SELECTION_CALIBRATOR_PATH: str = "state/selection_calibrator.json"
 
 # The posterior/proof version this calibrator is bound to. A served artifact whose _meta
-# posterior_version differs is STALE -> fail-closed. (The live replacement path's q mode is
-# BAYES_PRECISION_FUSION; the artifact is fit on those posteriors.)
-DEFAULT_POSTERIOR_VERSION: str = "BAYES_PRECISION_FUSION"
+# posterior_version differs is STALE -> fail-closed.
+#
+# [BLOCKER fix, consult REQ-20260622-154643] This MUST equal the fitter's
+# scripts/fit_selection_calibrator.POSTERIOR_VERSION (the live replacement fused posterior_method
+# string from forecast_posteriors.posterior_method). Previously this default was the q-MODE label
+# "BAYES_PRECISION_FUSION" while the fitter stamped the posterior_METHOD
+# "openmeteo_ecmwf_ifs9_bayes_fusion", so a freshly-fit artifact stale-version-fail-closed on the
+# default path. They are now the same string. The live caller may also pass the exact bundle
+# posterior version into apply_selection_calibrator(expected_posterior_version=...) from the
+# replacement readiness/bundle path; when it does, that wins over this default.
+DEFAULT_POSTERIOR_VERSION: str = "openmeteo_ecmwf_ifs9_bayes_fusion"
 
 # Module-level one-shot cache of the parsed artifact.
 _ARTIFACT_CACHE: Optional[dict] = None
@@ -212,6 +220,180 @@ def isotonic_nondecreasing(xs: Sequence[float], ys: Sequence[float]) -> list[flo
     if len(out) != n:
         out = (out + [out[-1]] * n)[:n] if out else [0.0] * n
     return out
+
+
+def isotonic_nondecreasing_weighted(
+    xs: Sequence[float], ys: Sequence[float], weights: Sequence[float]
+) -> list[float]:
+    """WEIGHTED pool-adjacent-violators isotonic regression ([MEDIUM] fix, consult REQ-...154643).
+
+    Each bucket carries a WEIGHT (its cell N / effective N). When two adjacent buckets violate the
+    monotone order they are pooled to their WEIGHTED mean, so a thin (n=1) bucket cannot materially
+    drag a deep (n=400) neighbour — the unweighted PAVA's flaw. Returns the fitted y-values aligned
+    to ``xs`` (xs assumed sorted ascending).
+    """
+    y = [float(v) for v in ys]
+    w = [max(float(v), 0.0) for v in weights]
+    n = len(y)
+    if n == 0:
+        return []
+    if len(w) != n:
+        w = [1.0] * n
+    # Blocks of [weighted_value, total_weight].
+    blocks: list[list[float]] = []
+    for value, weight in zip(y, w):
+        wt = weight if weight > 0 else 1e-9
+        blocks.append([value, wt])
+        while len(blocks) >= 2 and blocks[-2][0] > blocks[-1][0] + 1e-12:
+            v2, w2 = blocks.pop()
+            v1, w1 = blocks.pop()
+            merged_w = w1 + w2
+            merged_v = (v1 * w1 + v2 * w2) / merged_w
+            blocks.append([merged_v, merged_w])
+    # Re-expand: each ORIGINAL position gets its block's pooled value (block sizes track positions).
+    out: list[float] = []
+    bi = 0
+    counts = _block_position_counts(y, w)
+    for (value, _wt), cnt in zip(blocks, counts):
+        out.extend([value] * cnt)
+        bi += 1
+    if len(out) != n:
+        # Fallback: assign by walking blocks in order against the violation structure.
+        out = _reexpand_by_positions(y, w, blocks)
+    return out
+
+
+def _block_position_counts(y: list[float], w: list[float]) -> list[int]:
+    """Recompute the block boundaries (position counts) for weighted PAVA so re-expansion maps each
+    original position to its pooled block value. Mirrors the merge logic but tracks counts."""
+    blocks: list[list[float]] = []  # [value, weight, count]
+    for value, weight in zip(y, w):
+        wt = weight if weight > 0 else 1e-9
+        blocks.append([value, wt, 1])
+        while len(blocks) >= 2 and blocks[-2][0] > blocks[-1][0] + 1e-12:
+            v2, w2, c2 = blocks.pop()
+            v1, w1, c1 = blocks.pop()
+            merged_w = w1 + w2
+            merged_v = (v1 * w1 + v2 * w2) / merged_w
+            blocks.append([merged_v, merged_w, c1 + c2])
+    return [int(b[2]) for b in blocks]
+
+
+def _reexpand_by_positions(y: list[float], w: list[float], blocks: list[list[float]]) -> list[float]:
+    counts = _block_position_counts(y, w)
+    out: list[float] = []
+    for (value, _wt), cnt in zip(blocks, counts):
+        out.extend([value] * cnt)
+    n = len(y)
+    if len(out) != n:
+        out = (out + [out[-1]] * n)[:n] if out else [0.0] * n
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Beta inverse-CDF + the empirical-Bayes beta-binomial lower bound.
+# ---------------------------------------------------------------------------
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta function (Numerical Recipes betacf)."""
+    MAXIT = 200
+    EPS = 3.0e-12
+    FPMIN = 1.0e-300
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS:
+            break
+    return h
+
+
+def betainc_regularized(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta I_x(a, b) = CDF of Beta(a, b) at x. Pure-Python (no SciPy)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    front = math.exp(lbeta + a * math.log(x) + b * math.log(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def beta_inv_cdf(p: float, a: float, b: float) -> float:
+    """Inverse CDF (quantile) of Beta(a, b) at probability ``p`` via bisection on the regularized
+    incomplete beta. Pure-Python so the runtime never imports SciPy. ``a``,``b`` > 0.
+    """
+    if not (a > 0.0 and b > 0.0):
+        return 0.0
+    p = float(min(max(p, 0.0), 1.0))
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if betainc_regularized(a, b, mid) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-10:
+            break
+    return 0.5 * (lo + hi)
+
+
+def eb_lower_bound(*, p0: float, tau: float, wins: int, n: int, alpha_quantile: float = 0.05) -> float:
+    """Empirical-Bayes beta-binomial lower bound (consult REQ-...154643 STEP-2).
+
+    The full-corpus parent rate ``p0`` is the PRIOR; the selected/would-admitted ``(wins, n)`` is the
+    LIKELIHOOD. With shrinkage strength ``tau``::
+
+        alpha = tau*p0 + wins ;  beta = tau*(1-p0) + n - wins
+        q_safe_lb = BetaInvCDF(alpha_quantile, alpha, beta)
+
+    tau=0 -> the pure-data Beta(wins, n-wins) lower bound; tau->inf -> pins the prior mean p0. The
+    bound is conservative (a lower quantile, always < the posterior mean) and tightens with selected
+    evidence. Returns 0.0 for a degenerate cell.
+    """
+    p0 = float(min(max(p0, 0.0), 1.0))
+    w = float(min(max(int(wins), 0), int(n))) if n > 0 else 0.0
+    a = tau * p0 + w
+    b = tau * (1.0 - p0) + (float(n) - w)
+    # Degenerate guards: a Beta needs a, b > 0. tau=0 with wins=0 or wins=n collapses one shape
+    # parameter; nudge by the Jeffreys 0.5 so the quantile is well-defined and conservative.
+    if a <= 0.0:
+        a = 0.5
+    if b <= 0.0:
+        b = 0.5
+    return float(beta_inv_cdf(alpha_quantile, a, b))
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +531,32 @@ def apply_selection_calibrator(
             q_safe=0.0, trade=False, abstained=True, cell_key=key, L_g=0.0, n_g=0,
             basis="ACTIVE_MISSING_CELL",
         )
+
+    # EB v2 cell: a persisted q_safe_lb (BetaInvCDF computed offline by the fitter) gated on the
+    # SELECTED support count. The runtime serves the persisted bound directly — NO SciPy at runtime.
+    # The selected-support gate (n_selected >= min_n) is the fail-closed authority; the corpus prior
+    # alone never licenses an admit cell (consult: corpus support is a prior, not a license).
+    if "q_safe_lb" in cell:
+        try:
+            q_safe_lb = float(cell.get("q_safe_lb"))
+            n_selected = int(cell.get("n_selected", 0))
+        except (TypeError, ValueError):
+            return _fail_closed(key, "FAIL_CLOSED_MALFORMED")
+        if not (math.isfinite(q_safe_lb) and 0.0 <= q_safe_lb <= 1.0):
+            return _fail_closed(key, "FAIL_CLOSED_MALFORMED")
+        if n_selected < min_n:
+            # Thin SELECTED support -> fail-closed even though a corpus prior exists.
+            return CalibratorVerdict(
+                q_safe=0.0, trade=False, abstained=True, cell_key=key,
+                L_g=float(q_safe_lb), n_g=n_selected, basis="EB_THIN_SELECTED",
+            )
+        q_safe = float(min(max(q_safe_lb, 0.0), max(min(raw_side_prob, 1.0), 0.0)))
+        return CalibratorVerdict(
+            q_safe=q_safe, trade=True, abstained=False, cell_key=key,
+            L_g=float(q_safe_lb), n_g=n_selected, basis="SELECTION_EB_BETA",
+        )
+
+    # v1 cell: a realized hit_rate -> Wilson 95% lower bound.
     try:
         n_g = int(cell.get("n", 0))
         hit_rate = float(cell.get("hit_rate"))

@@ -61,10 +61,10 @@ def test_fit_cells_uses_only_settled_rows_and_keys_match_live_schema():
         _row("2026-06-1{}T00:00:00+00:00".format(i % 10), "NO", 1.0, "nonmodal", 0.87, i % 3 != 0)
         for i in range(60)
     ]
-    artifact = fsc.fit_cells(rows, min_n=30, posterior_version="BAYES_PRECISION_FUSION")
+    artifact = fsc.fit_cells(rows, min_n=30, posterior_version=fsc.POSTERIOR_VERSION)
     assert "_meta" in artifact and "cells" in artifact
     meta = artifact["_meta"]
-    assert meta["posterior_version"] == "BAYES_PRECISION_FUSION"
+    assert meta["posterior_version"] == fsc.POSTERIOR_VERSION
     assert meta["min_n"] == 30
     assert "max_settled_at" in meta
     # Every persisted cell key parses to the live schema (side|lead|class|pbN).
@@ -84,7 +84,7 @@ def test_persisted_bound_is_conservative_below_point():
     # 40/60 wins = 0.667 point; the persisted cell hit_rate is the realized rate, and the runtime
     # serves its beta/Wilson 95% LOWER bound which is < 0.667.
     rows = [_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 40) for i in range(60)]
-    artifact = fsc.fit_cells(rows, min_n=30, posterior_version="BAYES_PRECISION_FUSION")
+    artifact = fsc.fit_cells(rows, min_n=30, posterior_version=fsc.POSTERIOR_VERSION)
     live_key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.87)
     cell = artifact["cells"][live_key]
     assert abs(cell["hit_rate"] - (40 / 60)) < 1e-6
@@ -103,7 +103,7 @@ def test_monotone_in_prob_within_cell_group():
     # high-prob bucket (raw 0.90): realized 0.60 (60 rows) -- INVERTED vs belief
     for i in range(60):
         rows.append(_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.90, i < 36))
-    artifact = fsc.fit_cells(rows, min_n=30, posterior_version="BAYES_PRECISION_FUSION",
+    artifact = fsc.fit_cells(rows, min_n=30, posterior_version=fsc.POSTERIOR_VERSION,
                              enforce_monotone=True)
     lo_key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.55)
     hi_key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.90)
@@ -119,7 +119,7 @@ def test_adverse_selection_recovery_blocks_toxic_no_and_keeps_genuine_yes():
     # Genuine cheap YES: raw 0.45, realized 0.46 (200 rows).
     for i in range(200):
         rows.append(_row("2026-06-10T00:00:00+00:00", "YES", 1.0, "modal", 0.45, i < 92))
-    artifact = fsc.fit_cells(rows, min_n=30, posterior_version="BAYES_PRECISION_FUSION")
+    artifact = fsc.fit_cells(rows, min_n=30, posterior_version=fsc.POSTERIOR_VERSION)
     sc.reset_artifact_cache()
 
     v_no = sc.apply_selection_calibrator(
@@ -135,3 +135,63 @@ def test_adverse_selection_recovery_blocks_toxic_no_and_keeps_genuine_yes():
     )
     assert v_yes.trade is True
     assert v_yes.q_safe - 0.30 > 0.0  # genuine cheap-YES edge preserved
+
+
+# ---------------------------------------------------------------------------
+# Executed-EB hybrid fit (STEP-1 forced: no current-regime would-admit; corpus=prior, executed=lik).
+# ---------------------------------------------------------------------------
+
+def test_fit_eb_cells_persists_q_safe_lb_and_blocks_toxic_no():
+    # Corpus (PRIOR): the full-family NO at raw 0.87 realizes high (0.85) — un-conditioned.
+    corpus = [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 170) for i in range(200)]
+    # Selected (EXECUTED would-admit, admit0=True): the SAME cell realizes only 0.68 (toxic).
+    selected = [_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 71) for i in range(104)]
+    artifact = fsc.fit_eb_cells(
+        corpus_rows=corpus, selected_rows=selected, min_n=30,
+        posterior_version=fsc.POSTERIOR_VERSION, tau=10.0,
+    )
+    key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.87)
+    cell = artifact["cells"][key]
+    assert "q_safe_lb" in cell and "p0_corpus" in cell and "n_selected" in cell and "tau" in cell
+    # The EB lower bound is pulled toward the selected 0.68, BELOW the corpus 0.85.
+    assert cell["q_safe_lb"] < 0.75
+    sc.reset_artifact_cache()
+    v = sc.apply_selection_calibrator(
+        raw_side_prob=0.87, side="NO", lead_days=1.0, bin_class="nonmodal", artifact=artifact,
+    )
+    assert v.trade is True and v.basis == "SELECTION_EB_BETA"
+    assert v.q_safe - 0.70 <= 0.0  # blocks the ~0.70-cost toxic NO
+
+
+def test_fit_eb_cells_fail_closed_when_selected_support_thin():
+    # Corpus deep, but the SELECTED cell has < min_n -> the v2 cell must NOT license (corpus alone
+    # is only a prior). The runtime returns EB_THIN_SELECTED no-trade.
+    corpus = [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 170) for i in range(200)]
+    selected = [_row("2026-06-10T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 4) for i in range(5)]
+    artifact = fsc.fit_eb_cells(
+        corpus_rows=corpus, selected_rows=selected, min_n=30,
+        posterior_version=fsc.POSTERIOR_VERSION, tau=10.0,
+    )
+    key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=0.87)
+    assert artifact["cells"][key]["n_selected"] == 5
+    sc.reset_artifact_cache()
+    v = sc.apply_selection_calibrator(
+        raw_side_prob=0.87, side="NO", lead_days=1.0, bin_class="nonmodal", artifact=artifact,
+    )
+    assert v.trade is False and v.q_safe == 0.0 and v.basis == "EB_THIN_SELECTED"
+
+
+def test_learn_tau_returns_grid_value_by_prequential_score():
+    # A selected population that disagrees with the corpus prior should prefer a SMALLER tau (trust
+    # the data more). learn_tau returns a value from the grid.
+    corpus = [_row("2026-06-09T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 180) for i in range(200)]
+    # selected disagrees strongly (0.55) with deep support across multiple as-of times
+    selected = []
+    for day in range(10, 20):
+        for i in range(40):
+            selected.append(_row(f"2026-06-{day}T00:00:00+00:00", "NO", 1.0, "nonmodal", 0.87, i < 22))
+    tau = fsc.learn_tau(corpus_rows=corpus, selected_rows=selected,
+                        grid=[0.0, 1.0, 5.0, 10.0, 50.0, 250.0])
+    assert tau in [0.0, 1.0, 5.0, 10.0, 50.0, 250.0]
+    # With deep disagreeing data, the prequential-best tau should not pin the (wrong) prior hard.
+    assert tau <= 50.0

@@ -93,7 +93,9 @@ def _artifact(cells: dict, *, version: str = "sel_v1", min_n: int = 30, fitted_b
         "_meta": {
             "authority": "selection_calibrator_v1_walkforward",
             "version": version,
-            "posterior_version": "BAYES_PRECISION_FUSION",
+            # Source-of-truth constant so runtime/fitter version strings can never drift apart
+            # again (the BLOCKER the consult flagged).
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
             "min_n": min_n,
             "max_settled_at": fitted_before,
             "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
@@ -215,10 +217,33 @@ def test_fail_closed_on_stale_artifact_version():
     v = sc.apply_selection_calibrator(
         raw_side_prob=raw, side=side, lead_days=1.0, bin_class=bin_class,
         admission_margin=0.175, artifact=art,
-        expected_posterior_version="BAYES_PRECISION_FUSION",
+        expected_posterior_version=sc.DEFAULT_POSTERIOR_VERSION,
     )
     assert v.trade is False and v.q_safe == 0.0 and v.abstained is True
     assert v.basis == "FAIL_CLOSED_STALE_VERSION"
+
+
+def test_blocker_fix_runtime_and_fitter_version_strings_agree():
+    # [BLOCKER, consult REQ-20260622-154643] A freshly-fit artifact (stamped with the FITTER's
+    # POSTERIOR_VERSION) must NOT stale-version-fail-close on the runtime DEFAULT path. Regression
+    # guard: the two source constants must be identical, and a default-path apply must not be
+    # FAIL_CLOSED_STALE_VERSION.
+    import scripts.fit_selection_calibrator as fsc
+    assert sc.DEFAULT_POSTERIOR_VERSION == fsc.POSTERIOR_VERSION
+    side, lead_b, bin_class = "NO", "L1", "nonmodal"
+    raw = 0.875
+    bucket_idx, _ = sc.raw_prob_bucket(raw)
+    key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
+    # Artifact stamped exactly as the fitter would stamp it.
+    art = {
+        "_meta": {"posterior_version": fsc.POSTERIOR_VERSION, "min_n": 30},
+        "cells": {key: {"n": 104, "hit_rate": 0.679}},
+    }
+    v = sc.apply_selection_calibrator(
+        raw_side_prob=raw, side=side, lead_days=1.0, bin_class=bin_class, artifact=art,
+    )  # default expected_posterior_version
+    assert v.basis != "FAIL_CLOSED_STALE_VERSION"
+    assert v.trade is True
 
 
 def test_no_price_anchoring_q_is_single_authority():

@@ -57,6 +57,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from collections import defaultdict
@@ -267,12 +268,181 @@ def _project_monotone(cells: dict[str, dict]) -> dict[str, dict]:
         keys_sorted = sorted(keys, key=lambda k: int(k.rsplit("pb", 1)[1]))
         xs = [cells[k]["prob_mid"] for k in keys_sorted]
         ys = [cells[k]["hit_rate"] for k in keys_sorted]
-        fitted = sc.isotonic_nondecreasing(xs, ys)
+        # WEIGHTED PAVA ([MEDIUM] fix, consult REQ-...154643): weight each bucket by its N so a thin
+        # cell cannot drag a deep neighbour. Keep wins_raw / n_raw; store the projected hit_rate_iso.
+        ws = [float(cells[k]["n"]) for k in keys_sorted]
+        fitted = sc.isotonic_nondecreasing_weighted(xs, ys, ws)
         for k, y in zip(keys_sorted, fitted):
             out[k] = dict(cells[k])
-            out[k]["hit_rate"] = float(y)
-            out[k]["wins"] = int(round(float(y) * cells[k]["n"]))
+            out[k]["hit_rate_raw"] = float(cells[k]["hit_rate"])
+            out[k]["wins_raw"] = int(cells[k].get("wins", round(cells[k]["hit_rate"] * cells[k]["n"])))
+            out[k]["hit_rate"] = float(y)  # the projected (served) rate
     return out
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical empirical-Bayes hybrid fit (consult REQ-20260622-154643 STEP-2).
+#   corpus rows -> p0_b (the PRIOR, weighted-isotonic in raw prob).
+#   selected rows (executed / would-admit, admit0=True) -> (w_s, n_s) the LIKELIHOOD.
+#   beta-binomial shrinkage with a LEARNED tau -> persisted q_safe_lb (BetaInvCDF offline).
+# STEP-1 forced the EXECUTED-EB fallback: no current-regime would-admit receipts exist, so the
+# selected population is the executed trades; corpus alone never licenses (fail-closed on thin
+# selected support).
+# ---------------------------------------------------------------------------
+
+def _corpus_prior_rates(corpus_rows, *, enforce_monotone: bool = True) -> dict[str, float]:
+    """p0_b = weighted-isotonic full-corpus hit-rate per cell key (the EB PRIOR)."""
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    mids: dict[str, float] = {}
+    for r in corpus_rows:
+        key = sc.cell_key(side=r.side, lead_days=r.lead_days, bin_class=r.bin_class,
+                          raw_side_prob=r.raw_side_prob)
+        counts[key][0] += int(r.side_won)
+        counts[key][1] += 1
+        mids.setdefault(key, sc.raw_prob_bucket(r.raw_side_prob)[1])
+    p0 = {k: (w / n if n else 0.0) for k, (w, n) in counts.items()}
+    if not enforce_monotone:
+        return p0
+    # Weighted isotonic per (side, lead, class) group.
+    groups: dict[tuple, list[str]] = defaultdict(list)
+    for k in p0:
+        side, lead, klass, _pb = k.split("|")
+        groups[(side, lead, klass)].append(k)
+    out = dict(p0)
+    for _g, keys in groups.items():
+        keys_sorted = sorted(keys, key=lambda k: int(k.rsplit("pb", 1)[1]))
+        xs = [mids[k] for k in keys_sorted]
+        ys = [p0[k] for k in keys_sorted]
+        ws = [float(counts[k][1]) for k in keys_sorted]
+        fitted = sc.isotonic_nondecreasing_weighted(xs, ys, ws)
+        for k, y in zip(keys_sorted, fitted):
+            out[k] = float(y)
+    return out
+
+
+def _selected_counts(selected_rows) -> dict[str, list[int]]:
+    """(wins, n) per cell key over the selected/would-admit rows (the LIKELIHOOD)."""
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for r in selected_rows:
+        key = sc.cell_key(side=r.side, lead_days=r.lead_days, bin_class=r.bin_class,
+                          raw_side_prob=r.raw_side_prob)
+        counts[key][0] += int(r.side_won)
+        counts[key][1] += 1
+    return counts
+
+
+def learn_tau(*, corpus_rows, selected_rows, grid=None) -> float:
+    """Learn the shrinkage strength tau by rolling-origin prequential negative-log-likelihood on the
+    SELECTED rows (consult: tau must be LEARNED, never hard-coded).
+
+    For each as-of settlement timestamp T, fit p0_b on the corpus and the selected counts on rows
+    settled STRICTLY before T, then score the selected rows decided at T under the EB posterior MEAN
+    rate. Choose the tau minimizing total prequential NLL. Falls back to a mid grid value when there
+    is insufficient rolling support.
+    """
+    if grid is None:
+        grid = [0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 250.0]
+    p0 = _corpus_prior_rates(corpus_rows)
+    sel_sorted = sorted(selected_rows, key=lambda r: r.settled_at)
+    # Distinct settlement times that have prior rows -> rolling origins.
+    times = sorted({r.settled_at for r in sel_sorted})
+    if len(times) < 2:
+        return float(grid[len(grid) // 2])  # not enough origins to learn -> conservative middle
+    EPS = 1e-9
+    best_tau, best_nll = grid[len(grid) // 2], float("inf")
+    for tau in grid:
+        nll = 0.0
+        scored = 0
+        for T in times:
+            prior_rows = [r for r in sel_sorted if r.settled_at < T]
+            score_rows = [r for r in sel_sorted if r.settled_at == T]
+            if not prior_rows or not score_rows:
+                continue
+            sel_counts = _selected_counts(prior_rows)
+            for r in score_rows:
+                key = sc.cell_key(side=r.side, lead_days=r.lead_days, bin_class=r.bin_class,
+                                  raw_side_prob=r.raw_side_prob)
+                w_s, n_s = sel_counts.get(key, [0, 0])
+                p0_b = p0.get(key, 0.5)
+                a = tau * p0_b + w_s
+                b = tau * (1.0 - p0_b) + (n_s - w_s)
+                mean = a / (a + b) if (a + b) > 0 else p0_b
+                mean = min(max(mean, EPS), 1.0 - EPS)
+                nll -= (math.log(mean) if r.side_won else math.log(1.0 - mean))
+                scored += 1
+        if scored and nll < best_nll:
+            best_nll, best_tau = nll, tau
+    return float(best_tau)
+
+
+def fit_eb_cells(
+    *,
+    corpus_rows,
+    selected_rows,
+    min_n: int = MIN_N_DEFAULT,
+    posterior_version: str = POSTERIOR_VERSION,
+    tau: float | None = None,
+    enforce_monotone: bool = True,
+) -> dict:
+    """Fit the hierarchical EB hybrid artifact (v2). Persists per cell: n_selected, wins_selected,
+    p0_corpus, n_corpus, tau, alpha_post, beta_post, q_safe_lb. Runtime serves q_safe_lb directly
+    (no SciPy at runtime), gated on n_selected >= min_n (corpus alone never licenses).
+    """
+    p0 = _corpus_prior_rates(corpus_rows, enforce_monotone=enforce_monotone)
+    corpus_n: dict[str, int] = defaultdict(int)
+    for r in corpus_rows:
+        corpus_n[sc.cell_key(side=r.side, lead_days=r.lead_days, bin_class=r.bin_class,
+                             raw_side_prob=r.raw_side_prob)] += 1
+    sel_counts = _selected_counts(selected_rows)
+
+    if tau is None:
+        tau = learn_tau(corpus_rows=corpus_rows, selected_rows=selected_rows)
+
+    max_settled = ""
+    for r in list(corpus_rows) + list(selected_rows):
+        if r.settled_at > max_settled:
+            max_settled = r.settled_at
+
+    cells: dict[str, dict] = {}
+    # Union of selected cells (the only ones that can license) — corpus-only cells are NOT persisted
+    # as licensable (corpus is a prior, not a license). We persist selected cells with their EB bound.
+    for key, (w_s, n_s) in sel_counts.items():
+        p0_b = p0.get(key, 0.5)
+        a = tau * p0_b + w_s
+        b = tau * (1.0 - p0_b) + (n_s - w_s)
+        q_safe_lb = sc.eb_lower_bound(p0=p0_b, tau=tau, wins=w_s, n=n_s, alpha_quantile=0.05)
+        cells[key] = {
+            "n": int(n_s), "n_selected": int(n_s), "wins_selected": int(w_s),
+            "p0_corpus": round(float(p0_b), 6), "n_corpus": int(corpus_n.get(key, 0)),
+            "tau": float(tau), "alpha_post": round(float(a), 6), "beta_post": round(float(b), 6),
+            "q_safe_lb": round(float(q_safe_lb), 6),
+        }
+
+    fitted_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    qhash = hashlib.sha256(
+        (_FIT_QUERY + f"|eb|version={posterior_version}|tau={tau}").encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "_meta": {
+            "authority": AUTHORITY,
+            "version": "sel_eb_v2",
+            "schema": "eb_v2",
+            "posterior_version": posterior_version,
+            "min_n": int(min_n),
+            "tau": float(tau),
+            "max_settled_at": max_settled or None,
+            "n_corpus_rows": len(list(corpus_rows)),
+            "n_selected_rows": len(list(selected_rows)),
+            "created": fitted_at,
+            "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
+            "method": "hierarchical_eb_beta_binomial_corpus_prior_selected_likelihood_learned_tau",
+            "lower_bound": "BetaInvCDF(0.05, tau*p0+w_s, tau*(1-p0)+n_s-w_s) persisted (no runtime scipy)",
+            "selection_policy_version": "pre_selection_calibrator_q_lcb_price_gate_v1",
+            "source_query_hash": qhash,
+            "note": "STEP-1: no current-regime would-admit receipts -> selected=executed (fallback); shadow-log to accrue would-admit.",
+        },
+        "cells": cells,
+    }
 
 
 # ---------------------------------------------------------------------------
