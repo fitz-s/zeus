@@ -282,7 +282,7 @@ def _already_enqueued(
     try:
         row = conn.execute(
             """
-            SELECT seed_file, reason FROM cycle_advance_enqueues
+            SELECT seed_file, reason, held_position FROM cycle_advance_enqueues
             WHERE city = ? AND target_date = ? AND metric = ? AND target_cycle_time = ?
             LIMIT 1
             """,
@@ -296,7 +296,16 @@ def _already_enqueued(
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
         return False
-    if allow_missing_seed_file_reenqueue and seed_file and not Path(seed_file).exists():
+    # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held (money-at-risk) marker whose seed
+    # was built then processed/moved out of the live queue but produced NO posterior — the
+    # single_runs serving race materializes BLOCKED on REQUIREMENTS_NOT_MET — must NOT suppress
+    # re-enqueue forever, else the held belief freezes (Panama City 2026-06-22 stuck 13h+) ->
+    # BELIEF_AUTHORITY_FAULT fail-closed HOLD -> reversal exit starved ("observe but not act").
+    # Auto-enable the missing-seed re-enqueue for held rows, mirroring the day0 escape hatch.
+    # Bounded by the upstream needs_advance/coverage gate, so a successfully materialized cycle
+    # (posterior present) never reaches here to churn; a still-PRESENT pending seed also suppresses.
+    held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
+    if (allow_missing_seed_file_reenqueue or held) and seed_file and not Path(seed_file).exists():
         return False
     return True
 
@@ -385,7 +394,12 @@ def _record_enqueue(
         return True
     if seed_file:
         update_before = conn.total_changes
-        if replace_existing_seed_file:
+        # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held re-enqueue must REPLACE an
+        # existing seed-built marker (the moved/BLOCKED row), pairing with the _already_enqueued
+        # held re-heal above. Without this, INSERT OR IGNORE no-ops and the default NULL-seed gap
+        # UPDATE below cannot rewrite a seed-bearing held row, so the re-heal never completes and
+        # the held belief stays frozen.
+        if replace_existing_seed_file or held_position:
             conn.execute(
                 """
                 UPDATE cycle_advance_enqueues

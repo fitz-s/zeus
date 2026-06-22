@@ -477,6 +477,101 @@ def test_day0_observed_extreme_reseed_can_replace_moved_seed_file(tmp_path) -> N
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
 
 
+def test_held_marker_with_moved_seed_reheals_without_day0_optin(tmp_path) -> None:
+    """LIVE FREEZE FIX (2026-06-21): a HELD position whose materialization seed was built then
+    processed/moved out of the live queue but produced NO posterior (the single_runs serving race
+    -> BLOCKED on REQUIREMENTS_NOT_MET) must be re-enqueueable WITHOUT the caller opting in via a
+    day0-observed-extreme. Otherwise the held belief freezes permanently (Panama City 2026-06-22
+    stuck at the 18:00 cycle for 13h+ -> BELIEF_AUTHORITY_FAULT fail-closed HOLD -> reversal exit
+    starved -> 'observe but not act'). Money-at-risk held rows re-heal a moved seed automatically."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    moved_seed = tmp_path / "seeds_processed" / "PanamaCity.moved.json"  # processed out of seeds/
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','PanamaCity','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is False, "held marker with a moved/missing seed must re-heal (no permanent belief freeze)"
+
+
+def test_held_marker_with_present_seed_still_suppresses(tmp_path) -> None:
+    """CHURN GUARD: a held marker whose seed file is STILL PRESENT (validly pending in the queue,
+    not yet processed) must NOT re-enqueue — only a moved/missing seed re-heals. This keeps the
+    re-heal bounded so a pending or already-materialized cycle never rebuilds seeds each tick."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    present_seed = tmp_path / "PanamaCity.pending.json"
+    present_seed.write_text("{}", encoding="utf-8")
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','PanamaCity','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
+        (target_cycle, str(present_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is True, "a held marker with a present (pending) seed must suppress re-enqueue (no churn)"
+
+
+def test_nonheld_marker_with_moved_seed_still_suppresses(tmp_path) -> None:
+    """SCOPE GUARD: the auto re-heal is for MONEY-AT-RISK held rows only. A non-held marker with a
+    moved seed keeps the prior behavior (suppress) unless the caller explicitly opts in via
+    allow_missing_seed_file_reenqueue — the held auto-heal must not silently widen non-held churn."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    moved_seed = tmp_path / "gone" / "CityX.moved.json"
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','CityX','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 0, ?, NULL)""",
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="CityX", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is True, "non-held marker with a moved seed must keep prior suppress behavior"
+
+
+def test_record_enqueue_replaces_moved_seed_for_held_position() -> None:
+    """A held re-enqueue must REPLACE an existing seed-built marker (the moved/BLOCKED row), not be
+    ignored as ALREADY_ENQUEUED. Without auto-replace for held rows the re-heal in _already_enqueued
+    cannot complete (INSERT OR IGNORE no-ops and the default UPDATE only heals a NULL-seed gap)."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','PanamaCity','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 1,
+                   'PanamaCity.old.json', NULL)""",
+        (target_cycle,),
+    )
+    conn.commit()
+    replaced = cycle_advance._record_enqueue(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        consumed_cycle_iso="2026-06-20T18:00:00+00:00", target_cycle_iso=target_cycle,
+        held_position=True, seed_file="PanamaCity.new.json", reason=None,
+    )
+    conn.commit()
+    assert replaced is True, "a held re-enqueue must replace the prior seed-built marker row"
+    row = conn.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues WHERE city='PanamaCity'"
+    ).fetchone()
+    assert row["seed_file"] == "PanamaCity.new.json", "the marker must carry the fresh seed"
+
+
 def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypatch) -> None:
     """Always-decidable repair: a held family with no BPF posterior is a first materialization,
     not CYCLE_ADVANCE_NOT_NEEDED."""
