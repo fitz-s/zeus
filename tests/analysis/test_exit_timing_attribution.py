@@ -192,3 +192,86 @@ def test_additive_decomposition_holds():
     realized = closed_shares * avg_exit_price - entry_cost
     hold_counterfactual = closed_shares * 0.0 - entry_cost  # lost → 0 payoff
     assert realized == pytest.approx(hold_counterfactual + g.exit_alpha_usd)
+
+
+# --- runner integration (in-memory world + ATTACHed trades) ----------------
+
+def _exit_runner_conn():
+    import sqlite3
+    from src.state.schema.settlement_attribution_schema import ensure_table as ensure_sa
+    from src.state.schema.exit_timing_attribution_schema import ensure_table as ensure_eta
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ':memory:' AS trades")
+    ensure_sa(conn)
+    ensure_eta(conn)
+    conn.execute(
+        """
+        CREATE TABLE trades.position_current (
+            position_id TEXT PRIMARY KEY, phase TEXT, exit_price REAL,
+            exit_reason TEXT, shares REAL
+        )
+        """
+    )
+    return conn
+
+
+def _seed_settlement_attribution(conn, *, position_id, won, city="Lucknow"):
+    conn.execute(
+        """INSERT INTO settlement_attribution
+           (attribution_id, position_id, condition_id, city, target_date,
+            temperature_metric, direction, category, won, counts_as_skill_win,
+            graded_at, schema_version)
+           VALUES (?, ?, 'c1', ?, '2026-06-22', 'high', 'buy_yes', 'SKILL_LOSS',
+                   ?, 0, '2026-06-22T00:00:00', 1)""",
+        (f"a-{position_id}", position_id, city, int(won)),
+    )
+
+
+def test_runner_grades_skillful_reversal_exit_from_live_tables():
+    from src.analysis.exit_timing_attribution import run_exit_timing_attribution
+
+    conn = _exit_runner_conn()
+    # Held YES that WOULD have lost (won=0), exited @0.85 via a reversal trigger.
+    _seed_settlement_attribution(conn, position_id="p-rev", won=0)
+    conn.execute(
+        "INSERT INTO trades.position_current VALUES ('p-rev','economically_closed',0.85,'CI_SEPARATED_REVERSAL',10.0)"
+    )
+    stats = run_exit_timing_attribution(conn, only_new=False)
+    assert stats["graded"] == 1
+    assert stats["by_category"].get("SKILLFUL_REVERSAL_EXIT") == 1
+    assert stats["total_exit_alpha_usd"] == pytest.approx(8.5)
+    row = conn.execute(
+        "SELECT category, exit_alpha_usd, is_skillful FROM exit_timing_attribution WHERE position_id='p-rev'"
+    ).fetchone()
+    assert row[0] == "SKILLFUL_REVERSAL_EXIT"
+    assert row[1] == pytest.approx(8.5)
+    assert row[2] == 1
+
+
+def test_runner_excludes_held_to_settlement_positions():
+    """A 'settled' (held-to-settlement) position made no exit decision -> not graded."""
+    from src.analysis.exit_timing_attribution import run_exit_timing_attribution
+
+    conn = _exit_runner_conn()
+    _seed_settlement_attribution(conn, position_id="p-held", won=1)
+    conn.execute(
+        "INSERT INTO trades.position_current VALUES ('p-held','settled',NULL,NULL,10.0)"
+    )
+    stats = run_exit_timing_attribution(conn, only_new=False)
+    assert stats["graded"] == 0
+    assert stats["exited_positions"] == 0
+
+
+def test_runner_idempotent_upsert():
+    from src.analysis.exit_timing_attribution import run_exit_timing_attribution
+
+    conn = _exit_runner_conn()
+    _seed_settlement_attribution(conn, position_id="p-rev", won=0)
+    conn.execute(
+        "INSERT INTO trades.position_current VALUES ('p-rev','economically_closed',0.85,'CI_SEPARATED_REVERSAL',10.0)"
+    )
+    run_exit_timing_attribution(conn, only_new=False)
+    run_exit_timing_attribution(conn, only_new=False)  # re-run must not duplicate
+    n = conn.execute("SELECT COUNT(*) FROM exit_timing_attribution WHERE position_id='p-rev'").fetchone()[0]
+    assert n == 1

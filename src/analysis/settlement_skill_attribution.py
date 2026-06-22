@@ -1376,6 +1376,22 @@ def _run_with_conn(
         # so a graded settlement and its audit-row pnl are committed atomically.
         # Always runs (independent of only_new) so re-grades refresh pnl in place.
         pnl_written = writeback_settlement_pnl_to_audit(world_conn)
+        # Exit-timing attribution (2026-06-22, lifecycle consult): the orthogonal
+        # exit-decision grade. Runs in the SAME batch so the entry-skill row and its
+        # exit-timing row commit atomically. Reads this batch's freshly-written
+        # settlement_attribution.won; always re-grades (only_new=False) so exit alpha
+        # refreshes in place. Never raises out of the batch (audit must not block the
+        # settlement grader); on error the batch still releases with entry grades intact.
+        try:
+            from src.analysis.exit_timing_attribution import run_exit_timing_attribution
+            exit_stats = run_exit_timing_attribution(world_conn, now_utc=now_utc, only_new=False)
+            logger.info(
+                "exit_timing_attribution: graded=%s exited=%s total_exit_alpha_usd=%s by_category=%s",
+                exit_stats["graded"], exit_stats["exited_positions"],
+                exit_stats["total_exit_alpha_usd"], exit_stats["by_category"],
+            )
+        except Exception:  # noqa: BLE001 - exit-timing audit must never block entry grading
+            logger.exception("exit_timing_attribution pass failed (entry grades unaffected)")
         world_conn.execute("RELEASE skill_attr_batch")
     except Exception:
         world_conn.execute("ROLLBACK TO SAVEPOINT skill_attr_batch")
