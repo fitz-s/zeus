@@ -1912,7 +1912,14 @@ def _compute_posterior_payload(
             _k, _uniform_w, _floor_steps = _replacement_sigma_scale_lookup(_city_unit)
             if _city_unit != "C":
                 _k, _uniform_w = 1.0, 0.0  # defense-in-depth: only C families are corrected today
-            if _k > 1.0:
+            # Apply k for BOTH widening (k>1) and SHARPENING (k<1). genuine-alpha 2026-06-21:
+            # the served fused belief drifted too FLAT / over-smoothed, so the MLE now fits k<1
+            # (mode under-weighted ratio 1.63; -6.5% out-of-sample log-loss from a sharpen,
+            # forward-validated). The body is IDENTICAL — σ·k sharpens when k<1 and widens when
+            # k>1. The guard fires for any k != 1.0 (the k=1 no-op stays byte-identical). _k>0.0
+            # is defensive: _replacement_sigma_scale_lookup already clamps k>0, and a k<=0 σ is
+            # nonsensical, so a non-positive k is treated as the inert no-op.
+            if _k != 1.0 and _k > 0.0:
                 _sigma_pred = _sigma_pred * _k
                 _sigma_used = _sigma_pred
                 sigma_scale_k_applied = _k
@@ -2041,7 +2048,11 @@ def _compute_posterior_payload(
             # after mixing, any open-ended catch-all is re-capped at its honest (predictive-sigma) mass
             # in NORMALIZED space, so neither correction can recreate the far-catch-all inflation
             # category. The mass removed by the cap is redistributed over the remaining bins (renorm).
-            if _uniform_w > 0.0 and _k >= 1.0 and _city_unit == "C":
+            # Pedestal applies under SHARPENING too (genuine-alpha 2026-06-21): the `_k >= 1.0`
+            # condition was dropped so a k<1 fit (sharpen) still gets its fitted uniform mixture
+            # w (the two are fit JOINTLY from the same artifact family entry — w lifts the flat
+            # realized tails the scaled Normal alone cannot match, independent of k's direction).
+            if _uniform_w > 0.0 and _city_unit == "C":
                 _uniform_eligible_bins = (
                     [key for key, val in q.items() if float(val) > 0.0]
                     if _day0_obs_extreme_c is not None

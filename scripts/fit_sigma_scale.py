@@ -47,8 +47,9 @@ MODEL
   separately (k controls peakedness, w lifts the flat tails). q_adj is clipped to [EPS, 1−EPS].
 
 FIT
-  scipy.optimize (L-BFGS-B, multi-start) when available; else a fine 2-D grid (k∈[1.0,3.5] step .05,
-  w∈[0,0.30] step .01) + local refine. CIs: profile-likelihood 95% (Δ(−logL)=1.92, χ²₁ 0.95) by
+  scipy.optimize (L-BFGS-B, multi-start) when available; else a fine 2-D grid (k∈[0.6,3.5] step .05,
+  w∈[0,0.30] step .01) + local refine. The grid lower bound K_LO=0.6 is UN-BOUND below 1.0 so the
+  MLE can SHARPEN an over-smoothed (too-flat) forecast (k<1), not only WIDEN (k>1). CIs: profile-likelihood 95% (Δ(−logL)=1.92, χ²₁ 0.95) by
   default — walking outward from the MLE — OR nonparametric bootstrap over CELLS (--bootstrap N).
 
 REFUSAL
@@ -103,7 +104,16 @@ OUT_DEFAULT = os.path.join(REPO, "state", "sigma_scale_fit.json")
 
 # --- thresholds / contract constants -------------------------------------------------------------
 MIN_CELLS_DEFAULT = 60          # < this many settled cells in a unit family → REFUSE (family inert)
-K_LO, K_HI, K_STEP = 1.0, 3.5, 0.05   # grid-fallback search box for k
+# K_LO un-bound below 1.0 (genuine-alpha, 2026-06-21): the served fused belief
+# (openmeteo_ecmwf_ifs9_bayes_fusion) drifted TOO FLAT / over-smoothed (mode-bin
+# realized/expected ratio 1.63 on 614 current settled cells; -6.5% out-of-sample log-loss
+# from a sharpen, forward-validated). The MLE detects the over-width but, with K_LO=1.0,
+# was structurally WIDEN-ONLY — pinned at the lower bound, powerless to SHARPEN. Allowing
+# k<1.0 lets the math-fitted correction reduce σ when the forecast is too flat. K_LO is the
+# single source of truth for the lower bound: the grid (_fit_grid), profile-CI walk
+# (_profile_ci), and the K_PROFILE/_walk lo_bound all derive from it. The scipy bounds +
+# the _neg_log_likelihood validation are updated to use K_LO too (below).
+K_LO, K_HI, K_STEP = 0.6, 3.5, 0.05   # grid-fallback search box for k (lower bound un-bound for sharpen)
 W_LO, W_HI, W_STEP = 0.0, 0.30, 0.01  # grid-fallback search box for w
 EPS = 1e-9                      # q_adj clip so log() is finite
 SIGMA_IMPL_MIN = 0.15           # clamp back-out σ (in STEP units); surface min observed ≈0.150
@@ -415,7 +425,7 @@ def _neg_log_likelihood(cells, k: float, w: float) -> float:
 
     Per bin: won → −log(q_adj); lost → −log(1−q_adj). Vectorized per cell over the bin array.
     """
-    if not (k >= 1.0 - 1e-9 and 0.0 - 1e-9 <= w <= 1.0):
+    if not (k >= K_LO - 1e-9 and 0.0 - 1e-9 <= w <= 1.0):
         return float("inf")
     total = 0.0
     for cell in cells:
@@ -449,14 +459,18 @@ def _fit_mle(cells) -> tuple[float, float, float]:
     """Fit (k, w) by ML. scipy when available (multi-start), else the grid fallback."""
     if _HAVE_SCIPY and _scipy_minimize is not None:
         best = None
-        starts = [(1.0, 0.0), (2.0, 0.05), (2.5, 0.10), (3.0, 0.15)]
+        # Multi-start: WIDEN starts (k>=1) AND SHARPEN starts (k<1) so the optimizer
+        # explores both sides of k=1. The sharpen starts (0.7, 0.85) are required so a
+        # too-flat forecast (which maximizes likelihood at k<1) is found rather than the
+        # optimizer settling at the k=1 anchor (genuine-alpha 2026-06-21).
+        starts = [(1.0, 0.0), (2.0, 0.05), (2.5, 0.10), (3.0, 0.15), (0.7, 0.0), (0.85, 0.05)]
         for k0, w0 in starts:
             try:
                 res = _scipy_minimize(
                     lambda x: _neg_log_likelihood(cells, x[0], x[1]),
                     x0=np.array([k0, w0]),
                     method="L-BFGS-B",
-                    bounds=[(1.0, K_HI), (0.0, 0.5)],
+                    bounds=[(K_LO, K_HI), (0.0, 0.5)],
                 )
                 if res.success or np.isfinite(res.fun):
                     cand = (float(res.x[0]), float(res.x[1]), float(res.fun))
