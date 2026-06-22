@@ -1,6 +1,9 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-06-22
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+#                  + docs/evidence/live_order_pathology/2026-06-22_governor_scope_lattice_decision.md
+#                    (scope-lattice: SCOPED single-market unknowns isolate per-market;
+#                     only SYSTEMIC unknowns trip GLOBAL reduce_only; unscopeable = fail closed)
 """Risk allocation and portfolio-governor gates for R3 A2.
 
 This module is a blocking allocation surface, not a venue client.  It computes
@@ -56,6 +59,12 @@ class CapPolicy:
     max_correlated_exposure_micro: int = 1_000_000_000
     unknown_side_effect_limit: int = 0
     reconcile_finding_limit: int = 0
+    # Scope-lattice systemic escalator: when unknown side effects span this many
+    # or more DISTINCT independent markets, the cluster is treated as a systemic
+    # (common-mode) failure that trips global reduce_only rather than per-market
+    # isolation. A single scoped market's unknown(s) stay below this limit and are
+    # isolated only for that market (see governor scope-lattice decision 2026-06-22).
+    systemic_market_count_limit: int = 2
     ws_gap_seconds_limit: int = 15
     optimistic_exposure_weight: float = 0.5
     taker_min_depth_micro: int = 50_000_000
@@ -78,6 +87,8 @@ class CapPolicy:
             raise ValueError("max_drawdown_pct must be non-negative")
         if int(self.unknown_side_effect_limit) < 0 or int(self.reconcile_finding_limit) < 0 or int(self.ws_gap_seconds_limit) < 0:
             raise ValueError("kill-switch thresholds must be non-negative")
+        if int(self.systemic_market_count_limit) < 1:
+            raise ValueError("systemic_market_count_limit must be >= 1")
         for label, cap in self.max_per_resolution_window_micro.items():
             if not label or int(cap) <= 0:
                 raise ValueError("resolution-window caps require non-empty labels and positive caps")
@@ -94,6 +105,11 @@ class GovernorState:
     ws_gap_seconds: int = 0
     risk_level: RiskLevel = RiskLevel.GREEN
     unknown_side_effect_markets: tuple[str, ...] = ()
+    # Scope lattice (additive): count of unknown side effects classified SYSTEMIC
+    # — either unscopeable (cannot bind to a single market, fail closed) or spanning
+    # >= systemic_market_count_limit distinct markets. Only SYSTEMIC unknowns trip
+    # the GLOBAL reduce_only latch; SCOPED unknowns isolate via unknown_side_effect_markets.
+    systemic_unknown_side_effect_count: int = 0
     manual_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +120,7 @@ class GovernorState:
             "ws_gap_seconds": self.ws_gap_seconds,
             "unknown_side_effect_count": self.unknown_side_effect_count,
             "reconcile_finding_count": self.reconcile_finding_count,
+            "systemic_unknown_side_effect_count": self.systemic_unknown_side_effect_count,
             "kill_switch_armed": self.kill_switch_armed,
             "risk_level": self.risk_level.value,
             "unknown_side_effect_markets": list(self.unknown_side_effect_markets),
@@ -233,7 +250,13 @@ class RiskAllocator:
             return True
         if governor_state.ws_gap_active:
             return True
-        if governor_state.unknown_side_effect_count > 0 or governor_state.reconcile_finding_count > 0:
+        # Reconcile findings are always systemic (common-path accounting failure).
+        if governor_state.reconcile_finding_count > 0:
+            return True
+        # Scope lattice: only SYSTEMIC unknown side effects trip the GLOBAL latch.
+        # SCOPED single-market unknowns isolate via unknown_side_effect_markets
+        # (the per-market reject in can_allocate), and must not freeze the book.
+        if _systemic_unknown_present(governor_state):
             return True
         return governor_state.risk_level in {RiskLevel.DATA_DEGRADED, RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED}
 
@@ -463,18 +486,23 @@ def refresh_global_allocator(
 
     policy = cap_policy or load_cap_policy()
     allocator = RiskAllocator.from_position_lots(conn, policy)
-    unknown_count, unknown_markets = count_unknown_side_effects(conn)
+    scope = classify_unknown_side_effect_scope(conn, policy)
     finding_count = count_open_reconcile_findings(conn)
     governor = get_global_governor(policy)
     governor_state = governor.update_state(
         ledger,
         heartbeat,
         ws_status,
-        unknown_count=unknown_count,
+        unknown_count=scope.total_count,
         finding_count=finding_count,
     )
-    if unknown_markets:
-        governor_state = replace(governor_state, unknown_side_effect_markets=tuple(unknown_markets))
+    # Scope lattice: list scoped markets for per-market isolation (line-186 path),
+    # and publish the systemic count so only SYSTEMIC unknowns trip the GLOBAL latch.
+    governor_state = replace(
+        governor_state,
+        unknown_side_effect_markets=tuple(scope.scoped_markets),
+        systemic_unknown_side_effect_count=scope.systemic_count,
+    )
     configure_global_allocator(allocator, governor_state)
     return summary()
 
@@ -501,6 +529,7 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
         max_correlated_exposure_micro=int(data.get("max_correlated_exposure_micro", CapPolicy().max_correlated_exposure_micro)),
         unknown_side_effect_limit=int(data.get("unknown_side_effect_limit", CapPolicy().unknown_side_effect_limit)),
         reconcile_finding_limit=int(data.get("reconcile_finding_limit", CapPolicy().reconcile_finding_limit)),
+        systemic_market_count_limit=int(data.get("systemic_market_count_limit", CapPolicy().systemic_market_count_limit)),
         ws_gap_seconds_limit=int(data.get("ws_gap_seconds_limit", CapPolicy().ws_gap_seconds_limit)),
         optimistic_exposure_weight=float(data.get("optimistic_exposure_weight", CapPolicy().optimistic_exposure_weight)),
         taker_min_depth_micro=int(data.get("taker_min_depth_micro", CapPolicy().taker_min_depth_micro)),
@@ -740,12 +769,12 @@ def _review_required_carries_submit_side_effect_risk(conn: Any, row: Mapping[str
     return False
 
 
-def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
-    """Count venue commands that still carry unresolved submit-side-effect risk.
+def _gather_risky_unknown_rows(conn: Any) -> list[Mapping[str, Any]]:
+    """Return venue_command rows still carrying unresolved submit-side-effect risk.
 
-    The public name is retained for compatibility with the A2 governor, but the
-    object being counted is broader than one CommandState. REVIEW_REQUIRED and
-    UNKNOWN are operator/recovery handoff states, not allocation clearance.
+    Shared by ``count_unknown_side_effects`` (legacy tuple API) and
+    ``classify_unknown_side_effect_scope`` (scope lattice) so both views derive
+    from one classification pass over the same rows.
     """
 
     with _named_sqlite_rows(conn) as read_conn:
@@ -760,17 +789,105 @@ def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
             """,
             tuple(sorted(_UNRESOLVED_SIDE_EFFECT_STATES)),
         ).fetchall()
-        risky_rows = []
+        risky_rows: list[Mapping[str, Any]] = []
         for raw_row in rows:
             row = _row_mapping(raw_row)
             state = str(row.get("state") or "")
             if state == "REVIEW_REQUIRED" and not _review_required_carries_submit_side_effect_risk(read_conn, row):
                 continue
             risky_rows.append(row)
+    return risky_rows
+
+
+def count_unknown_side_effects(conn: Any) -> tuple[int, tuple[str, ...]]:
+    """Count venue commands that still carry unresolved submit-side-effect risk.
+
+    The public name is retained for compatibility with the A2 governor, but the
+    object being counted is broader than one CommandState. REVIEW_REQUIRED and
+    UNKNOWN are operator/recovery handoff states, not allocation clearance.
+
+    Returns ``(total_count, scoped_markets)`` where ``scoped_markets`` is the
+    sorted set of non-empty market_ids. Unscopeable rows (blank market_id) are
+    counted in ``total_count`` but absent from ``scoped_markets`` — the gap that
+    ``classify_unknown_side_effect_scope`` reads to fail closed.
+    """
+
+    risky_rows = _gather_risky_unknown_rows(conn)
     markets = tuple(
         sorted({str(row.get("market_id") or "") for row in risky_rows if str(row.get("market_id") or "")})
     )
     return len(risky_rows), markets
+
+
+@dataclass(frozen=True)
+class UnknownSideEffectScope:
+    """Scope classification of unresolved unknown submit side effects.
+
+    ``scoped_markets``    — distinct non-empty market_ids that can be isolated
+                            per-market (the line-186 ``unknown_side_effect_same_market``
+                            path keys on these).
+    ``unscopeable_count`` — risky rows whose market_id is blank/ambiguous and so
+                            cannot be bound to one market: FAIL CLOSED -> systemic.
+    ``systemic_count``    — count of unknowns escalated to GLOBAL: all unscopeable
+                            rows, plus the full risky count when distinct scoped
+                            markets reach ``systemic_market_count_limit``.
+    """
+
+    total_count: int
+    scoped_markets: tuple[str, ...]
+    unscopeable_count: int
+    systemic_count: int
+
+    @property
+    def is_systemic(self) -> bool:
+        return self.systemic_count > 0
+
+
+def classify_unknown_side_effect_scope(conn: Any, cap_policy: CapPolicy | None = None) -> UnknownSideEffectScope:
+    """Classify unresolved unknown side effects into SCOPED vs SYSTEMIC.
+
+    Fail-closed rule (governor scope-lattice decision 2026-06-22): an unknown that
+    cannot be confidently scoped to a single market_id (blank/ambiguous market_id)
+    is SYSTEMIC. A cluster spanning ``systemic_market_count_limit`` or more distinct
+    independent markets is SYSTEMIC. Otherwise a single scoped market's unknown(s)
+    are SCOPED and isolate only that market.
+    """
+
+    policy = cap_policy or CapPolicy()
+    risky_rows = _gather_risky_unknown_rows(conn)
+    total = len(risky_rows)
+    scoped_markets = tuple(
+        sorted({str(row.get("market_id") or "") for row in risky_rows if str(row.get("market_id") or "")})
+    )
+    unscopeable_count = sum(1 for row in risky_rows if not str(row.get("market_id") or "").strip())
+    cross_market_systemic = len(scoped_markets) >= int(policy.systemic_market_count_limit)
+    # Unscopeable rows are always systemic. When the distinct scoped-market count
+    # reaches the systemic limit, the entire cluster escalates to global.
+    systemic_count = total if cross_market_systemic else unscopeable_count
+    return UnknownSideEffectScope(
+        total_count=total,
+        scoped_markets=scoped_markets,
+        unscopeable_count=unscopeable_count,
+        systemic_count=systemic_count,
+    )
+
+
+def _systemic_unknown_present(governor_state: GovernorState) -> bool:
+    """Return True when GovernorState carries SYSTEMIC unknown side effects.
+
+    SYSTEMIC trips the GLOBAL reduce_only latch. The fail-closed default applies
+    when an unknown count is present but no scope classification accompanies it
+    (no scoped markets and no explicit systemic count): the unknown is unscopeable
+    by absence of evidence and must freeze globally until scoping exists.
+    """
+
+    if governor_state.systemic_unknown_side_effect_count > 0:
+        return True
+    if governor_state.unknown_side_effect_count <= 0:
+        return False
+    # Unknown(s) present. If at least one market is scoped, treat as SCOPED
+    # (isolated per-market). If NO scope evidence accompanies the count, fail closed.
+    return not governor_state.unknown_side_effect_markets
 
 
 def count_open_reconcile_findings(conn: Any) -> int:
