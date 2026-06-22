@@ -272,22 +272,31 @@ def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
-    def __init__(self, *, public_http_timeout: float | None = None):
+    def __init__(self, *, public_http_timeout: "float | httpx.Timeout | None" = None):
         self._clob_client = None
         self._v2_adapter = None
         self._pending_submission_envelope = None
         self._public_http_client = None
         # When set, overrides PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS for the lazy
-        # public HTTP client.  Discovery callers pass a short timeout (≈5s)
+        # public HTTP client.  Discovery callers pass a short float timeout (≈5s)
         # so a full 50-city CLOB scan cannot block more than
         # 3_calls × timeout × 50_cities = manageable wall-clock.
+        # A pre-built ``httpx.Timeout`` may be passed when connect and read need
+        # to be DECOUPLED — the scalar path below couples connect=t, read=2t, but
+        # a cold TLS handshake to clob.polymarket.com measures ~2.2-2.7s (forward,
+        # 2026-06-22) and must be given a connect budget exceeding it WITHOUT
+        # inflating read to 2t (which would push connect+read past a caller's
+        # outer guard). The submit-time JIT book fetch (GATE #84) uses this.
         self._public_http_timeout = public_http_timeout
 
     def _public_http(self) -> httpx.Client:
         client = getattr(self, "_public_http_client", None)
         if client is None:
             t = self._public_http_timeout
-            if t is not None:
+            if isinstance(t, httpx.Timeout):
+                # Caller supplied an explicit connect/read/write/pool split.
+                timeout = t
+            elif t is not None:
                 # Use explicit connect + read split so TLS handshake is bounded.
                 timeout = httpx.Timeout(connect=t, read=t * 2, write=t, pool=t)
             else:

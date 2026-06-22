@@ -7976,25 +7976,90 @@ def _edli_run_pre_submit_clob_call(label: str, fn):
     )
 
 
+def _edli_pre_submit_jit_book_timeout():
+    """Connect/read timeout for the submit-time JIT ``/book`` fetch (GATE #84).
+
+    A cold TLS handshake to clob.polymarket.com measures ~2.2-2.7s (forward,
+    2026-06-22). The prior path coupled connect=read=inner_io and clamped inner_io
+    to 2.0s, so 118 of 120 JIT fetches over 2026-06-17..06-22 failed with
+    "_ssl.c:1064: The handshake operation timed out" and ~84% of edge-positive
+    orders never reached the venue. Give the handshake a connect budget that
+    clears the measured floor while keeping connect+read strictly below the outer
+    daemon-protection guard so the inner venue IO still times out FIRST (the
+    invariant the 2026-06-19 "bound pre-submit venue reads" commit enforced).
+    """
+
+    import httpx
+
+    outer = _edli_pre_submit_clob_timeout_seconds()
+    read = _edli_pre_submit_inner_io_timeout_seconds()
+    # Headroom 0.5s keeps connect+read strictly under the outer circuit breaker.
+    connect = max(read, min(3.5, outer - read - 0.5))
+    return httpx.Timeout(connect=connect, read=read, write=read, pool=read)
+
+
+_PRE_SUBMIT_JIT_CLOB_CLIENT = None
+_PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK = threading.Lock()
+
+
+def _edli_reset_pre_submit_jit_clob_client():
+    """Drop and close the warm JIT CLOB client (clean shutdown + test isolation)."""
+
+    global _PRE_SUBMIT_JIT_CLOB_CLIENT
+    with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
+        client = _PRE_SUBMIT_JIT_CLOB_CLIENT
+        _PRE_SUBMIT_JIT_CLOB_CLIENT = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - best-effort close on shutdown
+            pass
+
+
+def _edli_pre_submit_jit_clob_client():
+    """Return a WARM, reused CLOB client for the submit-time JIT ``/book`` fetch.
+
+    Reusing one client keeps its TLS connection warm (httpx keepalive) across
+    submit candidates, so each fetch skips the ~2.2-2.7s cold handshake that timed
+    out 118/120 submits (warm reuse drops the fetch to ~0.66s, measured forward
+    2026-06-22). Thread-safe: httpx.Client is safe to share across the pre-submit
+    guard's worker threads; construction is lock-guarded (double-checked).
+    """
+
+    global _PRE_SUBMIT_JIT_CLOB_CLIENT
+    client = _PRE_SUBMIT_JIT_CLOB_CLIENT
+    if client is None:
+        with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
+            client = _PRE_SUBMIT_JIT_CLOB_CLIENT
+            if client is None:
+                from src.data.polymarket_client import PolymarketClient
+
+                client = PolymarketClient(
+                    public_http_timeout=_edli_pre_submit_jit_book_timeout()
+                )
+                _PRE_SUBMIT_JIT_CLOB_CLIENT = client
+    return client
+
+
 def _edli_pre_submit_jit_book_quote_provider():
     """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
     authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
     live CLOB book for exactly the selected candidate at submit time, or ``None``
     if a CLOB client cannot be constructed (caller then falls back to the DB row).
 
-    The client is constructed per call so the provider holds no long-lived
-    connection across reactor cycles; the call only fires for an actual submit
-    candidate (rare, fully gated), so the per-call cost is negligible.
+    Uses a WARM, REUSED client (see ``_edli_pre_submit_jit_clob_client``) so the
+    TLS connection stays warm across submit candidates instead of paying a cold
+    handshake per call. A failed fetch propagates to the caller, which returns
+    ``None`` and falls back/requeues; httpx reopens a fresh pooled connection on
+    the next fetch, so a transiently-dead socket costs at most one requeue.
     """
 
     def _fetch(token_id: str) -> dict:
-        from src.data.polymarket_client import PolymarketClient
-
-        with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
-            return _edli_run_pre_submit_clob_call(
-                "jit_book",
-                lambda: clob.get_orderbook_snapshot(token_id),
-            )
+        clob = _edli_pre_submit_jit_clob_client()
+        return _edli_run_pre_submit_clob_call(
+            "jit_book",
+            lambda: clob.get_orderbook_snapshot(token_id),
+        )
 
     return _fetch
 
