@@ -185,3 +185,46 @@ def test_old_leg_already_closed_leaves_lease_blocking(monkeypatch):
         "SELECT status FROM family_rebalance_intents WHERE intent_id=?", (intent,),
     ).fetchone()
     assert row["status"] == "EXIT_SUBMITTED"  # unchanged — blocking, no counter-entry
+
+
+# --- accessor regression: the old-leg exit SEED price must read the REAL snapshot
+# attribute (orderbook_top_bid). The earlier (best_bid/selected_outcome_best_bid)
+# names do not exist on the snapshot object, so the seed stayed 0.0 and the old-leg
+# exit DEFERRED every cycle (shift-bin silently inert). This drives the REAL
+# _read_old_leg_exit_inputs (not the stub) to lock the fix. (2026-06-22)
+
+def test_old_leg_exit_seed_reads_orderbook_top_bid(monkeypatch):
+    import sqlite3
+    import src.engine.event_reactor_adapter as era
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE position_current (token_id TEXT, no_token_id TEXT, shares REAL, "
+        "chain_shares REAL, phase TEXT, updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO position_current (token_id, shares, phase, updated_at) "
+        "VALUES ('old-tok', 10.0, 'active', '2026-06-22T07:00:00')"
+    )
+
+    monkeypatch.setattr(era, "_latest_exit_snapshot_context", None, raising=False)
+    # The helpers are imported INSIDE the function from exit_lifecycle; patch there.
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(xl, "_latest_exit_snapshot_context",
+                        lambda conn, tok: {"executable_snapshot_id": "snap-1"}, raising=False)
+    monkeypatch.setattr(xl, "_latest_exit_snapshot_identity_seed",
+                        lambda conn, tok: {"executable_snapshot_id": "snap-1"}, raising=False)
+
+    class _Snap:  # real snapshot dataclass exposes orderbook_top_bid (NOT best_bid)
+        orderbook_top_bid = 0.42
+
+    import src.state.snapshot_repo as sr
+    monkeypatch.setattr(sr, "get_snapshot", lambda conn, sid: _Snap(), raising=False)
+
+    out = era._read_old_leg_exit_inputs(conn, old_token_id="old-tok")
+    assert out is not None, "real accessor must produce a usable seed from orderbook_top_bid"
+    shares, current_price, best_bid, _identity = out
+    assert shares == 10.0
+    assert current_price == 0.42  # seeded from orderbook_top_bid, NOT 0.0/deferred
+    assert best_bid == 0.42

@@ -1201,7 +1201,13 @@ def _read_old_leg_exit_inputs(
     except Exception:  # noqa: BLE001
         snap = None
     if snap is not None:
-        for attr in ("best_bid", "selected_outcome_best_bid"):
+        # The executable snapshot dataclass exposes the touch as ``orderbook_top_bid``
+        # (the SAME attribute the existing exit lane reads — see the witness/exit
+        # snapshot handling). The earlier (best_bid/selected_outcome_best_bid) names do
+        # not exist on the snapshot object, so without orderbook_top_bid first the seed
+        # stayed 0.0 and the old-leg exit DEFERRED every cycle (shift-bin never fired —
+        # safe but inert). Real attribute first, the others kept as harmless fallbacks.
+        for attr in ("orderbook_top_bid", "best_bid", "selected_outcome_best_bid"):
             v = getattr(snap, attr, None)
             try:
                 if v is not None and float(v) > 0.0:
