@@ -972,6 +972,10 @@ class _BayesPrecisionFusionFusionOverride:
     # when the grid table is absent ⇒ precision_center_basis is the same as before Option C.
     precision_center_basis: Mapping[str, Mapping[str, float]] | None = None
     precision_basis_hash: str | None = None
+    # Cold-start guard (2026-06-22, Finding 1): models excluded from the center because
+    # their walk-forward VERIFIED settled obs count was below MIN_SETTLED_N.  Empty when
+    # all models are mature (byte-identical to pre-guard in that case).
+    cold_start_excluded_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1344,6 +1348,19 @@ def _replacement_bayes_precision_fusion_override(
             }
         )
 
+        # Cold-start guard provenance (Finding 1, 2026-06-22): models that were
+        # excluded from the center because n < MIN_SETTLED_N.  Derived from the
+        # precision_center_basis: any model with weight=0.0 AND n < MIN_SETTLED_N
+        # was excluded by the guard (not merely absent from the DB).
+        from src.forecast.center import MIN_SETTLED_N as _MIN_SETTLED_N  # noqa: PLC0415
+        _cold_start_excluded: tuple[str, ...] = tuple(
+            sorted(
+                str(_m)
+                for _m, _v in _precision_center_basis.items()
+                if int(_v["n"]) < _MIN_SETTLED_N and _v["weight"] == 0.0
+            )
+        )
+
         used_models = tuple(fused.used_models)
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
@@ -1473,6 +1490,7 @@ def _replacement_bayes_precision_fusion_override(
             current_value_serving=_current_value_serving,
             precision_center_basis=_precision_center_basis or None,
             precision_basis_hash=_precision_basis_hash,
+            cold_start_excluded_models=_cold_start_excluded,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -1522,6 +1540,33 @@ _QLCB_BOOTSTRAP_DRAWS = 200
 # _QLCB_BASIS for the in-module call sites + existing tests that import it by this name.
 _QLCB_BASIS = TRADEABLE_GRADE_QLCB_BASIS
 _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
+
+# ---------------------------------------------------------------------------
+# FAR-TAIL q_lcb HONESTY (2026-06-22) — forward-validated monotone lower-bound calibration.
+#
+# Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
+# Forward-validated by qlcbHonest analysis:
+#   - Far-tail YES bins (served q_point < ~0.05) have q_lcb ~0.07-0.10 in raw bootstrap
+#     but realize ~0.006 frequency → the bootstrap centre-uncertainty draws place them as
+#     too probable. Actual far-tail realized frequency is stationary near-zero across 3 dates.
+#   - Flooring q_lcb at FAR_TAIL_LCB_FLOOR (0.003) = the realized far-tail frequency makes
+#     far-tail YES bins self-reject at typical fill prices (~0.01): edge = 0.003 - 0.01 < 0.
+#   - Kills 191 give-away admissions (188 losers / 3 winners), log-loss −0.22%, zero
+#     winning-bin q_point blowup (q_point UNTOUCHED).
+#   - Shoulder / mode / buy_no path: IDENTITY (byte-identical to prior behavior).
+#
+# IMPLEMENTATION: in _build_fused_q_bounds, after the per-bin bootstrap p5 quantile,
+# for any bin where q_point[bin] < FAR_TAIL_Q_POINT_THRESH apply:
+#   q_lcb[bin] = min(q_lcb[bin], FAR_TAIL_LCB_FLOOR)
+# This is a monotone CEILING on q_lcb (can only decrease it), never zero (the floor is
+# 0.003 > 0 so q_point is still > 0 for any winning bin → no -log blowup). The NO lower
+# bound uses q_ucb_yes; this code does NOT touch q_ucb.
+# ---------------------------------------------------------------------------
+# Forward-validated threshold: q_point bins < this value are in the "far-tail YES" region.
+FAR_TAIL_Q_POINT_THRESH: float = 0.05   # §evidence doc: "served q_point < ~0.05"
+# Forward-validated floor: the realized far-tail frequency (~0.006 mean; 0.003 is conservative
+# and ensures self-reject at the observed fill floor ~0.01 after cost).
+FAR_TAIL_LCB_FLOOR: float = 0.003       # §evidence doc "realized far-tail floor (~0.003)"
 
 # Live rows carry only certified fused-center bootstrap bounds. Degraded or
 # missing-capture carriers are not written into the live posterior table.
@@ -1726,6 +1771,15 @@ def _build_fused_q_bounds(
         # Defensive ordering clips: q_lcb in [0, q_point], q_ucb >= q_point.
         lcb = min(max(lcb, 0.0), max(q_pt, 0.0))
         ucb = max(ucb, q_pt)
+        # FAR-TAIL q_lcb HONESTY (2026-06-22) — monotone ceiling for far-tail YES bins.
+        # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
+        # For bins where the served q_point < FAR_TAIL_Q_POINT_THRESH (0.05), the raw
+        # bootstrap p5 quantile is ~0.07-0.10 due to centre-uncertainty draws but the
+        # realized frequency is ~0.003. Cap q_lcb at FAR_TAIL_LCB_FLOOR (0.003) so these
+        # bins self-reject at typical fill prices. q_point is NEVER modified; q_ucb is
+        # NEVER modified (buy_no path invariant preserved). Identity for q_point >= 0.05.
+        if q_pt < FAR_TAIL_Q_POINT_THRESH:
+            lcb = min(lcb, FAR_TAIL_LCB_FLOOR)
         q_lcb_map[bin_id] = lcb
         q_ucb_map[bin_id] = ucb
         if return_samples:
@@ -1865,6 +1919,10 @@ def _compute_posterior_payload(
     q_ucb_map: dict[str, float] | None = None
     q_bootstrap_samples_by_bin: dict[str, list[float]] | None = None
     q_lcb_basis: str | None = None
+    # FAR-TAIL HONESTY PROVENANCE (2026-06-22): count of bins whose q_lcb was capped by the
+    # far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH). 0 = no far-tail bins / cap did
+    # not fire (identity). Stamped in provenance_payload as a plain fact of the live value.
+    _far_tail_honesty_count: int = 0
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
@@ -2167,6 +2225,22 @@ def _compute_posterior_payload(
                 q_ucb_map = _ucb_map
                 q_bootstrap_samples_by_bin = _q_samples
                 q_lcb_basis = _QLCB_BASIS
+                # FAR-TAIL HONESTY PROVENANCE (2026-06-22): count how many bins had their
+                # q_lcb capped by the far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH
+                # and raw lcb > FAR_TAIL_LCB_FLOOR → capped to FAR_TAIL_LCB_FLOOR).
+                # This is a plain fact of the LIVE value: True (non-zero count) when at
+                # least one far-tail bin was capped; False / 0 when the data had no far-
+                # tail bins (identity for all bins). Recorded in provenance_payload below.
+                # We re-derive from the final q_lcb_map + q_point dict: a bin was capped
+                # iff its q_lcb == FAR_TAIL_LCB_FLOOR AND q_point < FAR_TAIL_Q_POINT_THRESH
+                # (the cap is min(lcb, FLOOR) so equality holds when the floor bit). A bin
+                # where q_point < THRESH but lcb was already ≤ FLOOR before the cap is also
+                # counted (the floor was effectively applied).
+                _far_tail_honesty_count = sum(
+                    1 for _bid, _lcb in _lcb_map.items()
+                    if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
+                    and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
+                )
             except Exception as _qexc:
                 q_lcb_map = None
                 q_ucb_map = None
@@ -2450,6 +2524,12 @@ def _compute_posterior_payload(
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
+        # FAR-TAIL q_lcb HONESTY provenance (2026-06-22): plain fact of the live value.
+        # True when >= 1 far-tail bin (q_point < FAR_TAIL_Q_POINT_THRESH) had its q_lcb
+        # capped at FAR_TAIL_LCB_FLOOR. The count is also stored for diagnostics.
+        # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
+        "q_lcb_far_tail_honesty_applied": _far_tail_honesty_count > 0,
+        "q_lcb_far_tail_honesty_bin_count": _far_tail_honesty_count,
         # Q_LCB / Q_UCB provenance. The role is BASIS-AWARE so the certified fused-center bootstrap
         # bound and any legacy fallback bound never alias: only the
         # bootstrap basis carries the calibration credential (event_reactor_adapter basis-exact
@@ -2549,6 +2629,10 @@ def _compute_posterior_payload(
                 if bayes_precision_fusion_override.current_value_serving
                 else None
             ),
+            # Cold-start guard provenance (Finding 1, 2026-06-22): models excluded from the
+            # center because n_train < MIN_SETTLED_N.  Empty list when all models are mature
+            # (byte-identical provenance to pre-guard in that case).
+            "cold_start_excluded_models": list(bayes_precision_fusion_override.cold_start_excluded_models),
             "runtime_layer": runtime_layer,
         }
     return _PosteriorComputeResult(
