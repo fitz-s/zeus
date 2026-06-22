@@ -1,0 +1,205 @@
+Verdict: build the exit-timing audit first, then implement fill-up/shift-bin as one typed FamilyRebalanceIntent/“re-decide held exposure” operation with delta-to-target sizing, a family lifecycle lease, and close-before-open shift-bin sequencing; do not merely widen allow_same_family_monitor_owned; confidence: medium.
+
+The core reason is that Gap E is observability-only and will not change submit behavior, while Gap D changes live money-path admission and must not reopen the 2026-06-16 double-rest class. The current code already has the right primitives to build the safe version: EDLI redecision uses the live decision path, family exposure is reduced from position_current plus command/order/trade facts, pending/unknown command states are blocking, exit orders already have idempotency and an exit mutex, and the family dedup API already names the missing concept: a typed rebalance intent that explicitly names the existing exposure it may touch. The dangerous part is sizing: the current redecision ranker is exposure-aware for selection, but the final live stake kernel still documents a family-total binary Kelly stake for the selected single leg, not a residual add amount, so fill-up needs an explicit residualizer: entry_delta = max(0, target_total_exposure - current_live_and_pending_exposure) before any order is emitted. src/engine/event_reactor_adapter.py:_robust_marginal_utility_stake_and_price documents single-leg stake = family_total and says ΔU shapes allocation while fractional Kelly is applied once, so Kelly is not by itself a proof that a same-token re-entry is netted. GitHub
+
+Findings
+
+[BLOCKER] lifecycle/exposure admission — src/engine/event_reactor_adapter.py:161, src/strategy/family_exclusive_dedup.py:41-46, gist lines 78-83 — EDLI_REDECISION_PENDING currently broadens same-family admission with a boolean, while fill-up is blocked and shift-bin can open a sibling without coordinated old-leg closure, which is exactly the surface that can recreate double-rest/over-exposure — replace the boolean lift with a typed FamilyRebalanceIntent carrying operation, family_key, held_position_id, held_token_id, held_bin_id, allowed_exposure_ids, decision_generation, and idempotency_key; allow the existing exposure only when it is explicitly named by that intent — verify locally: pytest tests/engine/test_family_rebalance_intent.py tests/strategy/test_family_exclusive_dedup_rebalance_scope.py -q and a sqlite assertion that two concurrent EDLI events for one family create one active rebalance intent and at most one venue command. GitHub+2GitHub+2
+
+[HIGH] fill-up sizing — src/engine/event_reactor_adapter.py:633-645, src/engine/event_reactor_adapter.py:611-623 — current selection/ranking can account for existing exposure, but the live stake kernel documents the emitted single-leg stake as a family-total Kelly amount, so a same-token admission lift can submit another full target rather than the residual fill-up — add an exposure-aware resize seam after the fresh target is computed and before ExecutionIntent/venue command emission: delta_target = target_total - current_position_exposure - live_same_token_entry_orders; submit only if delta_target clears venue minimum and has positive marginal utility at the incremental cost curve — verify locally: pytest tests/engine/test_redecision_fillup_residual_sizing.py -q, with cases current=0, current<target, current==target, current>target, and pending_entry_unknown_blocks. GitHub+1
+
+[HIGH] shift-bin ordering — src/strategy/family_exclusive_dedup.py:_family_keys_conflict, src/strategy/family_exclusive_dedup.py:2244-2320, gist lines 79-83 — weather bins for the same city/date/metric are one mutually exclusive settlement partition, and the strategy comments say live execution is constrained to single-leg by default until a stake-vector/partial-fill/UNKNOWN state machine exists; therefore shift-bin must not open the new bin while the old leg is active — implement close-before-open: acquire family lease, submit old-leg exit, wait for confirmed zero/dust residual or economically-closed state, recompute fresh EDLI decision on current books, then submit the counter-entry only if the fresh decision still passes — verify locally: pytest tests/engine/test_shift_bin_close_before_open.py -q and query that no family has simultaneous active old-bin and new-bin entry commands during the shift path. GitHub+2GitHub+2
+
+[HIGH] concurrency/idempotency — src/strategy/family_exclusive_dedup.py:2536-2579, src/strategy/family_exclusive_dedup.py:3006-3023, src/execution/executor.py:53-60, src/execution/exit_safety.py:1-8 — blocking exposure already includes pending/unknown/review/partial states, and exit submit has idempotency plus an exit mutex, but there is no family-level lifecycle lease covering the whole redecision→exit→counter-entry transaction — add a durable unique active lease for (env, city, target_date, metric) while a rebalance is in PLANNED, EXIT_SUBMITTED, EXIT_UNKNOWN, ENTRY_SUBMITTED, PARTIAL, or REVIEW_REQUIRED; release only on terminal/aborted states; reuse command idempotency keys per leg — verify locally: pytest tests/engine/test_family_rebalance_concurrency.py -q with two threads/processes racing the same EDLI event and with simulated SUBMIT_UNKNOWN_SIDE_EFFECT. GitHub+3GitHub+3GitHub+3
+
+[HIGH] audit attribution — src/analysis/settlement_skill_attribution.py:63-66, src/analysis/settlement_skill_attribution.py:79-82, gist lines 84-87 — the existing grader selects terminal positions and grades settlement payoff against entry decision-q, while settlement PnL writeback computes pnl_usd = (settled_payoff - avg_fill_price) * filled_size - fees; this ignores exit proceeds and therefore cannot credit a correct early/reversal exit — add a separate exit_timing_attribution writer keyed by exit decision/closed lot that computes exit_alpha = net_exit_proceeds - would_have_settled_value after verified settlement, leaving entry-skill rows unchanged — verify locally: pytest tests/analysis/test_exit_timing_attribution.py -q with YES sold at 0.85 settling 0, YES sold at 0.20 settling 1, partial exits, missing settlement, and missing fill proceeds. GitHub+2GitHub+2
+
+[MEDIUM] data capture at exit — src/execution/executor.py:43-60, src/execution/exit_safety.py:0-8 — exit orders carry command/idempotency/snapshot/capability surfaces, but the attribution needs an immutable exit decision certificate equivalent to the entry certificate authority used by settlement_skill_attribution.py — persist exit-time q authority, trigger reason, price snapshot, command IDs, shares closed, avg exit price, fees, and residual shares into an exit audit row before/at submit and complete it from fill facts — verify locally: pytest tests/execution/test_exit_decision_audit_capture.py -q and inspect one live forward exit row after the next real exit fill. GitHub+2GitHub+2
+
+[MEDIUM] public API shape — src/engine/event_reactor_adapter.py:189, src/engine/event_reactor_adapter.py:505-518, src/engine/event_reactor_adapter.py:679-711 — allow_same_family_monitor_owned is too coarse because it scopes admission, opportunity-book proofing, and submit recapture as one yes/no flag — replace or wrap it with same_family_monitor_scope: None | FamilyRebalanceScope, and require every downstream clearance to check scope.allows(proof, exposure_id, operation) rather than event type alone — verify locally: grep -R "allow_same_family_monitor_owned" -n src tests returns no broad money-path boolean bypass except compatibility tests, and all new tests assert scoped denial. GitHub+1
+
+[LOW] forward verification — gist lines 71-75 — operator law rejects backtest/replay as proof, so TDD can prove invariants but not deployment success — add live-chain acceptance queries for “one active family lease”, “no overlap during shift”, “entry_delta <= target-current”, and “exit_alpha row materializes after settlement” — verify locally: sqlite3 zeus-world.db '<acceptance queries>' after the next live fill/exit/settlement. Gist
+
+Recommended realization: FamilyRebalanceIntent, not “lift the same-token invariant”
+
+The superior unification is a single “re-decide held exposure” operation. It should cover three outcomes of the same fresh EDLI redecision: hold/no-op, fill-up same token, or shift-bin by closing the old leg and then possibly entering the new leg. That is simpler and safer than adding separate fill_up, shift_bin, and exit paths because the risk boundary is the same: one family, one held exposure, one fresh decision, one durable lifecycle generation, and no new order unless the current chain/local state still matches the intent.
+
+The input is an EDLI_REDECISION_PENDING event, the complete family topology, fresh executable snapshots, the current q/q_lcb vector, the current position_current row(s), live/pending/unknown venue_commands and order/trade facts, current reserved collateral, and the entry decision certificate for the held position. The existing reactor already treats EDLI redecision as a forecast decision event and threads it through the same q/FDR/Kelly/live submit path; the adapter sets allow_same_family_monitor_owned = event.event_type == "EDLI_REDECISION_PENDING" near the decision body, and the source-truth/phase gates include EDLI redecision in the live boundary. GitHub+1
+
+The state change is a durable row, for example:
+
+family_rebalance_intents(intent_id, event_id, family_key, operation, held_position_id, held_token_id, held_bin_id, selected_token_id, selected_bin_id, q_entry_lcb, q_current_lcb, target_total_exposure_usd, current_exposure_usd, pending_exposure_usd, delta_entry_usd, old_exit_command_id, new_entry_command_id, status, generation, created_at, updated_at, abort_reason, idempotency_key, evidence_json)
+
+Add a unique active index on the family key while status IN ('PLANNED','EXIT_SUBMITTED','EXIT_UNKNOWN','EXIT_PARTIAL','ENTRY_SUBMITTED','ENTRY_UNKNOWN','ENTRY_PARTIAL','REVIEW_REQUIRED'). The existing WeatherFamilyExposureReducer is the right source for blocking exposure because it explicitly merges trade DB and portfolio projections and treats command/order/fill truth plus projection lag as durable command facts, not as optional UI state. GitHub+1
+
+Where the gate should live
+
+The first gate belongs in src/engine/event_reactor_adapter.py, immediately after the reactor has loaded the event-bound family topology/snapshots and before _selection_scoped_proofs clears held-family reasons. This is where the current broad boolean is born at event_reactor_adapter.py:161, and it is also where _selection_exposure is built and passed into the spine/ranker. GitHub+1
+
+The second gate belongs in src/strategy/family_exclusive_dedup.py as a defense-in-depth rule using family_portfolio_allowed_exposure_ids. The file already documents the right contract: different-bin existing exposure blocks new independent entries unless a typed rebalance intent explicitly names the existing exposure id, and new entry intents pass none. Do not bypass this with a global “monitor-owned allowed” flag; pass the one held position_id/command id as the allowed exposure id only for this rebalance generation. GitHub
+
+The final gate belongs immediately before command persistence/submit. Re-read exposure via the canonical reducer and check that the family lease is still active and held by this intent. If any new blocking entry, unknown side-effect, partial order, or unowned same-family exposure appeared, abort without submitting. The blocking phase set includes pending, active, partial, unknown, review, submitted, and submit_unknown_side_effect, so the safe behavior is already consistent with the current exposure contract. GitHub
+
+Precise fill-up condition
+
+Use this as the money-path predicate, not an unscoped same-token bypass:
+
+can_fill_up is true only when all of the following are true.
+
+The event is EDLI_REDECISION_PENDING, the event passed the existing source-truth/phase/fresh snapshot gates, and the fresh decision was produced by the same certified q_lcb/FDR/Kelly route as ordinary entries. The adapter comments say EDLI redecision carries the same FSR-shaped payload and is gated identically, and the reactor’s forecast lane phase gate includes EDLI redecision before scoring. GitHub
+
+There is exactly one open/economically live held exposure for the family, and there are no live/unknown/partial unowned ENTRY commands for the same family. “Exactly one” can allow the current held position_id and no other blocking exposure; if the reducer returns multiple open positions or any unknown command not owned by the same intent, fail closed.
+
+The selected fresh proof is the same token, same bin, same direction as the held position. This is fill-up, not shift-bin. If the fresh primary is a sibling token, route to shift-bin sequencing.
+
+The probability comparison uses the same authority on both sides. Prefer q_lcb_5pct/certified held-side q_lcb, not point posterior, because the money path’s size authority is q_lcb and the attribution file treats immutable decision-time q/q_lcb from the verified certificate as the skill authority. If entry q_lcb is missing, do not fill-up in v1; record FILLUP_ABORT_ENTRY_Q_LCB_MISSING. GitHub
+
+The exact evidence condition should be q_current_lcb > q_entry_lcb plus positive incremental target exposure. If the operator insists on the suggested 0.03 threshold, implement it only as a named evidence hysteresis constant, q_lcb_strengthening_floor = 0.03, with provenance on the receipt; do not present it as a safety cap. My preferred predicate is stricter economically and less arbitrary: target_total_exposure_usd > current_live_and_pending_exposure_usd + venue_min_increment_usd and the incremental cost curve still has positive robust marginal utility. That satisfies “belief strengthened” by letting q_lcb and Kelly/ΔU produce a larger target rather than adding a separate throttle.
+
+The submitted amount is residual: delta_entry_usd = target_total_exposure_usd - current_live_exposure_usd - same_token_pending_entry_usd. Submit nothing if delta_entry_usd <= 0, if it is below venue minimum and cannot be honestly bumped under the existing venue-minimum economics, or if the final submit recapture aborts. This is the critical safety lift: the invariant can be conditionally relaxed only for a residual resize, never for a second full entry.
+
+Exposure accounting: Kelly does not already net fill-up enough
+
+The current code is partially exposure-aware, but not sufficient for safe fill-up. The selection path builds extra_exposure_by_bin_id and documents that existing family exposure lowers marginal utility and can flip a candidate to no-trade. GitHub But the final live stake kernel documents that for single-leg selection, the stake is the family-total binary Kelly amount and that ΔU’s optimal_stake_usd is not the final stake authority. GitHub Therefore the safe implementation must explicitly compute residual target exposure before command emission.
+
+The exposure measure should use the same units consistently. At minimum v1 can use max-loss/cost-basis USD because the current family exposure reducer and portfolio helpers already expose committed USD. For better correctness, store both current_shares and current_cost_basis_usd, then compute the incremental order on the fresh executable cost curve so that the post-fill max-loss budget does not exceed target_total_exposure_usd. For YES/NO, treat the held native token’s payoff correctly; for buy_no, exposure projects onto all other outcomes in the family, matching the selection exposure function’s direction-aware treatment. GitHub
+
+Shift-bin sequencing
+
+Shift-bin should be close-before-open, not “atomically” in the database sense of holding a SQL transaction across venue calls. The correct atomicity is lifecycle atomicity: the family has one active rebalance lease, and the new entry is impossible until the old exposure is proven closed or dust-only. The README documents the lifecycle phases pending_entry → active → day0_window → pending_exit → economically_closed → settled, and the repo’s risk model distinguishes local/chain state with blocking on uncertain or chain-only facts. GitHub
+
+The sequence should be:
+
+Acquire the family rebalance lease and persist operation='SHIFT_BIN', the old position id/token/bin, and the fresh candidate that triggered the shift.
+
+Re-read exposure and commands. If there is any unowned pending/unknown/partial command in the family, abort with SHIFT_ABORT_BLOCKING_EXPOSURE.
+
+Submit a reduce-only exit sell for the old held token using the existing exit path. The exit executor already builds idempotency from decision_id, token, side, price, size, and intent kind; it checks existing idempotency rows, blocks unresolved economic unknowns, calls can_submit_replacement_sell, and acquires ExitMutex per position/token. GitHub+1
+
+Do not submit the new bin until old residual exposure is confirmed zero or below dust/min-order residual from chain/order/fill facts. If the exit is partial, unknown, review-required, or cancel-unknown, the rebalance stays blocking and no counter-entry is allowed.
+
+After old-leg closure, recompute the full family decision on fresh snapshots/books. Do not reuse the pre-exit selected sibling because the reactor itself has a submit-recapture rule that aborts when family rank reverses and says there is no inline switch/WATCH fallback auto-submit. GitHub+1
+
+If the fresh sibling still wins, submit a new entry sized to the fresh target. If no candidate now passes, end the rebalance as EXIT_ONLY_COMPLETE. That is not a false exit if the exit decision was independently justified and audited; it is a market-moved/no-counter-entry outcome.
+
+Error, boundary, concurrency, rollback cases
+
+If the pre-submit DB write fails before the venue call, no side effect occurred; abort the intent and release the lease. The executor already treats pre-submit database locks as transient reject/no order placed for exits. GitHub
+
+If the venue call boundary is crossed and the outcome is unknown, mark the command and the rebalance UNKNOWN/REVIEW_REQUIRED and block the whole family until reconciliation proves absence or terminal state. Do not attempt a replacement or counter-entry. This is consistent with the executor’s SUBMIT_TIMEOUT_UNKNOWN/SUBMIT_UNKNOWN_SIDE_EFFECT handling and the family exposure blocking phases. GitHub+1
+
+If duplicate EDLI events arrive, they should collide on the family lease or on command idempotency and return the existing intent/command, not create a second order. If an already-live fill-up order exists for the same token, the next EDLI event must see it as pending exposure and either no-op or wait.
+
+If old-leg exit fills but the fresh counter-entry no longer passes, stop. Do not “roll back” the exit by buying the old token again unless a later independent redecision selects it. Venue side effects are not database transactions.
+
+Exit-timing audit design
+
+The existing entry-skill grader should remain entry-skill. It selects terminal positions with phase IN ('settled','economically_closed','admin_closed'), uses the immutable entry decision-q authority, and writes one idempotent settlement_attribution row per position. It also writes settlement-derived PnL to edli_live_profit_audit as (settled_payoff - avg_fill_price) * filled_size - fees, which is explicitly settlement payoff, not exit proceeds. GitHub+2GitHub+2
+
+Add a second attribution axis: exit timing. The counterfactual is:
+
+would_have_settled_value_usd = closed_shares * settlement_payoff_per_share
+
+net_exit_value_usd = exit_proceeds_usd - exit_fees_usd
+
+exit_alpha_usd = net_exit_value_usd - would_have_settled_value_usd
+
+For a YES position sold at 0.85 that later settles 0, exit_alpha = +0.85/share before fees. For a YES sold at 0.20 that later settles 1, exit_alpha = -0.80/share before fees. For partial exits, grade each closed lot by its own closed_shares, leaving remaining shares to settlement/other exit rows.
+
+Categories should be settlement-grounded and separable from entry skill:
+
+SKILLFUL_REVERSAL_EXIT: exit was caused by a model/physics/family-rank reversal against the held side, exit_alpha is materially positive, and final settlement confirms the held leg underperformed the exit proceeds.
+
+LUCKY_EXIT_SAVED_LOSS: exit_alpha is materially positive, but the exit decision certificate did not show q/physics evidence against the held side, or the exit was operational/risk/admin rather than predictive.
+
+PREMATURE_EXIT_COST: exit_alpha is materially negative; holding would have produced more value than selling.
+
+CORRECT_HOLD_THROUGH_EXIT_REJECTED is not needed as an exit category unless a real exit decision was emitted and rejected; do not fabricate exit decisions.
+
+NEUTRAL_EXIT: absolute exit_alpha is within fees/dust/materiality threshold.
+
+ADMIN_OR_RISK_EXIT_VALUE_DELTA: record the dollar delta but exclude from model-skill denominator when exit was forced by admin/risk/cutover rather than predictive evidence.
+
+EXIT_UNATTRIBUTABLE_SETTLEMENT_MISSING: no verified settlement yet.
+
+EXIT_UNATTRIBUTABLE_PROCEEDS_MISSING: settlement exists but exit fill/proceeds are not provable.
+
+EXIT_UNATTRIBUTABLE_Q_MISSING: exit happened, but the exit decision-q/reason certificate is missing; value delta can still be reported, but not counted as model skill.
+
+At exit decision time, capture immutable facts sufficient to attribute the exit to the exit decision rather than the entry: exit_decision_id, position_id, entry_decision_id, family_rebalance_intent_id if any, old token/bin/direction, shares intended to close, q_exit/q_lcb_exit for the held side and selected sibling/family, q authority/provenance hash, trigger reason (EDGE_REVERSED, FAMILY_RANK, physics reversal, risk/admin), current book snapshot id, best bid/ask, limit price, expected proceeds, residual target, command id/idempotency key, and timestamp. At fill time, attach actual closed shares, average exit price, net proceeds, fees, order/trade ids, and residual shares. At settlement time, attach verified settlement outcome, payoff per share, would-have-settled value, exit_alpha, category, and rationale.
+
+Composition without double-counting
+
+Keep two ledgers:
+
+Entry skill answers: “Was the original entry aligned with settlement reality if held?” That remains settlement_attribution.
+
+Exit timing answers: “Given the entry existed, did the exit improve realized value versus the counterfactual hold-to-settlement value for the shares it closed?” That is exit_timing_attribution.
+
+The additive decomposition is:
+
+realized_closed_lot_pnl = exit_proceeds - entry_cost
+
+hold_counterfactual_pnl = settlement_payoff - entry_cost
+
+exit_timing_alpha = exit_proceeds - settlement_payoff
+
+So realized_closed_lot_pnl = hold_counterfactual_pnl + exit_timing_alpha.
+
+This avoids double-counting. A trade can have an entry SKILL_LOSS because the held bin ultimately lost, while the exit row is SKILLFUL_REVERSAL_EXIT because the system sold before the loss. That exactly matches the operator’s statement that a trade aligned initially and then correctly reversed before market notice is also a good trade. Gist
+
+Sequencing
+
+Build E first. It changes no submit decisions, improves truthfulness of every subsequent D event, and gives forward evidence for whether exits and shift-bin closes are helping. The smallest forward-verifiable increment is: create exit_decision_audit plus exit_timing_attribution; populate exit audit on the next real exit submit/fill; after verified settlement, compute exit_alpha_usd and category; show that the existing settlement_attribution entry row is unchanged. TDD can use synthetic sqlite fixtures, but the acceptance proof must be a forward real-chain exit and settlement.
+
+Then build D in two live increments.
+
+D1: same-token fill-up only. No sibling shift. Add FamilyRebalanceIntent(operation='FILL_UP'), scoped allowed exposure id, residual sizing, family lease, duplicate EDLI collision tests, and final pre-submit exposure reread. Forward verification: the next held same-token EDLI redecision either produces a no-submit reason or exactly one delta order, with current + pending + delta <= target_total and no second full Kelly order.
+
+D2: shift-bin close-before-open. Add operation='SHIFT_BIN', old-leg exit submission under the family lease, no counter-entry until old residual is proven closed, and mandatory fresh recompute before new entry. Forward verification: one live shift candidate produces an exit command; no new sibling entry appears while old exposure is active/partial/unknown; if the exit closes and fresh recompute still passes, one new entry command appears under the same intent generation.
+
+Alternatives weighed and rejected
+
+I reject “just lift the same-token invariant for EDLI when q_current > q_entry + 0.03.” The strongest case for it is minimal code churn and reuse of the existing redecision→entry screen→submit chain. The problem is that the current final stake kernel is not proven residual; it documents a family-total single-leg stake, so a direct lift can submit another target-sized order. It also does not solve duplicate EDLI races or pending unknown commands. GitHub+1
+
+I reject “leave shift-bin as open-new-leg plus old monitor exit later.” The strongest case for it is that it preserves opportunity capture when the new bin is temporarily cheap. The problem is that the code’s own strategy notes say live default is single-leg until a multi-leg execution state machine exists, and family identity is the complete city/date/metric partition, not a venue slug-level distinction. GitHub+1
+
+I reject adding caps, cooldowns, time bans, maker-only, or q haircuts. The operator laws explicitly require honest evidence gates and no artificial caps/throttles/shadow builds, and the current stake kernel already removed an artificial min-order percentage cap for that reason. Gist+1
+
+I reject replacing the entry grader with realized PnL only. It would credit exits but destroy the distinction between entry truth and exit timing. The right model is two composable attribution rows: entry-vs-settlement and exit-proceeds-vs-settlement counterfactual.
+
+Strongest case against my recommendation: close-before-open can miss profitable shifts when the old leg is illiquid or the new bin reprices before the exit fills. That is real EV drag. I still recommend it because the current system does not yet have a tested multi-leg/partial-fill/UNKNOWN state machine, and the binding safety law is “no false exit or entry.” Once a true family portfolio/stake-vector execution engine exists, shift-bin can become a two-leg rebalance with explicit maximum overlap, partial-fill handling, and chain-proven recovery; until then, close-before-open is the minimal safe live implementation.
+
+Highest-value local checks
+
+grep -R "allow_same_family_monitor_owned" -n src tests and replace broad money-path uses with a scoped FamilyRebalanceScope; verify every clearance checks operation, held id, token/bin, and generation.
+
+pytest tests/engine/test_redecision_fillup_residual_sizing.py -q: prove q strengthening alone never emits an order unless residual target is positive, no pending/unknown command exists, and duplicate EDLI events do not double-submit.
+
+pytest tests/engine/test_shift_bin_close_before_open.py -q: prove sibling entry is impossible until old exposure is closed/dust and a fresh recompute still selects the sibling.
+
+pytest tests/analysis/test_exit_timing_attribution.py -q: prove exit_alpha = proceeds - would_have_settled, entry attribution remains unchanged, partial exits are per-lot, and missing settlement/proceeds/q are unattributable rather than guessed.
+
+Forward live acceptance query after deployment: for every active family_rebalance_intent, count active family entry/exit commands and assert no unowned overlap; for every fill-up command, assert submitted_delta_usd <= target_total_usd - current_and_pending_usd + rounding_tolerance; for every settled exited lot, assert one exit-timing attribution row.
+
+Sources used
+
+I used the provided gist context/operator laws and gap analysis, especially lines 71-87 for the money path, no-caps/no-shadow/no-false-entry constraints, fill-up/shift-bin gap, and exit-audit gap. Gist+1
+
+I used src/engine/event_reactor_adapter.py for EDLI same-family admission, source/phase gates, exposure-aware selection inputs, robust marginal utility ranking, final stake kernel, submit recapture, and no-inline-switch behavior. GitHub+4GitHub+4GitHub+4
+
+I used src/strategy/family_exclusive_dedup.py for the “remove-only” safety posture, blocking phases, typed allowed exposure id contract, family conflict semantics, and canonical exposure reducer. GitHub+3GitHub+3GitHub+3
+
+I used src/analysis/settlement_skill_attribution.py for the existing entry-only settlement attribution, immutable decision-q authority, terminal phase query, settlement-attribution persistence, and settlement-only PnL writeback. GitHub+3GitHub+3GitHub+3
+
+I used src/execution/executor.py and src/execution/exit_safety.py for exit order idempotency, replacement-sell blocking, unknown side-effect handling, and exit mutex behavior. GitHub+2GitHub+2
+
+Could not read src/services/monitor_refresh.py at the guessed raw path; GitHub returned 404 for that path. If the exit monitor lives elsewhere, the smallest fact that could change implementation placement is the exact module that currently emits reversal exits, but it would not change the architecture: exit audit capture belongs at the exit decision/command seam and fill-up/shift-bin gating belongs at the EDLI redecision admission plus final pre-submit exposure reread.
+
+Load-bearing assumptions
+
+I assume Polymarket weather positions here are long native YES/NO tokens with sell-to-close exits, so exit proceeds are directly attributable per closed share. If there is a short/borrowed or synthetic liability path, the exit counterfactual formula must be generalized to close-cost avoided liability, but the same realized exit value - would-have-settled value principle holds.
+
+I assume q_lcb_5pct or an equivalent certified held-side lower bound is available for new EDLI decisions and should be added to held position entry metadata if not already stored. If historical held rows lack entry q_lcb, v1 should not fill-up those rows; it may still shift/exit if the exit decision has its own certified q authority.
+
+I assume local command/order/fill facts can prove residual exposure to zero/dust before counter-entry. If not, D2 must stop at close-only with review-required until reconciliation is strengthened.
