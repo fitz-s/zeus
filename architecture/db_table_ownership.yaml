@@ -1415,6 +1415,35 @@ tables:
       audit evidence; never a venue command, order truth, settlement truth, or
       calibration training input.
 
+  - name: family_rebalance_intents
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: intent_id
+    required_columns:
+      - {name: intent_id, type: TEXT, nullable: false}
+      - {name: family_key, type: TEXT, nullable: false}
+      - {name: operation, type: TEXT, nullable: false}
+      - {name: status, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: updated_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Family-rebalance lifecycle LEASE (2026-06-22, lifecycle design consult
+      REQ-20260622-060011 — D1 fill-up / D2 shift-bin). One ACTIVE row per
+      (env,city,target_date,metric) family while a re-decide-held-exposure operation
+      is in flight; the partial UNIQUE index uq_family_rebalance_active over the
+      non-terminal statuses is THE concurrency guard against the duplicate-EDLI /
+      SUBMIT_UNKNOWN double-submit race (the 2026-06-16 double-rest class) — a second
+      concurrent acquire on the same family hits IntegrityError and the caller
+      no-ops. Released only on COMPLETE / ABORTED / EXIT_ONLY_COMPLETE. Sole writer =
+      src/strategy/family_rebalance.py (the lease manager; acquire/advance). NO
+      daemon_writer field (the rebalance runs in the trading daemon, not
+      src.ingest_main). Lifecycle-coordination ledger; never a venue command, order
+      truth, or settlement truth (those remain in venue_commands / venue_order_facts
+      / settlement tables).
+
   - name: outcome_fact
     db: world
     schema_class: legacy_archived

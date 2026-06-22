@@ -3166,6 +3166,12 @@ def init_schema(
     from src.state.schema.exit_timing_attribution_schema import ensure_table as _ensure_exit_timing_attribution_table
     _ensure_exit_timing_attribution_table(conn)
 
+    # Family-rebalance lifecycle lease (2026-06-22, lifecycle consult): the
+    # concurrency guard (one active rebalance per family) for D1 fill-up / D2
+    # shift-bin. Sole writer = src/strategy/family_rebalance.py (lease manager).
+    from src.state.schema.family_rebalance_intents_schema import ensure_table as _ensure_family_rebalance_intents_table
+    _ensure_family_rebalance_intents_table(conn)
+
     # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
     from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
     _ensure_decision_certificate_tables(conn)

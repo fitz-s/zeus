@@ -104,3 +104,62 @@ def test_q_strengthening_floor_hysteresis():
     assert d.allow is False  # 0.31 - 0.30 = 0.01 < 0.03 floor
     d2 = decide_fill_up(**_base(q_current_lcb=0.34, q_entry_lcb=0.30, q_strengthening_floor=0.03))
     assert d2.allow is True  # 0.04 >= 0.03
+
+
+# --- lease manager (concurrency guard) -------------------------------------
+
+def _lease_conn():
+    import sqlite3
+    from src.state.schema.family_rebalance_intents_schema import ensure_table
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    return conn
+
+
+def test_lease_acquire_then_second_concurrent_acquire_is_none():
+    """The core concurrency guard: one active lease per family. A second acquire on
+    the same family while the first is active returns None (no second order)."""
+    from src.strategy.family_rebalance import acquire_rebalance_lease
+
+    conn = _lease_conn()
+    first = acquire_rebalance_lease(
+        conn, family_key="live|Tokyo|2026-06-23|high", operation="FILL_UP",
+        now_iso="2026-06-22T06:40:00", held_position_id="p1",
+    )
+    assert first is not None
+    second = acquire_rebalance_lease(
+        conn, family_key="live|Tokyo|2026-06-23|high", operation="FILL_UP",
+        now_iso="2026-06-22T06:40:01", held_position_id="p1",
+    )
+    assert second is None  # family already leased — fail closed
+
+
+def test_lease_release_allows_next_acquire():
+    from src.strategy.family_rebalance import acquire_rebalance_lease, advance_rebalance_lease
+
+    conn = _lease_conn()
+    fk = "live|Milan|2026-06-23|high"
+    first = acquire_rebalance_lease(conn, family_key=fk, operation="FILL_UP", now_iso="t0")
+    advance_rebalance_lease(conn, first, status="COMPLETE", now_iso="t1")
+    second = acquire_rebalance_lease(conn, family_key=fk, operation="FILL_UP", now_iso="t2")
+    assert second is not None  # released — next rebalance may acquire
+
+
+def test_lease_intermediate_status_keeps_family_locked():
+    from src.strategy.family_rebalance import acquire_rebalance_lease, advance_rebalance_lease
+
+    conn = _lease_conn()
+    fk = "live|Dallas|2026-06-23|high"
+    first = acquire_rebalance_lease(conn, family_key=fk, operation="SHIFT_BIN", now_iso="t0")
+    advance_rebalance_lease(conn, first, status="EXIT_SUBMITTED", now_iso="t1")  # still active
+    second = acquire_rebalance_lease(conn, family_key=fk, operation="SHIFT_BIN", now_iso="t2")
+    assert second is None  # mid-flight rebalance still holds the family
+
+
+def test_lease_distinct_families_independent():
+    from src.strategy.family_rebalance import acquire_rebalance_lease
+
+    conn = _lease_conn()
+    a = acquire_rebalance_lease(conn, family_key="live|Tokyo|2026-06-23|high", operation="FILL_UP", now_iso="t0")
+    b = acquire_rebalance_lease(conn, family_key="live|Seoul|2026-06-23|high", operation="FILL_UP", now_iso="t0")
+    assert a is not None and b is not None and a != b
