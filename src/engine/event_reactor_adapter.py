@@ -256,6 +256,7 @@ from src.strategy import market_phase_evidence as _market_phase_evidence
 # ranks the materialized NativeSideCandidates by ΔU and applies the §13
 # "robust marginal expected log utility <= 0" no-trade gate on the LIVE path.
 from src.strategy import utility_ranker
+from src.strategy import fill_up_wiring as _fill_up_wiring
 from src.strategy.redecision import (
     CandidateLifecycleState,
     RecaptureInputs,
@@ -644,6 +645,29 @@ def _is_entry_held_family_reason(reason: object) -> bool:
     return str(reason or "").strip().startswith(_ENTRY_HELD_FAMILY_REASON_BASE)
 
 
+def _is_entry_held_same_token_reason(reason: object) -> bool:
+    """True for the SAME-TOKEN held-position scoping reason.
+
+    D1 fill-up (2026-06-22 lifecycle consult): the same-token held reason
+    (``OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED``) is DISTINCT from the same-family
+    (different-bin) reason; the held-position selection filter must ADMIT a same-token
+    held proof for an EDLI redecision so the fill-up candidate can be selected (the
+    downstream decide_fill_up + lease gate is the real safety control). Fresh entries
+    never set ``allow_same_family_monitor_owned``, so this never widens the entry path.
+    """
+    return str(reason or "").strip().startswith(_ENTRY_HELD_POSITION_REASON_BASE)
+
+
+def _is_entry_held_redecision_reason(reason: object) -> bool:
+    """A held-position reason a redecision (fill-up or shift-bin) may keep selectable.
+
+    Either the same-token (fill-up) OR the same-family/different-bin (shift-bin)
+    held reason. Used ONLY under ``allow_same_family_monitor_owned`` (the EDLI
+    redecision lane), so the fresh-entry selection scope is byte-identical.
+    """
+    return _is_entry_held_same_token_reason(reason) or _is_entry_held_family_reason(reason)
+
+
 def _durable_live_cap_final_intent_token(final_intent_id: str) -> str:
     token = str(final_intent_id or "").rsplit(":", 1)[-1].strip()
     return token if token and token != str(final_intent_id or "") else ""
@@ -1021,6 +1045,69 @@ def _durable_unmaterialized_live_cap_reservations(
         if usage_id and reserved > 0.0:
             out.append((f"durable_live_cap:{usage_id}", city, reserved))
     return tuple(out)
+
+
+def _same_token_pending_entry_usd(
+    conn: sqlite3.Connection | None,
+    *,
+    token_id: str,
+    trade_conn: sqlite3.Connection | None = None,
+) -> float:
+    """Sum durable in-flight ENTRY notional for the SAME token not yet materialized.
+
+    D1 fill-up residual sizing (consult [HIGH] fill-up sizing): the residual to the
+    fresh target nets a live SAME-token pending entry from a prior cycle that has not
+    yet reached ``position_current`` — without this a fill-up could re-add capital
+    already in flight for the same leg. Reuses the existing durable-live-cap reducer
+    (``_durable_unmaterialized_live_cap_reservations``) and filters to the rows whose
+    ``final_intent_id`` token suffix equals the selected token. Fails CLOSED: any read
+    error raises (the caller treats sizing-truth ambiguity as a no-fill-up), never
+    silently returns 0 and over-sizes.
+    """
+    token = str(token_id or "").strip()
+    if conn is None or not token:
+        return 0.0
+    total = 0.0
+    if not (
+        _adapter_table_exists(conn, "edli_live_cap_usage")
+        and _adapter_table_exists(conn, "edli_live_order_events")
+    ):
+        return 0.0
+    # Per-token in-flight sum: reserved live-cap rows for THIS token not yet
+    # represented in trade truth. The city-keyed _durable_unmaterialized_live_cap_
+    # reservations tuple is not token-scoped, so re-derive directly from the live-cap
+    # rows and filter by the final_intent_id token suffix, reusing the SAME
+    # represented-in-trade-truth check the city reducer uses (no parallel exposure
+    # calc).
+    rows = conn.execute(
+        """
+        SELECT final_intent_id, execution_command_id, reserved_notional_usd
+          FROM edli_live_cap_usage
+         WHERE reservation_status IN ('RESERVED', 'CONSUMED')
+           AND reserved_notional_usd > 0
+        """
+    ).fetchall()
+    for row in rows:
+        final_intent_id = str(
+            row[0] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or ""
+        )
+        execution_command_id = str(
+            row[1] if not isinstance(row, sqlite3.Row) else row["execution_command_id"] or ""
+        )
+        reserved = float(
+            row[2] if not isinstance(row, sqlite3.Row) else row["reserved_notional_usd"]
+        )
+        if _durable_live_cap_final_intent_token(final_intent_id) != token:
+            continue
+        if _durable_live_cap_usage_is_represented_in_trade_truth(
+            trade_conn or conn,
+            execution_command_id=execution_command_id,
+            final_intent_id=final_intent_id,
+        ):
+            continue
+        if reserved > 0.0:
+            total += reserved
+    return total
 
 
 def _seed_portfolio_reservations_from_durable_live_cap(
@@ -1964,6 +2051,38 @@ def event_bound_live_adapter_from_trade_conn(
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
+                # D1 FILL-UP PRE-SUBMIT REREAD (2026-06-22 lifecycle consult §"final
+                # gate"): for an APPROVED same-token fill-up, before any command build /
+                # venue call, re-read family exposure on fresh truth. If a NEW unowned /
+                # unknown same-family entry appeared between admission and submit, abort
+                # (advance the lease ABORTED) and emit NO order — the only safe response
+                # to the over-exposure hazard reappearing mid-flight. No-op for every
+                # non-fill-up receipt (fill_up_lease_payload is None → entry path
+                # byte-identical).
+                _fill_up_lease = no_submit_receipt.fill_up_lease_payload
+                if _fill_up_lease is not None:
+                    _reread_abort = _fill_up_wiring.presubmit_reread_aborts(
+                        trade_conn,
+                        city=str(_fill_up_lease.get("city") or ""),
+                        target_date=str(_fill_up_lease.get("target_date") or ""),
+                        temperature_metric=str(_fill_up_lease.get("metric") or ""),
+                        owned_position_id=str(_fill_up_lease.get("owned_position_id") or ""),
+                        owned_token_id=str(_fill_up_lease.get("owned_token_id") or ""),
+                    )
+                    if _reread_abort is not None:
+                        _fill_up_wiring.abort_fill_up_lease(
+                            trade_conn,
+                            _fill_up_lease.get("intent_id"),
+                            now_iso=decision_time.astimezone(UTC).isoformat(),
+                            reason=_reread_abort,
+                        )
+                        return EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason=f"FILL_UP_PRESUBMIT_REREAD_ABORT:{_reread_abort}",
+                            proof_accepted=False,
+                        )
                 command_certificates = _run_live_order_build_savepoint(
                     build_conn,
                     lambda: _build_live_execution_command_certificates(
@@ -1991,6 +2110,30 @@ def event_bound_live_adapter_from_trade_conn(
                     _live_submit_count[0] += 1
                 if submit_result.venue_ack_received:
                     _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
+                # D1 FILL-UP lease terminal advance: COMPLETE on a venue ack, ABORTED
+                # otherwise (a non-ack submit result means no resting order materialized
+                # for this fill-up, so release the family for the next legitimate
+                # rebalance). No-op for non-fill-up receipts.
+                if _fill_up_lease is not None:
+                    _now_iso = certificate_decision_time.isoformat() if hasattr(
+                        certificate_decision_time, "isoformat"
+                    ) else decision_time.astimezone(UTC).isoformat()
+                    if submit_result.venue_ack_received:
+                        _fill_up_wiring.complete_fill_up_lease(
+                            trade_conn,
+                            _fill_up_lease.get("intent_id"),
+                            now_iso=_now_iso,
+                            new_entry_command_id=str(
+                                getattr(getattr(command, "header", None), "certificate_id", "") or ""
+                            ),
+                        )
+                    else:
+                        _fill_up_wiring.abort_fill_up_lease(
+                            trade_conn,
+                            _fill_up_lease.get("intent_id"),
+                            now_iso=_now_iso,
+                            reason=f"FILL_UP_SUBMIT_NO_ACK:{submit_result.status}",
+                        )
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=certificate_decision_time,
@@ -3470,6 +3613,103 @@ def _build_event_bound_no_submit_receipt_core(
                 free_cash_usd=free_cash_usd,
             )
         )
+        # D1 FILL-UP (2026-06-22 lifecycle consult REQ-20260622-060011): the ONLY
+        # additive money-path branch. For an EDLI_REDECISION_PENDING whose freshly-
+        # selected winning leg is the SAME token as an existing held position, the
+        # family-total ΔU stake (_robust_stake_usd) is NOT what we submit — we top up
+        # the EXISTING position by the RESIDUAL to the fresh target
+        # (delta = target - current_live - same_token_pending), gated by the committed
+        # decide_fill_up predicate + the family-rebalance lease. Everything else
+        # (fresh entries, shift-bin siblings, non-redecision) takes the
+        # `held is None`/NOOP branch and runs BYTE-IDENTICAL to the prior path.
+        #
+        # Placed AFTER the recapture proved may_submit and BEFORE kelly.size_usd is
+        # bound: overriding _robust_stake_usd here keeps the portfolio reservation,
+        # cost-basis hash, receipt kelly_size_usd, actionable cert and USD->shares
+        # conversion ALL coherent off the one value (consult: the single chokepoint).
+        if _recapture.may_submit and allow_same_family_monitor_owned:
+            _held_same_token = _fill_up_wiring.read_held_same_token_exposure(
+                trade_conn, token_id=str(selected_token_id or "")
+            )
+            if _held_same_token is not None:
+                # Venue minimum in USD: min_order_size (shares) priced at the chosen
+                # execution price (the same fee-deducted boundary the order pays).
+                # This is the residual floor decide_fill_up uses; a residual below it
+                # is denied (RESIDUAL_BELOW_VENUE_MIN). The recapture kernel separately
+                # enforces the true venue-min bump, so this is a secondary guard.
+                _min_order_shares = (
+                    _float_or_default(row.get("min_order_size"), 1.0)
+                    if isinstance(row, Mapping) else 1.0
+                )
+                _price_for_min = float(getattr(execution_price, "value", 0.0) or 0.0)
+                _venue_min_usd = (
+                    _min_order_shares * _price_for_min
+                    if _price_for_min > 0.0 else _min_order_shares
+                )
+                _same_token_pending = _same_token_pending_entry_usd(
+                    locked_opportunity_conn,
+                    token_id=str(selected_token_id or ""),
+                    trade_conn=trade_conn,
+                )
+                _fill_up_plan = _fill_up_wiring.plan_fill_up(
+                    trade_conn,
+                    is_redecision_event=True,
+                    family_key=str(family.family_id or ""),
+                    event_id=str(event.event_id or ""),
+                    selected_token_id=str(selected_token_id or ""),
+                    selected_bin_id=_candidate_bin_id(proof),
+                    selected_direction=str(direction or ""),
+                    held=_held_same_token,
+                    q_current_lcb=proof.q_lcb_5pct,
+                    target_total_exposure_usd=float(_robust_stake_usd),
+                    same_token_pending_entry_usd=float(_same_token_pending),
+                    venue_min_increment_usd=float(_venue_min_usd),
+                    now_iso=decision_time.isoformat(),
+                )
+                if _fill_up_plan.kind == "ABORT":
+                    # Lease collision OR decide_fill_up denied (at/over target, belief
+                    # not strengthened, unowned pending, residual below venue min):
+                    # emit NO order. The lease (when acquired) is already advanced
+                    # ABORTED inside plan_fill_up.
+                    return _with_shrink(EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=f"FILL_UP_NO_SUBMIT:{_fill_up_plan.reason}",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=execution_price.value,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=trade_score,
+                        native_quote_available=True,
+                        source_status="MATCH",
+                        family_complete=True,
+                    ))
+                if _fill_up_plan.kind == "APPLY":
+                    # THE residual safety override: submit the residual, never a
+                    # second full family-total stake.
+                    _robust_stake_usd = float(_fill_up_plan.residual_stake_usd or 0.0)
+                    if provenance_capture is not None:
+                        provenance_capture["fill_up_lease"] = {
+                            "intent_id": _fill_up_plan.lease_intent_id,
+                            "owned_position_id": _held_same_token.position_id,
+                            "owned_token_id": str(selected_token_id or ""),
+                            "city": family.city,
+                            "target_date": family.target_date,
+                            "metric": family.metric,
+                            "residual_stake_usd": _robust_stake_usd,
+                        }
+                # NOOP falls through with _robust_stake_usd unchanged (entry path).
         kelly = dataclass_replace(
             kelly,
             size_usd=float(_robust_stake_usd),
@@ -4019,6 +4259,14 @@ def build_event_bound_no_submit_receipt(
     _belief = provenance_capture.get("edli_belief")
     if _belief is not None and receipt.belief_payload is None:
         receipt = dataclass_replace(receipt, belief_payload=_belief)
+    # D1 FILL-UP (2026-06-22 lifecycle consult): carry the acquired fill-up lease
+    # context onto the receipt so the live submit wrapper runs the pre-submit family-
+    # exposure reread and advances the lease to a terminal status. Only set when the
+    # core APPROVED a fill-up (stake overridden to the residual); None otherwise so
+    # the fresh-entry path is byte-identical.
+    _fill_up_lease = provenance_capture.get("fill_up_lease")
+    if _fill_up_lease is not None and receipt.fill_up_lease_payload is None:
+        receipt = dataclass_replace(receipt, fill_up_lease_payload=_fill_up_lease)
     # === Q-KERNEL REBUILD STAGE 0 — emit the decision-receipt spine (2026-06-14) =========
     # READ-ONLY, observability-only: assemble the DecisionReceipt spine from the inputs the
     # live q-build already lifted onto provenance_capture (decision_receipt_spine_inputs) plus
@@ -8619,7 +8867,7 @@ def _selection_scoped_proofs(
             if proof.missing_reason is None
             or (
                 allow_same_family_monitor_owned
-                and _is_entry_held_family_reason(proof.missing_reason)
+                and _is_entry_held_redecision_reason(proof.missing_reason)
             )
         ]
     else:
@@ -8629,7 +8877,7 @@ def _selection_scoped_proofs(
             if _qkernel_may_rescore_rejected_proof(proof.missing_reason)
             or (
                 allow_same_family_monitor_owned
-                and _is_entry_held_family_reason(proof.missing_reason)
+                and _is_entry_held_redecision_reason(proof.missing_reason)
             )
         ]
     tradeable_limit = [
@@ -8661,7 +8909,7 @@ def _selection_scoped_proofs(
             if reason is None:
                 unheld.append(proof)
                 continue
-            if allow_same_family_monitor_owned and _is_entry_held_family_reason(reason):
+            if allow_same_family_monitor_owned and _is_entry_held_redecision_reason(reason):
                 unheld.append(proof)
         if unheld:
             scoped = unheld
@@ -8704,7 +8952,7 @@ def _opportunity_book_proofs_with_selection_rejections(
                 held_position_conn,
                 proof,
             )
-            if allow_same_family_monitor_owned and _is_entry_held_family_reason(reason):
+            if allow_same_family_monitor_owned and _is_entry_held_redecision_reason(reason):
                 reason = None
         if reason is not None:
             excluded_by_id[proof_id] = reason

@@ -377,6 +377,16 @@ class EventSubmissionReceipt:
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
     belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
+    # When this receipt is an APPROVED same-token fill-up (stake overridden to the
+    # residual delta), the family-rebalance lease intent_id + the owned-exposure
+    # identity are carried here so the live submit wrapper can run the pre-submit
+    # family-exposure reread and advance the lease to a terminal status (COMPLETE on
+    # ack / ABORTED on a late abort). compare=False + repr=False so it NEVER affects
+    # receipt equality or the receipt hash (internal plumbing, never serialized into
+    # receipt_json). None on EVERY non-fill-up receipt — the fresh-entry path never
+    # populates it, so the entry path is byte-identical.
+    fill_up_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
     # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
     # /tmp/allpass_nosubmit_rootcause.md). Records WHICH submit adapter actually
     # ran this decision so a full-pass receipt emitted by the no-submit adapter
