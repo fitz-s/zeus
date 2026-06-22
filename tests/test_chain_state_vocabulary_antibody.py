@@ -55,6 +55,48 @@ def test_chain_confirmed_zero_round_trips_through_position():
     assert pos.chain_state == VenueVisibilityStatus.CHAIN_CONFIRMED_ZERO
 
 
+def test_chain_absent_confirmed_unattributed_round_trips_through_position():
+    """The confirmed-chain-absence attribution-quarantine state must coerce.
+
+    Antibody for the 2026-06-22 recurrence of the riskguard-kill class:
+    chain_reconciliation._quarantine_confirmed_chain_absence writes
+    chain_state='chain_absent_confirmed_position_unattributed' (via the named
+    constant CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE), a value outside the enum, so
+    load_portfolio POISON-quarantined 9 live positions (Tokyo/Seoul/Houston/...).
+    RED before the enum member exists; GREEN after.
+    """
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="t-absent", market_id="m", city="Hong Kong", cluster="HK",
+        target_date="2026-06-09", bin_label="b", direction="buy_no",
+        unit="C", temperature_metric="high",
+        chain_state="chain_absent_confirmed_position_unattributed",
+    )
+    assert pos.chain_state == VenueVisibilityStatus.CHAIN_ABSENT_CONFIRMED_UNATTRIBUTED
+
+
+def test_constant_mediated_chain_state_writers_are_declared_members():
+    """The literal-only antibody above misses chain_state assigned via a named
+    constant (e.g. `corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE`).
+    Resolve module-level `*_CHAIN_STATE = "literal"` constants and require each to
+    be a declared member — this is the gap through which
+    'chain_absent_confirmed_position_unattributed' escaped to production."""
+    declared = {m.value for m in VenueVisibilityStatus}
+    const_re = re.compile(r"""^[A-Z][A-Z0-9_]*_CHAIN_STATE\s*=\s*["']([a-z_]+)["']""", re.M)
+    violations = []
+    for path in (REPO / "src").rglob("*.py"):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for match in const_re.finditer(text):
+            value = match.group(1)
+            if value not in declared:
+                violations.append(f"{path.relative_to(REPO)}: {value!r}")
+    assert not violations, (
+        "a *_CHAIN_STATE constant holds a value outside the ChainState enum "
+        f"(constant-mediated riskguard-kill class): {violations}"
+    )
+
+
 def test_poison_projection_row_is_quarantined_not_fatal(monkeypatch, caplog):
     """A row that fails coercion is skipped LOUDLY; healthy rows still load.
 

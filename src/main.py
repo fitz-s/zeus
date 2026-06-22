@@ -9670,16 +9670,24 @@ def main():
         _settlement_guard_report_tick, "cron", hour=9, minute=15,
         id="settlement_guard_report", max_instances=1, coalesce=True,
     )
-    # Settlement skill-attribution — 09:30 UTC, after settlement harvesting.
+    # Settlement skill-attribution — runs ~2min after boot, then EVERY 30min.
+    # WAS a single daily 09:30 cron, which silently stopped closing the audit loop
+    # whenever the daemon was not alive at 09:30 (verified stale 06-13..06-22 while
+    # the daemon cycled through frequent restarts). The decision->settlement audit
+    # loop is the mandate's spine ("EVERY real chain decision audited with reality"),
+    # so it must run continuously AND on every restart, not once a day. next_run_time
+    # ~2min after boot grades on every daemon start; interval=30min keeps it current.
     # Grades each settled position into a skill category (SKILL_WIN / LUCKY_WIN /
-    # SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION / UNATTRIBUTABLE_Q_MISSING)
-    # so a lucky win can no longer fake system health (operator 2026-06-12 law).
-    # Skill is attributed off the immutable decision-q certificate; an unresolvable
-    # cert grades UNATTRIBUTABLE_Q_MISSING (2026-06-21). Idempotent per position;
-    # backfills history on first run. Sole writer of settlement_attribution.
+    # SKILL_LOSS / MISCALIBRATED_LOSS / STALE_DECISION / UNATTRIBUTABLE_Q_MISSING) so
+    # a lucky win can no longer fake system health (operator 2026-06-12 law). Skill is
+    # attributed off the immutable decision-q certificate; an unresolvable cert grades
+    # UNATTRIBUTABLE_Q_MISSING (2026-06-21). Idempotent per position; backfills history
+    # on first run; also runs the settlement->audit pnl/outcome writeback. Sole writer
+    # of settlement_attribution. (2026-06-22: cron->interval, consult REQ-20260622-021129.)
     scheduler.add_job(
-        _settlement_skill_attribution_tick, "cron", hour=9, minute=30,
+        _settlement_skill_attribution_tick, "interval", minutes=30,
         id="settlement_skill_attribution", max_instances=1, coalesce=True,
+        next_run_time=_utc_run_time_after(120.0),
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
