@@ -239,3 +239,59 @@ def test_no_price_anchoring_q_is_single_authority():
         admission_margin=0.40, artifact=art,
     )
     assert math.isclose(v1.q_safe, v2.q_safe, rel_tol=1e-12)
+
+
+# --------------------------------------------------------------------------------------------------
+# Seam integration helper (flag-gated; default OFF must be a no-op).
+# --------------------------------------------------------------------------------------------------
+
+def _no_toxic_artifact():
+    side, lead_b, bin_class = "NO", "L1", "nonmodal"
+    raw = 0.875
+    bucket_idx, _ = sc.raw_prob_bucket(raw)
+    key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
+    return _artifact({key: {"n": 104, "hit_rate": 0.679}})
+
+
+def test_seam_helper_default_off_is_noop(monkeypatch):
+    # Flag unset -> the seam helper returns prior_lcb UNCHANGED (wiring it in is a no-op live).
+    monkeypatch.delenv("ZEUS_SELECTION_CALIBRATOR_LIVE", raising=False)
+    out = sc.selection_calibrated_side_lcb(
+        raw_side_prob=0.875, prior_lcb=0.83, side="NO", lead_days=1.0, bin_class="nonmodal",
+        artifact=_no_toxic_artifact(),
+    )
+    assert out == 0.83  # unchanged
+
+
+def test_seam_helper_live_deflates_toxic_no(monkeypatch):
+    # Flag ON -> the seam LOWERS the prior bootstrap lcb (0.83) to the calibrated ~0.59, so a 0.70
+    # NO cost no longer clears edge_lcb>0.
+    monkeypatch.setenv("ZEUS_SELECTION_CALIBRATOR_LIVE", "1")
+    out = sc.selection_calibrated_side_lcb(
+        raw_side_prob=0.875, prior_lcb=0.83, side="NO", lead_days=1.0, bin_class="nonmodal",
+        artifact=_no_toxic_artifact(),
+    )
+    assert out < 0.83
+    assert out - 0.70 <= 0.0  # blocked at a ~0.70 NO cost
+
+
+def test_seam_helper_live_fail_closed_returns_zero(monkeypatch):
+    # Flag ON but no artifact -> fail-closed 0.0 (NOT the prior bootstrap lcb).
+    monkeypatch.setenv("ZEUS_SELECTION_CALIBRATOR_LIVE", "1")
+    out = sc.selection_calibrated_side_lcb(
+        raw_side_prob=0.875, prior_lcb=0.83, side="NO", lead_days=1.0, bin_class="nonmodal",
+        artifact=None,
+    )
+    assert out == 0.0
+
+
+def test_seam_helper_live_never_raises_prior(monkeypatch):
+    # The calibrator is a guard: it can only LOWER the served bound. If the calibrated bound is
+    # ABOVE the prior, the prior wins (min).
+    monkeypatch.setenv("ZEUS_SELECTION_CALIBRATOR_LIVE", "1")
+    art = _no_toxic_artifact()  # cell LB ~0.59
+    out = sc.selection_calibrated_side_lcb(
+        raw_side_prob=0.875, prior_lcb=0.40, side="NO", lead_days=1.0, bin_class="nonmodal",
+        artifact=art,
+    )
+    assert out == 0.40  # prior (0.40) is below the calibrated 0.59 -> min keeps 0.40

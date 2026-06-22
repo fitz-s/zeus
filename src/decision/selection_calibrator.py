@@ -373,3 +373,71 @@ def apply_selection_calibrator(
         q_safe=q_safe, trade=True, abstained=False, cell_key=key,
         L_g=float(L_g), n_g=n_g, basis="SELECTION_BETA_95",
     )
+
+
+# ---------------------------------------------------------------------------
+# Seam integration helper (flag-gated; DEFAULT OFF — does NOT change live behavior).
+# ---------------------------------------------------------------------------
+#
+# The live admission seam in src/engine/event_reactor_adapter.py builds, per candidate side, a robust
+# lower bound (yes_lcb / no_lcb from the center-bootstrap bundle, or q_lcb_yes / q_lcb_no from the
+# canonical bootstrap) and THEN tests admission as ``lcb_side > cost`` (edge_lcb_positive) and feeds
+# ``p_values`` to BH-FDR. To make THIS calibrator the admission lower bound, the orchestrator wires
+# ``selection_calibrated_side_lcb`` between the lcb construction and the edge/FDR computation:
+#
+#     # after yes_lcb / no_lcb (or q_lcb_yes / q_lcb_no) are computed:
+#     yes_lcb = selection_calibrated_side_lcb(
+#         raw_side_prob=q_yes, prior_lcb=yes_lcb, side="YES", lead_days=<lead>,
+#         bin_class=("modal" if bin_id == forecast_bin else "nonmodal"),
+#     )
+#     no_lcb = selection_calibrated_side_lcb(
+#         raw_side_prob=1.0 - q_yes, prior_lcb=no_lcb, side="NO", lead_days=<lead>, bin_class=<...>,
+#     )
+#
+# It returns the calibrated lower bound when the calibrator LICENSES the cell, 0.0 (no-trade) when it
+# fails closed, and — by DEFAULT (flag OFF) — the unchanged ``prior_lcb`` so wiring it in is a no-op
+# until the orchestrator flips the flag AFTER forward-validation promotes the artifact. This keeps
+# the build inert in the live tree (no deploy, no entry-pause change) while shipping the exact seam.
+
+# Live activation flag. DEFAULT OFF -> the seam helper returns prior_lcb unchanged (no live change).
+# The orchestrator flips this (settings / env) ONLY after forward-validation promotes the artifact.
+_SELECTION_CALIBRATOR_LIVE_ENV: str = "ZEUS_SELECTION_CALIBRATOR_LIVE"
+
+
+def selection_calibrator_live_enabled() -> bool:
+    """Whether the calibrator is the LIVE admission lower bound. DEFAULT OFF (inert seam)."""
+    return os.environ.get(_SELECTION_CALIBRATOR_LIVE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def selection_calibrated_side_lcb(
+    *,
+    raw_side_prob: float,
+    prior_lcb: float,
+    side: str,
+    lead_days: float,
+    bin_class: str,
+    admission_margin: float | None = None,
+    artifact: Optional[Mapping] = None,
+    expected_posterior_version: str = DEFAULT_POSTERIOR_VERSION,
+) -> float:
+    """The seam value: the calibrated admission lower bound for ONE side, or a fail-closed 0.0.
+
+    DEFAULT OFF (``selection_calibrator_live_enabled()`` False) -> returns ``prior_lcb`` UNCHANGED so
+    wiring this into the adapter is a no-op until the orchestrator promotes the artifact and flips the
+    flag. When LIVE: returns ``min(prior_lcb, q_safe)`` on a licensed cell (the calibrator can only
+    LOWER the served bound, never raise it — it is a guard, not a new probability authority), and 0.0
+    when the calibrator fails closed (absent/malformed/stale/thin/missing-cell) so the downstream
+    ``edge_lcb = lcb - cost`` is non-positive and the candidate is NOT admitted. NEVER falls back to
+    the raw center-bootstrap ``prior_lcb`` on a fail-closed verdict.
+    """
+    if not selection_calibrator_live_enabled():
+        return float(prior_lcb)
+    verdict = apply_selection_calibrator(
+        raw_side_prob=raw_side_prob, side=side, lead_days=lead_days, bin_class=bin_class,
+        admission_margin=admission_margin, artifact=artifact,
+        expected_posterior_version=expected_posterior_version,
+    )
+    if not verdict.trade:
+        return 0.0  # fail-closed -> non-positive edge downstream -> not admitted.
+    # Guard semantics: only ever LOWER the served bound (min), never raise it.
+    return float(min(float(prior_lcb), float(verdict.q_safe)))
