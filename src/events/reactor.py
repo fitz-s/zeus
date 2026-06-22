@@ -387,6 +387,19 @@ class EventSubmissionReceipt:
     # receipt_json). None on EVERY non-fill-up receipt — the fresh-entry path never
     # populates it, so the entry path is byte-identical.
     fill_up_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # D2 SHIFT-BIN LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
+    # The close-before-open carrier. Two shapes, both keyed by the SHIFT_BIN lease
+    # intent_id + old-leg identity (old_position_id / old_token_id):
+    #   - phase="EXIT_OLD_LEG": this receipt is a TYPED NO-SUBMIT for the new bin. The
+    #     live submit wrapper submits the reduce-only exit for the OLD token via the
+    #     existing exit path (execute_exit_order) and advances the lease EXIT_SUBMITTED
+    #     / EXIT_PARTIAL / EXIT_UNKNOWN by the exit OrderResult — NEVER a new-bin entry.
+    #   - phase="ENTER_NEW_BIN": the old leg is proven closed; this receipt IS a real
+    #     counter-entry submit, and the wrapper advances the lease COMPLETE on ack.
+    # compare=False + repr=False so it NEVER affects receipt equality or the receipt
+    # hash. None on EVERY fresh-entry / fill-up receipt — the entry + D1 paths never
+    # populate it, so both are byte-identical.
+    shift_bin_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
     # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
     # /tmp/allpass_nosubmit_rootcause.md). Records WHICH submit adapter actually
     # ran this decision so a full-pass receipt emitted by the no-submit adapter

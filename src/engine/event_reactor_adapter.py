@@ -257,6 +257,7 @@ from src.strategy import market_phase_evidence as _market_phase_evidence
 # "robust marginal expected log utility <= 0" no-trade gate on the LIVE path.
 from src.strategy import utility_ranker
 from src.strategy import fill_up_wiring as _fill_up_wiring
+from src.strategy import shift_bin_wiring as _shift_bin_wiring
 from src.strategy.redecision import (
     CandidateLifecycleState,
     RecaptureInputs,
@@ -1108,6 +1109,191 @@ def _same_token_pending_entry_usd(
         if reserved > 0.0:
             total += reserved
     return total
+
+
+def _read_old_leg_exit_inputs(
+    conn: sqlite3.Connection | None,
+    *,
+    old_token_id: str,
+) -> tuple[float, float, float | None, dict[str, object]] | None:
+    """Read the OLD leg's shares + a sell price + snapshot identity for an exit.
+
+    Returns (shares, current_price, best_bid, snapshot_identity) from canonical
+    ``position_current`` + the latest executable snapshot for the old token, or None
+    when the old leg is no longer held (proven closed) or truth is unavailable.
+
+    The price is the latest executable-snapshot best-bid/ask for the old token; it is
+    only a SEED. ``execute_exit_order`` re-runs the executable-snapshot gate + identity
+    check and fails CLOSED on a stale/mismatched snapshot, so a stale seed price never
+    becomes a false/bad exit — the exit is gated and the SHIFT_BIN lease stays blocking
+    for a legitimate retry next cycle (close-before-open holds either way).
+    """
+    token = str(old_token_id or "").strip()
+    if conn is None or not token:
+        return None
+    if not _adapter_table_exists(conn, "position_current"):
+        return None
+    cols = _position_current_columns(conn)
+    token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
+    share_terms = [c for c in ("chain_shares", "shares") if c in cols]
+    if not token_cols or not share_terms:
+        return None
+    phase_sql = (
+        "phase IN ({})".format(",".join("?" for _ in _ENTRY_HELD_POSITION_BLOCKING_PHASES))
+        if "phase" in cols
+        else "1=1"
+    )
+    token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
+    select_cols = [c if c in cols else f"NULL AS {c}" for c in ("chain_shares", "shares")]
+    order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
+    sql = (
+        f"SELECT {', '.join(select_cols)} FROM position_current "
+        f"WHERE {phase_sql} AND ({token_sql}) {order_sql} LIMIT 1"
+    )
+    params: list[object] = []
+    if "phase" in cols:
+        params.extend(sorted(_ENTRY_HELD_POSITION_BLOCKING_PHASES))
+    params.extend(token for _ in token_cols)
+    try:
+        row = conn.execute(sql, tuple(params)).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None  # old leg no longer held → proven closed
+
+    def _g(name: str):
+        try:
+            return row[name] if isinstance(row, sqlite3.Row) else None
+        except (IndexError, KeyError):
+            return None
+
+    shares = 0.0
+    for value in (_g("chain_shares"), _g("shares")):
+        try:
+            v = float(value) if value is not None else 0.0
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0.0:
+            shares = v
+            break
+    if shares <= 0.0:
+        return None
+
+    # Seed price + snapshot identity from the latest executable snapshot for the old
+    # token (the SAME source the monitor exit lane seeds from before its fresh capture).
+    try:
+        from src.execution.exit_lifecycle import (
+            _latest_exit_snapshot_context,
+            _latest_exit_snapshot_identity_seed,
+        )
+        snap_ctx = _latest_exit_snapshot_context(conn, token) or {}
+        _identity = _latest_exit_snapshot_identity_seed(conn, token) or {}
+    except Exception:  # noqa: BLE001 — missing snapshot helpers → no exit this cycle.
+        return None
+    # Best-bid as the conservative sell-touch seed; execute_exit_order re-derives the
+    # tick-aligned limit and gates on the executable snapshot.
+    best_bid: float | None = None
+    current_price = 0.0
+    try:
+        from src.state.snapshot_repo import get_snapshot
+        snap_id = str(snap_ctx.get("executable_snapshot_id") or "")
+        snap = get_snapshot(conn, snap_id) if snap_id else None
+    except Exception:  # noqa: BLE001
+        snap = None
+    if snap is not None:
+        for attr in ("best_bid", "selected_outcome_best_bid"):
+            v = getattr(snap, attr, None)
+            try:
+                if v is not None and float(v) > 0.0:
+                    best_bid = float(v)
+                    break
+            except (TypeError, ValueError):
+                continue
+    if best_bid is not None:
+        current_price = best_bid
+    if current_price <= 0.0:
+        # No usable seed price; defer to a later cycle (lease stays blocking).
+        return None
+    return shares, current_price, best_bid, dict(snap_ctx)
+
+
+def _submit_shift_bin_old_leg_exit(
+    conn: sqlite3.Connection,
+    *,
+    payload: dict[str, object],
+    decision_time: datetime,
+) -> None:
+    """Submit the reduce-only exit for a SHIFT_BIN old leg via the existing exit path.
+
+    Reads the old leg's shares + seed price (``_read_old_leg_exit_inputs``), builds an
+    ``ExitOrderIntent``, and calls ``execute_exit_order`` (idempotent, ExitMutex, full
+    pre-submit gate chain, self-built client). Advances the SHIFT_BIN lease by the exit
+    OrderResult.status:
+      - "pending"             → EXIT_SUBMITTED (sell acked at venue; family stays
+                                blocking until the residual is proven zero/dust).
+      - "unknown_side_effect" → EXIT_UNKNOWN (block the family; reconciliation owns it;
+                                NO counter-entry, NO replacement).
+      - "rejected"            → ABORTED (clean pre-venue rejection: no side effect; the
+                                lease releases so a legitimate retry can re-acquire).
+    Any read miss (old leg already closed, no seed price) leaves the lease unchanged
+    (EXIT_SUBMITTED) so the next cycle re-attempts — close-before-open is preserved.
+    """
+    intent_id = payload.get("intent_id")
+    old_position_id = str(payload.get("old_position_id") or "")
+    old_token_id = str(payload.get("old_token_id") or "")
+    now_iso = decision_time.isoformat() if hasattr(decision_time, "isoformat") else str(decision_time)
+    if not (intent_id and old_position_id and old_token_id):
+        return
+    inputs = _read_old_leg_exit_inputs(conn, old_token_id=old_token_id)
+    if inputs is None:
+        # Old leg not readable / already closed / no seed price — leave the lease in
+        # EXIT_SUBMITTED (blocking) so the next redecision cycle re-evaluates.
+        return
+    shares, current_price, best_bid, snap_ctx = inputs
+    try:
+        from src.execution.exit_lifecycle import place_sell_order
+        result = place_sell_order(
+            trade_id=old_position_id,
+            token_id=old_token_id,
+            shares=float(shares),
+            current_price=float(current_price),
+            best_bid=best_bid,
+            executable_snapshot_id=str(snap_ctx.get("executable_snapshot_id") or ""),
+            executable_snapshot_hash=str(snap_ctx.get("executable_snapshot_hash") or ""),
+            executable_snapshot_min_tick_size=snap_ctx.get("executable_snapshot_min_tick_size"),
+            executable_snapshot_min_order_size=snap_ctx.get("executable_snapshot_min_order_size"),
+            executable_snapshot_neg_risk=snap_ctx.get("executable_snapshot_neg_risk"),
+            decision_id=f"shift_bin_exit:{old_position_id}",
+        )
+    except Exception as exc:  # noqa: BLE001 — venue boundary unknown → block the family.
+        _shift_bin_wiring.record_exit_submitted(
+            conn, intent_id, now_iso=now_iso, status="EXIT_UNKNOWN",
+        )
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "SHIFT_BIN old-leg exit raised (treated as EXIT_UNKNOWN): %s: %s",
+            type(exc).__name__, exc,
+        )
+        return
+    status = str(getattr(result, "status", "") or "")
+    command_id = str(getattr(result, "order_id", "") or getattr(result, "external_order_id", "") or "")
+    if status == "pending":
+        _shift_bin_wiring.record_exit_submitted(
+            conn, intent_id, now_iso=now_iso,
+            old_exit_command_id=command_id or None, status="EXIT_SUBMITTED",
+        )
+    elif status == "unknown_side_effect":
+        _shift_bin_wiring.record_exit_submitted(
+            conn, intent_id, now_iso=now_iso,
+            old_exit_command_id=command_id or None, status="EXIT_UNKNOWN",
+        )
+    else:
+        # Clean pre-venue rejection (mutex held, collateral, snapshot gate, malformed
+        # price, shares→0): no side effect. Release the lease for a legitimate retry.
+        _shift_bin_wiring.abort_shift_bin_lease(
+            conn, intent_id, now_iso=now_iso,
+            reason=f"SHIFT_BIN_EXIT_REJECTED:{getattr(result, 'reason', '') or status}",
+        )
 
 
 def _seed_portfolio_reservations_from_durable_live_cap(
@@ -1997,6 +2183,29 @@ def event_bound_live_adapter_from_trade_conn(
             replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
             family_snapshot_refresher=family_snapshot_refresher,
         )
+        # D2 SHIFT-BIN CLOSE-BEFORE-OPEN — old-leg exit submission (2026-06-22 consult
+        # §"Shift-bin sequencing" step 3). A SHIFT_BIN EXIT_OLD_LEG receipt is a TYPED
+        # no-submit for the NEW bin (proof_accepted=False) that carries the lease + the
+        # old-leg identity. When real submit is enabled, submit the reduce-only exit for
+        # the OLD held token THROUGH THE EXISTING exit path (execute_exit_order: builds
+        # idempotency from decision_id/token/SELL/price/size, runs the executable-snapshot
+        # gate + heartbeat/ws-gap/collateral, acquires ExitMutex, self-builds the client)
+        # — bypassing NO gate. The lease advances by the exit OrderResult: EXIT_SUBMITTED
+        # on a placed/acked sell, EXIT_PARTIAL on a partial, EXIT_UNKNOWN on an unknown
+        # side effect, ABORTED on a clean pre-venue rejection (releases the family for a
+        # legitimate retry). NO new-bin entry is built. No-op for every non-shift receipt.
+        _shift_exit_payload = no_submit_receipt.shift_bin_lease_payload
+        if (
+            _shift_exit_payload is not None
+            and str(_shift_exit_payload.get("phase") or "") == "EXIT_OLD_LEG"
+            and real_order_submit_enabled
+        ):
+            _submit_shift_bin_old_leg_exit(
+                trade_conn,
+                payload=_shift_exit_payload,
+                decision_time=decision_time.astimezone(UTC),
+            )
+            return no_submit_receipt
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
         # Wave-1 2026-06-12: the LIVE_CANARY_DISABLED gate (real_order_submit_enabled AND
@@ -2133,6 +2342,34 @@ def event_bound_live_adapter_from_trade_conn(
                             _fill_up_lease.get("intent_id"),
                             now_iso=_now_iso,
                             reason=f"FILL_UP_SUBMIT_NO_ACK:{submit_result.status}",
+                        )
+                # D2 SHIFT-BIN ENTER_NEW_BIN lease terminal advance: this submit IS the
+                # counter-entry (old leg already proven closed). COMPLETE on a venue ack,
+                # ABORTED otherwise (no resting counter-entry materialized → release the
+                # family). No-op for every non-shift / EXIT_OLD_LEG receipt.
+                _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
+                if (
+                    _shift_entry_lease is not None
+                    and str(_shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
+                ):
+                    _now_iso_sb = certificate_decision_time.isoformat() if hasattr(
+                        certificate_decision_time, "isoformat"
+                    ) else decision_time.astimezone(UTC).isoformat()
+                    if submit_result.venue_ack_received:
+                        _shift_bin_wiring.complete_shift_bin_lease(
+                            trade_conn,
+                            _shift_entry_lease.get("intent_id"),
+                            now_iso=_now_iso_sb,
+                            new_entry_command_id=str(
+                                getattr(getattr(command, "header", None), "certificate_id", "") or ""
+                            ),
+                        )
+                    else:
+                        _shift_bin_wiring.abort_shift_bin_lease(
+                            trade_conn,
+                            _shift_entry_lease.get("intent_id"),
+                            now_iso=_now_iso_sb,
+                            reason=f"SHIFT_BIN_ENTRY_SUBMIT_NO_ACK:{submit_result.status}",
                         )
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
@@ -3710,6 +3947,159 @@ def _build_event_bound_no_submit_receipt_core(
                             "residual_stake_usd": _robust_stake_usd,
                         }
                 # NOOP falls through with _robust_stake_usd unchanged (entry path).
+            else:
+                # D2 SHIFT-BIN (2026-06-22 lifecycle consult REQ-20260622-060011): the
+                # SIBLING case. The fresh winning leg is NOT the same token as any held
+                # position (D1 fill-up NOOP'd: _held_same_token is None) — but it MAY be
+                # a DIFFERENT bin in a family that already holds a position. That is the
+                # close-before-open hazard: without this branch the sibling falls through
+                # to the fresh-entry submit and opens a NEW bin while the OLD leg is still
+                # held. Close-before-open: detect the old leg, and either (a) exit it
+                # first and emit NO new entry this cycle, or (b) — once the old leg is
+                # proven zero/dust on a LATER cycle — admit the counter-entry under the
+                # SAME lease. A NON-sibling (no held different-bin family position) is a
+                # NOOP here → the candidate is a true fresh entry and runs BYTE-IDENTICAL.
+                _held_sibling = _shift_bin_wiring.read_held_sibling_exposure(
+                    trade_conn,
+                    city=str(family.city or ""),
+                    target_date=str(family.target_date or ""),
+                    temperature_metric=str(family.metric or ""),
+                    selected_token_id=str(selected_token_id or ""),
+                    selected_bin_label=str(candidate.bin.label or ""),
+                )
+                if _held_sibling is not None:
+                    # Old-leg residual from canonical truth: 0.0 == proven closed
+                    # (no live row for the old token); +inf on ambiguous read (treat as
+                    # live → exit first, never falsely enter). The dust floor is the
+                    # venue min order in USD (a sub-min remainder can never be sold).
+                    _old_leg_residual = _shift_bin_wiring.read_old_leg_residual_usd(
+                        trade_conn, token_id=_held_sibling.token_id
+                    )
+                    _min_order_shares = (
+                        _float_or_default(row.get("min_order_size"), 1.0)
+                        if isinstance(row, Mapping) else 1.0
+                    )
+                    _price_for_min = float(getattr(execution_price, "value", 0.0) or 0.0)
+                    _dust_floor_usd = (
+                        _min_order_shares * _price_for_min
+                        if _price_for_min > 0.0 else _min_order_shares
+                    )
+                    # Any unowned pending/unknown/partial ENTRY in the family fails the
+                    # shift closed (reuse the SAME pending-entry truth D1 uses; >0 means
+                    # an in-flight same-token-or-sibling entry that is not yet position
+                    # truth — ambiguous family exposure).
+                    _family_pending_usd = _same_token_pending_entry_usd(
+                        locked_opportunity_conn,
+                        token_id=_held_sibling.token_id,
+                        trade_conn=trade_conn,
+                    )
+                    _shift_plan = _shift_bin_wiring.plan_shift_bin(
+                        trade_conn,
+                        is_redecision_event=True,
+                        family_key=str(family.family_id or ""),
+                        event_id=str(event.event_id or ""),
+                        selected_token_id=str(selected_token_id or ""),
+                        selected_bin_id=_candidate_bin_id(proof),
+                        selected_direction=str(direction or ""),
+                        held=_held_sibling,
+                        old_leg_residual_usd=float(_old_leg_residual),
+                        has_unowned_pending_or_unknown_entry=bool(_family_pending_usd > 0.0),
+                        now_iso=decision_time.isoformat(),
+                        old_leg_dust_floor_usd=float(_dust_floor_usd),
+                    )
+                    if _shift_plan.kind == "ABORT":
+                        # Blocking unowned exposure OR concurrent family lease: emit NO
+                        # exit, NO order. The lease (when acquired) is already ABORTED.
+                        return _with_shrink(EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason=f"SHIFT_BIN_NO_SUBMIT:{_shift_plan.reason}",
+                            city=family.city,
+                            target_date=family.target_date,
+                            metric=family.metric,
+                            condition_id=str(candidate.condition_id or ""),
+                            token_id=selected_token_id,
+                            executable_snapshot_id=proof.executable_snapshot_id,
+                            family_id=family.family_id,
+                            bin_label=candidate.bin.label,
+                            direction=direction,
+                            q_live=proof.q_posterior,
+                            q_lcb_5pct=proof.q_lcb_5pct,
+                            c_fee_adjusted=execution_price.value,
+                            c_cost_95pct=proof.c_cost_95pct,
+                            p_fill_lcb=proof.p_fill_lcb,
+                            trade_score=trade_score,
+                            native_quote_available=True,
+                            source_status="MATCH",
+                            family_complete=True,
+                        ))
+                    if _shift_plan.kind == "EXIT_OLD_LEG":
+                        # CLOSE-BEFORE-OPEN: the old leg is still live. The submit
+                        # wrapper submits the reduce-only exit for the OLD token; NO
+                        # new-bin entry is built this cycle. Carry the lease + old-leg
+                        # identity so the wrapper drives the exit + lease advance.
+                        if provenance_capture is not None:
+                            provenance_capture["shift_bin_lease"] = {
+                                "phase": "EXIT_OLD_LEG",
+                                "intent_id": _shift_plan.lease_intent_id,
+                                "old_position_id": _shift_plan.old_position_id,
+                                "old_token_id": _shift_plan.old_token_id,
+                                "city": family.city,
+                                "target_date": family.target_date,
+                                "metric": family.metric,
+                            }
+                        return _with_shrink(EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason="SHIFT_BIN_EXIT_OLD_LEG_PENDING",
+                            city=family.city,
+                            target_date=family.target_date,
+                            metric=family.metric,
+                            condition_id=str(candidate.condition_id or ""),
+                            token_id=selected_token_id,
+                            executable_snapshot_id=proof.executable_snapshot_id,
+                            family_id=family.family_id,
+                            bin_label=candidate.bin.label,
+                            direction=direction,
+                            q_live=proof.q_posterior,
+                            q_lcb_5pct=proof.q_lcb_5pct,
+                            c_fee_adjusted=execution_price.value,
+                            c_cost_95pct=proof.c_cost_95pct,
+                            p_fill_lcb=proof.p_fill_lcb,
+                            trade_score=trade_score,
+                            native_quote_available=True,
+                            source_status="MATCH",
+                            family_complete=True,
+                            shift_bin_lease_payload={
+                                "phase": "EXIT_OLD_LEG",
+                                "intent_id": _shift_plan.lease_intent_id,
+                                "old_position_id": _shift_plan.old_position_id,
+                                "old_token_id": _shift_plan.old_token_id,
+                                "city": family.city,
+                                "target_date": family.target_date,
+                                "metric": family.metric,
+                            },
+                        ))
+                    if _shift_plan.kind == "ENTER_NEW_BIN":
+                        # The old leg is proven closed (zero/dust). This is the LATER
+                        # cycle's counter-entry: the reactor's OWN fresh selection on
+                        # current books IS the mandatory recompute (no pre-exit sibling
+                        # reuse). Fall through to the normal entry submit with
+                        # _robust_stake_usd UNCHANGED (the fresh target), carrying the
+                        # lease so the wrapper advances it COMPLETE on ack.
+                        if provenance_capture is not None:
+                            provenance_capture["shift_bin_lease"] = {
+                                "phase": "ENTER_NEW_BIN",
+                                "intent_id": _shift_plan.lease_intent_id,
+                                "old_position_id": _shift_plan.old_position_id,
+                                "old_token_id": _shift_plan.old_token_id,
+                                "city": family.city,
+                                "target_date": family.target_date,
+                                "metric": family.metric,
+                            }
+                    # NOOP (no sibling) falls through with _robust_stake_usd unchanged.
         kelly = dataclass_replace(
             kelly,
             size_usd=float(_robust_stake_usd),
@@ -4267,6 +4657,14 @@ def build_event_bound_no_submit_receipt(
     _fill_up_lease = provenance_capture.get("fill_up_lease")
     if _fill_up_lease is not None and receipt.fill_up_lease_payload is None:
         receipt = dataclass_replace(receipt, fill_up_lease_payload=_fill_up_lease)
+    # D2 SHIFT-BIN: carry the SHIFT_BIN lease context onto the receipt so the live
+    # submit wrapper can drive the close-before-open exit + lease advance. Only the
+    # ENTER_NEW_BIN counter-entry reaches this lift (the EXIT_OLD_LEG receipt is a
+    # typed no-submit that already set the payload inline at its early return). None on
+    # every fresh-entry / fill-up receipt so both paths stay byte-identical.
+    _shift_bin_lease = provenance_capture.get("shift_bin_lease")
+    if _shift_bin_lease is not None and receipt.shift_bin_lease_payload is None:
+        receipt = dataclass_replace(receipt, shift_bin_lease_payload=_shift_bin_lease)
     # === Q-KERNEL REBUILD STAGE 0 — emit the decision-receipt spine (2026-06-14) =========
     # READ-ONLY, observability-only: assemble the DecisionReceipt spine from the inputs the
     # live q-build already lifted onto provenance_capture (decision_receipt_spine_inputs) plus

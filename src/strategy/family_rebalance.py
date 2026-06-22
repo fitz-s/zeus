@@ -47,6 +47,90 @@ class FillUpDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class ShiftBinDecision:
+    """The close-before-open verdict for a sibling-different-bin redecision.
+
+    ``phase`` is the state-machine verdict, NOT a single submit/no-submit boolean —
+    shift-bin is inherently multi-cycle (the old-leg exit on cycle N, the counter-
+    entry on a later cycle once closure is proven):
+
+      - "NOT_SHIFT_BIN": not a sibling shift (not a redecision, no held exposure,
+        same token, or same bin = fill-up / fresh-entry territory). Leave the entry
+        path untouched.
+      - "BLOCKED": an unowned pending/unknown/partial family command exists — fail
+        closed. NO exit, NO entry (the 2026-06-16 double-rest hazard).
+      - "EXIT_OLD_LEG": the old held leg still carries live exposure (>= the
+        dust/min-order floor). Submit the reduce-only exit for the OLD leg; emit NO
+        counter-entry this cycle.
+      - "ENTER_NEW_BIN": the old leg residual is proven ZERO or below dust/min-order.
+        The counter-entry is admitted (the reactor's own fresh recompute on current
+        books decides the final stake — close-before-open is satisfied).
+    """
+
+    phase: str
+    allow_entry: bool
+    reason: str
+
+
+def decide_shift_bin(
+    *,
+    is_redecision_event: bool,
+    selected_token_id: str,
+    selected_bin_id: str,
+    selected_direction: str,
+    held_token_id: str | None,
+    held_bin_id: str | None,
+    held_position_id: str | None,
+    old_leg_residual_usd: float,
+    has_unowned_pending_or_unknown_entry: bool,
+    old_leg_dust_floor_usd: float = 0.0,
+) -> ShiftBinDecision:
+    """Pure close-before-open predicate for a sibling-different-bin redecision.
+
+    Mirrors ``decide_fill_up``'s fail-closed posture. The ordering is load-bearing:
+
+      1. NOT_SHIFT_BIN  — not a redecision / no held exposure / SAME token+bin
+         (that is fill-up or fresh entry, never a sibling shift).
+      2. BLOCKED        — ANY unowned pending/unknown/partial family command. Fail
+         closed BEFORE any exit/entry decision (dominates the entry path even when
+         the old leg looks closed).
+      3. EXIT_OLD_LEG   — the old held leg still has live exposure at/above the dust
+         floor. Close it FIRST; no counter-entry this cycle.
+      4. ENTER_NEW_BIN  — the old leg residual is proven ZERO or below the dust/min-
+         order floor. The counter-entry may proceed (the reactor's fresh selection on
+         current books is the recompute that decides the actual stake).
+
+    The dust floor models "economically closed" (a sub-min-order remainder that can
+    never be sold and is not live tradable exposure). At/above the floor is treated
+    as still-live exposure (exit first) — the conservative direction.
+    """
+    deny = lambda phase, reason: ShiftBinDecision(phase=phase, allow_entry=False, reason=reason)
+
+    if not is_redecision_event:
+        return deny("NOT_SHIFT_BIN", "NOT_REDECISION_EVENT")
+    if not held_token_id or not held_position_id:
+        return deny("NOT_SHIFT_BIN", "NO_HELD_EXPOSURE")  # fresh entry, not a shift
+    # SAME token+bin is fill-up territory (handled by decide_fill_up), not a sibling
+    # shift to a DIFFERENT bin.
+    if selected_token_id == held_token_id or selected_bin_id == held_bin_id:
+        return deny("NOT_SHIFT_BIN", "SAME_TOKEN_OR_BIN_NOT_SIBLING_SHIFT")
+    # Fail closed on the double-submit / over-exposure hazard BEFORE deciding exit vs
+    # entry — an ambiguous family must never be acted on.
+    if has_unowned_pending_or_unknown_entry:
+        return deny("BLOCKED", "SHIFT_ABORT_BLOCKING_EXPOSURE")
+    # Close-before-open: the old leg must be proven zero/dust before any counter-entry.
+    if float(old_leg_residual_usd) >= max(float(old_leg_dust_floor_usd), 0.0) and (
+        float(old_leg_residual_usd) > 0.0
+    ):
+        return deny("EXIT_OLD_LEG", "SHIFT_EXIT_OLD_LEG_RESIDUAL_LIVE")
+    return ShiftBinDecision(
+        phase="ENTER_NEW_BIN",
+        allow_entry=True,
+        reason="SHIFT_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+    )
+
+
 def decide_fill_up(
     *,
     is_redecision_event: bool,
