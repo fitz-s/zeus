@@ -1,101 +1,98 @@
 # docs AGENTS
 
-Documentation root for the tracked docs mesh.
+Documentation root for the tracked docs mesh. This directory routes docs; it does not outrank source code, machine manifests, tests, DB/runtime receipts, or active authority law.
 
-Module book: `docs/reference/modules/docs_system.md`
+Module book: `docs/reference/modules/docs_system.md`.
 
-## System understanding first
+---
 
-Before navigating the docs mesh, understand the trading system:
-- **What Zeus does and how it trades**: `reference/zeus_domain_model.md`
-- **Binding laws of the trading machine**: `authority/zeus_current_architecture.md`
+## System Understanding First
 
-This directory is a router, not a co-equal authority plane to source code or
-machine manifests. Use it to find the right live docs surface quickly.
+Before changing docs, understand the trading system enough to avoid restoring obsolete lore:
 
-## Taxonomy axis
+1. `../AGENTS.md`;
+2. `../workspace_map.md`;
+3. `authority/zeus_current_architecture.md`;
+4. `authority/zeus_current_delivery.md`;
+5. `reference/zeus_prediction_market_quant_reference.md`;
+6. `architecture/docs_registry.yaml` and affected manifests.
 
-Docs taxonomy: stability axis. Each subroot maps to a lifecycle tier:
-- `authority/` — durable law (never expires)
-- `reference/` — canonical reference (stable); `reference/legacy/` for demoted historical snapshots
-- `operations/` — active workbench + live control (volatile)
-- `reports/` — periodic diagnostic evidence (dated)
+---
 
-See `docs/authority/ARCHIVAL_RULES.md` for lifecycle transition rules.
+## Taxonomy
 
-## Design principle
+| Subroot | Class | Rule |
+|---|---|---|
+| `authority/` | durable authority law | no packets, consults, PR reviews, dated one-off doctrine, or current facts |
+| `reference/` | canonical durable reference | no present-tense runtime facts or packet evidence |
+| `reference/modules/` | module reference | one module/system surface per book; reference only |
+| `operations/` | current pointers and active work homes | pointer files only default-readable; task dirs are not default |
+| `runbooks/` | procedural | not architecture law |
+| `evidence/` | raw evidence/receipts | never default law |
+| `reports/` | interpreted history/reviews | never default law |
+| `archive/` | cold history | route through archive registry |
+| `rebuild/` | rebuild/consult history | never default law |
+| `to-do-list/`, `artifacts/` | worklists/evidence artifacts | not authority |
 
-Keep the tracked docs surface thin and truthful:
+See `authority/ARCHIVAL_RULES.md` for demotion and quarantine rules.
 
-- active tracked docs live in declared subroots
-- `docs/reference/` is canonical-only; stale support docs must move to reports
-  or operations current-fact surfaces; dense module books live under
-  `docs/reference/modules/` and remain reference, not authority
-- `docs/authority/` is durable law only; packet docs, ADRs, and historical
-  governance evidence must not remain there
-- visible historical protocol lives in `archive_registry.md`
-- raw archive bodies stay outside the default read path
+---
 
 ## Navigation
 
-Read `README.md` here for the tracked docs index.
+Read `README.md` for the active docs index. For historical needs, read `archive_registry.md` before opening archive/report/evidence bodies. Treat those bodies as historical evidence only.
 
-For historical needs, read `archive_registry.md` before opening any archive
-body or bundle.
+---
 
-## File registry
+## Active File Registry
 
 | Item | Purpose |
-|------|---------|
-| `README.md` | Tracked docs index and visibility guide |
-| `archive_registry.md` | Visible historical interface; archive access and promotion guardrails |
-| `to-do-list/known_gaps.md` | Active known-gap worklist; operational task inventory, not authority |
-| `to-do-list/known_gaps_archive.md` | Closed known-gap antibody archive |
-| `authority/` | Current architecture and delivery law -> `authority/AGENTS.md` |
-| `reference/` | Canonical domain, math, architecture, market/settlement, data/replay, failure-mode, and module references -> `reference/AGENTS.md` |
-| `reference/legacy/` | Demoted legacy reference snapshots (7 files relocated from `reports/` 2026-05-17); historical only -> `reference/legacy/AGENTS.md` |
-| `reference/modules/ingest.md` | Dense ingest module book for R3 user-channel event-stream routing; reference, not authority |
-| `operations/` | Live control pointer, current facts, active packets, and package inputs -> `operations/AGENTS.md` |
-| `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` | Packet-local R3 Z0 CLOB V2 live-money invariant summary; evidence, not authority |
-| `runbooks/` | Operator runbooks -> `runbooks/AGENTS.md` |
-| `reports/` | Generated diagnostic reports; evidence only -> `reports/AGENTS.md` |
-| `to-do-list/` | Active checklist workbooks; not authority -> `to-do-list/AGENTS.md` |
-| `artifacts/` | Active evidence artifacts and inventories; not authority -> `artifacts/AGENTS.md` |
-| `artifacts/tigge_data_training_handoff_2026-04-23.md` | Dated TIGGE asset/training handoff for completed raw, extraction, validation, and next Zeus training steps |
+|---|---|
+| `README.md` | docs index and visibility guide |
+| `archive_registry.md` | visible historical interface and demotion registry |
+| `authority/AGENTS.md` | authority-directory law |
+| `authority/zeus_current_architecture.md` | current architecture law |
+| `authority/zeus_current_delivery.md` | current delivery/docs law |
+| `authority/ARCHIVAL_RULES.md` | archival/evidence isolation law |
+| `reference/AGENTS.md` | reference router |
+| `reference/zeus_prediction_market_quant_reference.md` | canonical full money-path reference |
+| `reference/zeus_domain_model.md` | domain model |
+| `reference/zeus_math_spec.md` | math/q/q_lcb/payoff utility reference |
+| `reference/zeus_strategy_spec.md` | strategy/admission/selection reference |
+| `reference/zeus_market_settlement_reference.md` | market/settlement/source/bin reference |
+| `reference/zeus_execution_lifecycle_reference.md` | execution/lifecycle/exit/settlement reference |
+| `reference/zeus_risk_strategy_reference.md` | sizing/risk reference |
+| `reference/zeus_data_and_replay_reference.md` | data/replay reference |
+| `reference/zeus_failure_modes_reference.md` | failure modes reference |
+| `reference/modules/AGENTS.md` | dense module-book router |
+| `operations/current_state.md` | current operational pointer; not architecture |
+| `operations/current_data_state.md` | current data posture pointer |
+| `operations/current_source_validity.md` | current source-validity pointer |
+| `runbooks/` | procedures |
 
-## New city onboarding (canonical pointer)
+Old packet-local CLOB contracts, TIGGE handoffs, dated migration notes, and design audits are evidence/history only unless promoted into active authority/reference and registered.
 
-When a new Polymarket weather city must be added:
+---
 
-- **Add flow**: `docs/reference/zeus_vendor_change_response_registry.md` §T4 is the
-  canonical 6-phase procedure. The pipeline orchestrator is `scripts/onboard_cities.py`.
-- **Settlement validation**: every new city requires a `SETTLEMENT_SOURCE_<CITY>`
-  blocking entry in `config/reality_contracts/data.yaml`. Run
-  `scripts/verify_reality_contracts_2026-05-17.py --apply` and confirm exit 0.
-- **Hard gate — no live trades until**:
-  1. `config/reality_contracts/data.yaml` entry captured for the city
-  2. `verify_reality_contracts_2026-05-17.py` exits 0 with `last_verified` renewed
-  3. `oracle_penalty` BLACKLIST cleared (error_rate below threshold after 14-day shadow)
-- **Source-contract monitor**: run `scripts/watch_source_contract.py` to validate
-  Gamma settlement-source consistency before clearing the BLACKLIST.
-- **ENS bias**: `model_bias_ens_v2` rows land in zeus-forecasts.db
-  (SCHEMA_FORECASTS_VERSION=7, **pending ENS-refit forecasts-schema migration PR #337 — table not yet in production schema**) via `src/calibration/ens_bias_repo.py`;
-  observation backfill lands in zeus-world.db (SCHEMA_VERSION=35).
+## New City / Source Work
+
+For new city or source-routing tasks, do not rely on this router alone. Read:
+
+- `docs/reference/zeus_market_settlement_reference.md`;
+- `docs/reference/zeus_data_and_replay_reference.md`;
+- `docs/operations/current_source_validity.md` if current truth is needed;
+- `architecture/fatal_misreads.yaml`;
+- source/config manifests and current evidence.
+
+Current per-city truth must be fresh/evidence-backed. If not verified, mark unknown and fail closed for live money.
+
+---
 
 ## Rules
 
-- New active docs belong in declared tracked subroots, not directly under
-  `docs/`, except for approved root files such as `README.md`,
-  `archive_registry.md`; active gaps belong under `operations/`.
-- Historical needs route through `archive_registry.md`, not archive-subtree
-  routers or raw archive bodies.
-- Do not put current facts, dated audits, or stale support material in
-  `docs/reference/`.
-- Dense module books may live under `docs/reference/modules/`, but they remain
-  descriptive reference surfaces and must not become packet diaries, current
-  fact sinks, or duplicate authority kernels.
-- Do not put packet-scoped docs, ADRs, rollback notes, or one-off governance
-  doctrine in `docs/authority/`; route them to operations evidence, reports, or
-  archive interfaces.
-- Generated reports are evidence only and must not become authority by
-  placement.
+- New active docs belong in declared tracked subroots, not directly under `docs/` except approved roots such as `README.md`, `AGENTS.md`, and `archive_registry.md`.
+- Historical needs route through `archive_registry.md`, not raw archive bodies.
+- Do not put current facts, dated audits, or stale support material in `docs/reference/`.
+- Do not put packet-scoped docs, ADRs, rollback notes, consult raw, PR reviews, or one-off governance doctrine in `docs/authority/`.
+- Generated reports and evidence are evidence only and must not become authority by placement.
+- When demoting, update docs registry/router/archive registry in the same patch.
