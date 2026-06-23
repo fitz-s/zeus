@@ -154,6 +154,36 @@ def _emit_typed_realized_fill(
 
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
+# Transient submit-channel gap: retry ~each monitor cycle and NEVER give up, so a
+# correct reversal exit sells once the channel recovers instead of being abandoned.
+CHANNEL_NOT_READY_COOLDOWN_SECONDS = 120
+
+
+def _is_channel_not_ready_error(error: str) -> bool:
+    """True for TRANSIENT submit-channel-not-ready conditions where the position
+    is still sellable once the channel recovers — a user-channel WS disconnect
+    (``ws_gap...m5_reconcile_required``) or a transient CLOB read. These must NOT
+    consume the bounded exit-retry budget that terminates in
+    ``backoff_exhausted`` → admin-close: a correct reversal exit has to keep
+    retrying until a bid can be hit, not be abandoned over a brief gap (operator:
+    react to reversal, sell before the market notices).
+
+    EXCLUDES genuinely terminal / unsellable conditions — ``market_end`` (the
+    market closed; it settles), no ``bid-side`` liquidity, and sub-min
+    ``min_order_size`` dust — which keep the existing fail-closed budget path so
+    they are not retried forever. (2026-06-23 exit-execution diagnosis.)
+    """
+    if not error:
+        return False
+    e = error.lower()
+    if "market_end" in e or "min_order_size" in e or "bid-side" in e:
+        return False
+    return (
+        ("ws_gap=" in e and "m5_reconcile_required=true" in e)
+        or "clob_market_info" in e
+        or "venue_read_transient" in e
+        or "transientvenueread" in e
+    )
 PENDING_EXIT_REPRICE_MIN_TICKS = 2
 
 EXIT_EVENT_VOCABULARY = (
@@ -3243,6 +3273,30 @@ def _mark_exit_retry(
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
+
+    if _is_channel_not_ready_error(error):
+        # Transient channel gap: do NOT consume the bounded retry budget toward
+        # backoff_exhausted/admin-close. Keep the exit alive and retrying on a
+        # short fixed cooldown so it sells once the channel recovers, rather than
+        # abandoning a still-sellable reversal exit. (2026-06-23 diagnosis.)
+        position.last_exit_error = error[:500]
+        position.exit_state = "retry_pending"
+        position.next_exit_retry_at = (
+            _utcnow() + timedelta(seconds=CHANNEL_NOT_READY_COOLDOWN_SECONDS)
+        ).isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+        )
+        logger.info(
+            "EXIT CHANNEL-NOT-READY %s: %s (budget NOT consumed; next retry %s)",
+            position.trade_id, reason, position.next_exit_retry_at,
+        )
+        return
+
     position.exit_retry_count += 1
     position.last_exit_error = error[:500]
 

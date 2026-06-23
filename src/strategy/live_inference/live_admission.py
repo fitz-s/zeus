@@ -324,3 +324,121 @@ def live_buy_no_conservative_evidence_rejection_reason(
                 f"coverage_status={status or 'missing'}"
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Selection-aware q_lcb calibrator + per-city skill gate + would-admit shadow logger
+# (wired 2026-06-22; team-lead. These are the LIVE seam call sites — the components in
+# src/decision/{selection_calibrator,city_skill_gate,shadow_admit_logger}.py were inert without
+# them. ALL THREE are FLAG-GATED so DEFAULT-OFF is byte-identical to the current live path, and
+# ALL THREE are FAIL-SOFT — they never raise into the decision path.)
+# ---------------------------------------------------------------------------
+
+def selection_calibrated_admission_q_lcb(
+    *,
+    q_lcb: float | int | None,
+    raw_side_prob: float | int | None,
+    direction: str | None,
+    lead_days: float = 1.0,
+    bin_class: str = "nonmodal",
+    own_side_cost: float | int | None = None,
+    artifact=None,
+    expected_posterior_version: str | None = None,
+) -> float:
+    """The admission q_lcb after the selection-aware calibrator deflation.
+
+    DEFAULT OFF (``ZEUS_SELECTION_CALIBRATOR_LIVE`` unset) -> returns ``q_lcb`` UNCHANGED (the live
+    path is byte-identical). When ON: deflates the served q_lcb to the calibrated lower bound for the
+    toxic adverse-selection tail (and 0.0 fail-closed) via ``selection_calibrated_side_lcb`` so the
+    downstream ``edge_lcb = q_lcb - cost`` turns non-positive and the candidate is not admitted.
+
+    FAIL-SOFT: any error or non-finite input returns the input ``q_lcb`` unchanged (never raises).
+    """
+    try:
+        from src.decision.selection_calibrator import (
+            DEFAULT_POSTERIOR_VERSION as _SC_DEFAULT_VER,
+            selection_calibrated_side_lcb,
+        )
+        prior = float(q_lcb)
+        if not math.isfinite(prior):
+            return prior
+        side = "NO" if str(direction or "").lower() == "buy_no" else "YES"
+        margin = None
+        if own_side_cost is not None and math.isfinite(float(own_side_cost)):
+            margin = prior - float(own_side_cost)
+        return float(
+            selection_calibrated_side_lcb(
+                raw_side_prob=float(raw_side_prob),
+                prior_lcb=prior,
+                side=side,
+                lead_days=float(lead_days),
+                bin_class=str(bin_class),
+                admission_margin=margin,
+                artifact=artifact,
+                expected_posterior_version=expected_posterior_version or _SC_DEFAULT_VER,
+            )
+        )
+    except Exception:  # noqa: BLE001 — observability/safety: never break admission for the calibrator.
+        try:
+            return float(q_lcb)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+
+
+def city_skill_block_rejection_reason(
+    *,
+    city: str | None,
+    artifact=None,
+    expected_posterior_version: str | None = None,
+) -> str | None:
+    """Block a candidate whose city is a CONFIRMED temporally-stable loser (loss-reduction mode).
+
+    DEFAULT OFF (``ZEUS_CITY_SKILL_GATE_LIVE`` unset) -> None (no block; live path unchanged). When
+    ON: returns a rejection reason iff ``apply_city_skill_gate(require_stable_bad_to_block=True)``
+    blocks the city as a confirmed stable-bad loser. A missing/unknown city or a stable-good/noisy
+    city is NOT blocked (loss-reduction only hard-blocks confirmed stable losers). FAIL-SOFT: any
+    error -> None (never blocks for missing context, never raises)."""
+    try:
+        from src.decision.city_skill_gate import (
+            DEFAULT_POSTERIOR_VERSION as _CSG_DEFAULT_VER,
+            apply_city_skill_gate,
+            city_skill_gate_live_enabled,
+        )
+        if not city_skill_gate_live_enabled():
+            return None
+        if not city or not str(city).strip():
+            return None
+        verdict = apply_city_skill_gate(
+            city=str(city),
+            artifact=artifact,
+            expected_posterior_version=expected_posterior_version or _CSG_DEFAULT_VER,
+            require_stable_bad_to_block=True,
+        )
+        if verdict.basis == "CITY_SKILL_BLOCKED_STABLE_BAD":
+            return (
+                f"ADMISSION_CITY_SKILL_STABLE_BAD:city={city}:"
+                f"prior_skill={verdict.prior_skill:.4f}:prior_n={verdict.n_g if hasattr(verdict, 'n_g') else verdict.prior_n}"
+            )
+        return None
+    except Exception:  # noqa: BLE001 — never break admission for the skill gate.
+        return None
+
+
+def shadow_log_admission(*, path: str | None = None, **fields) -> bool:
+    """Record a would-admit candidate to the shadow log (accrual of the missing population).
+
+    DEFAULT OFF (``ZEUS_SHADOW_ADMIT_LOG`` unset) -> no-op (returns False). When ON: appends the
+    would-admit record. FAIL-SOFT: any error is swallowed (observability never breaks trading).
+    ``side`` is derived from ``direction`` for the underlying logger."""
+    try:
+        from src.decision.shadow_admit_logger import maybe_log_candidate
+        if "side" not in fields and "direction" in fields:
+            fields["side"] = "NO" if str(fields.pop("direction") or "").lower() == "buy_no" else "YES"
+        elif "direction" in fields:
+            fields.pop("direction")
+        # The underlying record uses ``q_lcb_side``; the live seam is called with ``q_lcb``.
+        if "q_lcb_side" not in fields and "q_lcb" in fields:
+            fields["q_lcb_side"] = fields.pop("q_lcb")
+        return bool(maybe_log_candidate(path=path, **fields))
+    except Exception:  # noqa: BLE001 — never break trading for a log write.
+        return False

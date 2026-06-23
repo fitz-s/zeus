@@ -219,3 +219,88 @@ def test_no_index_entries_404_is_retried_not_skipped() -> None:
         f"Expected 2 retry calls for 'No index entries' 404, got {call_count}"
     )
     assert result["status"] == "download_failed"
+
+
+# ---------------------------------------------------------------------------
+# PYTHONSAFEPATH sibling-import antibody (2026-06-22)
+# ---------------------------------------------------------------------------
+# Root cause of a 12h forecast blackout: the forecast-live launchd plist sets
+# PYTHONSAFEPATH=1, which (Python 3.11+) suppresses Python's default injection of
+# the launched script's own directory into sys.path[0]. The extract subprocess
+# (`python ".../51 source data/scripts/extract_open_ens_localday.py"`) then could
+# not import its sibling module `tigge_local_calendar_day_common` →
+# ModuleNotFoundError → ecmwf extraction rc=1 → bayes_precision_fusion capture
+# failed → zero posteriors for 12h → stale belief → blind exits + stale entries.
+# Fix: _run_subprocess must explicitly inject the script's dir onto the child
+# PYTHONPATH so sibling imports resolve regardless of the parent's PYTHONSAFEPATH.
+
+def test_run_subprocess_injects_script_dir_on_pythonpath(monkeypatch) -> None:
+    """The launched .py script's own dir must be FIRST on the child PYTHONPATH."""
+    import os
+    from src.data import ecmwf_open_data as _mod
+
+    captured: dict = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeCompleted()
+
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    script_dir = "/Users/leofitz/zeus-live-main/51 source data/scripts"
+    script = f"{script_dir}/extract_open_ens_localday.py"
+    _mod._run_subprocess(
+        [sys.executable, script, "--track", "mx2t6_high"],
+        label="extract_antibody",
+        timeout=5,
+    )
+
+    env = captured.get("env")
+    assert env is not None, (
+        "_run_subprocess must pass an explicit env to subprocess.run so the "
+        "child PYTHONPATH can carry the script dir under PYTHONSAFEPATH=1."
+    )
+    pp = env.get("PYTHONPATH", "")
+    first = pp.split(os.pathsep)[0] if pp else ""
+    assert os.path.normpath(first) == os.path.normpath(script_dir), (
+        "The launched script's own directory must be FIRST on the child "
+        f"PYTHONPATH so sibling imports resolve under PYTHONSAFEPATH=1. Got {pp!r}."
+    )
+
+
+def test_run_subprocess_preserves_existing_pythonpath(monkeypatch) -> None:
+    """Injecting the script dir must PREPEND, not clobber, an existing PYTHONPATH."""
+    import os
+    from src.data import ecmwf_open_data as _mod
+
+    captured: dict = {}
+
+    class _FakeCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _FakeCompleted()
+
+    monkeypatch.setenv("PYTHONPATH", "/Users/leofitz/zeus-live-main")
+    monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+
+    script_dir = "/Users/leofitz/zeus-live-main/51 source data/scripts"
+    _mod._run_subprocess(
+        [sys.executable, f"{script_dir}/extract_open_ens_localday.py"],
+        label="extract_antibody2",
+        timeout=5,
+    )
+    pp = captured["env"].get("PYTHONPATH", "")
+    parts = [os.path.normpath(p) for p in pp.split(os.pathsep)]
+    assert parts[0] == os.path.normpath(script_dir), f"script dir must be first; got {pp!r}"
+    assert os.path.normpath("/Users/leofitz/zeus-live-main") in parts, (
+        f"existing PYTHONPATH entry must be preserved; got {pp!r}"
+    )

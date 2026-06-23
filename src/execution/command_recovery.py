@@ -39,7 +39,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
@@ -7402,6 +7402,329 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
     return payload
 
 
+# =============================================================================
+# Abandoned never-submitted EDLI ghost reconcile (live_order_pathology 2026-06-22)
+# =============================================================================
+# A live decision can build an EDLI order aggregate all the way to
+# ``ExecutionCommandCreated`` (the executor accepted the command INTERNALLY) and
+# then be interrupted — daemon restart / SQLite lock — BEFORE the venue submit.
+# The aggregate then stalls with NO subsequent event: no VenueSubmitAttempted, no
+# SubmitRejected, no SubmitUnknown, no ack, no user event, no Reconciled. Its
+# ``edli_live_order_projection.venue_order_id`` is NULL and there is ZERO
+# ``venue_commands`` row for its execution_command_id — i.e. the order NEVER
+# reached the venue and has $0 capital at risk.
+#
+# Such a ghost is NON-TERMINAL per ``event_reactor_adapter._TERMINAL_EVENT_SQL``,
+# so ``_locked_live_opportunity_active_order_reason`` treats it as an ACTIVE order
+# and permanently SUPPRESSES every new submit on the same weather family (the
+# duplicate-suppression lock has no direction filter — a stuck buy_YES ghost
+# blocks a live buy_NO on the same family forever). No other reconcile path
+# terminalizes it: the SUBMIT_UNKNOWN reconcile (_reconcile_edli_pending_no_order_if_proven)
+# requires ``pending_reconcile=1`` (a SubmitUnknown the ghost never reached), and
+# ``append_reconciled`` requires venue-reconcile truth a never-submitted order
+# has none of.
+#
+# The LEGAL terminalization (confirmed in live_order_aggregate._validate_event_append
+# for event_type=="SubmitRejected") is a PRE-SUBMIT SubmitRejected appended directly
+# after ExecutionCommandCreated WITHOUT a VenueSubmitAttempted: it is accepted iff
+# ``_is_pre_submit_rejection_payload(payload)`` is True (pre_submit_rejection=True,
+# submit_status="PRE_SUBMIT_ERROR", venue_call_started=False), the command-binding
+# fields match the ExecutionCommandCreated event, and a non-empty reason_code is set.
+# A SubmitRejected event makes the aggregate TERMINAL per _TERMINAL_EVENT_SQL, so the
+# family duplicate lock RELEASES and the family re-enters the normal decision pipeline
+# (still fully re-certified downstream — no gate bypassed).
+#
+# VENUE-TRUTH GUARD (money-path, fail-closed): a ghost is terminalized ONLY when it
+# has NO venue presence whatsoever — venue_order_id IS NULL in the projection, NO
+# venue_commands row for its execution_command_id, and NONE of
+# {VenueSubmitAttempted, VenueSubmitAcknowledged, SubmitUnknown, UserOrderObserved,
+# UserTradeObserved, SubmitRejected, Reconciled, CapTransitioned} events exist on
+# the aggregate. A real resting / filled / in-flight order is NEVER terminalized.
+
+# The same safe-replay grace the SUBMIT_UNKNOWN path uses: an aggregate is only a
+# terminalizable ghost once it has sat at ExecutionCommandCreated for longer than
+# this window (a crash mid-cycle is normal; we never race a still-completing submit).
+_ABANDONED_GHOST_GRACE_SECONDS = _SAFE_REPLAY_MIN_AGE_SECONDS
+
+# Events that prove the aggregate progressed past the never-submitted boundary (any
+# venue contact, any user-channel fact, or any later terminal/cap event). If ANY of
+# these exist on the aggregate it is NOT a never-submitted ghost — fail closed.
+_GHOST_DISQUALIFYING_EVENT_TYPES = (
+    "VenueSubmitAttempted",
+    "VenueSubmitAcknowledged",
+    "SubmitUnknown",
+    "UserOrderObserved",
+    "UserTradeObserved",
+    "SubmitRejected",
+    "Reconciled",
+    "CapTransitioned",
+)
+
+
+def _abandoned_unsubmitted_ghost_candidates(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    projection_ref: str,
+    cutoff_iso: str,
+) -> list[dict]:
+    """Aggregates stalled at ExecutionCommandCreated that never reached the venue.
+
+    Returns one row per ghost with its aggregate_id + execution_command_id (read
+    from the latest ExecutionCommandCreated event payload). Strictly read-only.
+
+    Predicates (ALL must hold):
+      * projection current_state = EXECUTION_COMMAND_CREATED and last_event_type =
+        ExecutionCommandCreated (the aggregate's CURRENT event is the command);
+      * projection.venue_order_id IS NULL;
+      * the ExecutionCommandCreated event occurred before ``cutoff_iso`` (grace);
+      * no disqualifying (venue / user / later-terminal / cap) event exists on the
+        aggregate — defense-in-depth even though current_state already implies it;
+      * no venue_commands row links to the execution_command_id (decision_id key).
+    """
+    disqualifier_placeholders = ",".join("?" for _ in _GHOST_DISQUALIFYING_EVENT_TYPES)
+    rows = conn.execute(
+        f"""
+        SELECT proj.aggregate_id AS aggregate_id,
+               json_extract(cmd_ev.payload_json, '$.execution_command_id') AS execution_command_id,
+               cmd_ev.occurred_at AS command_occurred_at
+        FROM {projection_ref} proj
+        JOIN {events_ref} cmd_ev
+          ON cmd_ev.aggregate_id = proj.aggregate_id
+         AND cmd_ev.event_type = 'ExecutionCommandCreated'
+        WHERE proj.current_state = 'EXECUTION_COMMAND_CREATED'
+          AND proj.last_event_type = 'ExecutionCommandCreated'
+          AND COALESCE(proj.venue_order_id, '') = ''
+          AND cmd_ev.occurred_at < ?
+          AND NOT EXISTS (
+              SELECT 1 FROM {events_ref} later
+              WHERE later.aggregate_id = proj.aggregate_id
+                AND later.event_type IN ({disqualifier_placeholders})
+          )
+        ORDER BY cmd_ev.occurred_at, proj.aggregate_id
+        """,
+        (cutoff_iso, *_GHOST_DISQUALIFYING_EVENT_TYPES),
+    ).fetchall()
+    candidates: list[dict] = []
+    for row in rows:
+        record = _dict_row(row)
+        execution_command_id = str(record.get("execution_command_id") or "").strip()
+        if not execution_command_id:
+            # An ExecutionCommandCreated with no execution_command_id cannot be
+            # safely cap-released or command-bound; skip (fail closed).
+            continue
+        # VENUE-TRUTH GUARD: any venue_commands row for this execution_command_id
+        # means the order reached the command bus — never terminalize.
+        if _table_exists(conn, "venue_commands"):
+            venue_cmd = conn.execute(
+                "SELECT 1 FROM venue_commands WHERE decision_id = ? LIMIT 1",
+                (execution_command_id,),
+            ).fetchone()
+            if venue_cmd is not None:
+                continue
+        record["execution_command_id"] = execution_command_id
+        candidates.append(record)
+    return candidates
+
+
+def _terminalize_abandoned_unsubmitted_ghost(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    projection_ref: str,
+    cap_usage_ref: str,
+    day_slots_ref: str | None,
+    rate_window_ref: str | None,
+    aggregate_id: str,
+    execution_command_id: str,
+    occurred_at: str,
+) -> bool:
+    """Append a PRE-SUBMIT SubmitRejected terminal + release the cap reservation.
+
+    Returns True when the ghost was terminalized, False when a final guard
+    (re-read venue truth) refuses. Caller wraps this in a SAVEPOINT.
+    """
+    # Re-read the ExecutionCommandCreated event for the exact command-binding
+    # fields (event_id / final_intent_id / execution_command_id) the
+    # _require_command_binding check enforces. Fail closed if absent.
+    command_event = _latest_edli_event(conn, events_ref, aggregate_id, "ExecutionCommandCreated")
+    command_payload = _edli_payload(command_event)
+    event_id = str(command_payload.get("event_id") or "").strip()
+    final_intent_id = str(command_payload.get("final_intent_id") or "").strip()
+    bound_command_id = str(command_payload.get("execution_command_id") or "").strip()
+    if not event_id or not final_intent_id or bound_command_id != execution_command_id:
+        return False
+
+    # FINAL venue-truth guard (re-read the projection under the write lock): the
+    # latest event must still be ExecutionCommandCreated and venue_order_id NULL.
+    projection = conn.execute(
+        f"""
+        SELECT current_state, last_event_type, venue_order_id
+        FROM {projection_ref}
+        WHERE aggregate_id = ?
+        """,
+        (aggregate_id,),
+    ).fetchone()
+    if projection is None:
+        return False
+    if str(projection["current_state"]) != "EXECUTION_COMMAND_CREATED":
+        return False
+    if str(projection["last_event_type"] or "") != "ExecutionCommandCreated":
+        return False
+    if str(projection["venue_order_id"] or "").strip():
+        return False
+
+    # The PRE-SUBMIT SubmitRejected payload the immutable ledger accepts directly
+    # after ExecutionCommandCreated (no VenueSubmitAttempted required), per
+    # live_order_aggregate._validate_event_append + _is_pre_submit_rejection_payload
+    # + _require_command_binding. reason_code is mandatory.
+    submit_rejected_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "execution_receipt_hash": str(command_payload.get("execution_receipt_hash") or ""),
+        "reason_code": "ABANDONED_UNSUBMITTED_GHOST_RECONCILE",
+        "submit_status": "PRE_SUBMIT_ERROR",
+        "venue_call_started": False,
+        "venue_ack_received": False,
+        "pre_submit_rejection": True,
+        "proof_class": "command_created_never_submitted_no_venue_presence",
+        "required_predicates": {
+            "current_event_is_execution_command_created": True,
+            "no_venue_submit_attempt": True,
+            "no_venue_order_id": True,
+            "no_venue_commands_row": True,
+            "aged_past_grace_seconds": _ABANDONED_GHOST_GRACE_SECONDS,
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": occurred_at,
+    }
+    _append_edli_event_qualified(
+        conn,
+        events_ref=events_ref,
+        aggregate_id=aggregate_id,
+        event_type="SubmitRejected",
+        payload=submit_rejected_payload,
+        occurred_at=occurred_at,
+        source_authority="existing_executor",
+    )
+
+    # Release the still-RESERVED cap reservation keyed by execution_command_id.
+    cap = conn.execute(
+        f"""
+        SELECT usage_id, reservation_status
+        FROM {cap_usage_ref}
+        WHERE execution_command_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (execution_command_id,),
+    ).fetchone()
+    if cap is not None and str(cap["reservation_status"]) == "RESERVED":
+        usage_id = str(cap["usage_id"])
+        conn.execute(
+            f"UPDATE {cap_usage_ref} SET reservation_status = 'RELEASED' WHERE usage_id = ?",
+            (usage_id,),
+        )
+        if day_slots_ref:
+            conn.execute(f"DELETE FROM {day_slots_ref} WHERE usage_id = ?", (usage_id,))
+        if rate_window_ref:
+            conn.execute(f"DELETE FROM {rate_window_ref} WHERE usage_id = ?", (usage_id,))
+
+    _rebuild_edli_projection_qualified(
+        conn,
+        events_ref=events_ref,
+        projection_ref=projection_ref,
+        aggregate_id=aggregate_id,
+    )
+    return True
+
+
+def reconcile_abandoned_unsubmitted_ghosts(
+    conn: sqlite3.Connection,
+    *,
+    updated_before: str | None = None,
+) -> dict[str, int]:
+    """Terminalize EDLI order aggregates abandoned at ExecutionCommandCreated.
+
+    THE GHOST CLASS THIS KILLS (live_order_pathology 2026-06-22): an aggregate
+    that reached ExecutionCommandCreated and was then interrupted before the venue
+    submit. It is non-terminal, so the duplicate-suppression family lock
+    (event_reactor_adapter._locked_live_opportunity_active_order_reason) suppresses
+    every new submit on the same weather family forever — even an opposite-direction
+    trade — while $0 sits at the venue.
+
+    For each such ghost (after a grace window, with NO venue presence) this appends
+    a PRE-SUBMIT SubmitRejected — the legal terminal directly after
+    ExecutionCommandCreated, accepted by the immutable ledger's _validate_event_append
+    — and releases its still-RESERVED cap reservation. That makes the aggregate
+    TERMINAL per _TERMINAL_EVENT_SQL, releasing the family lock so the next decision
+    cycle re-enters the family through the full (un-bypassed) certification pipeline.
+
+    Wired into both recovery lanes (boot / periodic) so a daemon restart self-heals
+    any ghost it created on its way down. DB-only pass; never calls the venue.
+    Returns {"scanned", "advanced", "stayed", "errors"}.
+    """
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    if not events_ref or not projection_ref or not cap_usage_ref:
+        return summary
+    day_slots_ref = _edli_live_cap_ref(conn, "edli_live_cap_day_slots")
+    rate_window_ref = _edli_live_cap_ref(conn, "edli_live_cap_rate_window")
+
+    now = datetime.now(timezone.utc)
+    explicit_cutoff = _parse_ts(updated_before) if updated_before else None
+    grace_cutoff = now - timedelta(seconds=_ABANDONED_GHOST_GRACE_SECONDS)
+    # Honor an explicit caller cutoff only when it is at least as strict (no later
+    # than) the grace cutoff — we never terminalize a ghost younger than the grace.
+    cutoff = min(explicit_cutoff, grace_cutoff) if explicit_cutoff is not None else grace_cutoff
+    cutoff_iso = cutoff.astimezone(timezone.utc).isoformat()
+
+    candidates = _abandoned_unsubmitted_ghost_candidates(
+        conn,
+        events_ref=events_ref,
+        projection_ref=projection_ref,
+        cutoff_iso=cutoff_iso,
+    )
+    occurred_at = _now_iso()
+    for candidate in candidates:
+        summary["scanned"] += 1
+        aggregate_id = str(candidate.get("aggregate_id") or "")
+        execution_command_id = str(candidate.get("execution_command_id") or "")
+        conn.execute("SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
+        try:
+            advanced = _terminalize_abandoned_unsubmitted_ghost(
+                conn,
+                events_ref=events_ref,
+                projection_ref=projection_ref,
+                cap_usage_ref=cap_usage_ref,
+                day_slots_ref=day_slots_ref,
+                rate_window_ref=rate_window_ref,
+                aggregate_id=aggregate_id,
+                execution_command_id=execution_command_id,
+                occurred_at=occurred_at,
+            )
+            conn.execute("RELEASE SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
+            conn.execute("RELEASE SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
+            logger.error(
+                "recovery: abandoned-unsubmitted-ghost reconcile failed for %s (cmd=%s): %s",
+                aggregate_id,
+                execution_command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def reconcile_stale_intent_created_no_submit(
     conn: sqlite3.Connection,
     *,
@@ -9550,6 +9873,15 @@ def _reconcile_passes_inline(
         summary["stayed"] += stale_intent_summary["stayed"]
         summary["errors"] += stale_intent_summary["errors"]
 
+        abandoned_ghost_summary = reconcile_abandoned_unsubmitted_ghosts(
+            conn,
+            updated_before=started_at,
+        )
+        summary["abandoned_unsubmitted_ghosts"] = abandoned_ghost_summary
+        summary["advanced"] += abandoned_ghost_summary["advanced"]
+        summary["stayed"] += abandoned_ghost_summary["stayed"]
+        summary["errors"] += abandoned_ghost_summary["errors"]
+
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
 
@@ -9910,6 +10242,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
     _db_pass("stale_intent_created_no_submit",
              reconcile_stale_intent_created_no_submit,
              "stale_intent_created_no_submit",
+             updated_before=started_at)
+
+    _db_pass("abandoned_unsubmitted_ghosts",
+             reconcile_abandoned_unsubmitted_ghosts,
+             "abandoned_unsubmitted_ghosts",
              updated_before=started_at)
 
     # In-flight per-row scan (find_unresolved_commands + _reconcile_row).

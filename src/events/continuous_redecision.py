@@ -1706,7 +1706,22 @@ def screen_resting_orders(
                     bid = None
             if bid is not None:
                 drift = float(bid.price) - float(rest.limit_price)
-                if drift >= REST_BOOK_DRIFT_TICKS * TICK_SIZE - _EPS:
+                # Gate the BOOK_MOVED microstructure pull behind the same 300s
+                # maker-window floor the value-refresh pull uses (and the
+                # escalation-arming floor in event_reactor_adapter). Pre-fix this
+                # pull had NO age guard, so a rest whose bid moved a tick was
+                # cancelled sub-floor, re-decided as a fresh non-escalated
+                # REST_DEFAULT, and pulled again — an infinite rest->pull->re-rest
+                # loop with 0 crosses / 0 +EV-band fills. Holding within the
+                # window lets the rest survive to escalation-eligibility so the
+                # next certified decision crosses TAKER_ESCALATED_AFTER_REST (still
+                # +EV-gated). Belief-decay (screen_reprice) stays ungated above, so
+                # fair-value protection on NEW evidence is unchanged.
+                # (2026-06-23 entry fill-lane diagnosis.)
+                if (
+                    drift >= REST_BOOK_DRIFT_TICKS * TICK_SIZE - _EPS
+                    and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0
+                ):
                     decision = RepriceDecision(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
                         action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,
