@@ -17,6 +17,16 @@ The live admission gate trades on `edge_lcb = payoff_q_lcb − cost > 0` and **i
 **EXCEEDS the point estimate** — a lower bound above its own point. That manufactures false
 edge on cheap deep-OTM YES tickets and admits them at zero/negative point EV.
 
+**Root** = the **one-sided σ floor** in `joint_q_band.draw_sigma` (`return max(drawn, floor)`,
+L308): the band's per-draw σ is floored upward at the realized floor, so when the served σ IS
+that floor, the point sits at the LEFT boundary of the draw law and EVERY draw is ≥ the point σ.
+Deep-OTM bin mass is convex/steep in σ, so even the band's 5th-percentile σ produces bin mass ≥
+the point's. **Recommended fix = FIX-2: make `draw_sigma` a two-sided posterior centered on the
+served σ** (so the 5pct is a genuine lower bound by construction). A one-line decision-invariant
+fuse (FIX-1: clip `edge_lcb ≤ point_ev` at the economics seam) stops the loss immediately but is
+NOT the permanent statistical fix — see §4. An independent frontier-model audit reached the same
+mechanism and the same FIX-2 verdict (Appendix B).
+
 **Inversion is REAL and large.** Last 400 `DecisionProofAccepted` proofs, cheap buy_yes
 (cost ≤ 0.12), n=217 selected economics:
 
@@ -175,43 +185,84 @@ is trusting a bound that is silently no longer a lower bound.
 `band.samples` (via `_candidate_guarded_pi` / `effective_outcome_pi`), so a bin with inflated
 band mass also shows positive robust ΔU at the venue-min stake.
 
-## 4. PROPOSED FIX (single, universal, law-compliant)
+## 4. PROPOSED FIX — TWO candidates; the ROOT repair is FIX-2
 
-**Make `edge_lcb` a genuine conservative lower bound by construction: it can never exceed the
-point edge.** The lower bound of the payoff value must be ≤ the point value — that is the
-definition of a lower bound. Equivalently `payoff_q_lcb ≤ q_dot_payoff`.
+Both an independent frontier-model audit (ChatGPT Pro, 2026-06-22, see Appendix B) and this
+analysis agree the **dominant mechanism is the one-sided σ floor in `draw_sigma`**. They differ
+on which fix to ship. Below are both, honestly stated, for the operator to choose.
 
-**Lever (file:line):** `src/decision/payoff_vector.py::compute_candidate_economics`, at the
-`edge_lcb` assignment (L793-797). After computing `edge_lcb` and `point_ev`, clamp:
+### FIX-2 (ROOT, recommended): make the band's σ posterior two-sided/coherent
 
-```
-edge_lcb = min(edge_lcb, point_ev)
-```
+**Lever (file:line):** `src/probability/joint_q_band.py::draw_sigma` (L297-312), specifically the
+one-sided floor `return max(drawn, floor)` (L308-312) and the served-σ relationship in
+`src/forecast/sigma_authority.py::build_sigma` (the realized-floor path L572-573 where the
+served σ IS the realized floor, making the point sit at the LEFT boundary of the draw law).
 
-(equivalently clamp the band path `edge_lower_bound(...)` and the guarded path
-`q_guard - cost` to never exceed `q_dot - cost`). This is a one-line correctness clip at the
-single seam where both quantities already exist (`point_ev` L791, `edge_lcb` L793, both in
-scope before the `CandidateEconomics` build L810).
+The defect: `draw_sigma` draws `N(σ_native, disp)` then truncates the LEFT tail at
+`floor = max(realized_floor, 1e-6)` (L308). When `σ_native == realized_floor` (the common case
+where sigma_authority served the floor), the point's σ is the **lower boundary** of the draw
+law — every draw's σ is ≥ the point σ, so the band is a one-sided upward perturbation. For a
+deep-OTM bin whose mass is convex and sharply increasing in σ (the Gaussian-tail
+distance²/variance term), even the band's 5th-percentile σ ≥ the point σ ⇒ 5pct bin mass ≥
+point bin mass ⇒ the lower bound exceeds the point.
 
-### Why this is the right fix and law-compliant
+The fix: replace the one-sided floor with a **centered two-sided** σ posterior whose
+median/mean IS `σ_native` (e.g. draw on log-σ, or on excess-over-positive-floor, recentered so
+the served σ is the center, NOT the boundary), and let the realized-floor live ONCE in the
+served-σ authority upstream rather than as a second one-sided widening at band time. Point_ev
+stays raw; `build_joint_q` stays the sole integrator; μ-draw unchanged.
 
-- **It fixes an EXISTING computation, adds NO new gate.** `edge_lcb` is *already documented as
-  a lower bound* (L298-306 "robust lower credible bound"); a lower bound exceeding its point is
-  a bug in that computation. The clip restores the invariant the code already claims. This is
-  the operator's "fix an existing gate to be correct, do not add gate mass" path verbatim.
-- **No cap / haircut / allowlist / price-band / throttle.** It is not a notional cap or a
-  q-haircut — it never touches the point q / μ / sizing magnitude; it only enforces
-  `lower_bound ≤ point` on the bound itself.
-- **Raw q stays the sole authority; point_ev stays honest.** `q_dot_payoff` (raw point q) is
-  untouched and becomes the ceiling for its own lower bound — the most honest possible
-  reference. No market-anchor, no shadow, no flag.
-- **Universal — helps ALL bins and BOTH sides, not one order type.** For any bin where the
-  bound exceeded the point (deep-OTM tails), `edge_lcb` drops to `point_ev` and the bin
-  self-rejects when `point_ev ≤ 0`. The inversion is YES-dominant but not YES-only: last 400
-  proofs, **YES 117/217 = 54% inverted, NO 21/183 = 11% inverted** — the clip corrects both.
-  For bins where the band bound is already ≤ point (89% of NO legs, 46% of YES), the clip is
-  the **identity — zero behavior change on the legitimate path** (modal / shoulder / in-the-money
-  legs are untouched).
+**Why FIX-2 is more correct:** it repairs the object every downstream consumer *believes* it is
+reading — a coherent posterior band centered on the same raw point law. After FIX-2 the band's
+5pct is a genuine lower bound by construction, the extreme ratios collapse, and the band's
+`q_ucb` and the robust-ΔU sizing inputs (which consume the SAME inflated `band.samples`) are
+fixed in the same stroke. It adds no gate, no cap, no haircut, no shadow; raw q untouched.
+
+**Risk / why not trivial:** the realized-floor is a deliberate sigma-authority invariant
+(AGENTS.md §0: "no draw is sub-realized"). FIX-2 must preserve the floor on the *served* σ
+while removing the floor's one-sided effect on the *draw lower tail* — a wider blast radius than
+FIX-1 (touches band semantics + needs regression on `q_ucb` and ΔU). It is the correct ROOT but
+needs more verification before it touches live money.
+
+### FIX-1 (immediate safety fuse, NOT the permanent statistical fix)
+
+**Lever (file:line):** `src/decision/payoff_vector.py::compute_candidate_economics` (L789-797),
+after `point_ev` (L791) and `edge_lcb` (L793) are both in scope, clamp
+`edge_lcb = min(edge_lcb, point_ev)`.
+
+**What it is:** a *decision invariant* — "never admit a candidate whose raw point EV is ≤ 0 via
+a positive lower-bound edge." It guarantees no `point_ev ≤ 0` deep-OTM ticket is admitted, in
+one line, with zero band-semantics blast radius. It is the only universal fuse that stops the
+capital loss immediately.
+
+**What it is NOT — the honest caveat (raised by the independent audit, and correct):** clipping
+`edge_lcb ≤ point_ev` is NOT a statistical theorem. A genuine Bayesian posterior lower quantile
+of a *convex* payoff transform CAN legitimately exceed the plug-in point (Jensen) — so FIX-1
+can in principle over-reject a real posterior-implied opportunity. FIX-1 masks an incoherent
+band rather than repairing it. Therefore: ship FIX-1 ONLY as an explicitly-named temporary
+fuse (e.g. an `edge_lcb_actionable = min(raw_edge_lcb, point_ev)` field that keeps
+`raw_edge_lcb` for diagnostics), and REMOVE it once FIX-2 makes the band coherent.
+
+**Reconciliation with the operator framing:** the operator calls these tickets "garbage" and
+the task names "make q_lcb ≤ point q" as the strongest candidate. That intent is precisely the
+FIX-1 *decision invariant* ("don't buy negative-point-EV deep-OTM tails"). It is a legitimate
+business rule, but it is a DECISION rule, not a repair of the band — so the cleanest end state
+is: FIX-2 repairs the band (the inversion disappears by construction for the floored-width
+artifact), and if the operator ALSO wants the hard "no negative-point-EV trade" invariant, that
+is a deliberate one-line decision rule layered on a now-coherent band, not a patch over a broken
+one.
+
+**Universality of the symptom (both sides):** the inversion is YES-dominant but not YES-only —
+last 400 proofs, **YES 117/217 = 54% inverted, NO 21/183 = 11% inverted**. FIX-2 corrects both
+by construction; FIX-1 corrects both at the seam. For bins where the band bound is already ≤
+point (89% of NO legs, 46% of YES — modal/shoulder/ITM), both fixes are the identity.
+
+### Recommendation
+
+Ship **FIX-2** as the permanent root repair (it makes the lower bound honest by construction and
+also fixes `q_ucb` + ΔU). If live capital is exposed before FIX-2 can be regression-tested, ship
+**FIX-1 as a clearly-labelled temporary fuse** in `compute_candidate_economics`, then remove it
+when FIX-2 lands. Do NOT ship FIX-1 as the permanent statistical fix.
 - **Does it over-reject a legitimate bin?** No. A true lower bound is BY DEFINITION ≤ the point
   estimate; there is no legitimate case where the 5th-percentile of a bin's mass should exceed
   the bin's point mass. Any case where it does is the floored-width artifact. So the clip can
@@ -247,19 +298,21 @@ rather than changing it. (The "favorite-longshot relaxation" at
 `test_family_decision_engine.py:1095` is a DIRECTION-LAW allowance — admitting a NO on the
 modal bin — and is unrelated to the lower-bound-vs-point invariant.)
 
-### Deeper alternative considered (and why the clip is preferred as the immediate fix)
+(Test-fixture consistency note: the clip is the identity on all existing fixtures, so FIX-1
+breaks no current test; FIX-2 needs new band-coherence regressions — see Appendix B verify-list.)
 
-FIX-2: make the band coherent with the point by removing the one-sided sigma floor inside
-`draw_sigma` (L308) — use a **two-sided** sigma posterior so the band's 5pct is a genuine lower
-bound by construction. This attacks the ROOT (the floored width) and would also fix the band's
-`q_ucb` and the robust-ΔU sizing inputs. **However** the floor at `realized_floor` is a
-deliberate sigma-authority invariant (AGENTS.md §0: "settlement sigma-shape floor… no draw is
-sub-realized") — removing/loosening it re-opens an over-confident-narrow-sigma failure the
-floor was built to prevent, and is a wider blast-radius change to the band semantics. The
-clip (FIX-1) is the **minimal, provably-safe** correction that restores the lower-bound
-invariant at the seam without weakening the sigma floor. Recommend FIX-1 now; consider FIX-2
-(two-sided sigma uncertainty that preserves the realized-floor on the *served* sigma but not on
-the *draw* lower tail) as a follow-up coherence improvement to the band's upside as well.
+## A related MEDIUM finding: the economics seam does not assert point/band identity
+
+`src/decision/payoff_vector.py::_validate_alignment` (L264-283) checks only that `payoff`,
+`joint_q.q`, and `band.samples` share the same bin LENGTH — it does NOT assert that `joint_q`
+and `band.joint_q` were built from the SAME predictive distribution + Omega
+(`joint_q.identity_hash == band.joint_q.identity_hash`). At the live call site they ARE the same
+(`family_decision_engine.py:669-672` builds both from one `predictive`), so a stale/mismatched
+band is NOT the live cause here — the one-sided σ floor is. But a future caller that passes a
+mismatched (point, band) pair would produce the EXACT "lower bound exceeds its own point"
+symptom undetected. Cheap hardening: add an identity-hash equality assertion in
+`_validate_alignment` (or at the top of `compute_candidate_economics`). Independent-audit MEDIUM
+finding; recommended as defensive but secondary to the σ-floor root.
 
 ## Decisive cross-check: the PERSISTED q_lcb is clean — the spine band is the culprit
 
@@ -328,3 +381,41 @@ the user-channel writer not traced here — flagged for a dedicated fill-lane di
   −0.0073); Munich (cost 0.0094, q_dot 9.9e-3, payoff_q_lcb 0.069, point_ev 0.0005); Madrid
   (cost 0.0157, q_dot 4.2e-2, payoff_q_lcb 0.096); Shenzhen (cost 0.0105, q_dot 3.1e-2,
   payoff_q_lcb 0.117).
+
+## Appendix B: independent frontier-model audit (ChatGPT Pro Extended, 2026-06-22)
+
+An independent audit (different model family, web-browsing, given the exact formulas + the live
+statistics) was run as a cross-check. Verbatim answer saved at
+`/tmp/cgc_answer_REQ-20260622-220855-fd415c.txt`. It could NOT browse the commit-pinned
+`6052c15d` blobs (GitHub 404 in its session) and audited reachable `main` instead — so its
+line numbers are against `main` (rendered offsets differ from this doc's worktree offsets), but
+the symbols and logic match. Its verdict:
+
+- **Mechanism — AGREES with this doc:** the dominant cause is the **one-sided σ draw/floor** in
+  `draw_sigma` (`max(drawn, floor)`), NOT simplex renormalization (point and band share the same
+  `build_joint_q` renorm) and NOT day0 (carried unchanged into each per-draw pd). Gaussian-tail
+  mass is convex/steep in σ, so a one-sided-widened σ lifts deep-tail mass by orders of
+  magnitude and makes the point sit at/near the lower boundary of the draw law — explaining the
+  10^1–10^28 ratios.
+- **Fix — recommends FIX-2 (repair `draw_sigma` to a centered two-sided σ posterior)** as the
+  permanent single fix; treat FIX-1 (`min(edge_lcb, point_ev)`) as a temporary, explicitly-named
+  actionable-edge fuse, removed once the band is coherent.
+- **Key theoretical caveat (incorporated into §4):** `posterior_lcb ≤ plug-in_point` is NOT a
+  theorem — a Bayesian posterior lower quantile of a convex payoff transform can legitimately
+  exceed the plug-in point (Jensen). So FIX-1 is a DECISION invariant, not a statistical repair,
+  and can over-reject in principle.
+- **New MEDIUM finding (incorporated above):** `_validate_alignment` checks only vector length,
+  not point/band `identity_hash` equality — add an identity assertion as defensive hardening.
+- **Caveat on the audit itself:** it ran against `main`, not the pinned tree; the one fact that
+  would flip its verdict is if the live `draw_sigma` is ALREADY a centered two-sided posterior
+  and the inversion comes from a stale/mismatched band — which this doc REFUTES (live point+band
+  are built from one predictive at `family_decision_engine.py:669-672`, and the worktree
+  `draw_sigma` L308 IS the one-sided `max(drawn, floor)`). So the σ-floor root stands.
+
+Verify-locally list (from the audit, for the operator implementing the fix):
+1. For inverted live rows, log `sigma_native`, `realized_floor_native`, draw_sigma p05/median,
+   `band.joint_q.identity_hash == joint_q.identity_hash`, and
+   `quantile(band.samples @ payoff, .05) / (joint_q.q @ payoff)`.
+2. Unit test: deep-OTM one-hot YES payoff with `sigma_native == realized_floor`, `center_se == 0`
+   ⇒ expect `quantile(samples @ payoff, .05) ≈ point_q @ payoff` (today it is strictly above).
+3. After FIX-2: rerun the live-row audit; require the extreme ratios to collapse.
