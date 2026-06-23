@@ -220,6 +220,18 @@ scope before the `CandidateEconomics` build L810).
   where the bound is already a true lower bound it is the identity, so the legitimate modal/NO
   book is not perturbed.)
 
+### Downstream-invariant consistency (verified)
+
+The clip is consistent with every downstream consumer:
+- `payoff_q_lcb` is reverse-derived as `edge_lcb + cost` (`qkernel_spine_bridge.py:1357`)
+  AFTER the clip, so the receipt identity `payoff_q_lcb == cost + edge_lcb`
+  (`event_reactor_adapter.py:1510`) still holds.
+- The clamped `payoff_q_lcb = min(old, q_dot_payoff) ≤ 1.0` still satisfies the range check
+  (`event_reactor_adapter.py:1504`).
+- A clipped-negative `edge_lcb` (from `point_ev ≤ 0`) correctly fails the
+  `edge_lcb <= 0.0 → return None` admission check (`event_reactor_adapter.py:1508`) — exactly
+  the intended self-rejection of the deep-OTM tail, with NO new gate.
+
 ### Deeper alternative considered (and why the clip is preferred as the immediate fix)
 
 FIX-2: make the band coherent with the point by removing the one-sided sigma floor inside
