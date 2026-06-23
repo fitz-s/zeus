@@ -1,142 +1,144 @@
-# Operations Packet Archival Rules
+# Zeus Archival And Evidence Isolation Rules
 
-Status: SPEC
-Companion: `PURGE_CATEGORIES.md` (Category 4 names the rule;
-this file specifies the criteria, evidence, and exemption logic in detail)
+Status: active durable archival authority  
+Scope: packet/archive/evidence/report demotion, quarantine, stubs, and default-read isolation  
+Freshness model: durable rule. Individual current facts and packet status remain expiry-bound elsewhere.
 
-## Why Archival Is Hard
+---
 
-A closed packet is not the same as a dead packet. The
-`CLOSED_PACKET_STILL_LOAD_BEARING` friction pattern (see sibling audit packet)
-shows that runtime, current authority docs, and even active hooks frequently
-import or cite evidence from packets the human considers "closed." Naive
-archival breaks the runtime silently and the agent later cites the missing
-file as "this never existed."
+## 1. Purpose
 
-This file specifies the criteria that distinguish a packet whose evidence is
-truly post-load-bearing from one that is merely past its activity window.
+Archival in Zeus is not cosmetic. A closed packet, dated consult, PR review, rebuild diary, or evidence report can still contain useful history, but it must not sit in the authority/reference/default-boot path where a zero-context agent can restore an obsolete worldview.
 
-## Archival Verdicts
+This file defines when historical material is moved, stubbed, indexed, or quarantined. It does not authorize deletion of evidence and it does not define live system behavior.
 
-Every packet directory under `docs/operations/task_*/` receives one verdict
-on each maintenance run:
+---
 
-- `ACTIVE`: modified within last 30 days OR contains `Status: ACTIVE_LAW` /
-  `Status: AUTHORITY` / `Status: IN_PROGRESS`
-- `WINDING_DOWN`: not modified 30–60 days, no AUTHORITY status, but at least
-  one current-authority file references a path inside it
-- `ARCHIVE_CANDIDATE`: not modified 60+ days, no AUTHORITY status, and
-  passes ALL exemption checks below
-- `LOAD_BEARING_DESPITE_AGE`: would otherwise be ARCHIVE_CANDIDATE, but at
-  least one exemption check failed; this packet stays in place AND a row is
-  written to `LOAD_BEARING_REGISTRY.md` so the human knows it cannot be
-  archived without first cutting the load-bearing link
-- `ALREADY_ARCHIVED`: a `<name>.archived` stub exists at the original path
+## 2. Layer Verdicts
 
-Only `ARCHIVE_CANDIDATE` packets move under any agent action. All others are
-left in place.
+Every doc-like file that can influence agent cognition must be classed as one of:
 
-## Exemption Checks (ALL must pass to archive)
+- `durable_authority_law`: active law under `docs/authority/**`.
+- `canonical_reference`: durable reference under `docs/reference/**`.
+- `current_fact_pointer`: expiry-bound current fact under `docs/operations/current_state.md`, `current_data_state.md`, or `current_source_validity.md`.
+- `runbook`: procedural operation under `docs/runbooks/**`.
+- `machine_manifest`: machine-checkable yaml/registry under `architecture/**`.
+- `evidence`: raw evidence, receipt, audit, measurement, or diagnostic artifact.
+- `report`: interpreted historical report, review, closeout, or audit summary.
+- `packet`: active or closed work packet.
+- `archive`: historical material retained for discoverability.
+- `quarantined_pollution`: a file demoted because its old path/class made agents likely to treat stale claims as authority.
+- `obsolete_dead`: retained only to explain that an old branch/feature/path is dead.
 
-For each candidate packet `P = docs/operations/task_<date>_<slug>`:
+Only the first five classes may appear in default boot, and only when the router says so. `current_fact_pointer` is default-readable only as a pointer, not as durable law.
 
-0. **Authority Status Registry check (priority — runs FIRST).** Look up
-   the packet's canonical path in the active `artifact_authority_status`
-   registry introduced by `01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md`
-   §13 and populated by `01_topology_v_next/ZEUS_BINDING_LAYER.md` §8.
-   If the path appears in the registry AND the status is NOT one of
-   `{ARCHIVED, CURRENT_HISTORICAL}` (or `CURRENT_HISTORICAL` only when the
-   row also carries an explicit `archival_ok: true` flag), classify the
-   packet as `LOAD_BEARING_DESPITE_AGE` immediately and SKIP checks 1–8.
-   The registry is the authoritative source of truth for load-bearing status;
-   the 8 heuristic checks below are a fallback for packets not yet registered.
-   If the registry file is absent or unreadable, log a WARNING and continue
-   to check 1 (do NOT silently treat absence as "not registered").
+---
 
-1. **Authority status check**: grep PLAN.md / README.md first 50 lines for
-   `Status: AUTHORITY` | `Status: ACTIVE_LAW` | `Status: AUTHORITATIVE`. If
-   present → `LOAD_BEARING_DESPITE_AGE`.
-2. **Reference replacement check**: scan
-   `architecture/reference_replacement.yaml` for any entry whose `source`
-   path is under `P/`. If present → `LOAD_BEARING_DESPITE_AGE`.
-3. **Docs registry check**: scan `architecture/docs_registry.yaml` for any
-   entry whose `path` is under `P/`. If present → `LOAD_BEARING_DESPITE_AGE`.
-4. **Code reference grep**: `git grep -l "task_<date>_<slug>"` across `src/`,
-   `scripts/`, `tests/`, `architecture/`. Any non-self hit →
-   `LOAD_BEARING_DESPITE_AGE`.
-5. **Active packet citation**: grep all packets matching `task_*` modified in
-   the last 30 days for references to `P/`. Any hit →
-   `LOAD_BEARING_DESPITE_AGE`.
-6. **Open PR check**: list open PRs (`gh pr list --state open --json
-   files,number`); if any open PR touches a file inside `P/` →
-   `LOAD_BEARING_DESPITE_AGE`.
-7. **Hook / launchd citation**: grep `.claude/settings.json`,
-   `.codex/hooks.json`, `~/Library/LaunchAgents/com.zeus.*.plist` for any
-   path containing `task_<date>_<slug>`. Any hit → `LOAD_BEARING_DESPITE_AGE`.
-8. **Worktree branch check**: list `git worktree list`; if any worktree's
-   branch name contains `<slug>` → `LOAD_BEARING_DESPITE_AGE`.
+## 3. What Must Leave Authority Or Reference
 
-A packet must pass all nine checks to become `ARCHIVE_CANDIDATE`. Any single
-failure flips it to `LOAD_BEARING_DESPITE_AGE`.
+Move or demote these out of active authority/reference unless the durable rule has been promoted into current law/reference:
 
-## Archive Move Procedure
+- dated strategy-of-record documents;
+- consult raw transcripts;
+- PR reviews or critic/verifier reports;
+- packet plans, closeouts, work logs, task diaries;
+- one-off statistical/audit snapshots;
+- evidence dumps;
+- current operational facts without freshness/expiry;
+- historical deploy status such as loaded SHA, PID, bankroll, active positions, transient reject counts;
+- docs that present legacy ENS/Platt/market_fusion, AIFS hard dependency, q_lcb_5pct, submit-disabled, shadow-only, old lifecycle strings, old bankroll/caps, or packet freeze claims as current law.
 
-For an `ARCHIVE_CANDIDATE` packet:
+If a demoted file contains a still-valid rule, promote the rule first. The source remains evidence/history and must not be default-read.
 
-1. Compute target path:
-   `docs/archive/<YYYY>-Q<1-4>/<original-name>/`
-2. Verify target does not exist; if collision, append `.duplicate-<N>`.
-3. `git mv` the directory tree under git so history is preserved.
-4. Create stub at original path:
-   ```
-   docs/operations/<original-name>.archived  (single file, ~12 lines)
-   ---
-   archived_to: docs/archive/<YYYY>-Q<1-4>/<original-name>/
-   archived_at: <ISO date>
-   archived_by: maintenance_agent
-   last_modified_before_archive: <ISO date>
-   exemption_checks_passed: 9/9  # check #0 (registry) + checks 1-8
-   reference_grep_count: 0
-   restore_command: git mv docs/archive/.../<name>/ docs/operations/<name>/
-   ---
-   ```
-5. Add a row to `02_daily_maintenance_agent/evidence_trail/<date>/archived.tsv`:
-   `<original-name>\t<archived-to>\t<exemption-checks-passed>`
-6. The `git mv` and stub-write happen in a single commit on a dedicated
-   branch named `maintenance/archive-<YYYY-MM-DD>`. The commit message lists
-   every archived packet. PR opened against main with `[maintenance]` tag.
+---
 
-The agent does NOT merge the PR. Human merges after spot-check.
+## 4. Packet Archival Verdicts
 
-## Restore Procedure
+For packet directories under `docs/operations/task_*` or equivalent current-work homes:
 
-If a future search hits the `.archived` stub instead of content, the agent
-(or human) follows the `restore_command`. Restore is reversible by re-running
-the archive procedure on next tick once the load-bearing link is found and
-either cut or documented.
+- `ACTIVE`: current open packet, explicitly named by `docs/operations/current_state.md`, with freshness/evidence.
+- `CURRENT_POINTER_ONLY`: the current-state pointer names the packet, but agents may not default-read the whole directory.
+- `WINDING_DOWN`: recently closed or partially referenced; not default-read.
+- `LOAD_BEARING_HISTORY`: code/manifests/tests/reference still cite it. Keep discoverable, but cut default routes and promote any durable rule.
+- `ARCHIVE_CANDIDATE`: not active, not load-bearing after checks, safe to move to archive/report/evidence.
+- `QUARANTINE_CANDIDATE`: old class/path makes false authority likely; move or reindex immediately even if raw content remains useful.
+- `ALREADY_ARCHIVED`: original path is a stub pointing to archive/report/evidence.
 
-## Quarterly Hard Sweep
+Closed packet evidence must not be read during default boot merely because it remains load-bearing history.
 
-A separate `quarterly_archive_sweep` task runs once per quarter, NOT daily.
-It re-evaluates all packets older than 180 days and proposes a second-tier
-move from `archive/<YYYY>-Q<N>/` to `archive/cold/<YYYY>/`. Cold archival
-adds a `cold_archived: true` field to the stub but otherwise behaves
-identically.
+---
 
-The agent never deletes packets. Deletion of `cold/` archives is an explicit
-human action gated outside the agent.
+## 5. Exemption Checks Before Moving A Packet
 
-## Special Case: Wave Packets
+Before moving a packet directory, check:
 
-The wave-packet pattern (`task_*_wave[0-9]+`) is common in Zeus. Wave packets
-share evidence within the same wave family. Treat them as an ATOMIC GROUP:
-all wave packets in a family are archived together, OR none. The exemption
-checks above run against the union of paths in all wave packets sharing the
-same family slug.
+1. Is it named by a fresh current-state pointer?
+2. Is it referenced by `architecture/docs_registry.yaml`, `reference_replacement.yaml`, `module_manifest.yaml`, `task_boot_profiles.yaml`, `fatal_misreads.yaml`, or scoped AGENTS?
+3. Is it cited by active authority/reference docs?
+4. Is it imported or opened by source, scripts, tests, hooks, launchd, or CI?
+5. Does it contain status markers `AUTHORITY`, `ACTIVE_LAW`, `IN_PROGRESS`, or similar?
+6. Does it contain surviving durable law that has not yet been promoted?
+7. Does an open PR or branch actively modify it?
+8. Would moving it break a current runbook, operator receipt, or validation script?
+9. Is there an archive/report/evidence index row or stub plan for discoverability?
 
-## Acceptance For This Spec
+If any check blocks a move, cut or update the load-bearing link first. Do not leave the file in default boot as a workaround.
 
-A maintenance-agent run that proposes an archive without all nine exemption
-checks (check #0 registry + checks 1–8) recorded in its evidence trail is a
-regression. The DRY_RUN_PROTOCOL must surface the per-check outcome to the
-human, not just the final verdict.
+---
+
+## 6. Move And Stub Procedure
+
+Preferred move forms:
+
+- closed packet -> `docs/archive/<YYYY>-Q<N>/<original-name>/`;
+- interpreted historical report -> `docs/reports/<topic>/<name>.md`;
+- raw measurement/audit evidence -> `docs/evidence/<topic>/<name>`;
+- authority/reference pollution -> `docs/reports/authority_history/<name>.md` or `docs/archive/<YYYY>-Q<N>/authority_pollution/<name>.md`.
+
+Use `git mv` where possible. When only a contents API is available, create the target file, delete the old path, and record the demotion in `docs/archive_registry.md` or the active archive/report index.
+
+A stub is allowed only when repo policy or link preservation requires it. Stubs must be short and must state:
+
+- old path;
+- new path;
+- demoted class;
+- reason it is not authority;
+- date of demotion;
+- active replacement authority/reference.
+
+A stub under an active route must itself say `archive-only` and must not restate obsolete present-tense claims.
+
+---
+
+## 7. Archive Registry Requirements
+
+Every demotion must record:
+
+- old path;
+- new path or deletion/discoverability note;
+- old claimed class;
+- actual class after inspection;
+- default-read after demotion (`false` unless a pointer stub is required);
+- reason for demotion;
+- active replacement law/reference, if any;
+- evidence date / demotion date.
+
+The registry is an index, not authority. It helps agents find history without default-reading it.
+
+---
+
+## 8. Deletion Rule
+
+Agents do not delete historical evidence for convenience. Deletion is allowed only for duplicate generated artifacts, empty stubs, or files whose content is preserved elsewhere and whose deletion is explicitly recorded. Human/operator review is required for irreversible purge of evidence archives.
+
+---
+
+## 9. Acceptance Criteria
+
+An archival/demotion patch is accepted only if:
+
+1. no demoted evidence/report/archive path remains in default AGENTS/README/registry route;
+2. active authority/reference still contains the surviving durable truth;
+3. current facts have freshness/expiry semantics or are marked unknown;
+4. archive/report/evidence remains discoverable through registry/index;
+5. validation or search confirms stale terms are not present-tense law in default-read authority/reference/router files.
