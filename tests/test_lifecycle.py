@@ -799,6 +799,26 @@ class TestExitTriggers:
         assert decision.should_exit
         assert decision.trigger == "SETTLEMENT_IMMINENT"
 
+    def test_settlement_imminent_holds_confirmed_win(self):
+        """A near-certain WIN near settle must be HELD to its certain $1.00 settlement, NOT
+        force-sold. Selling a confirmed win at <1.0 forgoes the free spread to settlement AND
+        pays a sell fee for nothing — a FALSE EXIT (operator-reported 2026-06-23: a NO at 99.9¢,
+        a confirmed win, was force-sold by SETTLEMENT_IMMINENT). When BOTH the held-side market
+        price AND the fresh belief confirm the win (>=0.90), hold."""
+        pos = _make_position()
+        decision = _call_exit(pos, 0.97, 0.97, hours_to_settlement=0.5)
+        assert not decision.should_exit, "confirmed win near settle must hold, not force-sell"
+        assert decision.trigger != "SETTLEMENT_IMMINENT"
+
+    def test_settlement_imminent_still_exits_reversal(self):
+        """The mission's GOOD near-settle exit: a physics REVERSAL the market has not yet priced
+        (fresh belief LOW that the held side wins, but market price still HIGH) STILL exits — sell
+        before the market notices. Not a confirmed win (belief < floor), so the force-exit holds."""
+        pos = _make_position()
+        decision = _call_exit(pos, 0.20, 0.95, hours_to_settlement=0.5)
+        assert decision.should_exit
+        assert decision.trigger == "SETTLEMENT_IMMINENT"
+
     def test_whale_toxicity(self):
         pos = _make_position()
         decision = _call_exit(pos, 0.60, 0.40, whale_toxicity=True)
