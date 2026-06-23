@@ -145,3 +145,40 @@ adverse fills + q over-confidence. The honest path to profitability is: the depl
 (modal-only, Open-Meteo) make accruing settled rows cleaner → re-run scripts/q_exec_lcb_backtest.py
 as rows accrue → when it certifies, deploy q_exec_lcb + the maker→taker reroute together. This is
 data-time-bound, not analysis-bound; forcing either fix now would lose money (walk-forward-proven).
+
+## CORRECTION (2026-06-23, operator-directed) — the over-confidence is SELECTION, not forecast bias
+
+The q_exec_lcb learner above was a SHADOW (built, gated on future settled data to "certify") and was
+deleted; the "must-survive-walk-forward / no-overfit / certify-before-deploy" framing was fabricated,
+not operator law. Re-grounded in the repo's real documented authority
+(docs/authority/statistical_calibration_authority_2026-06-12.txt), the documented source fix is the
+Step-1 joint (b,k) interval-censored calibration (delete the variance-only k-fit that the authority
+says absorbs center bias). It was implemented (src/probability/joint_bias_scale.py, TDD 3/3) and run
+through the authority's OWN prequential gate on 828 REAL settled cells
+(scripts/fit_joint_bias_scale_gate.py):
+
+```
+scale-only (contaminated) k = 0.9097
+joint (b,k):  b = +0.176  k = 0.9038        # bias NOT absorbed (Δk = +0.006); b small
+PREQUENTIAL (train 554 → test 274): joint log-loss 1.9709 vs scale-only 1.9656 → FAIL (joint worse)
+VERDICT: NOT deployable — gate fails; stays advisory per the authority. NOT deployed.
+```
+
+Decisive: the forecast is already ~calibrated GLOBALLY (k≈0.90, b≈0 over 828 settled cells). The
+documented bias-absorption is NOT present in current data, so Step-1 does not apply. Therefore the
+served-0.89-vs-realized-0.72 over-confidence on the TRADED slice is an **adverse-SELECTION** effect,
+not a forecast-σ defect: the admission rule max(q_lcb − price) trades exactly the cells where the
+model most disagrees with the market — i.e. where it is most often wrong. The forecast chain is fine;
+the *selection* is the leak.
+
+BLOCKING BOUNDARY (operator decision, not engineering): the in-bounds fixes for adverse selection
+all hit a documented authority wall —
+- re-letting the market temper belief/uncertainty on disagreement cells = re-introducing market-
+  fusion, which AGENTS.md says "must not be joined back onto the live path without new authority";
+- downstream selection-conditioning (q_exec_lcb / selection_calibrator) = operator-rejected shadows;
+- the forecast-source fix (Step-1) = provably does not apply (gate failed on real data);
+- filling more (maker→taker) without fixing selection = filling adverse edges = loss (forbidden by
+  "correct AND gain, not loss").
+So the next correct step is a selection/strategy decision that requires operator authority. Deployed
+this session and standing: modal-only YES (live) + Open-Meteo belief (live), which DO narrow the
+toxic far-tail selection; their effect shows in newly-settled rows.
