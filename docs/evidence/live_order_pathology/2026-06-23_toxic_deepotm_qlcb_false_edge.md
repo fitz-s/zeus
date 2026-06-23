@@ -246,6 +246,49 @@ invariant at the seam without weakening the sigma floor. Recommend FIX-1 now; co
 (two-sided sigma uncertainty that preserves the realized-floor on the *served* sigma but not on
 the *draw* lower tail) as a follow-up coherence improvement to the band's upside as well.
 
+## Decisive cross-check: the PERSISTED q_lcb is clean — the spine band is the culprit
+
+`forecast_posteriors` (`state/zeus-forecasts.db`, `runtime_layer='live'`) carries
+`q_json` + `q_lcb_json` — the MATERIALIZER's persisted point q and its bootstrap q_lcb. Checked
+the latest 3 live posteriors (Seoul/Qingdao/Paris 2026-06-24): **0 of 11 bins per city have
+`q_lcb > q_point`** — the persisted materializer q_lcb is a correct lower bound on every bin
+(the materializer's per-bin clip `lcb = min(lcb, q_point)` at
+`replacement_forecast_materializer.py:1772` and the far-tail floor 0.003 at L1781-1782 work).
+
+Therefore the inflated `payoff_q_lcb=0.058` admitting deep-OTM YES is **NOT** the persisted
+bound — it is the **live spine `build_joint_q_band` lower bound** consumed by
+`edge_lower_bound`. The candidate-level receipt field `q_lcb_calibration_source=FORECAST_BOOTSTRAP`
+(the persisted bound, correctly ≈0) vs the economics `payoff_q_lcb` (the band, inflated) being
+1–8 orders apart in the SAME proof is the smoking gun. The 2026-06-22 far-tail floor was added
+to the materializer bootstrap; it does NOT reach the live spine band's `edge_lcb`. **That is the
+gap the fix closes.**
+
+## Related but DISTINCT root (coordinator framing): the q is too flat (modal under-weight)
+
+The operator/coordinator separately observes the q is INVERTED two ways: tails over-weighted
+(this doc's root) AND the **modal/predicted bin under-weighted** (q too flat). Confirmed flat:
+the live posteriors above are near-uniform — Seoul modal mass **0.134** with top-3
+[0.134, 0.131, 0.124] over 11 bins; Paris modal **0.187**. A near-uniform q means the
+predictive σ is wide relative to the 1°C bin width.
+
+This is a **separate lever from the q_lcb seam**: the flat-q root is the predictive WIDTH —
+`predictive_sigma_c = max(1.0, sqrt(fused.sd² + σ_resid²))`
+(`replacement_forecast_materializer.py:1461`, with σ_resid defaulting to 1.5°C on thin
+substrate, L1447), plus the settlement sigma-shape mixture (k, w, uniform floor) in
+`src/forecast/sigma_authority.py`. Over-wide σ_pred under-weights the modal bin and over-weights
+the tails on the POINT q itself.
+
+**Scope discipline (operator law: fix ONE existing computation, no gate accretion):** the
+two roots have two different levers and should NOT be collapsed into one change. This doc's fix
+(clip `edge_lcb ≤ point_ev`) is the minimal correctness fix for the **q_lcb false-edge / tail
+admission** — it makes the system stop BUYING the tails regardless of how flat the point q is,
+because a too-flat-but-honest point still gives `point_ev ≤ 0` on a deep-OTM bin priced above
+its point mass. The modal-under-weight (σ-too-wide) is a real second issue but is a
+predictive-width correction (sigma_authority / σ_resid floor), a distinct verify-and-fix that
+should be evaluated on its own settlement evidence — not folded into the q_lcb seam. Doing the
+q_lcb clip first is correct precedence: it stops the capital loss on the tails immediately and
+is provably the identity on the honest path; the width fix then improves modal sharpness on top.
+
 ## Secondary note (NOT the primary deliverable): fill-observation dead
 
 The operator observed real fills the system does not record (Shenzhen/Warsaw `local_only`,
