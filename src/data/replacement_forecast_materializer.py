@@ -874,6 +874,27 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
         return 1.0, 0.0, 0.0
 
 
+def _effective_unit_sigma_scale(unit: str) -> tuple[float, float, float]:
+    """The (k, w, floor_steps) the fused-q build applies for a settlement-unit family.
+
+    The FITTED artifact is the SOLE licensing authority. ``_replacement_sigma_scale_lookup`` already
+    returns inert ``(1.0, 0.0, 0.0)`` for any family the fitter REFUSED (``fitted=False`` — written
+    when a family has < MIN_CELLS=60 settled cells), so a family is σ-scaled iff math licensed it by
+    fitting it. There is NO hardcoded settlement-unit allow-list.
+
+    2026-06-23 universal-correctness fix: the prior inline ``unit != "C"`` defense-in-depth gate
+    forced EVERY non-Celsius family to ``(1.0, 0.0)`` regardless of the artifact. That was correct
+    when F was unfitted (n=47 < 60), but the σ-scale fitter has since LICENSED F (n_cells=100,
+    k=0.7322, w=0.0552; settled d=0 modal realized/expected ratio 1.424→1.090) — and the gate was
+    SUPPRESSING that math-supported correction, leaving every US (Fahrenheit) city's served
+    posterior too FLAT, so the modal (predicted) bin was under-weighted and buy_yes leaked to
+    deep-OTM tails instead of landing on the predicted bin. The artifact's per-family ``fitted``
+    flag now governs uniformly. OPERATOR LAW (2026-06-12) "no hardcoded value without math support"
+    is satisfied: k is MLE-fitted (never hand-set), and a refused family still falls back to inert.
+    """
+    return _replacement_sigma_scale_lookup(unit)
+
+
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
     """Return the settlement unit ('C' or 'F') for the city, derived from the request bins.
 
@@ -1972,12 +1993,14 @@ def _compute_posterior_payload(
             # the artifact and docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
             # Contract: σ-scale applies BEFORE the floor (floor stays a lower bound on the scaled σ);
             # the uniform mixture w is applied to the FINAL normalized q below (after integration).
-            # The C-only restriction is enforced by the artifact (F family unfitted → (1.0,0.0)); the
-            # explicit unit gate is kept as defense-in-depth so k can never touch an F family.
+            # Per-family licensing is the artifact's job (a REFUSED family → (1.0,0.0,0.0) inert from
+            # the lookup), so NO hardcoded settlement-unit allow-list here: every family the fitter
+            # licensed (C, and F since it crossed n>=60 → k=0.7322) applies. See
+            # _effective_unit_sigma_scale (2026-06-23 universal-correctness fix — the stale
+            # `unit != "C"` gate was suppressing the math-licensed F correction → US cities stayed
+            # flat → buy_yes leaked to deep-OTM tails instead of the predicted bin).
             _city_unit = _city_settlement_unit_from_bins(request)
-            _k, _uniform_w, _floor_steps = _replacement_sigma_scale_lookup(_city_unit)
-            if _city_unit != "C":
-                _k, _uniform_w = 1.0, 0.0  # defense-in-depth: only C families are corrected today
+            _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(_city_unit)
             # Apply k for BOTH widening (k>1) and SHARPENING (k<1). genuine-alpha 2026-06-21:
             # the served fused belief drifted too FLAT / over-smoothed, so the MLE now fits k<1
             # (mode under-weighted ratio 1.63; -6.5% out-of-sample log-loss from a sharpen,
