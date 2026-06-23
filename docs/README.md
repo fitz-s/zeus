@@ -1,72 +1,87 @@
 # Docs Index
 
-All docs use `lower_snake_case.md` naming unless a date prefix is required.
+Docs are a layered cognition mesh for a live-money trading system. Placement is not authority by itself; class, registry, freshness, and proof rank decide how a file may be used.
 
-## Design principle
+---
 
-The docs surface is a tracked active mesh, not "active subdirectories plus
-archives."
+## 1. Design Principle
 
-- active tracked docs live in declared subroots
-- visible history is routed through `archive_registry.md`
-- raw archive bodies are historical cold storage outside the default read path
+Default-read paths must be safe for zero-context agents. Active authority and canonical reference stay small, current, and code-anchored. Historical reports, evidence, consults, PR reviews, rebuild notes, and closed packet material remain discoverable but non-default.
 
-## Tracked docs subroots
+If a historical file contains surviving law, promote the law into active authority/reference and demote the source.
 
-| Directory | Purpose | Notes |
-|-----------|---------|-------|
-| `authority/` | Durable architecture and delivery law only | No packet docs, ADRs, or historical governance evidence |
-| `reference/` | Canonical durable references only | Concepts, system references, and routing into dense module books |
-| `reference/modules/` | Dense module books | Module cognition layer; reference only, not law |
-| `operations/` | Live control pointer, current fact surfaces, active packets, package inputs | Current work routing |
-| `runbooks/` | Operator runbooks | Runtime support |
-| `reports/` | Generated diagnostic reports | Evidence only |
-| `to-do-list/` | Active known-gap worklist, checklist workbooks, and audit queues | Never authority |
-| `artifacts/` | Active evidence artifacts and inventories | Never authority |
+---
 
-Historical governance files demoted from authority live under
-`reports/authority_history/` as evidence only.
+## 2. Tracked Docs Subroots
 
-## Active top-level docs
+| Directory | Class | Purpose | Default-read? |
+|---|---|---|---|
+| `authority/` | durable authority law | current architecture, delivery, governance, archival law | only routed active files |
+| `reference/` | canonical durable reference | domain/math/strategy/settlement/execution/risk/data/failure/module books | by task route |
+| `reference/modules/` | module reference | dense module books | only routed modules |
+| `operations/` | current pointers + active work homes | current-state/data/source pointers and active packages | pointer files only by default |
+| `runbooks/` | procedure | operator workflows | only for operation task |
+| `evidence/` | evidence | raw measurements, audits, receipts | no |
+| `reports/` | report/history | reviews, closeouts, authority history, diagnostic reports | no |
+| `archive/` | archive | cold historical bodies | no |
+| `rebuild/` | rebuild/history | implementation/rebuild notes and consult material | no |
+| `to-do-list/` | worklist | checklist/known gaps | no unless task routes there |
+| `artifacts/` | artifacts | evidence artifacts/inventories | no |
 
-- `../AGENTS.md` - root operating brief
-- `archive_registry.md` - visible historical interface and promotion guardrails
-- `authority/zeus_current_architecture.md` - current architecture law
-- `authority/zeus_current_delivery.md` - current delivery law
-- `reference/zeus_domain_model.md` - short domain model
-- `reference/modules/AGENTS.md` - router for dense module books
-- `reference/modules/ingest.md` - dense ingest module book for R3 user-channel event-stream routing
-- `reference/zeus_architecture_reference.md` - canonical architecture reference anchor
-- `reference/zeus_market_settlement_reference.md` - canonical market/settlement reference anchor
-- `reference/zeus_data_and_replay_reference.md` - canonical data/replay reference anchor
-- `reference/zeus_failure_modes_reference.md` - canonical failure modes reference anchor
-- `operations/current_state.md` - live control pointer
-- `operations/current_data_state.md` - current audited data posture
-- `operations/current_source_validity.md` - current audited source-validity posture
-- `runbooks/live_operation.md` - day-to-day live daemon runbook
-- `to-do-list/known_gaps.md` - active known-gap worklist
-- `to-do-list/known_gaps_archive.md` - closed known-gap antibody archive
-- `operations/task_2026-04-23_midstream_remediation/` - midstream remediation package; phase evidence lives under `phases/`
-- `operations/task_2026-04-26_polymarket_clob_v2_migration/polymarket_live_money_contract.md` - R3 Z0 packet-local live-money invariant summary for CLOB V2
-- `operations/task_2026-04-29_design_simplification_audit/` - first-principles audit plus phased repair evidence; not live-deploy authority
-- `artifacts/tigge_data_training_handoff_2026-04-23.md` - dated TIGGE asset + Zeus training handoff snapshot
-- `../workspace_map.md` - repo visibility and routing guide
+---
 
-## Historical interface
+## 3. Active Default-Read Set
 
-Raw historical bodies are not part of the default tracked boot surface.
+A zero-context docs/money-path agent may enter these, in order, when relevant:
 
-Use `archive_registry.md` first. Only open archive bodies or bundles when the
-task explicitly needs historical evidence, and label archive-derived claims as
-`[Archive evidence]`.
+- `../AGENTS.md`;
+- `../workspace_map.md`;
+- scoped `AGENTS.md` files;
+- `docs/AGENTS.md` for docs work;
+- `authority/AGENTS.md`;
+- `authority/zeus_current_architecture.md`;
+- `authority/zeus_current_delivery.md`;
+- `authority/ARCHIVAL_RULES.md` for demotion/archive work;
+- `reference/AGENTS.md`;
+- `reference/zeus_prediction_market_quant_reference.md`;
+- focused canonical references named by `reference/AGENTS.md`;
+- `operations/current_state.md`, `operations/current_data_state.md`, `operations/current_source_validity.md` only when current facts are required and freshness is acceptable.
 
-## Naming rules
+Do not recursively read `operations/current/**`, `operations/task_*`, `evidence/**`, `reports/**`, `archive/**`, or `rebuild/**` by default.
 
-- All `.md` files use `lower_snake_case.md`
-- Exceptions: `AGENTS.md`, `README.md`
-- New independent packages use `task_YYYY-MM-DD_name.md` or
-  `task_YYYY-MM-DD_name/`
-- Multi-phase work stays inside one package folder, normally under
-  `task_YYYY-MM-DD_package/phases/task_YYYY-MM-DD_phase/`
-- Avoid generic top-level names such as `plan.md` or `progress.md` outside an
-  active task folder
+---
+
+## 4. Canonical References
+
+| File | Purpose |
+|---|---|
+| `reference/zeus_prediction_market_quant_reference.md` | complete current deploy money-path reference |
+| `reference/zeus_domain_model.md` | family/bin/native-side/domain model |
+| `reference/zeus_math_spec.md` | q/q_lcb/payoff/utility math |
+| `reference/zeus_strategy_spec.md` | direction law, admission, selection |
+| `reference/zeus_market_settlement_reference.md` | market/source/settlement/bin topology |
+| `reference/zeus_execution_lifecycle_reference.md` | execution, command, lifecycle, exit, settlement |
+| `reference/zeus_risk_strategy_reference.md` | sizing, risk, DATA_DEGRADED |
+| `reference/zeus_data_and_replay_reference.md` | DB topology, provenance, replay boundaries |
+| `reference/zeus_failure_modes_reference.md` | live-money failure modes |
+| `reference/modules/AGENTS.md` | module-book router |
+
+Specialized legacy references may remain for discoverability, but they are non-default unless current code/manifests support the task-specific claim.
+
+---
+
+## 5. Historical Interface
+
+Use `archive_registry.md` first for demoted material. Only open archive/evidence/report/rebuild bodies when the task explicitly needs historical evidence, and label derived claims as historical evidence.
+
+Historical material must not be cited as present-tense law.
+
+---
+
+## 6. Naming Rules
+
+- Use `lower_snake_case.md` for ordinary docs.
+- Exceptions: `AGENTS.md`, `README.md`.
+- New active packages belong under the operations current work home, not root.
+- Closed/superseded packages must be moved, indexed, or clearly non-default.
+- Avoid generic top-level names such as `plan.md` or `progress.md` outside active task folders.
