@@ -1286,10 +1286,43 @@ def _concat_steps(
                 out.write(step_file.read_bytes())
 
 
+def _subprocess_env_with_script_dir(args: list[str]) -> dict:
+    """Child env that injects the launched .py script's own directory FIRST on
+    PYTHONPATH, so sibling-module imports resolve even when the parent process
+    sets PYTHONSAFEPATH=1 (Python 3.11+ then suppresses the default script-dir
+    injection into sys.path[0]).
+
+    Antibody (2026-06-22): the forecast-live launchd plist sets PYTHONSAFEPATH=1,
+    which broke `from tigge_local_calendar_day_common import ...` inside the
+    extract subprocess → ecmwf extraction rc=1 → fusion capture failed → 12h of
+    zero posteriors → stale belief → blind exits. See
+    tests/test_ecmwf_open_data_subprocess_hardening.py.
+    """
+    import os as _os
+
+    env = dict(_os.environ)
+    script = next(
+        (a for a in args[1:] if isinstance(a, str) and a.endswith(".py")), None
+    )
+    if script:
+        script_dir = _os.path.dirname(_os.path.abspath(script))
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            script_dir + (_os.pathsep + existing if existing else "")
+        )
+    return env
+
+
 def _run_subprocess(args: list[str], *, label: str, timeout: int) -> dict:
     logger.info("ecmwf_open_data %s: %s", label, " ".join(args[:6]) + " ...")
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_subprocess_env_with_script_dir(args),
+        )
     except subprocess.TimeoutExpired as exc:
         logger.error("ecmwf_open_data %s: TIMEOUT after %ds", label, timeout)
         partial_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
