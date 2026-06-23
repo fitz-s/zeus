@@ -346,9 +346,12 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     )
 
 
-def test_continuous_redecision_partial_refresh_filters_to_fresh_families(monkeypatch):
-    """A PARTIAL confirmation refresh must not freeze every family. Only families
-    whose full topology has fresh YES and NO executable substrate are admitted."""
+def test_continuous_redecision_partial_refresh_admits_family_with_any_fresh_bin(monkeypatch):
+    """Operator fill-lane directive 2026-06-23: a family is admitted when ANY of its conditions
+    has fresh YES+NO substrate (the tradeable bin), NOT only when every bin is fresh. A single
+    stale sibling bin must not veto a family that has a fresh, tradeable bin — that all-bins gate
+    was the emit throttle that starved new-entry families to entry_scope=0 (no orders). Stale
+    sibling bins are filtered downstream (per-candidate R7 + submit-time fresh-ask witness)."""
 
     import src.data.market_topology_rows as topology_rows
     import src.state.db as state_db
@@ -392,8 +395,11 @@ def test_continuous_redecision_partial_refresh_filters_to_fresh_families(monkeyp
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
     )
 
-    assert admitted == {("Paris", "2026-06-20", "low")}
-    assert {"fresh-a", "fresh-b", "stale-d"}.issubset(set(fresh_conditions))
+    # Paris (all fresh) AND Tokyo (fresh-c + stale-d → has a fresh tradeable bin) are admitted;
+    # Berlin (no conditions at all) is not. The stale-d sibling no longer vetoes Tokyo.
+    assert admitted == {("Paris", "2026-06-20", "low"), ("Tokyo", "2026-06-20", "high")}
+    assert "fresh-c" in fresh_conditions  # Tokyo admitted via its fresh bin
+    assert ("fresh-a" in fresh_conditions) or ("fresh-b" in fresh_conditions)  # Paris fresh bin
     assert forecasts.closed
     assert trade.closed
 

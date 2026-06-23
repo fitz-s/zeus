@@ -7030,12 +7030,19 @@ def _edli_families_with_fresh_executable_substrate(
     *,
     now_utc: datetime,
 ) -> set[tuple[str, str, str]]:
-    """Families whose complete market topology has fresh executable snapshots.
+    """Families with AT LEAST ONE fresh-substrate condition (tradeable-bin admission).
 
-    This is the family-level confirmation proof for continuous redecision. A
-    partial capture must not freeze every current money-path family, but it also
-    must not queue decisions from stale prices. Each family is admitted only when
-    every known condition has fresh YES and NO buy-side executable substrate.
+    FILL-LANE FUNNEL FIX (operator directive 2026-06-23 "no orders are filling"): a family is
+    admitted when ANY of its conditions has fresh YES+NO buy-side executable substrate — NOT only
+    when EVERY condition is fresh. The old all-conditions gate dropped an entire family (city×date×
+    metric, ~10-20 bins) whenever a single sibling bin's substrate was stale, so the per-tick
+    refresh budget (which prioritizes held/rest families) almost never left a NEW entry family with
+    100% fresh bins → entry_scope=0 → no emit → ~0 orders (docs/evidence/live_order_pathology/
+    2026-06-23_funnel_collapse_diagnosis.md, throttle (b)). To TRADE one bin you only need THAT
+    bin's substrate fresh; admitting the family lets the fresh bin's candidate flow while stale
+    sibling bins are dropped downstream by the per-candidate freshness check (discovery R7) and the
+    submit-time fresh-ask witness (FIX B). No caps, no stale-price trading: this only stops a stale
+    sibling from vetoing a fresh, tradeable bin.
     """
 
     clean_families = {
@@ -7079,7 +7086,7 @@ def _edli_families_with_fresh_executable_substrate(
             }
             if not condition_ids:
                 continue
-            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
+            if any(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
                 out.add(family)
     finally:
         try:
