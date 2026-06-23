@@ -112,3 +112,36 @@ NET this session: the IMMEDIATE money-path improvements that ARE deployed+proven
 adjacent YES, stale belief). The q-calibration + fill-lane root fixes are built/specified but gated
 on clean-regime data accrual, NOT deployed (a deploy would fail walk-forward and harm). The backtest
 harness is the standing gate that will say when q_exec_lcb is finally certifiable.
+
+## Fill-lane: full mechanism traced (2026-06-23), why it stays at ~3.5%
+
+Real-chain (zeus_trades.db, last 24h): 88 INTENT_CREATED → 87 SUBMIT_ACKED → 78 CANCEL_ACKED →
+6 EXPIRED → 3 FILL_CONFIRMED + 4 PARTIAL. Last 3h: 57 acked, 52 cancelled, 2 filled — no improvement.
+Cancel events carry source=`maker_rest_escalation`, action=`CANCEL_REPLACE`, reasons `BOOK_MOVED`
+(≈1.5¢ drift) and `CONFIRMED_VALUE_REFRESH`. The rest-then-cross escalation lane DID fire 66×
+(TAKER_ESCALATED_AFTER_REST) but converted to only 3 fills.
+
+Ruled out as the cause: (a) entries-pause override — `control_overrides` has 0 active rows; (b)
+reprice clock-reset churn — the 300s maker-window gate on the BOOK_MOVED/VALUE_REFRESH pulls
+(continuous_redecision.py:1709-1755, REST_BOOK_DRIFT_TICKS + value_refresh_min_age_seconds) is
+DEPLOYED (live-main byte-identical to git HEAD) and each position has ~1 command (no multi-command
+churn); (c) exit/re-eval logic — healthy (EXIT_SAVED_LOSS=25).
+
+Remaining mechanism (the real collapse): the mode decision still PREFERS maker
+(mode_consistent_ev.select_mode_consistent_ev: ev_maker scaled by p_fill_maker=0.10 GUESS beats
+ev_taker×(1+0.15) on many candidates; TAKER hysteresis defaults maker on knife-edge), so entries
+rest below ask and only fill on adverse down-moves (~10.8% measured, 0 at p0.3-0.8); and the 66
+escalation crosses do not convert (re-rest as maker on re-certification, or the cross is itself
+screen-cancelled / FOK-fails before executing). This is consult BLOCKER #2 (maker placement requires
+maker-fill settlement authority; else recost taker, submit iff q_exec_lcb_taker > taker_all_in_cost,
+else reject+continue). It is COUPLED to q_exec_lcb (#1): doing maker→taker with the current
+over-confident q_lcb would cross the same false edge at the ask. q_exec_lcb is not yet certifiable
+(54 settled q_lcb rows, all <3 days). So the fill-lane root fix is gated on the same clean-regime
+accrual — there is no safe single-knob fix that respects "correct AND gain" today.
+
+CONCLUSION (evidence-complete): discovery is broad, re-eval works across all phases, exit is not the
+leak. The book is net-negative from exactly two coupled, data-gated root causes — maker-preference
+adverse fills + q over-confidence. The honest path to profitability is: the deployed quality fixes
+(modal-only, Open-Meteo) make accruing settled rows cleaner → re-run scripts/q_exec_lcb_backtest.py
+as rows accrue → when it certifies, deploy q_exec_lcb + the maker→taker reroute together. This is
+data-time-bound, not analysis-bound; forcing either fix now would lose money (walk-forward-proven).
