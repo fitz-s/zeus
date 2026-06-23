@@ -356,7 +356,11 @@ class TestSingleModeAuthorityFreshSide:
     TAKER while every proof said REST_DEFAULT/MAKER: a 100% MODE_FLIPPED rate
     that silently requeued the whole day-ahead lane to the retry cap."""
 
-    def test_far_horizon_two_sided_book_fresh_mode_is_maker(self):
+    def test_far_horizon_admissible_book_fresh_mode_is_taker(self):
+        # Operator directive 2026-06-23 ("no orders are filling"): when the cross clears the
+        # conservative bound (taker all-in ~0.61 <= q_lcb 0.78, tight spread) the shared policy
+        # CROSSES to fill even far from the event end. Proof and fresh share the policy, so
+        # proof==fresh==TAKER and the validator AGREES (no flip). FIX B caps the cross at <= q_lcb.
         from types import SimpleNamespace
         from datetime import datetime, timezone
         from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
@@ -371,9 +375,9 @@ class TestSingleModeAuthorityFreshSide:
             tick_size=0.01,
             decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
         )
-        assert mode == "MAKER", (
-            "26h out on a two-sided book the shared policy rests — the proof said "
-            "the same, so the validator must AGREE, not flip"
+        assert mode == "TAKER", (
+            "admissible edge (ask+fee ~0.61 <= q_lcb 0.78) crosses to fill under the 2026-06-23 "
+            "fill-lane directive; proof and fresh share the policy so the validator agrees"
         )
 
     def test_near_end_huge_edge_fresh_mode_is_taker(self):

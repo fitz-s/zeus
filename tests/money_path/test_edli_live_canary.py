@@ -1688,11 +1688,13 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
     ensure_table(conn)
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    # Low trade_score + p_fill_lcb keeps EV boundary False → MAKER (post_only=True).
-    # With limit_price ~0.4 and witness ask=0.39, would_cross=True → verifier raises.
-    # P0 mode-authority: declare the PROVEN maker mode so the fresh-book validator (which
-    # also computes MAKER from the low EV) confirms it and proceeds to the would_cross verifier
-    # check, rather than aborting on a proof/fresh mode disagreement.
+    # The command MUST be blocked. Two valid block reasons depending on the fresh book:
+    #   - would_cross_book=false: a MAKER post_only whose limit crosses the ask (inadmissible-taker
+    #     case) is rejected by the pre-submit verifier — the original guard, still in force.
+    #   - SUBMIT_ABORTED_MODE_FLIPPED: under the 2026-06-23 fill-lane directive, an ADMISSIBLE book
+    #     (here the proof q_lcb 0.90 vs witness ask ~0.39 is a huge edge) makes the fresh policy say
+    #     TAKER, so the system refuses to submit the stale crossing-MAKER proof and aborts for a
+    #     re-rank rather than resting a quote that crosses. Either way the crossing command is blocked.
     accepted = replace(
         _accepted_receipt(event, execution_mode_intent="MAKER", maker_limit_price=0.40),
         trade_score=0.0,
@@ -1703,7 +1705,7 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
         decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
     )
 
-    with pytest.raises(Exception, match="would_cross_book=false"):
+    with pytest.raises(Exception, match="would_cross_book=false|SUBMIT_ABORTED_MODE_FLIPPED"):
         adapter._build_live_execution_command_certificates(
             event=event,
             receipt=accepted,

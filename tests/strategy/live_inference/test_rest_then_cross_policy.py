@@ -50,41 +50,76 @@ HEALTHY = dict(
 )
 
 
+# Taker INADMISSIBLE: the fresh all-in ask sits ABOVE the conservative q_lcb (FIX B forbids
+# crossing above q_lcb), so the cross-to-fill lane cannot fire and the policy rests as a maker
+# limit below q_lcb that fills only on a favorable move. (ask+fee 0.73 > q_lcb 0.71.)
+INADMISSIBLE_REST = dict(
+    q_lcb=0.71,
+    taker_all_in_cost=0.73,
+    p_fill_taker=1.0,
+    best_bid=0.58,
+    best_ask=0.72,
+    tick_size=0.01,
+    reservation=0.70,
+)
+
+
 def _decide(**overrides):
     kwargs = dict(HEALTHY)
     kwargs.update(overrides)
     return select_rest_then_cross_mode(**kwargs)
 
 
-class TestRestDefault:
-    def test_healthy_wide_book_rests_as_maker(self):
-        """The Karachi-class fill: REST, never immediate cross."""
+def _decide_rest(**overrides):
+    kwargs = dict(INADMISSIBLE_REST)
+    kwargs.update(overrides)
+    return select_rest_then_cross_mode(**kwargs)
+
+
+class TestFillLaneCrossesWhenEdgeClearsBound:
+    """Operator directive 2026-06-23 ("no orders are filling"): when the marketable cross clears
+    the conservative bound (best_ask+fee <= q_lcb AND spread guard passes), CROSS to fill instead
+    of resting a quote that demonstrably does not fill (real-chain ~3.5% fill, 78/88 cancelled
+    before fill). FIX B still caps the cross at/below q_lcb, so the cross is always conservative +EV.
+    """
+
+    def test_admissible_edge_crosses_to_fill(self):
+        from src.strategy.live_inference.mode_consistent_ev import POLICY_TAKER_EDGE_CLEARS_BOUND
         decision = _decide(minutes_to_event_end=20 * 60.0)
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
+        # never pays above the conservative bound (FIX B): all-in cost <= q_lcb
+        assert decision.taker_forbidden_reason is None
+
+    def test_admissible_edge_crosses_regardless_of_event_horizon(self):
+        from src.strategy.live_inference.mode_consistent_ev import POLICY_TAKER_EDGE_CLEARS_BOUND
+        # far from event and unknown horizon both still fill (the cross clears the bound now)
+        for mte in (20 * 60.0, None):
+            d = _decide(minutes_to_event_end=mte)
+            assert d.chosen_mode == "TAKER", mte
+            assert d.policy == POLICY_TAKER_EDGE_CLEARS_BOUND, mte
+
+
+class TestRestFallbackWhenInadmissible:
+    def test_inadmissible_taker_rests_as_maker(self):
+        """ask+fee > q_lcb: cannot cross conservatively -> rest a maker limit below q_lcb."""
+        decision = _decide_rest(minutes_to_event_end=20 * 60.0)
         assert decision.chosen_mode == "MAKER"
         assert decision.policy == POLICY_REST_DEFAULT
         assert decision.escalation_deadline_minutes == pytest.approx(
             MAKER_REST_ESCALATION_DEADLINE_MINUTES
         )
-        assert decision.ev_maker is not None and decision.ev_maker > 0.0
-
-    def test_rest_default_even_when_taker_ev_higher(self):
-        """The policy overrides the one-shot EV comparison: a healthy non-fleeting
-        edge rests even where EV_taker > EV_maker (that comparison was the disease)."""
-        decision = _decide(minutes_to_event_end=20 * 60.0)
-        # ev provenance still recorded for the settlement loop:
-        assert decision.ev_taker is not None
-        assert decision.chosen_mode == "MAKER"
+        assert decision.ev_maker is not None
 
     def test_measured_fill_prior_is_used_not_the_guess(self):
-        decision = _decide(minutes_to_event_end=20 * 60.0)
+        decision = _decide_rest(minutes_to_event_end=20 * 60.0)
         assert decision.maker_fill_probability == pytest.approx(
             MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE
         )
         assert "MEASURED" in decision.maker_fill_probability_source
 
-    def test_unknown_event_end_rests(self):
-        """Missing event-end info fails toward resting (the conservative default)."""
-        decision = _decide(minutes_to_event_end=None)
+    def test_unknown_event_end_inadmissible_rests(self):
+        decision = _decide_rest(minutes_to_event_end=None)
         assert decision.chosen_mode == "MAKER"
         assert decision.policy == POLICY_REST_DEFAULT
 
@@ -150,15 +185,18 @@ class TestEscalationLane:
         # The proven-unfillable rest is NOT re-posted: chosen_ev=-inf == no-trade.
         assert decision.chosen_ev == float("-inf")
 
-    def test_first_rest_for_family_still_rests_default(self):
-        """The Karachi rest-first antibody is intact: a family with NO prior
-        cancelled-unfilled rest (escalated_after_rest=False) on a healthy book
-        REST_DEFAULTs as a real maker rest (finite ev) — only an ESCALATED family
-        whose taker is inadmissible no-trades."""
-        decision = _decide(minutes_to_event_end=20 * 60.0)  # escalated defaults False
-        assert decision.chosen_mode == "MAKER"
-        assert decision.policy == POLICY_REST_DEFAULT
-        assert decision.chosen_ev != float("-inf")
+    def test_first_rest_for_family_crosses_when_admissible(self):
+        """Operator directive 2026-06-23: the Karachi rest-first default is SUPERSEDED for the
+        admissible case — a first-look family whose cross clears the conservative bound now CROSSES
+        to fill (it no longer rests a quote that never fills). Inadmissible first looks still rest."""
+        from src.strategy.live_inference.mode_consistent_ev import POLICY_TAKER_EDGE_CLEARS_BOUND
+        crossed = _decide(minutes_to_event_end=20 * 60.0)  # admissible
+        assert crossed.chosen_mode == "TAKER"
+        assert crossed.policy == POLICY_TAKER_EDGE_CLEARS_BOUND
+        rested = _decide_rest(minutes_to_event_end=20 * 60.0)  # ask+fee > q_lcb
+        assert rested.chosen_mode == "MAKER"
+        assert rested.policy == POLICY_REST_DEFAULT
+        assert rested.chosen_ev != float("-inf")
 
 
 class TestExceptionLanes:
@@ -169,57 +207,37 @@ class TestExceptionLanes:
         assert decision.chosen_mode == "TAKER"
         assert decision.policy == POLICY_TAKER_EVENT_END_NEAR
 
-    def test_event_end_far_rests(self):
-        decision = _decide(
+    def test_event_end_far_inadmissible_rests(self):
+        # Far from event AND inadmissible (ask+fee > q_lcb): rests (can't cross conservatively).
+        decision = _decide_rest(
             minutes_to_event_end=TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES + 60.0
         )
         assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_REST_DEFAULT
 
-    def test_fleeting_edge_crosses_only_near_event_end(self):
-        # OPERATOR DIRECTIVE 2026-06-11 (Denver first fill: lane 2 crossed a
-        # 5-cent spread 26h before settlement, paying $0.43 mark-to-mid). A big
-        # edge FAR from the event end is STRUCTURAL, not fleeting -> REST.
-        far = _decide(
-            q_lcb=HEALTHY["taker_all_in_cost"]
-            + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
-            + 0.01,
-            minutes_to_event_end=20 * 60.0,
-        )
-        assert far.chosen_mode == "MAKER"
-        assert far.policy == POLICY_REST_DEFAULT
-        # Inside the near-end window (>= the 180m unconditional floor, < 360m)
-        # the lane still crosses on a huge edge.
-        near = _decide(
-            q_lcb=HEALTHY["taker_all_in_cost"]
-            + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
-            + 0.01,
-            minutes_to_event_end=300.0,
-        )
-        assert near.chosen_mode == "TAKER"
-        assert near.policy == POLICY_TAKER_FLEETING_EDGE
-        # Unknown horizon is conservative: REST.
-        unknown = _decide(
-            q_lcb=HEALTHY["taker_all_in_cost"]
-            + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
-            + 0.01,
-            minutes_to_event_end=None,
-        )
-        assert unknown.chosen_mode == "MAKER"
-        # Nesting relation: the fleeting window sits ABOVE the unconditional
-        # event-end floor, else lane 5 is dead code.
+    def test_admissible_edge_crosses_at_every_horizon(self):
+        # Operator directive 2026-06-23 supersedes the fleeting/structural rest split for the
+        # admissible case: a cross that clears the conservative bound fills regardless of horizon.
+        # The Denver spread-loss is still prevented by FIX B (cross capped at <= q_lcb), so this is
+        # not the "pay $0.43 to cross far out" failure — the all-in cost is at/below q_lcb here.
+        from src.strategy.live_inference.mode_consistent_ev import POLICY_TAKER_EDGE_CLEARS_BOUND
+        for mte in (20 * 60.0, 300.0, None):
+            d = _decide(
+                q_lcb=HEALTHY["taker_all_in_cost"] + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD + 0.01,
+                minutes_to_event_end=mte,
+            )
+            assert d.chosen_mode == "TAKER", mte
+            assert d.policy in (POLICY_TAKER_EDGE_CLEARS_BOUND, POLICY_TAKER_FLEETING_EDGE), mte
+        # Nesting relation still holds (lane 5 not dead code).
         from src.strategy.live_inference.mode_consistent_ev import (
             TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END,
             TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES as _floor,
         )
         assert TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END > _floor
 
-    def test_sub_fleeting_edge_rests(self):
-        decision = _decide(
-            q_lcb=HEALTHY["taker_all_in_cost"]
-            + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
-            - 0.02,
-            minutes_to_event_end=20 * 60.0,
-        )
+    def test_inadmissible_small_edge_rests(self):
+        # ask+fee > q_lcb: cannot cross conservatively -> rest fallback (fills only on a move).
+        decision = _decide_rest(minutes_to_event_end=20 * 60.0)
         assert decision.chosen_mode == "MAKER"
         assert decision.policy == POLICY_REST_DEFAULT
 

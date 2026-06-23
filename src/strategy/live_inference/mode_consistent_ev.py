@@ -171,6 +171,7 @@ TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END = 360.0
 
 # Policy verdicts (travel on receipts; the settlement loop groups by these).
 POLICY_REST_DEFAULT = "REST_DEFAULT"
+POLICY_TAKER_EDGE_CLEARS_BOUND = "TAKER_EDGE_CLEARS_BOUND"
 POLICY_HOLD_REST_IN_PROGRESS = "HOLD_REST_IN_PROGRESS"
 POLICY_TAKER_ESCALATED_AFTER_REST = "TAKER_ESCALATED_AFTER_REST"
 POLICY_TAKER_EVENT_END_NEAR = "TAKER_EVENT_END_NEAR"
@@ -609,6 +610,21 @@ def select_rest_then_cross_mode(
     if escalated_after_rest and not taker_admissible:
         return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
 
-    # 6b. THE DEFAULT: the genuine FIRST rest for a family (no prior cancelled-unfilled
-    #    rest) rests post_only GTC with the measured escalation deadline.
+    # 6a'. FILL-LANE FIX (operator directive 2026-06-23 "no orders are filling"): when the
+    #    marketable cross CLEARS THE CONSERVATIVE BOUND (taker_admissible — FIX B already proved
+    #    best_ask + fee <= q_lcb AND the spread guard passes), CROSS to fill rather than resting a
+    #    quote that demonstrably does not fill. Real-chain: maker rests fill ~3.5% (78/88 cancelled
+    #    before fill, churned by BOOK_MOVED/VALUE_REFRESH), so REST_DEFAULT produced ~0 fills. A
+    #    cross whose all-in ask cost is at/below the conservative q_lcb is a correct, conservative
+    #    +EV entry by the system's own honest gate (it can NEVER pay above q_lcb — FIX B), and it
+    #    actually executes. This is "correct AND gain, not a quote that never fills." The rest lane
+    #    remains the fallback ONLY when the cross is inadmissible (ask + fee > q_lcb or wide spread):
+    #    there a maker limit at/below q_lcb may still fill on a favorable move, and crossing is
+    #    forbidden anyway. Supersedes the REST_DEFAULT-first doctrine for the admissible case.
+    if taker_admissible:
+        return _as_taker(POLICY_TAKER_EDGE_CLEARS_BOUND)
+
+    # 6b. FALLBACK: the cross is inadmissible (cannot clear the conservative bound at the fresh
+    #    ask, or the spread is too wide) — rest post_only GTC at the maker limit with the measured
+    #    escalation deadline; it fills only if the market comes to us, else cleanly no-trades.
     return _as_maker(POLICY_REST_DEFAULT, deadline=float(escalation_deadline_minutes))
