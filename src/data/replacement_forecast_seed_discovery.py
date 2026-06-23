@@ -113,6 +113,56 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
     return tuple(manifests)
 
 
+def _manifest_payload_covers_target_local_day(
+    manifest: RawForecastArtifactManifest,
+    *,
+    city_timezone: str,
+    target_date: str,
+) -> bool:
+    """True iff the manifest's ON-DISK payload contains >=1 hourly sample inside the
+    wanted local day.
+
+    EASTWARD-BLACKOUT FIX (2026-06-23): the live downloader writes the Open-Meteo single-
+    runs anchor manifest with ``forecast_hours=120`` UNCONDITIONALLY, but the bytes on disk
+    can be a PARTIAL-HORIZON capture — when the provider's run was only partly published at
+    fetch time the rung-1 single-runs response carried only the launch local day (24h). The
+    ``payload_path.exists()`` guard in the downloader then never re-fetches it, so the 24h
+    file persists. ``_manifest_horizon_allows_target_date`` TRUSTS the declared 120h and
+    admits that 24h file for a LATER target date it physically cannot serve; the materialize
+    subprocess then raises "insufficient Open-Meteo hourly samples inside target local day"
+    and the whole eastward family produces no posterior (a discovery blackout). Selecting on
+    the declared horizon alone is therefore unsafe — the truth is the payload's actual time
+    coverage. This reuses the SAME local-day windowing the extractor uses (parse each
+    ``hourly.time`` into the city timezone, count samples on ``target_date``), so the
+    selector and the extractor can never disagree on coverage. Fail-OPEN: any read/parse
+    error returns True so a transient FS/JSON hiccup never makes an otherwise-admissible
+    manifest vanish (the extractor remains the fail-closed backstop). NO daily extreme is
+    computed or fabricated here — coverage is a count of in-day samples only, so the
+    ``require_full_localday`` guard's intent (reject horizon-clipped partial days at
+    extraction) is untouched.
+    """
+    from src.data.openmeteo_ecmwf_ifs9_anchor import _parse_openmeteo_time  # noqa: PLC0415
+
+    payload_text = _manifest_path_value(manifest, "openmeteo_payload_json") or manifest.artifact_path
+    if not payload_text:
+        return True
+    base_dir = _manifest_base_dir(manifest, fallback=Path(manifest.artifact_path).parent)
+    payload_path = _resolve_path(payload_text, base_dir=base_dir)
+    try:
+        wanted = date.fromisoformat(str(target_date).strip())
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        times = payload["hourly"]["time"]
+    except Exception:
+        return True  # fail-open: extractor stays the fail-closed backstop
+    for raw_time in times:
+        try:
+            if _parse_openmeteo_time(str(raw_time), city_timezone=city_timezone).date() == wanted:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _latest_manifest(
     manifests: tuple[RawForecastArtifactManifest, ...],
     *,
@@ -120,6 +170,7 @@ def _latest_manifest(
     data_version: str,
     city: str,
     target_date: str,
+    city_timezone: str | None = None,
 ) -> RawForecastArtifactManifest | None:
     candidates = [
         manifest
@@ -130,7 +181,34 @@ def _latest_manifest(
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda manifest: (manifest.source_cycle_time, manifest.source_available_at, manifest.captured_at))
+    # PRIMARY selection key: does the payload ACTUALLY cover the wanted local day? A
+    # partial-horizon capture admitted only by its (mislabeled) declared forecast_hours sorts
+    # BELOW any sibling that genuinely covers the day, so the fresher-but-broken neighbor can
+    # never be picked over a covering manifest at the same cycle/availability stamps (the live
+    # tie that selected the 24h file over the 120h sibling). When no city timezone is provided
+    # (defensive — the live caller always passes it) OR no candidate covers, the recency key
+    # alone decides, preserving the prior behaviour. The (source_cycle_time, source_available_at,
+    # captured_at) recency key is retained as the secondary discriminator.
+    tz_name = city_timezone or str(
+        candidates[0].product_metadata.get("city_timezone") or ""
+    )
+
+    def _covers(manifest: RawForecastArtifactManifest) -> bool:
+        if not tz_name:
+            return True  # no tz to check coverage with — neutral, recency decides
+        return _manifest_payload_covers_target_local_day(
+            manifest, city_timezone=tz_name, target_date=target_date
+        )
+
+    return max(
+        candidates,
+        key=lambda manifest: (
+            _covers(manifest),
+            manifest.source_cycle_time,
+            manifest.source_available_at,
+            manifest.captured_at,
+        ),
+    )
 
 
 def _manifest_allows_city(manifest: RawForecastArtifactManifest, *, city: str) -> bool:
@@ -421,12 +499,20 @@ def discover_replacement_forecast_materialization_seeds(
             metric = str(target["temperature_metric"])
             target_key = f"{city}|{target_date}|{metric}"
             expected = expected_replacement_dependency_identity_by_role(metric)
+            # City timezone for payload-coverage selection (eastward-blackout fix): resolved
+            # from the SAME canonical city registry the seed builder uses, so the selector and
+            # the local-day extractor agree on the timezone. Absent -> coverage check is neutral.
+            from src.config import cities_by_name  # noqa: PLC0415
+
+            _city_cfg = cities_by_name.get(city)
+            _city_tz = str(getattr(_city_cfg, "timezone", "") or "") or None
             openmeteo = _latest_manifest(
                 manifests,
                 source_id=expected["openmeteo_ifs9_anchor"].source_id,
                 data_version=expected["openmeteo_ifs9_anchor"].data_version,
                 city=city,
                 target_date=target_date,
+                city_timezone=_city_tz,
             )
             if openmeteo is None:
                 failed.append(target_key)

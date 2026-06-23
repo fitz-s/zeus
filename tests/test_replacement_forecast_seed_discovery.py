@@ -219,6 +219,215 @@ def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) 
     assert not _manifest_allows_target_date(manifest, target_date="2026-06-26")
 
 
+def _hourly_localday_payload(*, local_date: str, n_days: int, tz_offset_hours: int) -> dict:
+    """A single-runs-shaped hourly payload starting at 00:00 LOCAL on ``local_date``.
+
+    The provider serves UTC-naive times already in the requested timezone, so the
+    extractor reads ``hourly.time`` as local wall-clock. ``n_days`` controls how many
+    local days the file covers from ``local_date`` (1 = the broken single-day partial
+    capture; >=2 = a healthy multi-day horizon). ``tz_offset_hours`` is unused in the
+    bytes (times are local) but documents the city family the payload belongs to.
+    """
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+
+    del tz_offset_hours
+    start = _dt.fromisoformat(f"{local_date}T00:00")
+    times: list[str] = []
+    temps: list[float] = []
+    for hour in range(24 * n_days):
+        ts = start + _td(hours=hour)
+        times.append(ts.strftime("%Y-%m-%dT%H:%M"))
+        temps.append(20.0 + (hour % 24) * 0.1)
+    return {
+        "hourly_units": {"time": "iso8601", "temperature_2m": "°C"},
+        "hourly": {"time": times, "temperature_2m": temps},
+    }
+
+
+def _write_anchor_manifest_with_payload(
+    raw_dir: Path,
+    *,
+    name: str,
+    declared_target_date: str,
+    payload: dict,
+    source_available_at: str,
+    captured_at: str,
+) -> RawForecastArtifactManifest:
+    """Write a single-runs anchor manifest whose payload bytes are ``payload``.
+
+    The manifest declares ``forecast_hours=120`` (as the live downloader always does),
+    so horizon-admission trusts a 120h coverage even when the bytes are a 24h partial.
+    Returns the manifest as it would be loaded by ``_load_manifests`` (with the
+    ``manifest_json`` + ``openmeteo_payload_json`` paths threaded through metadata).
+    """
+    payload_path = _write_file(raw_dir / f"{name}.json", payload)
+    precision_path = _write_file(raw_dir / f"precision_{name}.json", {"ok": True})
+    manifest_path = raw_dir / f"{name}.manifest.json"
+    manifest = RawForecastArtifactManifest.from_file(
+        payload_path,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-22T12:00:00+00:00",
+        source_available_at=source_available_at,
+        captured_at=captured_at,
+        request_url="https://example.invalid/openmeteo",
+        request_params={"run": "2026-06-22T12:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "Chengdu",
+            "cities": ["Chengdu"],
+            "target_date": declared_target_date,
+            "target_dates": [declared_target_date],
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(payload_path),
+            "precision_metadata_json": str(precision_path),
+            "manifest_json": str(manifest_path),
+        },
+    )
+    write_manifest(manifest, manifest_path)
+    # Mirror _load_manifests: thread manifest_json so the base-dir/payload resolves.
+    return RawForecastArtifactManifest(
+        **{
+            **manifest.to_dict(),
+            "product_metadata": {
+                **dict(manifest.product_metadata),
+                "manifest_json": str(manifest_path),
+            },
+        }
+    )
+
+
+def test_latest_manifest_skips_partial_horizon_payload_for_eastward_target(tmp_path: Path) -> None:
+    """Live eastward blackout 2026-06-23: a partial-horizon single-runs capture (24h,
+    only the launch local day) is mislabeled forecast_hours=120 in its manifest, so
+    horizon-admission admits it for a LATER target date it cannot serve. When a healthy
+    sibling manifest at the SAME cycle/availability/captured stamps DOES cover the wanted
+    day, _latest_manifest must select the COVERING manifest, not the partial one whose
+    extraction raises 'insufficient Open-Meteo hourly samples inside target local day'.
+
+    Both manifests carry identical (source_cycle_time, source_available_at, captured_at),
+    so the pre-fix max() tiebreak is order-dependent and can return the broken partial.
+    """
+    from src.data.replacement_forecast_seed_discovery import _latest_manifest
+
+    raw_dir = tmp_path / "raw" / "20260622T120000Z"
+
+    # BROKEN: declared target_date 2026-06-23, 24h payload covering ONLY 2026-06-23.
+    partial = _write_anchor_manifest_with_payload(
+        raw_dir,
+        name="openmeteo_Chengdu_2026-06-23_high_20260622T120000Z",
+        declared_target_date="2026-06-23",
+        payload=_hourly_localday_payload(local_date="2026-06-23", n_days=1, tz_offset_hours=8),
+        source_available_at="2026-06-23T08:10:15+00:00",
+        captured_at="2026-06-23T08:10:15+00:00",
+    )
+    # HEALTHY: declared target_date 2026-06-24, multi-day payload covering 2026-06-24.
+    covering = _write_anchor_manifest_with_payload(
+        raw_dir,
+        name="openmeteo_Chengdu_2026-06-24_high_20260622T120000Z",
+        declared_target_date="2026-06-24",
+        payload=_hourly_localday_payload(local_date="2026-06-23", n_days=3, tz_offset_hours=8),
+        source_available_at="2026-06-23T08:10:15+00:00",
+        captured_at="2026-06-23T08:10:15+00:00",
+    )
+
+    # Order the partial FIRST so an order-dependent max() tiebreak would return it.
+    chosen = _latest_manifest(
+        (partial, covering),
+        source_id="openmeteo_ecmwf_ifs_9km",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Chengdu",
+        target_date="2026-06-24",
+        city_timezone="Asia/Shanghai",
+    )
+    assert chosen is not None
+    chosen_payload = chosen.product_metadata.get("openmeteo_payload_json")
+    assert chosen_payload == covering.product_metadata.get("openmeteo_payload_json"), (
+        "must select the manifest whose payload covers 2026-06-24, not the 24h partial"
+    )
+
+
+def test_latest_manifest_unchanged_when_westward_payload_already_covers(tmp_path: Path) -> None:
+    """No regression for the working (westward) cities: when the freshest manifest's payload
+    already covers the wanted local day, the coverage-aware selector returns the SAME manifest
+    the recency tiebreak would have — the freshest covering one — never a staler sibling."""
+    from src.data.replacement_forecast_seed_discovery import _latest_manifest
+
+    raw_dir = tmp_path / "raw" / "20260622T120000Z"
+
+    older = _write_anchor_manifest_with_payload(
+        raw_dir,
+        name="openmeteo_Chengdu_2026-06-24_high_older",
+        declared_target_date="2026-06-24",
+        payload=_hourly_localday_payload(local_date="2026-06-23", n_days=3, tz_offset_hours=8),
+        source_available_at="2026-06-23T06:00:00+00:00",
+        captured_at="2026-06-23T06:00:00+00:00",
+    )
+    fresher = _write_anchor_manifest_with_payload(
+        raw_dir,
+        name="openmeteo_Chengdu_2026-06-24_high_fresher",
+        declared_target_date="2026-06-24",
+        payload=_hourly_localday_payload(local_date="2026-06-23", n_days=3, tz_offset_hours=8),
+        source_available_at="2026-06-23T08:10:15+00:00",
+        captured_at="2026-06-23T08:10:15+00:00",
+    )
+
+    chosen = _latest_manifest(
+        (older, fresher),
+        source_id="openmeteo_ecmwf_ifs_9km",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Chengdu",
+        target_date="2026-06-24",
+        city_timezone="Asia/Shanghai",
+    )
+    assert chosen is not None
+    assert chosen.product_metadata.get("openmeteo_payload_json") == fresher.product_metadata.get(
+        "openmeteo_payload_json"
+    ), "both cover the day; the fresher (recency) manifest must still win"
+
+
+def test_latest_manifest_falls_back_to_recency_when_no_candidate_covers(tmp_path: Path) -> None:
+    """If NO admitted manifest covers the wanted day (e.g. all are partial captures), the
+    selector falls back to the prior recency tiebreak and returns a candidate (the extractor
+    remains the fail-closed backstop) rather than returning None and starving the target."""
+    from src.data.replacement_forecast_seed_discovery import _latest_manifest
+
+    raw_dir = tmp_path / "raw" / "20260622T120000Z"
+
+    partial_old = _write_anchor_manifest_with_payload(
+        raw_dir,
+        name="openmeteo_Chengdu_2026-06-23_high_old",
+        declared_target_date="2026-06-23",
+        payload=_hourly_localday_payload(local_date="2026-06-23", n_days=1, tz_offset_hours=8),
+        source_available_at="2026-06-23T06:00:00+00:00",
+        captured_at="2026-06-23T06:00:00+00:00",
+    )
+    partial_new = _write_anchor_manifest_with_payload(
+        raw_dir,
+        name="openmeteo_Chengdu_2026-06-23_high_new",
+        declared_target_date="2026-06-23",
+        payload=_hourly_localday_payload(local_date="2026-06-23", n_days=1, tz_offset_hours=8),
+        source_available_at="2026-06-23T08:10:15+00:00",
+        captured_at="2026-06-23T08:10:15+00:00",
+    )
+
+    chosen = _latest_manifest(
+        (partial_old, partial_new),
+        source_id="openmeteo_ecmwf_ifs_9km",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Chengdu",
+        target_date="2026-06-24",
+        city_timezone="Asia/Shanghai",
+    )
+    # Neither covers 2026-06-24; recency decides — the fresher one is returned (not None).
+    assert chosen is not None
+    assert chosen.product_metadata.get("openmeteo_payload_json") == partial_new.product_metadata.get(
+        "openmeteo_payload_json"
+    )
+
+
 def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_manifest(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
