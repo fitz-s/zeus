@@ -7008,12 +7008,20 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
 
 
 def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
+    # PARTIAL coverage routes to PER-FAMILY freshness admission — including when SOME
+    # families hit a transient `database is locked`. The per-family filter
+    # (_edli_families_with_fresh_executable_substrate) does an INDEPENDENT fresh read of
+    # every condition's executable substrate, so a lock that left some families stale
+    # cannot admit them; it only excludes them. Forcing a full-tick drop on any lock hit
+    # (the prior `and not _has_sqlite_lock_failures`) discarded EVERY candidate + reprice
+    # on the tick — even families with complete fresh substrate — which (with ~757 lock
+    # hits/run of WAL contention) was the dominant reason the candidate pipeline emitted
+    # for only ~2 families instead of the full universe (2026-06-23 candidate-pipeline fix).
     if not isinstance(summary, dict):
         return False
     return (
         str(summary.get("status") or "") == "refreshed"
         and str(summary.get("executable_substrate_coverage_status") or "") == "PARTIAL"
-        and not _edli_refresh_summary_has_sqlite_lock_failures(summary)
     )
 
 

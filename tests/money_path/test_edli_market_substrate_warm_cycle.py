@@ -308,9 +308,15 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
 def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
     """The emit gate must fail closed when confirmation refresh did not prove
     any executable-price coverage for the current money-path families. A PARTIAL
-    capture is not globally sufficient; it must be resolved by family freshness
-    proof before any family can be emitted."""
+    capture is not globally sufficient; it MUST be resolved by per-family freshness
+    proof before any family is emitted — and that includes the case where SOME
+    families hit a transient `database is locked`. A lock on some families must NOT
+    force-drop the families that DID get fresh substrate (2026-06-23 candidate-pipeline
+    fix): the per-family filter independently verifies each condition's freshness, so
+    PARTIAL always routes to it regardless of lock noise. Only NONE coverage (nothing
+    fresh) or a refresh that did not run (skipped_lock_busy / error) fails the whole tick."""
 
+    # NONE coverage (with or without lock) → nothing fresh → full skip.
     assert main_module._edli_confirmation_refresh_unavailable(
         {
             "status": "refreshed",
@@ -318,18 +324,22 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
             "failure_samples": [{"error": "database is locked"}],
         }
     )
-    assert main_module._edli_confirmation_refresh_unavailable(
-        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
-    )
+    # PARTIAL (no lock) → per-family freshness filter (not a full skip).
     assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert not main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+    # PARTIAL WITH a transient lock on some families → STILL the per-family filter, so the
+    # families with fresh substrate are emitted instead of the whole tick being dropped.
+    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
         {
             "status": "refreshed",
             "executable_substrate_coverage_status": "PARTIAL",
             "failure_samples": [{"error": "database is locked"}],
         }
+    )
+    # A refresh that did not run at all still fails closed.
+    assert main_module._edli_confirmation_refresh_unavailable(
+        {"status": "skipped_lock_busy"}
     )
     assert not main_module._edli_confirmation_refresh_unavailable(
         {"status": "refreshed", "executable_substrate_coverage_status": "FULL"}
