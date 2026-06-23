@@ -133,6 +133,84 @@ class TestMilanIncidentReplay:
         )
 
 
+class TestModalOnlyYesRevert20260623:
+    """Operator mandate 2026-06-23: "buy_yes only on its predicted bin ±0.5".
+
+    REVERTS the 2026-06-15 σ-distance relaxation (YES admissible iff
+    distance(bin, μ*) ≤ max(1 step, k·σ)) which admitted adjacent NON-forecast
+    bins within one predictive sigma. Modal-only YES = legal ONLY on the bin the
+    canonically-rounded center settles into — identical to
+    FamilyDecisionEngine.direction_law_ok (route.bin_id == forecast_bin). The
+    Milan far-tail ban is strictly preserved (a far bin is never the forecast
+    bin), so this is NOT a ban-revival — it is the operator's standing law.
+    """
+
+    def test_adjacent_within_sigma_nonforecast_buy_yes_rejected(self):
+        # mu=26.42 settles 26 (WMO). The 27C bin is adjacent and WITHIN the old
+        # σ band (distance 0.58 ≤ threshold max(1, 1.263)=1.263) so σ-distance
+        # ADMITTED it. Modal-only must REJECT it: 27 is not the forecast bin.
+        reason = direction_law_rejection_reason(
+            direction="buy_yes",
+            bin_low=27.0,
+            bin_high=27.0,
+            bin_unit="C",
+            mu=INCIDENT_MU_C,
+            predictive_sigma=INCIDENT_SIGMA_C,
+        )
+        assert reason is not None and "buy_yes" in reason, (
+            "modal-only: adjacent non-forecast YES (bin 27, mu 26.42→26) must be "
+            "rejected even though it is within one predictive sigma"
+        )
+
+    def test_forecast_bin_buy_yes_still_admitted(self):
+        # The modal bin (26, containing settled 26.42→26) stays YES-admissible.
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_yes",
+                bin_low=26.0,
+                bin_high=26.0,
+                bin_unit="C",
+                mu=INCIDENT_MU_C,
+                predictive_sigma=INCIDENT_SIGMA_C,
+            )
+            is None
+        )
+
+    def test_modal_only_matches_buy_no_complement(self):
+        # YES legal ⟺ bin IS forecast bin; NO legal ⟺ bin is NOT forecast bin.
+        # For every bin around mu, exactly one side is admissible (mod boundary
+        # zone, which only widens the NO ban). mu=30.795 settles 31.
+        for low, high, yes_ok in ((31.0, 31.0, True), (29.0, 29.0, False)):
+            yes = direction_law_rejection_reason(
+                direction="buy_yes", bin_low=low, bin_high=high, bin_unit="C",
+                mu=30.7950, predictive_sigma=1.91,
+            )
+            no = direction_law_rejection_reason(
+                direction="buy_no", bin_low=low, bin_high=high, bin_unit="C",
+                mu=30.7950, predictive_sigma=1.91,
+            )
+            assert (yes is None) is yes_ok, (low, high, yes)
+            # forecast bin: YES ok + NO banned; non-forecast far bin: YES banned + NO ok
+            assert (yes is None) != (no is None), (low, high)
+
+    def test_truncation_city_modal_only_yes_uses_callable(self):
+        # Truncation city (floor): mu=30.85 → floor=30. YES legal only on bin 30,
+        # NOT on 31 (which WMO half-up would have called the forecast bin).
+        trunc = lambda v: float(__import__("math").floor(v))  # noqa: E731
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_yes", bin_low=30.0, bin_high=30.0, bin_unit="C",
+                mu=30.85, predictive_sigma=1.5, settle_value=trunc,
+            )
+            is None
+        )
+        reason31 = direction_law_rejection_reason(
+            direction="buy_yes", bin_low=31.0, bin_high=31.0, bin_unit="C",
+            mu=30.85, predictive_sigma=1.5, settle_value=trunc,
+        )
+        assert reason31 is not None and "buy_yes" in reason31
+
+
 class TestThreshold:
     def test_threshold_never_below_one_settlement_step(self):
         assert direction_law_threshold(unit="C", predictive_sigma=0.3) == 1.0
@@ -351,8 +429,9 @@ class TestBuyNoDoctrineHalf:
         )
         assert reason is not None and "forecast_bin" in reason
 
-    def test_buy_yes_half_byte_identical(self):
-        # Milan killer untouched: far buy_yes still rejected on the sigma band.
+    def test_buy_yes_half_far_tail_still_rejected(self):
+        # Milan killer preserved under modal-only: far buy_yes (bin 24, mu 26.42
+        # settles 26) is still rejected — a far bin is never the forecast bin.
         reason = direction_law_rejection_reason(
             direction="buy_yes",
             bin_low=24.0,

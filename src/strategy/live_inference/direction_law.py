@@ -18,7 +18,14 @@ Law (operator doctrine, both halves; buy_no half restored to the doctrine's own
 words on 2026-06-11 — operator standing law "buy_yes ⟺ bin≈forecast; buy_no ⟺
 bin≠forecast" — after the σ-distance over-implementation banned every adjacent-bin
 NO and structurally zeroed the favorite-longshot harvest):
-  buy_yes admissible  iff  distance(bin, mu*) <= T
+  buy_yes admissible  iff  the bin IS the forecast bin — i.e. settled(mu*)
+                           lands inside [low, high]. MODAL-ONLY (operator mandate
+                           2026-06-23 "buy_yes only on its predicted bin ±0.5"),
+                           reverting the 2026-06-15 σ-distance relaxation that
+                           admitted adjacent bins within max(1 step, k·sigma).
+                           The Milan far-tail ban is preserved (a far bin is
+                           never the forecast bin); this is a tightening, and the
+                           verdict equals FamilyDecisionEngine.direction_law_ok.
   buy_no  admissible  iff  the bin is NOT the forecast bin — i.e. settled(mu*)
                            (the canonical per-city settlement rounding of the
                            fused center) does NOT land inside [low, high].
@@ -181,15 +188,44 @@ def direction_law_rejection_reason(
         if direction == "buy_yes":
             return f"{DIRECTION_LAW_REASON}:mu=missing:direction=buy_yes"
         return None
-    distance = bin_forecast_distance(bin_low=bin_low, bin_high=bin_high, mu=float(mu))
-    threshold = direction_law_threshold(
-        unit=bin_unit, predictive_sigma=predictive_sigma, sigma_k=sigma_k
+    # Rounding authority (shared by BOTH halves): settle_value callable >
+    # mu_settled scalar > WMO half-up default. The canonically-rounded center
+    # defines the FORECAST BIN — the single bin our own forecast settles into.
+    # This is the SAME authority grade_receipt uses, so the law and the grader
+    # never disagree on which bin is the forecast bin.
+    if settle_value is not None:
+        settled = float(settle_value(float(mu)))
+    elif mu_settled is not None and math.isfinite(float(mu_settled)):
+        settled = float(mu_settled)
+    else:
+        from src.contracts.settlement_semantics import round_wmo_half_up_value
+
+        settled = round_wmo_half_up_value(float(mu))
+    settled_distance = bin_forecast_distance(
+        bin_low=bin_low, bin_high=bin_high, mu=settled
     )
-    if direction == "buy_yes" and distance > threshold:
-        return (
-            f"{DIRECTION_LAW_REASON}:direction=buy_yes:"
-            f"distance={distance:.4f}:threshold={threshold:.4f}:mu={float(mu):.4f}"
-        )
+    if direction == "buy_yes":
+        # MODAL-ONLY YES (operator mandate 2026-06-23 "buy_yes only on its
+        # predicted bin ±0.5"): YES is legal ONLY on the FORECAST BIN — the bin
+        # the canonically-rounded center settles into. This REVERTS the
+        # 2026-06-15 σ-distance relaxation (admit iff distance(bin, μ*) ≤
+        # max(1 step, k·σ)) which admitted adjacent NON-forecast bins within one
+        # predictive sigma; that relaxation diluted the book with over-confident
+        # adjacent-bin YES whose claimed edge did not realize. The Milan far-tail
+        # ban is strictly preserved (a far bin is never the forecast bin), so
+        # this is a TIGHTENING, not a ban-revival. Verdict is identical to
+        # FamilyDecisionEngine.direction_law_ok (route.bin_id == forecast_bin),
+        # so the legacy reactor path and the greenfield engine agree. The
+        # ±0.5 tolerance is the rounding that DEFINES the forecast bin (settled),
+        # not a widening of the admissible set — no σ term, no boundary-zone
+        # expansion for YES (matches FDE exactly).
+        if settled_distance != 0.0:
+            return (
+                f"{DIRECTION_LAW_REASON}:direction=buy_yes:"
+                f"nonforecast_bin:mu={float(mu):.4f}:mu_settled={settled:.4f}:"
+                f"bin=[{bin_low},{bin_high}]"
+            )
+        return None
     if direction == "buy_no":
         # Doctrine half (operator standing law): buy_no ⟺ bin≠forecast. The
         # banned set is the FORECAST BIN — the bin the canonically-rounded center
@@ -197,21 +233,6 @@ def direction_law_rejection_reason(
         # LOSES if our own forecast settles exactly). Adjacent bins are admissible;
         # their residual YES mass is policed by q_lcb + the material-YES
         # conservative-evidence gate + the settlement-coverage license.
-        #
-        # Rounding authority priority: settle_value callable > mu_settled scalar >
-        # WMO half-up default. settle_value is authoritative for BOTH the primary
-        # test and the boundary-zone shifted tests.
-        if settle_value is not None:
-            settled = float(settle_value(float(mu)))
-        elif mu_settled is not None and math.isfinite(float(mu_settled)):
-            settled = float(mu_settled)
-        else:
-            from src.contracts.settlement_semantics import round_wmo_half_up_value
-
-            settled = round_wmo_half_up_value(float(mu))
-        settled_distance = bin_forecast_distance(
-            bin_low=bin_low, bin_high=bin_high, mu=settled
-        )
         if settled_distance == 0.0:
             return (
                 f"{DIRECTION_LAW_REASON}:direction=buy_no:"
