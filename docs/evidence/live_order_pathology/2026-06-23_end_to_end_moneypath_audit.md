@@ -75,3 +75,40 @@ collapse is the FILL lane, downstream of broad, healthy generation.
 
 These two are coupled: a fill-aware q_exec_lcb needs the taker reroute to have a settlement-
 conditioned population to certify. Sequencing is being finalized with the consult (round 3).
+
+## Commit-1 attempt + the decisive walk-forward result (2026-06-23, q_exec_lcb)
+
+Built the always-on q_exec_lcb estimator (src/decision/q_exec_lcb.py, commit 1ac42bd1): isotonic
+(PAVA, no buckets) 5% beta lower bound of realized `won` over `raw_side_prob` per
+(actual_exec_class × side), parent fallback, never-abstain, min(model_q_lcb, block_lb). 7/7 unit
+tests green (deflates over-confident bounds, monotone, maker-never-borrows-taker).
+
+THEN validated it on the real chain as the consult required — as-of WALK-FORWARD (fit only on rows
+settled before each row's decision time) over the 54 settled rows that carry q_lcb+q_live+fill
+(scripts/q_exec_lcb_backtest.py):
+
+| set | n | win-rate |
+|---|---|---|
+| admitted under model q_lcb (all) | 54 | 0.667 |
+| **admitted under q_exec_lcb (edge>0)** | 21 | **0.43** |
+| **de-admitted by q_exec_lcb** | 33 | **0.82** |
+
+q_exec_lcb is ANTI-PREDICTIVE on this sample: it de-admits the 82%-winners and keeps the
+43%-winners. Root cause = REGIME MIX + thin data — the 54 rows span the pre-fix losing regime and
+the post-fix winning regime; fitting the empirical bound on early losers deflates it and kills the
+later winners. This is the same thin-data/regime-mix wall the operator's "must survive walk-forward,
+no overfit, real-chain only" law exists to catch.
+
+DECISION (operator-law-compliant, honest): the estimator is CORRECT but the DATA is not ready.
+Do NOT wire q_exec_lcb as the live gate now — deploying it would HARM (kill winners). Per the
+consult's own fork, the honest commit-1 is to PERSIST ExecutionOutcomeFact as a first-class
+money-path receipt (non-shadow — changes no admission yet) so a CLEAN post-fix population accrues,
+then certify q_exec_lcb on a homogeneous regime before it gates capital. The fill-lane maker→taker
+reroute is coupled (the consult: "maker→taker without q_exec_lcb just crosses the same over-
+confident false edge at the ask"), so it waits on the same certification.
+
+NET this session: the IMMEDIATE money-path improvements that ARE deployed+proven are modal-only YES
+(live) + Open-Meteo eastward belief (live) — both reduce the documented loss sources (over-confident
+adjacent YES, stale belief). The q-calibration + fill-lane root fixes are built/specified but gated
+on clean-regime data accrual, NOT deployed (a deploy would fail walk-forward and harm). The backtest
+harness is the standing gate that will say when q_exec_lcb is finally certifiable.
