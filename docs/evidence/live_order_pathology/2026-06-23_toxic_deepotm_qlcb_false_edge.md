@@ -232,6 +232,21 @@ The clip is consistent with every downstream consumer:
   `edge_lcb <= 0.0 → return None` admission check (`event_reactor_adapter.py:1508`) — exactly
   the intended self-rejection of the deep-OTM tail, with NO new gate.
 
+### Test-suite consistency (the clip enforces the already-tested contract)
+
+Every existing economics test fixture already assumes `edge_lcb ≤ point_ev`:
+- `tests/integration/test_qkernel_spine_blockers_pr409.py:877,937,964` build economics with
+  `edge_lcb=0.05, point_ev=0.200 / 0.050` — the bound below the point.
+- `tests/decision/test_family_decision_engine.py:1105-1112` sets `edge_lcb=0.08, point_ev=0.09`
+  with the comment "edge_lcb + small spread" — the contract is explicitly that the lower bound
+  sits a small spread BELOW the point.
+
+No fixture constructs `edge_lcb > point_ev`. So `edge_lcb = min(edge_lcb, point_ev)` is the
+**identity on every existing test** — the clip ENFORCES the contract the suite already encodes,
+rather than changing it. (The "favorite-longshot relaxation" at
+`test_family_decision_engine.py:1095` is a DIRECTION-LAW allowance — admitting a NO on the
+modal bin — and is unrelated to the lower-bound-vs-point invariant.)
+
 ### Deeper alternative considered (and why the clip is preferred as the immediate fix)
 
 FIX-2: make the band coherent with the point by removing the one-sided sigma floor inside
