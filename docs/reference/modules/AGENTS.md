@@ -1,58 +1,58 @@
 # docs/reference/modules AGENTS
 
-Dense module-reference layer for Zeus.
+Dense module-reference layer for Zeus. Module books explain package behavior, hazards, truth surfaces, tests, and change routes. They do not replace active authority docs, machine manifests, current-fact surfaces, tests, or source.
 
-This directory exists for module books that make zero-context work possible
-without promoting those books into authority. Module books explain one module's
-purpose, hazards, truth surfaces, tests, and change routes. They do not replace
-authority docs, machine manifests, current-fact surfaces, tests, or source.
+---
 
-## Read order
+## Read Order
 
-1. root `AGENTS.md`
-2. `workspace_map.md`
-3. the scoped `AGENTS.md` for the touched module or system surface
-4. `architecture/module_manifest.yaml`
-5. the one routed module book in this directory
-6. current-fact/test surfaces named by that module book
+1. root `AGENTS.md`;
+2. `workspace_map.md`;
+3. scoped `AGENTS.md` for the touched module/system;
+4. `docs/reference/zeus_prediction_market_quant_reference.md` for money-path context;
+5. `architecture/module_manifest.yaml` when module routing/dependencies matter;
+6. exactly the routed module book(s);
+7. current-fact/test/evidence surfaces named by the module book only when needed.
 
-## File registry
+Do not default-read all module books. Do not route through packet evidence, active-packet standards, or dated module audits.
+
+---
+
+## File Registry
 
 | File | Purpose |
-|------|---------|
-| `state.md` | Dense module book for canonical runtime truth, lifecycle legality, and projection discipline |
-| `engine.md` | Dense module book for runtime orchestration, evaluator flow, replay parity, and monitor sequencing |
-| `data.md` | Dense module book for source-role routing, ingest discipline, and data-version boundaries |
-| `contracts.md` | Dense module book for frozen semantic contracts and typed cross-layer boundaries |
-| `execution.md` | Dense module book for live-money order placement, exit mechanics, and settlement harvest |
-| `venue.md` | Dense module book for Polymarket V2 adapter boundaries and submission provenance |
-| `ingest.md` | Dense module book for user-channel event-stream ingest and U2 fact append bridges |
-| `riskguard.md` | Dense module book for protective enforcement and behavior-changing risk levels |
-| `control.md` | Dense module book for the external control plane and gate provenance |
-| `supervisor_api.md` | Dense module book for Zeus/Venus typed boundary contracts |
-| `strategy.md` | Dense module book for edge selection, FDR, Kelly, and posterior fusion |
-| `signal.md` | Dense module book for P_raw, Day0, and diurnal signal generation |
-| `calibration.md` | Dense module book for Platt calibration, maturity gates, and shadow metrics |
-| `observability.md` | Dense module book for derived operator read models and health views |
-| `types.md` | Dense module book for unit safety, market types, and observation atoms |
-| `analysis.md` | Dense module book for placeholder/derived analysis utilities |
-| `scripts.md` | Dense module book for top-level script families and safety boundaries |
-| `tests.md` | Dense module book for law gates, relationship tests, and diagnostic/advisory families |
-| `topology_system.md` | Dense module book for machine routing, topology doctor, and manifest law |
-| `docs_system.md` | Dense module book for the tracked docs mesh and trust-layer routing |
-| `code_review_graph.md` | Dense module book for derived structural context and graph boundaries |
-| `topology_doctor_system.md` | Dense system book for topology-doctor lanes, issue models, and CLI/closeout seams |
-| `manifests_system.md` | Dense system book for manifest ownership, fact-type boundaries, and repair routing |
-| `closeout_and_receipts_system.md` | Dense system book for scoped closeout, receipts, work records, and deferral evidence |
+|---|---|
+| `state.md` | Runtime truth, lifecycle legality, projection discipline |
+| `engine.md` | Runtime orchestration, event reactor, q-kernel bridge, replay/monitor sequencing |
+| `data.md` | Source-role routing, replacement forecast materialization, data-version boundaries |
+| `contracts.md` | Frozen semantic contracts and typed cross-layer boundaries |
+| `execution.md` | Live-money order placement, command persistence, exit mechanics, settlement harvest |
+| `venue.md` | Polymarket adapter boundaries and submission provenance |
+| `ingest.md` | Split ingest daemons and event-stream/fill bridge facts |
+| `riskguard.md` | Protective enforcement and behavior-changing risk levels |
+| `control.md` | External control plane and gate provenance |
+| `supervisor_api.md` | Zeus/Venus typed boundary contracts |
+| `strategy.md` | q-kernel edge selection, direction law, payoff vectors, utility/risk strategy |
+| `signal.md` | Signal generation; legacy paths must be explicitly marked diagnostic if not live |
+| `calibration.md` | Calibration/fusion/q band support; distinguish legacy Platt from current q authority |
+| `observability.md` | Derived operator read models and health views |
+| `types.md` | Unit safety, market types, observation atoms |
+| `analysis.md` | Derived analysis utilities only |
+| `scripts.md` | Script families and safety boundaries |
+| `tests.md` | Law gates, relationship tests, diagnostic/advisory test families |
+| `topology_system.md` | Machine routing, topology doctor, manifest law |
+| `docs_system.md` | Docs mesh and trust-layer routing |
+| `code_review_graph.md` | Derived structural context and graph boundaries |
+| `topology_doctor_system.md` | Topology-doctor lanes, issue models, CLI/closeout seams |
+| `manifests_system.md` | Manifest ownership, fact-type boundaries, repair routing |
+| `closeout_and_receipts_system.md` | Scoped closeout, receipts, work records, deferral evidence |
+
+---
 
 ## Rules
 
 - One file per module or system surface.
-- Follow the Module Authority Book Standard described in the active packet and
-  later durable references.
-- Do not store packet status, dated audits, row counts, live source health, or
-  archive bodies here.
-- If a claim is time-bound, point to `docs/operations/**` instead of embedding
-  it here.
-- If a graph appendix is useful, keep it derived-only and subordinate to the
-  module book.
+- No packet status, dated audits, row counts, live source health, active position state, current rejection counts, or archive bodies.
+- Time-bound claims must point to `docs/operations/current*.md` with freshness/expiry.
+- Legacy module behavior must be clearly labeled diagnostic/history/rollback unless current code path proves active behavior.
+- Graph appendices are derived-only and subordinate to source/manifests/tests.
