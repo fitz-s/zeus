@@ -5500,7 +5500,13 @@ def test_day0_buy_no_point_reversal_requires_stronger_evidence():
 
 
 def test_day0_observation_exits_when_settlement_imminent():
-    """Day0 positions must still exit when settlement is imminent (fallthrough fix)."""
+    """Day0 positions must still exit near settle when an adverse signal contradicts the held side.
+
+    Post 2026-06-23 EV-fix: the blanket near-settle force-sell is replaced by an EV gate (hold iff
+    holding beats selling now). A hold-EV-dominant position (belief 0.80 > bid 0.54) FALLS THROUGH
+    to the downstream adverse-signal checks instead of being blanket-sold — and a HARD model
+    divergence (0.40) the market is pricing against us still force-exits. The position never gets
+    stuck near settlement; it exits for the accurate cause."""
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -5519,9 +5525,9 @@ def test_day0_observation_exits_when_settlement_imminent():
     )
 
     assert decision.should_exit is True
-    assert decision.trigger == "SETTLEMENT_IMMINENT"
+    assert decision.trigger == "MODEL_DIVERGENCE_PANIC"
     assert "day0_observation_authority" in decision.applied_validations
-    assert "near_settlement_gate" in decision.applied_validations
+    assert "near_settlement_hold_ev_dominant" in decision.applied_validations
 
 
 def test_live_execute_exit_blocks_incomplete_context():

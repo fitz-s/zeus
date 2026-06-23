@@ -794,27 +794,47 @@ class TestExitTriggers:
     """
 
     def test_settlement_imminent(self):
+        """Near-settle force-sell fires when selling now EV-dominates holding (belief 0.40 below
+        the 0.60 bid → the market overpays our belief, lock the gain)."""
         pos = _make_position()
-        decision = _call_exit(pos, 0.60, 0.40, hours_to_settlement=0.5)
+        decision = _call_exit(pos, 0.40, 0.60, hours_to_settlement=0.5)
         assert decision.should_exit
         assert decision.trigger == "SETTLEMENT_IMMINENT"
 
-    def test_settlement_imminent_holds_confirmed_win(self):
-        """A near-certain WIN near settle must be HELD to its certain $1.00 settlement, NOT
-        force-sold. Selling a confirmed win at <1.0 forgoes the free spread to settlement AND
-        pays a sell fee for nothing — a FALSE EXIT (operator-reported 2026-06-23: a NO at 99.9¢,
-        a confirmed win, was force-sold by SETTLEMENT_IMMINENT). When BOTH the held-side market
-        price AND the fresh belief confirm the win (>=0.90), hold."""
-        pos = _make_position()
-        decision = _call_exit(pos, 0.97, 0.97, hours_to_settlement=0.5)
-        assert not decision.should_exit, "confirmed win near settle must hold, not force-sell"
+    def test_settlement_imminent_holds_when_hold_ev_dominates(self):
+        """A near-settle WIN whose hold-to-settlement EV dominates selling now must NOT be blanket
+        force-sold (operator-reported 2026-06-23: a confirmed-win NO at 99.9¢ was force-sold). The
+        decision is EV-derived (HoldValue net of exit costs vs shares×bid), NOT a hardcoded floor:
+        fresh belief 0.999 well above the 0.90 bid → holding beats selling, no adverse signal."""
+        pos = _make_position(shares=10.0)
+        decision = _call_exit(pos, 0.999, 0.90, hours_to_settlement=0.5)
+        assert not decision.should_exit, "hold-EV-dominant win near settle must hold"
         assert decision.trigger != "SETTLEMENT_IMMINENT"
+        assert "near_settlement_hold_ev_dominant" in decision.applied_validations
+
+    def test_settlement_imminent_sells_when_market_overpays_belief(self):
+        """EV, not a 0.90 floor: when the market BID (0.999) overpays our fresh belief (0.90),
+        selling now beats holding — lock the gain ('sell before the market notices'). The old
+        hardcoded floor wrongly HELD this (both >= 0.90); the EV gate correctly SELLS."""
+        pos = _make_position(shares=10.0)
+        decision = _call_exit(pos, 0.90, 0.999, hours_to_settlement=0.5)
+        assert decision.should_exit, "market overpaying fresh belief must sell, not hold"
+        assert decision.trigger == "SETTLEMENT_IMMINENT"
+
+    def test_settlement_imminent_holds_belief_above_bid_below_old_floor(self):
+        """EV, not a 0.90 floor: a position whose fresh belief (0.85) exceeds the bid (0.70) but
+        sits BELOW the old 0.90 confirmed-win floor must now HOLD (holding EV dominates, no adverse
+        signal). The old hardcoded floor wrongly force-SOLD it (belief < 0.90)."""
+        pos = _make_position(shares=10.0)
+        decision = _call_exit(pos, 0.85, 0.70, hours_to_settlement=0.5)
+        assert not decision.should_exit, "hold-EV-dominant position below old floor must hold"
+        assert "near_settlement_hold_ev_dominant" in decision.applied_validations
 
     def test_settlement_imminent_still_exits_reversal(self):
         """The mission's GOOD near-settle exit: a physics REVERSAL the market has not yet priced
         (fresh belief LOW that the held side wins, but market price still HIGH) STILL exits — sell
-        before the market notices. Not a confirmed win (belief < floor), so the force-exit holds."""
-        pos = _make_position()
+        before the market notices. Holding EV (belief 0.20) is far below selling at 0.95."""
+        pos = _make_position(shares=10.0)
         decision = _call_exit(pos, 0.20, 0.95, hours_to_settlement=0.5)
         assert decision.should_exit
         assert decision.trigger == "SETTLEMENT_IMMINENT"
