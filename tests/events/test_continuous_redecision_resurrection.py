@@ -586,7 +586,7 @@ def test_rest_pull_fires_when_best_bid_moves_past_limit_tolerance():
         command_id="cmd1", venue_order_id="vo1",
         family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
-        limit_price=0.70, quote_age_ms=0.0,
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,  # post-floor: BOOK_MOVED fires after the maker window
     )
 
     pulls = cr.screen_resting_orders(
@@ -609,7 +609,7 @@ def test_rest_pull_fires_when_best_bid_is_one_tick_ahead_of_limit():
         command_id="cmd1", venue_order_id="vo1",
         family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
-        limit_price=0.70, quote_age_ms=0.0,
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,  # post-floor: BOOK_MOVED fires after the maker window
     )
 
     pulls = cr.screen_resting_orders(
@@ -622,6 +622,39 @@ def test_rest_pull_fires_when_best_bid_is_one_tick_ahead_of_limit():
     assert len(pulls) == 1
     assert pulls[0][1].reason == "BOOK_MOVED"
     assert pulls[0][1].detail == pytest.approx(cr.TICK_SIZE)
+
+
+def test_book_moved_holds_within_maker_window():
+    """ANTIBODY (2026-06-23 entry fill-lane diagnosis): sub-floor (quote younger
+    than the 300s REST_VALUE_REFRESH_MIN_AGE_SECONDS maker window), even when the
+    best bid moves a full tick past our limit, HOLD — do NOT BOOK_MOVED-pull.
+    Every maker rest must get a real fill window and survive to
+    escalation-eligibility (the next decision crosses TAKER_ESCALATED_AFTER_REST),
+    instead of the documented infinite sub-floor rest->pull->re-rest loop that
+    produced 0 crosses / 0 +EV-band fills (venue_commands 24h: 0/12 fills in the
+    0.40-0.80 band). The belief-decay pull (NEW evidence) is NOT gated and still
+    fires; only the microstructure BOOK_MOVED twitch is dampened to the floor.
+    """
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.73", ask="0.75")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=60_000.0,  # 60s < 300s floor
+    )
+
+    pulls = cr.screen_resting_orders(
+        world, trade, open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert pulls == [], (
+        "a book-moved pull within the 300s maker window must HOLD so the rest "
+        "survives to escalation; sub-floor BOOK_MOVED churn caused 0 +EV fills"
+    )
 
 
 def test_rest_pull_ignores_stale_book_moved_evidence():
@@ -656,7 +689,7 @@ def test_buy_no_rest_uses_native_no_best_bid_for_book_moved():
         command_id="cmd-no", venue_order_id="vo-no",
         family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_no",
         condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
-        limit_price=0.76, quote_age_ms=0.0,
+        limit_price=0.76, quote_age_ms=6 * 60 * 1000.0,  # post-floor: BOOK_MOVED fires after the maker window
     )
 
     pulls = cr.screen_resting_orders(
