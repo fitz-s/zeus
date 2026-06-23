@@ -1,352 +1,179 @@
 # Zeus Current Delivery Law
 
-Status: active delivery authority
-Scope: authority order, boot order, planning lock, packet doctrine, autonomy limits, demotion/promotion hygiene, completion evidence
+Status: active durable delivery authority  
+Scope: authority order, zero-context boot, documentation isolation, packet discipline, demotion/promotion hygiene, validation, and completion evidence  
+Freshness model: durable law. This file does not record live bankroll, process status, positions, packet diary, temporary reject counts, or loaded SHA.
 
 ---
 
-## 1. Purpose & Runtime Supra-Authority
+## 1. Purpose
 
-This file defines how work is allowed to happen in Zeus (change-control protocol, execution packets, planning locks, autonomy limits). 
+This file defines how work may land in Zeus without corrupting the live-money trading machine or the agent cognition surface. `docs/authority/zeus_current_architecture.md` defines what Zeus is; this file defines how changes, docs, packets, and evidence are handled.
 
-**CRITICAL WARNING:** Runtime Reality Outranks Delivery Protocol. 
-Any agent executing a task involving runtime logic, truth planes, or physics MUST ingest the Runtime Semantic Constitution (`zeus_current_architecture.md`) and the domain model *before* applying the governance rules in this file. Following correct packet disciplines does not excuse semantic violations of the trading machine.
-
-It defines:
-- who outranks whom
-- how agents boot into the right mental model
-- when planning lock applies
-- how packets are closed or reopened
-- what autonomy may and may not do
-- how authority surfaces stay clean
-
-It is the single default entrypoint for workspace governance and delivery law.
+Correct delivery process never excuses semantic violations. For runtime, strategy, settlement, source, execution, lifecycle, DB, risk, or docs-authority work, ingest the architecture law and relevant code/manifests before relying on any prose plan.
 
 ---
 
-## 2. Authority Order
+## 2. Proof And Authority Order
 
-Use this order when deciding what may land:
+Use this order for every conflict:
 
-1. executable source, tests, DB/event/projection truth
-2. machine manifests under `architecture/**`
-3. `docs/authority/zeus_current_architecture.md`
-4. this file
-5. `docs/authority/zeus_change_control_constitution.md` for deep governance
-6. `docs/operations/current_state.md`
-7. task-profile-required current-fact surfaces
-8. durable reference
-9. derived context
-10. reports, artifacts, packets, archive/history evidence
+1. executable source, launchd deploy artifacts as installed by operator receipts, migrations/schema, DB/event/projection truth, tests/invariants, and runtime receipts;
+2. machine manifests under `architecture/**`;
+3. active durable authority files: `docs/authority/zeus_current_architecture.md`, this file, and retained constitutions whose registry class is active authority;
+4. canonical durable references under `docs/reference/**`;
+5. current-fact operation pointers while fresh and evidence-backed;
+6. scoped AGENTS files as routing contracts;
+7. evidence, reports, packets, task folders, consults, PR reviews, dated audits, rebuild notes, archives, graph outputs, and chat memory.
 
-Chat memory, hook behavior, outer-host memory, generated plans, graph output,
-reports, and archives never outrank repo law.
+If code/manifests/tests and prose disagree, update the prose. If implementation is unclear, mark the ambiguity instead of manufacturing a stable law.
 
 ---
 
-## 3. Default Boot Order
+## 3. Zero-Context Boot Order
 
-For every non-trivial task:
+For non-trivial work, the default route is:
 
-1. `AGENTS.md`
-2. `workspace_map.md`
-3. `docs/reference/zeus_domain_model.md`
-4. `docs/authority/zeus_current_architecture.md`
-5. classify task class
-6. scoped `src/<module>/AGENTS.md` for the module you will touch
-7. `architecture/task_boot_profiles.yaml`
-8. `architecture/fatal_misreads.yaml`
-9. `architecture/city_truth_contract.yaml` if city/source/date/settlement/
-   hourly/Day0/calibration truth is involved
-10. `docs/operations/current_state.md`
-11. profile-required current-fact surfaces, if fresh enough
-12. targeted code/tests
-13. graph/topology Stage 2
+1. `AGENTS.md`;
+2. `workspace_map.md`;
+3. scoped `AGENTS.md` for every directory you will touch;
+4. `docs/authority/zeus_current_architecture.md`;
+5. this file when the work touches delivery, docs, architecture, governance, demotion, packets, or registries;
+6. `docs/reference/AGENTS.md` and the canonical reference named there for the task;
+7. `architecture/task_boot_profiles.yaml` and `architecture/fatal_misreads.yaml` for the task class;
+8. relevant machine manifests such as `architecture/db_table_ownership.yaml`, `money_path_objects.yaml`, `negative_constraints.yaml`, `runtime_modes.yaml`, `runtime_posture.yaml`, `test_topology.yaml`, `module_manifest.yaml`, and `docs_registry.yaml`;
+9. targeted code/tests/config/deploy artifacts;
+10. current-fact pointers only when the task needs present operational status and the pointer is fresh enough.
 
-For governance or docs-authority work, also read:
-
-- this file
-- `architecture/docs_registry.yaml`
-- `architecture/map_maintenance.yaml`
+Do not default-read `docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**`, closed `docs/operations/task_*`, dated consult/review/raw docs, or packet evidence. Read them only by explicit task need and cite them as evidence/history, never present-tense law.
 
 ---
 
-## 4. Change Classes
+## 4. Documentation Layer Law
+
+The docs tree has one job per layer:
+
+- `docs/authority/**`: durable law only. No consult raw, one-off doctrine, dated task packet, PR review, packet diary, live runtime snapshot, or active work log.
+- `docs/reference/**`: durable concept/reference/module books. No live bankroll, PID, loaded SHA, current position list, active rejection count, current packet diary, or time-bound operational fact.
+- `docs/operations/current_state.md`, `current_data_state.md`, `current_source_validity.md`: current-fact pointers with evidence/freshness/expiry semantics. They do not authorize architecture.
+- `docs/operations/current/**`: active work package home only; default route must not recursively read it. Closed/superseded packages move to archive/reports/evidence and become non-default.
+- `docs/runbooks/**`: procedural operations. Runbooks must not define architecture.
+- `docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**`: evidence/history. Discoverable, non-default, non-authority.
+
+A historical file in the wrong layer must be demoted. If it contains a surviving rule, promote the rule into active authority or canonical reference first, then archive or report the source.
+
+---
+
+## 5. Change Classes
 
 Classify before editing:
 
-- **Math**: formulas, thresholds, calibration, signal, feature logic inside
-  existing semantics.
-- **Architecture**: lifecycle grammar, truth ownership, transaction boundaries,
-  canonical read/write paths, zone boundaries, source/settlement semantics.
-- **Governance**: AGENTS surfaces, authority docs, constitutions, demotion,
-  promotion, docs registry, evidence burden.
-- **Schema / truth-contract**: migrations, DB truth contracts, supervisor
-  contracts, control-plane semantics.
+- **Math/strategy**: probability, q, q_lcb/q_ucb, payoff vector, FDR, selection, Kelly, risk, calibration, signal, thresholding.
+- **Architecture**: lifecycle grammar, truth ownership, DB split, transaction boundaries, source/settlement semantics, family/bin/native-side law, runtime topology.
+- **Execution/venue**: intent, command persistence, pre-submit witness, venue adapter, idempotency, fill truth.
+- **Docs/governance**: AGENTS, authority/reference/current-fact isolation, registry/router changes, demotion/promotion.
+- **Schema/truth contract**: migrations, DB ownership, supervisor/control-plane contracts, manifest grammar.
 
-If a task touches lifecycle truth, `strategy_key`, DB authority, settlement
-semantics, control-plane behavior, authority order, or cross-zone boundaries,
-treat it as architecture/governance even if the diff is small.
+If a change touches live-money side effects, lifecycle truth, `strategy_key`, settlement source, q authority, DB ownership, risk semantics, authority order, or default boot path, treat it as architecture/governance even if the diff is small.
 
 ---
 
-## 5. Planning Lock
+## 6. Planning Lock And Packet Discipline
 
 Plan before touching:
 
-- `docs/authority/**`
-- `architecture/**`
-- `.github/workflows/**`
-- `src/state/**` truth ownership, schema, projection, lifecycle write paths
-- `src/control/**`
-- `src/supervisor_api/**`
-- cross-zone work
-- more than 4 files
-- any authority order / doc-class / demotion / promotion change
-- any current truth / lifecycle / governance / control / schema boundary
+- `docs/authority/**`;
+- `architecture/**`;
+- AGENTS files or workspace routing;
+- schema/migrations/DB ownership;
+- `src/state/**`, `src/execution/**`, `src/engine/event_reactor_adapter.py`, q-kernel/decision/risk code, or venue adapter;
+- cross-zone work;
+- demotion/promotion or registry updates;
+- more than four files.
 
-Machine check:
+A packet is execution evidence, not durable law. A packet can guide a task while active, but it must not remain in the default authority/reference route. Closing a packet requires targeted evidence, affected-surface checks, explicit residual risks, and router/registry cleanup.
 
-`python3 scripts/topology_doctor.py --planning-lock --changed-files <files...> --plan-evidence <plan file>`
-
-No broad autopilot, no packet-less architecture editing, and no authority
-rewrite by momentum.
+Do not create new root-level plan, handoff, scratch, or one-off status files. Use the existing operations/evidence/report/archive homes and registry classes.
 
 ---
 
-## 6. Packet Doctrine
+## 7. Current-Fact Rules
 
-### 6.1 Atomic Unit
+Current facts must name:
 
-A packet is the atomic authority-bearing unit of execution:
+- observed fact;
+- evidence source/receipt;
+- observed_at or checked_at;
+- freshness or expiry rule;
+- owner/path to refresh;
+- what to do when stale.
 
-- program > packet > execution slice
-- a completed slice is not a completed packet
-- a commit is not closeout
+If freshness cannot be proven, write `unknown` and fail closed where the money path needs the fact. Current facts cannot be backfilled into durable authority to avoid expiry.
 
-Continue autonomously only while:
-
-- the same packet remains open
-- the next slice is clear
-- no new authority/risk boundary is crossed
-- no contradiction appears
-
-Stop when the packet is complete, scope widens, a new packet/phase would start,
-or evidence burden cannot be met.
-
-### 6.2 Closure And Reopen
-
-Packet acceptance is defeasible by later repo-truth contradiction.
-
-Do not claim done unless all are true:
-
-1. targeted evidence passed
-2. broader affected-surface checks passed
-3. runtime semantics converge with the claim
-
-If later repo truth contradicts a closeout claim, reopen explicitly.
-
-### 6.3 Evidence Visibility
-
-Every required evidence item must appear in the packet, work log, receipt, or a
-clearly referenced evidence surface. Chat memory and implied knowledge are not
-evidence.
-
-### 6.4 Capability Present / Absent
-
-When behavior depends on a capability being present, acceptance must prove:
-
-- capability-present behavior
-- capability-absent behavior
-
-If absent behavior is advisory skip, fail-loud, or staged no-op, say so and
-test or record it directly.
-
-### 6.5 Waivers
-
-A gate may be waived only when:
-
-- it is explicitly staged/advisory by current law, or
-- it is externally unavailable for a recorded reason
-
-Convenience is never a waiver reason.
+Forbidden current facts in durable authority/reference: live bankroll, PID, loaded SHA, active position inventory, active packet diary, temporary rejection count, process loaded/unloaded status, current launchctl output, and current venue balances.
 
 ---
 
-## 7. Review And Closeout Gates
+## 8. Demotion And Promotion
 
-Before phase or packet closeout:
+Promote a rule only when it is durable, future-applicable, no longer packet/date scoped, and backed by code, tests, manifests, DB truth, deploy artifacts, or operator receipts.
 
-1. Run targeted tests/gates.
-2. Run broader affected-surface checks.
-3. Run adversarial Critic review.
-4. Run Verifier review.
-5. Record changed files, evidence, residual risks, and rollback/disposition.
+Demote a file when it is:
 
-After a packet is accepted/pushed:
+- dated strategy-of-record doc superseded by current code;
+- consult raw, PR review, debate transcript, packet evidence, task log, rebuild diary, or work diary;
+- an active operational fact without freshness semantics;
+- a reference file carrying present-tense runtime state;
+- a historical law absorbed into current authority/reference.
 
-1. Run one additional third-party Critic review.
-2. Run one additional Verifier pass.
-3. If either finds contradiction, stale control state, or evidence gap, reopen
-   or repair before advancing.
-
-Treat post-close success as separate advancement permission.
+Demotion actions must update `docs/archive_registry.md` or the repo's active archive/report index and must remove default-read router references.
 
 ---
 
-## 8. Autonomy Limits
+## 9. Validation Law
 
-### 8.1 Always Human-Gated
+A change is not complete until validation is attempted and results are separated into:
 
-- live cutover timing
-- irreversible migration/cutover switches
-- archive/delete/demotion actions that change the active law stack
-- permanent risk re-enable after a safety-triggered pause
-- expansion of command vocabulary that affects live control
+- changed-surface failures caused by the patch;
+- repo-wide pre-existing drift;
+- unavailable validation due missing checkout/tooling/credential.
 
-### 8.2 Team Mode
+Minimum docs/architecture validation surface:
 
-Team mode is allowed only when:
+- `python3 scripts/topology_doctor.py --strict`;
+- `python3 scripts/topology_doctor.py --source`;
+- `python3 scripts/topology_doctor.py --tests`;
+- `python3 scripts/topology_doctor.py --fatal-misreads`;
+- docs registry/topology modes shown by `python3 scripts/topology_doctor.py --help`;
+- stale-term searches against active default-read authority/reference/router files.
 
-- there is an approved packet
-- work is parallelizable
-- one owner remains accountable
-- team members are not redefining authority
-
-Do not teamize:
-
-- `architecture/**`
-- `docs/authority/**`
-- migration cutover decisions
-- supervisor/control-plane semantics
-- packet-less exploratory rewrites
-
-One frozen packet at a time. Serialize writes to the same file.
+When local execution is unavailable, record the exact reason and run the strongest available static validation through the connector/search surface. Do not claim a command passed unless it actually ran.
 
 ---
 
-## 9. Authority Hygiene
+## 10. Completion Protocol
 
-### 9.1 `docs/authority/` Is Durable Law Only
+Before claiming complete:
 
-Do not leave these in authority:
+1. list active default-read surface after the change;
+2. list files rewritten;
+3. list files demoted/archived/quarantined/deleted;
+4. list registry/router updates;
+5. list stale claims removed and their new truth/action;
+6. summarize current deploy money path with code anchors;
+7. report validation commands and results honestly;
+8. name unresolved implementation ambiguities;
+9. give one tiny next follow-up only if needed.
 
-- `task_YYYY-MM-DD_*`
-- `*_adr.md`
-- fix-pack notes
-- packet-scoped rollback doctrine
-- dated boundary supplements
-- one-off constitutions
-
-If useful, move them to operations packet evidence, reports history, or archive
-interfaces.
-
-### 9.2 Current Facts Are Not Law
-
-`current_state.md`, `current_data_state.md`, and
-`current_source_validity.md` are time-bound planning surfaces. They must be:
-
-- receipt-backed
-- expiry-bound
-- summary-only
-- fail-closed when stale
-
-### 9.3 Reference Is Not Current Truth
-
-`docs/reference/` carries durable descriptive understanding. Current row
-counts, provider status, packet status, and dated audits belong elsewhere.
-
-### 9.4 Derived Context Does Not Rise
-
-Graph, topology, digests, context packs, and source rationale help routing and
-review. They do not replace authority, current facts, receipts, manifests, or
-tests.
+Do not hide failures. Do not call evidence/history present-tense law. Do not leave obsolete docs reachable through AGENTS, README, docs registry, reference replacement, module manifest, task boot profiles, or default current routes.
 
 ---
 
-## 10. Demotion And Promotion
+## 11. Relationship To Other Files
 
-Promote a rule to durable authority only if it is:
-
-- no longer packet-scoped
-- no longer date-scoped
-- applicable to future similar work
-- backed by executable truth, manifests, tests, or operator reality
-
-Demote a file when it:
-
-- only applied to a past packet
-- has been absorbed into core law or manifests
-- is ADR/fix-pack/rollback residue
-- is better kept as historical evidence
-
-Demotion is not deletion. It preserves history while cleaning the active law
-surface.
-
----
-
-## 11. Market-Math And Settlement Packets
-
-Any packet touching market math or settlement semantics must state:
-
-1. domain assumptions
-2. authority source for each assumption
-3. invalidation condition if false
-
-Review must verify:
-
-- bin contract kind
-- settlement cardinality
-- shoulder semantics
-- discrete support semantics
-- source/date/unit/track proof
-
----
-
-## 12. External Boundary
-
-Zeus owns repo law and inner truth.
-
-Venus may read derived status and typed contracts and may issue narrow ingress
-commands. OpenClaw may host workspace/runtime support, memory injection,
-notifications, and gateway routing.
-
-Outer hosts may not silently mutate Zeus authority, schema, DB truth, or
-control semantics.
-
----
-
-## 13. Completion Protocol
-
-Before calling work complete:
-
-1. verify persistence of code/docs changes
-2. run relevant checks
-3. update maps/registries for moved/added/deleted files
-4. confirm no moved historical file remains active authority
-5. confirm current_state points at the active packet and receipt
-6. confirm no new parallel law surface was created
-7. record remaining risks honestly
-
-### 13.1 Script Disposal
-
-If a packet adds, modifies, runs, deprecates, or moves a top-level script, its
-closeout must name the script disposition:
-
-- deleted
-- promoted to long-lived script
-- promotion candidate with owner and deadline
-- packet-ephemeral with delete-by date
-- deprecated fail-closed with canonical `DO_NOT_RUN`
-
-Do not close a packet with anonymous one-off scripts left in `scripts/`.
-
----
-
-## 14. Relationship To Other Files
-
-- `docs/authority/zeus_current_architecture.md`: how Zeus operates.
-- `docs/authority/zeus_change_control_constitution.md`: deep anti-entropy
-  rationale, not default boot.
-- `docs/operations/current_state.md`: current active packet pointer.
-- `architecture/docs_registry.yaml`: machine-readable docs classification.
+- `docs/authority/zeus_current_architecture.md`: semantic/runtime law.
+- `docs/authority/zeus_change_control_constitution.md`: retained anti-entropy constitution; non-default unless a governance task requires deep rationale.
+- `docs/authority/ARCHIVAL_RULES.md`: retained archival hygiene law when present.
+- `docs/reference/zeus_prediction_market_quant_reference.md`: canonical durable reference for the live money path.
+- `docs/operations/current_state.md`: active packet/current-state pointer, not architecture.
+- `architecture/docs_registry.yaml`: machine-readable classification and default-read control.
