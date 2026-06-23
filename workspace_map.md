@@ -1,121 +1,127 @@
 # Zeus Workspace Map
 
-This is the root visibility and routing guide for zero-context agents.
+This is the root visibility and routing guide for zero-context agents. Read it immediately after root `AGENTS.md`.
 
-Use it after `AGENTS.md` to answer two questions quickly:
+It answers:
 
-1. what kind of surface am I looking at?
-2. what should I read next?
+1. What kind of surface am I looking at?
+2. Is it default-readable authority/reference/current fact, or evidence/history only?
+3. What should I read next?
 
-## Default route
+---
 
-1. read `AGENTS.md` (establishes the money path and probability chain)
-2. run the topology digest for your task — this gives a compact route,
-   context, and candidate-file orientation:
-   `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>`
-3. read the scoped `AGENTS.md` for the module the digest routes you to
-4. read code and evidence only after the route is narrow
+## 1. Default Route
 
-## Visibility classes
+1. Read `AGENTS.md`.
+2. Read this map.
+3. Read scoped `AGENTS.md` for every subtree you will touch.
+4. For runtime or money-path work, read `docs/authority/zeus_current_architecture.md` and the targeted canonical reference.
+5. For docs/governance/router/registry work, read `docs/authority/zeus_current_delivery.md`, `docs/authority/ARCHIVAL_RULES.md`, and `architecture/docs_registry.yaml`.
+6. Use machine manifests under `architecture/**` before relying on prose.
+7. Use evidence/archive/report files only after a narrow task requires history.
+
+`python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` may be used for route hints. It is not a proof source and must not make evidence/history default-readable.
+
+---
+
+## 2. Visibility Classes
 
 | Class | Meaning | Examples | Default posture |
-|------|---------|----------|-----------------|
-| tracked visible text | Tracked human-readable routing, law, plans, and docs | `AGENTS.md`, `workspace_map.md`, `docs/**`, `architecture/**` | Default-read when relevant |
-| tracked derived context | Tracked artifacts that help review and retrieval but are not authority | `.code-review-graph/graph.db` | Read as derived context, never as law |
-| historical cold storage | Historical bodies and bundles that may exist locally but are not part of the default boot path | `docs/archives/**`, local archive bundles | Do not default-read; route through `docs/archive_registry.md` |
-| runtime-local scratch and control | Runtime state, DBs, coordination files, and ignored planning scratch | `state/**`, `.omx/**`, `.omc/**` | Treat as runtime context, not repo law |
-| generated evidence sinks | Reports, checklists, workbooks, and raw captures | `docs/reports/authority_history/**`, `docs/to-do-list/**`, `raw/**`; artifacts/historical_evidence untracked on disk | Evidence only unless promoted through a packet |
+|---|---|---|---|
+| durable authority law | Active law for architecture, delivery, archival hygiene | `docs/authority/zeus_current_architecture.md`, `docs/authority/zeus_current_delivery.md`, `docs/authority/ARCHIVAL_RULES.md` | Read when task class requires it |
+| canonical durable reference | Stable explanation of domain/math/strategy/execution/risk/data/failure modes | `docs/reference/zeus_prediction_market_quant_reference.md`, targeted `docs/reference/zeus_*.md` | Read by task route |
+| current fact pointer | Present-tense pointer with freshness/expiry | `docs/operations/current_state.md`, `current_data_state.md`, `current_source_validity.md` | Read only when current facts are required |
+| machine-checkable manifest | YAML/registry/test topology/law surfaces | `architecture/*.yaml` | Prefer over prose for registered facts |
+| runbook | Operator procedure | `docs/runbooks/**` | Read only for operation being performed |
+| evidence/report/archive/rebuild | Historical evidence, dated audit, consult, PR review, packet closeout, raw measurement | `docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**` | Do not default-read; evidence only |
+| runtime local state | DBs, logs, state JSON, launchd/process truth | `state/**`, `logs/**`, live launchd/process receipts | Current fact only when freshly inspected |
+| derived structural context | Graphs, topology digests, generated maps | `.code-review-graph/**`, topology output | Route aid only, never semantic proof |
+| scratch/untracked | Temporary local work | `.omx/**`, `.omc/**`, raw dumps | Not durable authority |
 
-## Directory router
+---
+
+## 3. Directory Router
 
 | Path | Role | Next read |
-|------|------|-----------|
+|---|---|---|
 | `src/` | Runtime source code | `src/AGENTS.md`, then package `AGENTS.md` |
-| `src/events/` | EDLI event-sourced opportunity facts, triggers, and reactor boundary | `src/events/AGENTS.md` |
-| `src/venue/` | Live venue adapter boundary | `src/venue/AGENTS.md`, `docs/reference/modules/venue.md` |
-| `src/strategy/` | Strategy, benchmark, FDR/Kelly, and candidate-stub boundary | `src/strategy/AGENTS.md`, `docs/reference/modules/strategy.md` |
-| `src/risk_allocator/` | R3 A2 capital allocation, cap policy, governor state, and kill-switch enforcement | `src/risk_allocator/AGENTS.md`, `docs/reference/modules/riskguard.md` |
-| `src/ingest/` | Runtime event-stream ingest and forecast-live producer boundary | `src/ingest/AGENTS.md`, `docs/reference/modules/ingest.md` |
-| `tests/` | Regression and law gates, including test-only fakes and integration antibodies | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
-| `scripts/` | Operator, ETL, audit, and enforcement tools | `scripts/AGENTS.md`, `architecture/script_manifest.yaml` |
-| `docs/authority/` | Durable architecture + delivery law (incl. ARCHIVAL_RULES.md since 2026-05-17 PR #136 W3) | `docs/authority/AGENTS.md` |
-| `docs/reference/` | Domain, architecture, market/settlement, data/replay, failure-mode, and module references | `docs/reference/AGENTS.md` |
-| `docs/reference/modules/` | Dense module books; reference only, never constitutional law | `docs/reference/modules/AGENTS.md` (`state`, `engine`, and `data` landed first) |
-| `docs/reference/legacy/` | Demoted historical reference snapshots (`legacy_reference_*.md`); doc_class `legacy_reference` per 2026-05-17 W6 | `docs/reference/legacy/AGENTS.md` |
-| `docs/operations/` | Live control pointer, active packets (.archived stubs dropped 2026-05-17 — git is backup, docs/archives/packets/ holds canonical) | `docs/operations/AGENTS.md` |
-| `docs/operations/edli_v1/` | EDLI v1 operation package, context envelope, and repo/spec cross-reference | `docs/operations/AGENTS.md` |
+| `src/contracts/` | Settlement, native-side, typed economic contracts | `src/contracts/AGENTS.md`, market/settlement reference |
+| `src/data/` | Forecast/source/materialization and external data boundaries | `src/data/AGENTS.md`, data/replay reference |
+| `src/forecast/`, `src/probability/`, `src/calibration/` | Predictive/q/calibration math | scoped AGENTS if present, math/strategy references |
+| `src/decision/`, `src/strategy/` | Family decision, payoff, direction, utility/risk strategy | `src/strategy/AGENTS.md`, strategy/risk references |
+| `src/engine/`, `src/events/` | Live daemon orchestration and event reactor boundary | `src/engine/AGENTS.md`, `src/events/AGENTS.md` |
+| `src/execution/`, `src/venue/` | Execution side effects and venue adapter | `src/execution/AGENTS.md`, `src/venue/AGENTS.md`, execution lifecycle reference |
+| `src/state/` | DB/event/projection/lifecycle truth | `src/state/AGENTS.md`, DB ownership manifest |
+| `src/riskguard/`, `src/risk_allocator/` | Risk action and capital allocation boundaries | scoped AGENTS, risk strategy reference |
+| `src/ingest/` | Split ingest/event-stream daemons | `src/ingest/AGENTS.md` if present, data/replay reference |
+| `tests/` | Regression, invariant, and money-path relationship checks | `tests/AGENTS.md`, `architecture/test_topology.yaml` |
+| `scripts/` | Operator/ETL/audit/enforcement tools | `scripts/AGENTS.md`, script manifests when present |
+| `deploy/launchd/` | Operator-installable launchd artifacts | Treat as deploy artifact; verify live load separately |
+| `config/` | Runtime settings and static config | `config/AGENTS.md`; remember current behavior still needs runtime proof |
+| `docs/authority/` | Durable law only | `docs/authority/AGENTS.md` |
+| `docs/reference/` | Durable concept/reference layer | `docs/reference/AGENTS.md` |
+| `docs/reference/modules/` | Module books only | `docs/reference/modules/AGENTS.md` |
+| `docs/operations/` | Current pointers, run-state notes, active work homes | `docs/operations/AGENTS.md`; do not recursively default-read packets |
 | `docs/runbooks/` | Operator runbooks | `docs/runbooks/AGENTS.md` |
-| `docs/reports/authority_history/` | Durable authority history ADRs and delivery boundary (kept tracked; rest of docs/reports/ is untracked archive) | `docs/reports/authority_history/` |
-| `docs/to-do-list/` | Active checklist workbooks | `docs/to-do-list/AGENTS.md` |
-| `architecture/` | Machine-checkable workspace law | `architecture/AGENTS.md` |
-| `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
-| `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
-| `state/` | Runtime DBs and local control files | classify before treating as truth |
-| `raw/` | Raw external evidence captures | `raw/AGENTS.md` |
-| artifacts (untracked) | Review artifacts untracked 2026-05-23 — bodies on disk, gitignored. See `docs/archive_registry.md`. | untracked |
-| historical evidence (untracked) | Historical evidence trails untracked 2026-05-23 — bodies on disk, gitignored. | untracked |
-| `.agents/` | Repo-local workflow skills and AI handoff guidance | `.agents/skills/AGENTS.md` |
+| `docs/evidence/`, `docs/reports/`, `docs/archive/`, `docs/rebuild/` | Evidence/history/consult/rebuild/closed material | Route through registry/archive index; non-default |
+| `architecture/` | Machine-checkable law/registries/topology | `architecture/AGENTS.md` |
+| `.code-review-graph/` | Derived structural context | graph status command; not semantic truth |
+| `state/` | Runtime DBs/local current state | Fresh inspection only; never durable law |
+| `raw/` | Raw external captures | Evidence only |
 
-## Machine manifests
+---
 
-Prefer these over prose when they exist:
+## 4. Machine Manifests To Prefer Over Prose
 
 | Manifest | Use |
-|----------|-----|
-| `architecture/invariants.yaml` | Current invariant IDs and enforcement intent |
-| `architecture/negative_constraints.yaml` | Negative constraint definitions |
-| `architecture/zones.yaml` | Canonical file-level zone ownership |
-| `architecture/topology.yaml` | Coverage roots, docs registry, current-state contract |
-| `architecture/source_rationale.yaml` | Per-file `src/**` rationale, hazards, and write routes |
-| `architecture/script_manifest.yaml` | Script lifecycle and authority scope |
-| `architecture/test_topology.yaml` | Test categories and law gates |
-| `architecture/money_path_objects.yaml` | Money-path economic object, state, source, scheduler, and side-effect registry |
-| `architecture/money_path_ci.yaml` | Semantic diff to invariant/test routing for money-path CI |
-| `architecture/test_quality.yaml` | Money-path test falsifying-proof metadata |
-| `architecture/pre_existing_failure_registry.yaml` | Central IDs, owners, evidence, and review deadlines for temporary pre-existing failures |
-| `architecture/history_lore.yaml` | Dense historical lessons and antibodies |
-| `architecture/artifact_lifecycle.yaml` | Artifact classes and evidence rules |
-| `architecture/context_budget.yaml` | Boot-surface budget and maintenance cadence |
-| `architecture/change_receipt_schema.yaml` | Route-receipt contract |
+|---|---|
 | `architecture/docs_registry.yaml` | Docs classification and default-read registry |
-| `architecture/module_manifest.yaml` | Machine registry for module books, module routers, module-level dependencies, high-risk control routes such as CutoverGuard, the R3 venue adapter boundary, and forecast-live data-daemon entrypoints |
-| `architecture/task_boot_profiles.yaml` | Question-first semantic boot profiles by task class |
-| `architecture/fatal_misreads.yaml` | Machine-readable semantic shortcut antibodies |
-| `architecture/city_truth_contract.yaml` | Stable city/source/date truth contract schema; not a current truth table |
-| `architecture/code_review_graph_protocol.yaml` | Two-stage Code Review Graph use protocol; graph remains derived context |
-| `scripts/ci/` | CI-only enforcement helpers for semantic diff classification, invariant coverage, and test quality gates |
-| `tests/money_path/` | Deterministic money-path relationship/model tests selected by semantic CI |
-| `architecture/agent_pr_discipline_2026_05_09.md` | Agent PR discipline: 300-LOC threshold, auto-reviewer cost economics, author detection, bypass protocol |
-| `architecture/exit_strategy_audit_2026_05_27.md` | Pre-merge audit of D1+D2+D3 exit-strategy pure-math layer; graded findings A1..A3 (2026-05-27) |
-| `architecture/exit_strategy_integration_plan_2026_05_27.md` | Integration plan for D3 part 2 — cycle_runtime wiring deferred to follow-up PR (2026-05-27) |
-| `architecture/pr_exit_strategy_premerge_critic_2026_05_27.md` | Pre-merge critic pass 1 findings for PR #353 (2026-05-27) |
-| `architecture/pr_exit_strategy_premerge_critic_pass2_2026_05_27.md` | Pre-merge critic pass 2 findings for PR #353; direction-flip SEV-1 catch (2026-05-27) |
+| `architecture/reference_replacement.yaml` | Canonical reference replacement map |
+| `architecture/module_manifest.yaml` | Module-book/router/dependency registry |
+| `architecture/kernel_manifest.yaml` | Kernel authority and lifecycle surfaces |
+| `architecture/invariants.yaml` | Invariant IDs and enforcement intent |
+| `architecture/negative_constraints.yaml` | Forbidden patterns and carve-outs |
+| `architecture/fatal_misreads.yaml` | Semantic shortcut antibodies |
+| `architecture/db_table_ownership.yaml` | Canonical table-to-DB ownership |
+| `architecture/runtime_modes.yaml` | Discovery mode grammar and shared runtime path |
+| `architecture/runtime_posture.yaml` | Branch posture grammar |
+| `architecture/money_path_objects.yaml` | Economic object/state-machine/source registry |
+| `architecture/test_topology.yaml` | Test categories and law gates |
+| `architecture/source_rationale.yaml` | Per-source/package rationale, hazards, providers |
+| `architecture/task_boot_profiles.yaml` | Semantic boot profiles by task class |
+| `architecture/city_truth_contract.yaml` | Stable source-role schema, not current per-city truth |
+| `architecture/code_review_graph_protocol.yaml` | Graph usage protocol; graph is derived context |
 
-## Do not default-read
+Dated audit/critic/plan Markdown under `architecture/**` is historical unless a manifest routes it as active. Do not add dated review files to the default map.
 
-- `docs/archives/**` and local archive bundles
-- `.code-review-graph/graph.db` as if it were authority
-- `docs/reports/**` as if placement made them law
-- `docs/reference/modules/*.md` before a scoped router or module manifest says
-  which module actually matters
-- `.omx/context/**` and `.omc/**` runtime scratch
-- long reference docs unless the digest or packet routes you there
+---
 
-Packet docs, ADRs, fix-pack notes, rollback doctrine, and date-scoped boundary
-notes must not remain in `docs/authority/`. If still useful, keep them as
-operations packet evidence, reports evidence, or archive-indexed history.
+## 5. Do Not Default-Read
 
-## Maintenance rule
+- `docs/evidence/**`;
+- `docs/reports/**`;
+- `docs/archive/**`;
+- `docs/rebuild/**`;
+- closed `docs/operations/task_*` packages;
+- raw consult, PR review, closeout, packet, or dated strategy documents;
+- `.code-review-graph/graph.db` as if it were authority;
+- `.omx/**`, `.omc/**`, generated dumps, local scratch;
+- long module books before scoped routing identifies the module.
 
-When adding, renaming, or deleting a file:
+Packet docs, ADRs, fix-pack notes, rollback doctrine, and date-scoped boundary notes must not remain in active authority/reference. Promote surviving law into active authority/reference, then archive or report the source.
 
-1. update the owning manifest when one exists
-2. update the scoped `AGENTS.md` if the local router changed
-3. update this file only when directory-level structure or visibility classes
-   changed
+---
 
-Run:
+## 6. Maintenance Rule
+
+When adding, renaming, demoting, or deleting a doc-like file:
+
+1. update the owning manifest or registry;
+2. update scoped `AGENTS.md` if route instructions changed;
+3. update `docs/archive_registry.md` for demotions;
+4. update this map only when directory-level structure or visibility class changed;
+5. validate with topology/stale-term checks and report unavailable checks honestly.
+
+Suggested command after a material boot-surface rewrite:
 
 `python3 scripts/topology_doctor.py --context-budget --json`
-
-after a material boot-surface rewrite.
