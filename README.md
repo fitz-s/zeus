@@ -1,213 +1,132 @@
 # Zeus
 
-**Quantitative trading engine for weather-settlement prediction markets on Polymarket.**
+Zeus is a live-money quantitative trading engine for Polymarket weather-settlement prediction markets.
 
-Zeus converts atmospheric ensemble forecasts into calibrated probabilities, identifies edges against market prices, sizes positions via fractional Kelly, and executes through the Polymarket CLOB — all while enforcing strict contract semantics, source provenance, and dual-track temperature identity end-to-end.
+It trades discrete settlement contracts, not continuous weather values. The basic economic object is a city/local-date/metric family with mutually-exclusive settlement bins and native YES/NO venue tokens. Forecast probability becomes tradable only after Zeus pins contract semantics, source/settlement truth, family/bin topology, executable orderbook cost, native side, risk, and lifecycle state.
+
+For complete current law and reference, read:
+
+- `AGENTS.md` and `workspace_map.md` for boot routing;
+- `docs/authority/zeus_current_architecture.md` for durable architecture law;
+- `docs/authority/zeus_current_delivery.md` for docs/change-control law;
+- `docs/reference/zeus_prediction_market_quant_reference.md` for the canonical money-path reference.
+
+This README is intentionally not a strategy-of-record snapshot. Runtime behavior must be proven from code, config, manifests, tests, DB/runtime receipts, and current-fact pointers.
 
 ---
 
-## How it works
-
-Zeus trades **discrete settlement contracts** on daily high/low temperatures.
-
-### Strategy of record (2026-06-09)
-
-The live forecast→edge→size path is the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`):
+## Money Path
 
 ```text
-contract semantics
-  → source truth (settlement provider, station, observation field)
-  → per-model walk-forward empirical-Bayes de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8))
-  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (bayes_precision_fusion.fuse_bayes_precision_posterior)
-  → σ_pred = max(1.0°C, √(fused.sd²+σ_resid²))
-  → settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct)
-  → q_lcb floor (Wilson z=1.645) → edge → BH FDR (per tested-family)
-  → fractional Kelly sizing (dynamic cascade multiplier × DDD coverage discount)
-  → execution via Polymarket CLOB → monitoring / exit → settlement reconciliation
-  → learning (without hindsight leakage)
+contract/source/settlement truth
+  -> forecast posterior
+  -> q over Ω
+  -> conservative q band
+  -> family book
+  -> native-side route/payoff vector
+  -> direction/coherence/edge/utility gates
+  -> sizing/risk
+  -> execution intent
+  -> venue command
+  -> fill/position lifecycle
+  -> monitor/exit
+  -> settlement/redeem
+  -> learning
 ```
 
-Live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q built and persisted by `src/data/replacement_forecast_materializer.py` `_insert_posterior`; the single settlement integrator is `src/calibration/emos.py` `bin_probability_settlement`.
+Current implementation anchors:
 
-### Baseline (legacy chain — diagnostics only since 2026-06-12)
+| Surface | Code / manifest |
+|---|---|
+| trading daemon | `src/main.py` |
+| discovery/cycle orchestration | `src/engine/cycle_runner.py`, `src/engine/discovery_mode.py`, `architecture/runtime_modes.yaml` |
+| event reactor | `src/engine/event_reactor_adapter.py` |
+| q-kernel bridge | `src/engine/qkernel_spine_bridge.py` |
+| terminal family decision | `src/decision/family_decision_engine.py` |
+| replacement forecast materialization | `src/data/replacement_forecast_materializer.py` |
+| Bayesian precision fusion | `src/forecast/bayes_precision_fusion.py` |
+| settlement-preimage bin integration | `src/calibration/emos.py` |
+| direction law | `src/strategy/live_inference/direction_law.py` |
+| execution boundary | `src/execution/executor.py`, `src/venue/**`, `src/state/venue_command_repo.py` |
+| lifecycle/position truth | `src/state/lifecycle_manager.py`, `src/state/portfolio.py`, `src/state/chain_reconciliation.py` |
+| monitor/exit/settlement | `src/engine/monitor_refresh.py`, `src/execution/exit_lifecycle.py`, `src/execution/harvester.py` |
+| DB ownership | `architecture/db_table_ownership.yaml` |
 
-The legacy 51-ENS chain still runs as an **independent baseline for diagnostics and for strategies genuinely on baseline q**. It no longer caps or vetoes the live replacement q (Wave-2 single-q-authority cut, commit 479cb34446): the former `min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)` join is deleted; the baseline value is carried as `baseline_q_lcb_reference` receipt provenance. Regime law: `docs/authority/regime_unification_2026-06-12.md` (U1):
+---
+
+## Current Architecture In One Page
+
+A family is one complete Ω: one city, local settlement date, metric (`high` or `low`), settlement unit, rounding rule, and venue market/condition topology. Bins may be point, finite range, or open shoulder. High and low tracks share calendar geometry but not physical quantity, observation field, calibration family, replay identity, or settlement rebuild identity.
+
+YES and NO are native venue sides. NO is not an execution shortcut for `1 - YES`; it has its own token, quote, depth, payoff, fill, and risk. The allowed conservative probability complement is the certified q-band identity `q_lcb_no = 1 - q_ucb_yes`, produced inside the q construction seam. `1 - q_lcb_yes` is forbidden.
+
+The current q-kernel path, when enabled by config, routes each family through `qkernel_spine_bridge -> FamilyDecisionEngine.decide()`: predictive distribution, Ω, joint q, joint q band, family book, market coherence, route/payoff candidates, direction/coherence/edge/ΔU filters, then robust utility-density selection. Legacy scalar trade-score and old market-fusion/baseline paths may exist as diagnostics, rollback, or receipt provenance; they are not the default strategy authority.
+
+Direction law is structural: YES is legal only on the forecast settlement bin; NO is legal only off the forecast settlement bin, subject to the boundary-zone rule. A non-modal YES is not admitted just because a tail probability looks positive.
+
+Execution is a side-effect boundary. Zeus must persist command/intent truth, prove a fresh pre-submit book/heartbeat/user-channel/connectivity/balance witness, and submit through the venue adapter. Unknown side-effect states are not retried as empty.
+
+---
+
+## DB And Deploy Topology
+
+Canonical DB topology is declared by `architecture/db_table_ownership.yaml`:
+
+| DB | Canonical role |
+|---|---|
+| `state/zeus-world.db` | world/runtime facts that remain world-owned |
+| `state/zeus-forecasts.db` | forecast, observation, source-run, readiness, posterior, settlement-outcome truth |
+| `state/zeus_trades.db` | trade decisions, execution facts, venue commands/events, positions, lifecycle truth, settlement commands |
+
+Committed launchd artifacts under `deploy/launchd/**` are installable operator artifacts, not proof that a process is loaded. They define split process roles for substrate observation, price/user-channel ingest, and post-trade capital follow-up. Live process/PID/loaded-SHA status must come from fresh operator/runtime receipts, not README prose.
+
+---
+
+## Risk And Lifecycle
+
+Risk levels change behavior. Advisory-only risk is forbidden.
+
+| Level | Runtime behavior |
+|---|---|
+| GREEN | normal operation |
+| YELLOW | no new entries; continue monitoring |
+| ORANGE | no new entries; exit only under favorable/policy-authorized conditions |
+| RED | protective cancel/sweep/exit behavior according to code |
+
+Canonical lifecycle phases are:
 
 ```text
-51 ENS members → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture;
-  10k-MC p_raw_vector_from_maxes retired) → Extended Platt → P_cal →
-  market_fusion.compute_posterior (model_only_v1 — NO market-prior blend live) → bootstrap q_lcb
+pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled
 ```
 
-ENS bias correction (`src/calibration/ens_bias_model.py`; flag `settings.bias_correction_enabled`, default `false`) and the Data Density Discount remain baseline-path features. The α-weighted `P_posterior = α·P_cal + (1−α)·P_market` is **spec-only**; the live `model_only_v1` posterior takes no market input.
-
-Everything starts with the **venue contract** — city, local date, temperature metric, unit, bin topology, settlement source, and provider-specific settlement transform. Forecast probability is economically meaningful only after these semantic obligations are pinned.
-
-### Why settlement is discrete
-
-Polymarket weather markets settle on integer temperatures reported by the settlement provider (typically Weather Underground). A real temperature of 74.45°F → sensor reads 74.2°F → METAR rounds → WU displays 74°F. Zeus models this full chain explicitly via Monte Carlo rather than assuming continuous distributions.
-
-Three bin types exist:
-
-| Type | Example | Resolution |
-|------|---------|------------|
-| `point` | 10°C | Resolves on exactly {10} |
-| `finite_range` | 50-51°F | Resolves on {50, 51} |
-| `open_shoulder` | 75°F+ | Unbounded — not a symmetric range |
-
-### Calibration (baseline path)
-
-Extended Platt below is the **legacy baseline / LCB-cap** calibration; the live q is built by `emos.bin_probability_settlement` (see Strategy of record above). Raw ensemble probabilities are biased — overconfident at long lead times, underconfident near settlement. Zeus uses Extended Platt scaling with lead-time as an input feature:
-
-```text
-P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)
-```
-
-The `B·lead_days` term triples effective training data per bucket vs. simple lead-time bucketing and prevents overtrade of stale forecasts.
-
-Before calibration, raw ensemble member extrema are bias-corrected: an **empirical-Bayes ENS bias model** shrinks the TIGGE structural prior toward live OpenData settled residuals (SNR-gated, so a noisy/uncertain bias is not applied), with a predictive-error layer that also widens the Monte-Carlo draw and transports the 0.5°→0.25° grid-resolution variance. See `src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py` (PRs #334/#336). **This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending.**
-
-### Edge detection and sizing
-
-- **Model-market fusion** (baseline path; spec-only — live runs `model_only_v1` with NO market blend, `src/strategy/market_fusion.py` `compute_posterior`): `P_posterior = α × P_cal + (1 - α) × P_market`, where α is dynamically computed from calibration maturity, ensemble spread, and lead time (clamped to [0.20, 0.85])
-- **Uncertainty**: double-bootstrap propagates ensemble sampling noise, instrument noise (σ ≈ 0.2–0.5°F), and calibration parameter uncertainty
-- **Selection**: Benjamini-Hochberg FDR controls false discovery within each tested family
-- **Sizing**: fractional Kelly reduced multiplicatively through CI width, lead time, win rate, portfolio heat, and drawdown cascades (fail-closed on NaN)
-- **Data Density Discount (DDD)**: when a city's observation coverage is thin or its oracle mismatch rate is high, a two-rail trigger applies a continuous Kelly discount (and hard-halts below an absolute coverage floor); spec `docs/reference/zeus_oracle_density_discount_reference.md`, code `src/oracle/data_density_discount.py`
+Terminal/recovery phases are `voided`, `quarantined`, `admin_closed`, and the code-declared `unknown` sentinel. Exit intent is not economic close. Economic close is not settlement. Chain/CLOB truth outranks local cache.
 
 ---
 
-## Trading strategies
+## Documentation Map
 
-Four independent strategy families with distinct alpha profiles:
+| Layer | Purpose |
+|---|---|
+| `docs/authority/**` | durable law only |
+| `docs/reference/**` | durable reference and module books |
+| `docs/operations/current*.md` | current-fact pointers with freshness/expiry semantics |
+| `docs/runbooks/**` | procedures |
+| `docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**` | history/evidence only; not default boot |
+| `architecture/**` | machine-checkable manifests, registries, topology, invariants |
 
-| Strategy | Edge source | Alpha decay |
-|----------|------------|-------------|
-| **Settlement Capture** | Observed fact post-peak temperature | Very slow |
-| **Shoulder Bin Sell** | Retail cognitive bias (prospect theory → shoulder overpricing) | Moderate |
-| **Center Bin Buy** | Model accuracy vs. market at estimating most likely bin | Fast |
-| **Opening Inertia** | New market mispricing (first LP anchoring) | Fastest |
-
-Per-strategy tracking is required because portfolio-level P&L masks which edges are being competed away.
-
----
-
-## Risk management
-
-Risk levels change runtime behavior — advisory-only risk is forbidden:
-
-| Level | Behavior |
-|-------|----------|
-| GREEN | Normal operation |
-| YELLOW | No new entries, continue monitoring |
-| ORANGE | No new entries, exit at favorable prices |
-| RED | Cancel all pending, sweep all active positions |
-
-Overall risk = max of all individual risk signals. Computation error or broken truth input → RED. Fail-closed.
+Dated consults, PR reviews, packet closeouts, raw evidence, and historical strategy snapshots must not be read as current law.
 
 ---
 
-## Position lifecycle
+## Validation Commands
 
-```text
-pending_entry → active → day0_window → pending_exit → economically_closed → settled
-```
-
-Terminal states: `voided`, `quarantined`, `admin_closed`.
-
-Every cycle reconciles local state against on-chain truth:
-
-| Condition | Action |
-|-----------|--------|
-| Local + chain match | SYNCED |
-| Local exists, chain snapshot CHAIN_EMPTY (fresh, complete) | VOID |
-| Local exists, chain snapshot CHAIN_UNKNOWN (stale / missing API response) | NO-OP — never void on a degraded snapshot |
-| Chain exists, NOT local | Emit `ChainOnlyFact` (typed review entry); entry stays blocked, `review_state` escalates UNRESOLVED→EXPIRED at 48h (operator-resolved) |
-
-`CHAIN_EMPTY` vs `CHAIN_UNKNOWN` is the snapshot completeness classifier
-(`src/state/chain_state.py.ChainSnapshotCompleteness`). Treating a missing
-API response as `CHAIN_EMPTY` would void real live positions on degraded
-infra; the void rule applies ONLY to authoritatively empty snapshots.
-See `docs/plans/2026-05-27-chain-local-position-model-refactor.md` (PR C0,
-Finding 1) for the timestamp-split that keeps the classifier honest.
-
----
-
-## Data model
-
-All persistent data falls into three layers:
-
-| Layer | What | Isolation |
-|-------|------|-----------|
-| **World data** | External facts (forecasts, observations) | Shared, no mode tag |
-| **Decision data** | Trading choices and outcomes | Shared + `env` discriminator |
-| **Process state** | Mutable runtime state | Physically isolated per instance |
-
-High and low temperature markets share city/date geometry but are **separate semantic families** — they do not share physical quantity, observation field, Day0 causality, calibration parameters, or replay identity.
-
----
-
-### Runtime entry points
-
-| Entry point | Purpose |
-|-------------|--------|
-| `src/main.py` | Live daemon |
-| `src/engine/cycle_runner.py` | Cycle orchestration |
-| `src/engine/evaluator.py` | Candidate → decision pipeline |
-| `src/execution/executor.py` | Live order placement |
-| `src/engine/monitor_refresh.py` | Position monitoring |
-| `src/execution/exit_safety.py` | Exit logic |
-| `src/execution/harvester.py` | Settlement and learning |
-
-### Integrity checks
+Run the strongest applicable subset for a change:
 
 ```bash
-python3 scripts/topology_doctor.py --strict          # Registry parity and zone coverage
-python3 scripts/topology_doctor.py --source           # Source rationale checks
-python3 scripts/topology_doctor.py --tests            # Test topology audit
-python3 scripts/topology_doctor.py --fatal-misreads   # Forbidden semantic shortcut checks
+python3 scripts/topology_doctor.py --strict
+python3 scripts/topology_doctor.py --source
+python3 scripts/topology_doctor.py --tests
+python3 scripts/topology_doctor.py --fatal-misreads
 ```
 
----
-
-## Repository structure
-
-```text
-src/                  Runtime source (signal, contracts, execution, state, risk, engine)
-tests/                Executable correctness and regression guards
-scripts/              Topology doctor, replay parity, maintenance tools
-architecture/         Machine-readable manifests, invariants, zones, task profiles
-docs/authority/       Durable architecture and delivery law
-docs/reference/       Domain model, math spec, module references
-docs/operations/      Current-fact surfaces and active work packets
-docs/to-do-list/      Known gaps, active checklists, and audit queues
-config/               Runtime configuration and source/provenance registries
-migrations/           SQL migrations defining canonical DB schema
-state/                Runtime databases and projections (local, not committed)
-```
-
----
-
-## For agents
-
-This repository is maintained by AI coding agents with a structured change-control layer. 
-
-MUST READ `AGENTS.md` and `workspace_map.md` 
-Run `python3 scripts/topology_doctor.py --navigation --task "<task>" --files <files>` for a scoped context pack
-
-You may need to install new environment in your virtual machine or test may fail.
-
-### Packet Runtime (`zpkt`)
-
-A unified CLI collapses packet lifecycle, scope tracking, soft-warn enforcement, and closeout into a single surface. One-time setup (`zpkt setup`) installs the in-repo githook path. Daily use:
-
-```bash
-python3 scripts/zpkt.py setup                    # one-time per clone
-python3 scripts/zpkt.py start <slug>             # new packet + isolated worktree
-python3 scripts/zpkt.py status                   # one-call digest (5-min cached)
-python3 scripts/zpkt.py scope add <files>        # widen in_scope as you discover
-python3 scripts/zpkt.py commit -m "..." [files]  # commit with soft-warn
-python3 scripts/zpkt.py close                    # closeout: receipt + status flip
-```
-
-Full protocol: [`docs/operations/packet_scope_protocol.md`](docs/operations/packet_scope_protocol.md).
+Use targeted pytest for the touched code paths. Separate changed-surface failures from pre-existing repo drift.
