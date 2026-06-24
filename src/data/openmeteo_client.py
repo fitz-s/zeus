@@ -11,7 +11,7 @@ import time
 
 import httpx
 
-from src.data.openmeteo_quota import quota_tracker
+from src.data.openmeteo_quota import OpenMeteoQuotaTracker, quota_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ def fetch(
     backoff_sec: float = DEFAULT_BACKOFF_SEC,
     endpoint_label: str = "",
     fast_fail_429: bool = False,
+    quota: OpenMeteoQuotaTracker | None = None,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -54,9 +55,10 @@ def fetch(
     the quota cooldown, but they receive the 429 immediately instead of sleeping inside this
     shared client and blocking the fallback ladder.
     """
-    if not quota_tracker.can_call():
+    tracker = quota or quota_tracker
+    if not tracker.can_call():
         raise RuntimeError(
-            f"Open-Meteo quota exhausted ({quota_tracker.calls_today()} calls today)"
+            f"Open-Meteo quota exhausted ({tracker.calls_today()} calls today)"
         )
 
     last_exc: Exception | None = None
@@ -71,7 +73,7 @@ def fetch(
                     if retry_after
                     else DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
                 )
-                quota_tracker.note_rate_limited(int(wait))
+                tracker.note_rate_limited(int(wait))
                 if fast_fail_429:
                     logger.warning(
                         "Open-Meteo 429 on attempt %d%s — fast-fail to fallback ladder; no client sleep",
@@ -89,7 +91,7 @@ def fetch(
                 continue
 
             resp.raise_for_status()
-            quota_tracker.record_call(endpoint_label)
+            tracker.record_call(endpoint_label)
             return resp.json()
 
         except httpx.HTTPError as e:

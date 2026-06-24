@@ -52,6 +52,7 @@ from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
     _default_live_fetch,
 )
+from src.data.openmeteo_quota import OpenMeteoQuotaTracker
 from src.forecast.model_selection import (
     ANCHOR_MODEL,
     GLOBAL_LIKELIHOOD_MODELS,
@@ -61,6 +62,8 @@ from src.forecast.model_selection import (
 )
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
+
+_BPF_OPENMETEO_QUOTA_TRACKER = OpenMeteoQuotaTracker()
 
 # SPEC §5: ~6 months retention on the raw input capture table.
 RETENTION_DAYS = 180
@@ -527,6 +530,7 @@ def _default_live_fetch_batched(
             SINGLE_RUNS_FORECAST_URL,
             params,
             endpoint_label="bayes_precision_fusion_single_runs_batched",
+            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
         )
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
@@ -621,6 +625,7 @@ def _default_previous_runs_fetch_batched(
             PREVIOUS_RUNS_URL,
             params,
             endpoint_label="bayes_precision_fusion_previous_runs_batched",
+            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
         )
         return _parse_batched_previous_runs_payload(payload, models, hourly_var)
     except Exception as exc:

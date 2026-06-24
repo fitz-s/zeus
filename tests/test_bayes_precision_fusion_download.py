@@ -485,6 +485,42 @@ def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tm
     assert "Open-Meteo quota exhausted" in report["transport_errors"][0]
 
 
+def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(monkeypatch) -> None:
+    """A cooldown in another Open-Meteo lane must not suppress the BPF raw-input lane."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as om
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    class _Resp:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "hourly": {
+                    "temperature_2m_previous_day1_icon_global": [18.0, 19.5, 17.25],
+                }
+            }
+
+    monkeypatch.setattr(om.quota_tracker, "can_call", lambda: False)
+    monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(om.httpx, "get", lambda *_args, **_kwargs: _Resp())
+
+    got = dl._default_previous_runs_fetch_batched(
+        models=["icon_global"],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        target_date="2026-06-09",
+        lead_days=1,
+    )
+
+    assert got == {"icon_global": (19.5, 17.25)}
+
+
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:
     """FIX 1 mapping: the DEFAULT previous-runs fetch for the anchor must send the OM
     ECMWF previous-runs model id (ecmwf_ifs025) to the OM API, even though the stored

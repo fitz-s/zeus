@@ -74,6 +74,27 @@ def test_non_qkernel_receipt_omits_qkernel_execution_economics():
     assert "qkernel_execution_economics" not in payload
 
 
+def test_qkernel_selection_authority_records_economics_without_rewriting_q_source():
+    cert = {
+        "edge_lcb": 0.077,
+        "payoff_q_lcb": 0.73,
+        "candidate_id": "DIRECT_YES:bin-1:route",
+    }
+    payload = json.loads(
+        _receipt_json(
+            _receipt(
+                q_source="replacement_0_1",
+                selection_authority_applied="qkernel_spine",
+                qkernel_execution_economics=cert,
+            )
+        )
+    )
+
+    assert payload["q_source"] == "replacement_0_1"
+    assert payload["selection_authority_applied"] == "qkernel_spine"
+    assert payload["qkernel_execution_economics"] == cert
+
+
 def test_replacement_forecast_receipt_tag_is_hash_stable_when_absent_and_recorded_when_set():
     """replacement_forecast=None must not drift pre-replacement receipt hashes."""
     no_tag = json.loads(_receipt_json(_receipt(replacement_forecast=None)))
