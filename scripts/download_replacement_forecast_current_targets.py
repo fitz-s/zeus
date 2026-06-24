@@ -260,16 +260,27 @@ def _resolve_anchor_payload(
     caller skips the city, never the batch). Genuine defects still raise loudly:
       * rung 1: HTTP 400 (run-not-yet-served), 429, and 5xx degrade to rung 2; auth/client
         defects re-raise.
-      * rung 2: three outcomes degrade to rung 3 — the meta REFUSAL (ValueError: provider
-        declares an older run; never weakened), a transport error (provider unreachable), and
-        a 5xx (provider server-side unavailability, e.g. intermittent 502 on meta.json). A 4xx
-        on meta is a client-side defect and re-raises.
+      * rung 2: meta REFUSAL (ValueError: provider declares an older run; never weakened),
+        transport errors, provider rate limits, retry exhaustion, and 5xx degrade to rung 3.
+        Other 4xx responses on meta are client-side defects and re-raise.
       * rung 3: serves only cross-check-whitelisted cities for the bucket-declared wanted run
         with every needed timestep present; otherwise BucketTransportNotAdmissible.
     """
     from src.data.openmeteo_ecmwf_ifs9_anchor import (
         fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped,
     )
+
+    def _is_transient_provider_failure(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            "429" in text
+            or "too many requests" in text
+            or "exhausted retries" in text
+            or "rate limit" in text
+        )
+
+    def _exception_summary(exc: Exception) -> str:
+        return f"{type(exc).__name__}: {str(exc)[:160]}"
 
     # Rung 1: run-pinned single-runs (strongest provenance).
     single_runs_exc: Exception
@@ -285,14 +296,16 @@ def _resolve_anchor_payload(
             raise
         # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
         single_runs_exc = exc
+    except RuntimeError as exc:
+        if not _is_transient_provider_failure(exc):
+            raise
+        single_runs_exc = exc
 
     # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
     try:
         payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(request)
         provenance = dict(meta_provenance)
-        provenance["single_runs_fallback_reason"] = (
-            f"HTTP 400 run not yet served: {str(single_runs_exc)[:160]}"
-        )
+        provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
         return payload, provenance
     except httpx.HTTPStatusError as meta_status_exc:
         # 429/5xx = provider-side unavailability (degrade to rung 3); other 4xx = our defect.
@@ -300,6 +313,10 @@ def _resolve_anchor_payload(
         if status_code != 429 and status_code < 500:
             raise
         rung2_reason: Exception = meta_status_exc
+    except RuntimeError as meta_runtime_exc:
+        if not _is_transient_provider_failure(meta_runtime_exc):
+            raise
+        rung2_reason = meta_runtime_exc
     except (ValueError, httpx.TransportError) as meta_exc:
         # ValueError = meta REFUSAL (older run; never weakened); TransportError = provider
         # unreachable. Both degrade to rung 3 (the bucket is independent infrastructure).

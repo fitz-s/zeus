@@ -399,6 +399,39 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     )
     assert prov3["run_authority"] == "bucket_partial_run_unverified"
 
+    # Case D: rung-2 success must preserve the real rung-1 failure class in provenance; rate
+    # limits and retry exhaustion are not run-not-yet-served defects.
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
+        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        lambda r: ({"hourly": {"time": [], "temperature_2m": []}}, {"run_authority": "meta_stamped"}),
+    )
+    payload4, prov4 = dl._resolve_anchor_payload(
+        request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
+    )
+    assert prov4["run_authority"] == "meta_stamped"
+    assert prov4["single_runs_fallback_reason"].startswith("RuntimeError:")
+    assert "HTTP 400 run not yet served" not in prov4["single_runs_fallback_reason"]
+
+    # Case E: the live Open-Meteo client wraps repeated 429s as RuntimeError after retries.
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
+        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
+    )
+    payload5, prov5 = dl._resolve_anchor_payload(
+        request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
+    )
+    assert prov5["run_authority"] == "bucket_partial_run_unverified"
+
 
 def test_bucket_artifact_source_available_at_is_capture_time_not_api_lag() -> None:
     """Fitz #4 / seed-discovery coupling: a bucket artifact's source_available_at must be the
