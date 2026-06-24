@@ -902,11 +902,13 @@ class Day0FastObsEmitter:
         *,
         cities: list[Any],
         decision_time: datetime,
-        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], None]] = None,
+        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], Any]] = None,
     ) -> FastObsPrefetch:
         """HTTP phase: resolve eligible cities, fetch METAR (throttled), run the
         (WU-HTTP) anomaly cross-check. NO DB writes — safe to run OUTSIDE the
-        world-write mutex (P0-2). Fail-soft everywhere."""
+        world-write mutex (P0-2). Any anomaly result is returned as a durable
+        action for emit_prefetched to apply with the already-open world_conn.
+        Fail-soft everywhere."""
         eligible: list[tuple[Any, FastObsSource, str]] = []
         for city in cities:
             source = fast_obs_source_for_city(city)
@@ -1148,7 +1150,7 @@ class Day0FastObsEmitter:
         decision_time: datetime,
         received_at: str,
         limit: int = 50,
-        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], None]] = None,
+        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], Any]] = None,
     ) -> int:
         """Compatibility wrapper: prefetch (HTTP) + emit (DB) in one call.
 

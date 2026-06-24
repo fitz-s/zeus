@@ -629,12 +629,18 @@ def wu_metar_anomaly_action(
         )
 
 
-def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> None:
-    """Throttled WU-vs-METAR divergence check; persists the resulting action."""
+def wu_metar_anomaly_check(
+    city: Any, extremes: Any, metar_reports: list
+) -> Optional[Day0OracleAnomalyAction]:
+    """Compatibility callback for the WU-vs-METAR divergence check.
 
-    action = wu_metar_anomaly_action(city, extremes, metar_reports)
-    if action is not None:
-        apply_day0_oracle_anomaly_action(action)
+    The check may update the in-process fail-closed registry immediately, but
+    it must not perform a standalone durable write from the prefetch phase.
+    Return the action so Day0FastObsEmitter.emit_prefetched can persist it with
+    the already-open world_conn during the write phase.
+    """
+
+    return wu_metar_anomaly_action(city, extremes, metar_reports)
 
 
 def check_wu_metar_divergence(

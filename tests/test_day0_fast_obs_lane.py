@@ -798,6 +798,59 @@ class TestMutexNoHttpSplit:
             conn=conn,
         ) is True
 
+    def test_prefetch_anomaly_check_returns_action_without_writer_lock(self, monkeypatch):
+        from src.data import day0_oracle_anomaly as oa
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+        from src.state import db_writer_lock
+
+        def forbidden_lock(*_args, **_kwargs):
+            raise AssertionError("prefetch-phase anomaly check must not acquire a writer lock")
+
+        def wu_obs(city, target_date=None, **kw):
+            return SimpleNamespace(
+                source="wu_api",
+                coverage_status="OK",
+                observation_time="2026-06-09T15:05:00+00:00",
+                high_so_far=26.0,
+                low_so_far=21.0,
+            )
+
+        monkeypatch.setattr(db_writer_lock, "db_writer_lock", forbidden_lock)
+        monkeypatch.setattr("src.data.observation_client.get_current_observation", wu_obs)
+
+        t0 = datetime(2026, 6, 9, 15, 0, tzinfo=UTC)  # Jun 10 00:00 JST
+        reports = [
+            _report("RJTT", t0, 21.0, t_group=False),
+            _report("RJTT", t0 + timedelta(minutes=5), 21.0, t_group=False),
+        ]
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: reports, min_fetch_interval_s=0.0)
+
+        prefetch = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=10),
+            anomaly_check=oa.wu_metar_anomaly_check,
+        )
+
+        assert len(prefetch.anomaly_actions) == 1
+        action = prefetch.anomaly_actions[0]
+        assert action.action == "flag"
+        assert action.city == "Tokyo"
+        assert action.target_date == "2026-06-10"
+        assert oa.is_day0_family_paused(
+            "Tokyo",
+            "2026-06-10",
+            now=datetime(2026, 6, 9, 15, 15, tzinfo=UTC),
+            conn=sqlite3.connect(":memory:"),
+        ) is True
+
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused(
+            "Tokyo",
+            "2026-06-10",
+            now=datetime(2026, 6, 9, 15, 15, tzinfo=UTC),
+            conn=sqlite3.connect(":memory:"),
+        ) is False, "prefetch must not make restart durability depend on a standalone write"
+
     def test_main_prefetches_before_mutex_and_emit_is_write_only(self):
         """Source-order pin: the HTTP prefetch (_edli_prefetch_day0_fast_obs,
         which also hosts the open-meteo hourly-vector refresh) happens BEFORE
