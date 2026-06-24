@@ -21,10 +21,15 @@ the SERVED q_lcb:
     q_safe[side, bin] = min( band.q_lcb[side, bin], L_g )
 
 where ``L_g`` is the one-sided Wilson 95% LOWER bound of the realized OOF hit-rate in the
-reliability CELL ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket)``. YES cells
-grade "settled in this bin"; NO cells grade the complement "settled outside this bin". The
-cell is NOT per-city (a per-city offset would BE a fitted de-bias). The candidate may trade
-ONLY if ALL hold:
+reliability CELL ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket, precision_class)``.
+YES cells grade "settled in this bin"; NO cells grade the complement "settled outside this bin".
+The cell is NOT per-city (a per-city offset would BE a fitted de-bias); ``precision_class`` is a
+COVERAGE stratifier (``fine_nest`` vs ``coarse_global`` — whether a sub-9km regional nest covers
+the city's settlement coordinate), a pure point-in-polygon property, NOT a per-city center
+correction. It exists because a RAW coarse-only-nest center runs cold-biased, so a coarse-only-NO
+bet pooled with fine-nest cities reads the fine cities' calibration and trades; splitting on
+precision_class lets the coarse cell accrue its OWN realized hit-rate and deflate. The candidate
+may trade ONLY if ALL hold:
 
     * ``N_g >= N_MIN``                          (the cell has enough OOF evidence)
     * ``L_g >= q_lcb_bucket_floor − EPS``       (the realized frequency supports the bucket)
@@ -95,6 +100,16 @@ _WILSON_Z_95: float = 1.6448536269514722
 # The OOF reliability artifact path (gitignored generated file; INERT when absent).
 _QLCB_OOF_RELIABILITY_PATH: str = "state/qlcb_oof_reliability.json"
 
+# The precision-class values (the coverage STRATIFIER, not a per-city de-bias). A city is
+# ``fine_nest`` iff its settlement coordinate falls inside ANY sub-9km regional nest's domain
+# polygon (the fusion would select a fine regional model for it); else ``coarse_global``.
+PRECISION_CLASS_FINE: str = "fine_nest"
+PRECISION_CLASS_COARSE: str = "coarse_global"
+
+# Module-level cache of the per-city precision class (a pure, stable function of the city's
+# settlement coordinate + the regional nest polygons; computed once per process per city).
+_PRECISION_CLASS_CACHE: dict[str, str] = {}
+
 # Module-level cache of the parsed artifact so the hot path reads it once per process.
 # ``_RELIABILITY_CACHE`` is the parsed cell map; ``_RELIABILITY_LOADED`` guards the one-shot
 # load (a missing file is cached as the empty map -> the guard stays inert without re-statting).
@@ -156,22 +171,106 @@ def qlcb_bucket(q_lcb: float) -> tuple[int, float]:
     return 0, edges[0]
 
 
-def cell_key(
-    *, metric: str, lead_days: float, side: str, bin_position: str, q_lcb: float
-) -> str:
-    """The reliability CELL key ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket)``.
+def _clean_precision_class(precision_class: Optional[str]) -> str:
+    """Normalize an arbitrary precision_class token to one of the two legal classes.
 
-    NOT per-city — a per-city offset would be a fitted de-bias (forbidden). ``side`` is the
-    executable claim side ("YES" = the bin hits, "NO" = the bin does not hit). ``bin_position``
-    is the route's position class within the family (currently "modal" / "nonmodal"); the
-    caller supplies the stable, non-per-city position label the OOF table was built with.
-    The q_lcb bucket index keys the same buckets the table uses.
+    Anything other than the explicit ``fine_nest`` token collapses to ``coarse_global`` — the
+    conservative default (a city is only ``fine_nest`` when a sub-9km nest provably covers it).
+    """
+    return (
+        PRECISION_CLASS_FINE
+        if str(precision_class) == PRECISION_CLASS_FINE
+        else PRECISION_CLASS_COARSE
+    )
+
+
+def precision_class_for_coord(lat: float, lon: float) -> str:
+    """The precision class of a settlement coordinate: ``fine_nest`` vs ``coarse_global``.
+
+    A PURE COVERAGE PROPERTY (point-in-polygon over the sub-9km regional nests), NOT a per-city
+    de-bias. The city is ``fine_nest`` iff its settlement (airport) coordinate falls inside ANY
+    ``model_selection.REGIONAL_MODELS`` domain polygon — i.e. the fusion would select a fine
+    (sub-9km) regional model for it (icon_d2 2km / arome 1.3km / ukmo_uk 2km / gfs_hrrr 3km /
+    gem_hrdps 2.5km). Coverage is a stable geometric property of the coordinate, independent of
+    lead horizon, so the same city always lands in the same precision class at both the live
+    guard and the OOF builder. Out-of-domain (no nest covers it) -> ``coarse_global``.
+
+    Fail-safe: a missing/unparseable polygon config makes EVERY regional out-of-domain (the
+    conservative default of ``load_domain_polygons``), so every city becomes ``coarse_global``
+    and the guard simply does not split — never a leak in the unsafe direction.
+    """
+    try:
+        from src.forecast.model_selection import (
+            REGIONAL_MODELS,
+            load_domain_polygons,
+            point_in_ring,
+        )
+
+        polygons = load_domain_polygons()
+        latf, lonf = float(lat), float(lon)
+        for model_name in REGIONAL_MODELS:
+            poly = polygons.get(model_name)
+            if poly is not None and point_in_ring(latf, lonf, poly.ring):
+                return PRECISION_CLASS_FINE
+    except Exception:  # noqa: BLE001 — coverage failure is non-fatal: default conservative.
+        return PRECISION_CLASS_COARSE
+    return PRECISION_CLASS_COARSE
+
+
+def precision_class_for_city(city: Optional[str]) -> str:
+    """The precision class of a configured city name (resolves its settlement coordinate).
+
+    Thin wrapper over :func:`precision_class_for_coord` that looks up the city's settlement
+    ``(lat, lon)`` from ``src.config.cities_by_name`` (the same coordinate the fusion and the OOF
+    builder use). Cached per process. An unknown/unconfigured city -> ``coarse_global`` (the
+    conservative default; it does not borrow a fine city's reliability). This keeps the stratifier
+    a coverage property of the city, never a fitted per-city table.
+    """
+    key = str(city or "")
+    cached = _PRECISION_CLASS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = PRECISION_CLASS_COARSE
+    try:
+        from src.config import cities_by_name
+
+        cfg = cities_by_name.get(key)
+        if cfg is not None:
+            result = precision_class_for_coord(float(cfg.lat), float(cfg.lon))
+    except Exception:  # noqa: BLE001 — config failure is non-fatal: default conservative.
+        result = PRECISION_CLASS_COARSE
+    _PRECISION_CLASS_CACHE[key] = result
+    return result
+
+
+def cell_key(
+    *,
+    metric: str,
+    lead_days: float,
+    side: str,
+    bin_position: str,
+    q_lcb: float,
+    precision_class: str = PRECISION_CLASS_COARSE,
+) -> str:
+    """The reliability CELL key
+    ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket, precision_class)``.
+
+    NOT per-city — a per-city offset would be a fitted de-bias (forbidden). ``precision_class``
+    is the COVERAGE STRATIFIER (``fine_nest`` vs ``coarse_global``): whether a sub-9km regional
+    nest covers the city's settlement coordinate. It is a pure point-in-polygon property of the
+    coordinate, never a fitted per-city center correction, so coarse-only-nest cities (which run
+    cold-biased) accrue their OWN realized hit-rate instead of being propped up by the
+    fine-nest cities' calibration. ``side`` is the executable claim side ("YES" = the bin hits,
+    "NO" = the bin does not hit). ``bin_position`` is the route's position class within the
+    family (currently "modal" / "nonmodal"). The q_lcb bucket index keys the same buckets the
+    table uses.
     """
     bucket_idx, _floor = qlcb_bucket(q_lcb)
     clean_side = "NO" if str(side).upper() == "NO" else "YES"
+    clean_precision = _clean_precision_class(precision_class)
     return (
         f"{str(metric).lower()}|{lead_bucket(lead_days)}|"
-        f"{clean_side}|{bin_position}|qb{bucket_idx}"
+        f"{clean_side}|{bin_position}|qb{bucket_idx}|{clean_precision}"
     )
 
 
@@ -229,8 +328,14 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
             if isinstance(cells, dict):
                 for key, val in cells.items():
                     parts = str(key).split("|")
-                    if len(parts) != 5 or parts[2] not in {"YES", "NO"}:
-                        # Side-less v1 cells are not compatible with live side-aware claims.
+                    if (
+                        len(parts) != 6
+                        or parts[2] not in {"YES", "NO"}
+                        or parts[5] not in {PRECISION_CLASS_FINE, PRECISION_CLASS_COARSE}
+                    ):
+                        # v1 (side-less) and v2 (no precision_class) cells are not compatible with
+                        # the live side+precision-aware claims — skip so an old artifact cannot
+                        # silently authorize a mis-stratified cell.
                         continue
                     if not isinstance(val, dict):
                         continue
@@ -313,6 +418,7 @@ def apply_guard(
     lead_days: float,
     side: str = "YES",
     bin_position: str,
+    precision_class: str = PRECISION_CLASS_COARSE,
     reliability_table: Optional[Mapping[str, tuple[int, float]]] = None,
     reliability_artifact_active: Optional[bool] = None,
 ) -> GuardVerdict:
@@ -321,7 +427,8 @@ def apply_guard(
     ``band_q_lcb`` is the Path-A ``build_joint_q_band`` per-bin lower bound for this route
     (already the coherent quantile). The guard:
 
-      1. Resolves the cell ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket)``.
+      1. Resolves the cell
+         ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket, precision_class)``.
       2. Reads the OOF cell ``(N_g, hit_rate_g)`` from the table (artifact or injected).
       3. INERT path — artifact absent: serves ``band_q_lcb`` unchanged, ``trade=True``,
          ``basis="INERT"`` (pass-through, no abstain; the conservative edge_lcb>0 gate
@@ -348,9 +455,11 @@ def apply_guard(
     else:
         artifact_active = _RELIABILITY_ARTIFACT_ACTIVE
     bucket_idx, bucket_floor = qlcb_bucket(band_q_lcb)
+    clean_precision = _clean_precision_class(precision_class)
     key = (
         f"{str(metric).lower()}|{lead_bucket(lead_days)}|"
-        f"{'NO' if str(side).upper() == 'NO' else 'YES'}|{bin_position}|qb{bucket_idx}"
+        f"{'NO' if str(side).upper() == 'NO' else 'YES'}|{bin_position}|qb{bucket_idx}|"
+        f"{clean_precision}"
     )
 
     cell = table.get(key)

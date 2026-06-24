@@ -1842,6 +1842,119 @@ def _temperature_native_value_to_c(value: float, *, unit: str) -> float:
     raise ValueError(f"unsupported Day0 observed-extreme unit: {unit!r}")
 
 
+def _day0_observed_extreme_from_canonical_surface(
+    *,
+    city_name: str,
+    target_date: str,
+    metric_is_low: bool,
+    now: datetime | None = None,
+    world_conn: sqlite3.Connection | None = None,
+) -> tuple[float, str, int] | None:
+    """Observed running extreme + its observation version from the canonical settlement-grade
+    ``world.observation_instants`` surface — the SAME source the day0 hard-fact lane
+    (``day0_hard_fact_exit._durable_observation_instants_extremes``) and the
+    ``day0_extreme_updated`` trigger already treat as authoritative.
+
+    Same-day exit-blindness fix 2026-06-23: the monitor belief reseed previously sourced the
+    observed extreme ONLY from a live-provider fetch (``get_current_observation``) that routinely
+    fails on the settlement day ("All observation providers failed for <city>/<date>"), starving
+    the day0 conditioning while this canonical WU-hourly surface already held the verified running
+    extreme (Toronto NO@24 -98.94% incident). Returns ``(observed_native, observation_time_iso,
+    sample_count)``, or None when no VERIFIED WU row is available up to ``now``. ``world_conn`` is
+    injectable for tests; otherwise a private short-lived read-only world connection is opened and
+    closed (the position_belief read posture). See
+    docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md.
+    """
+    extreme_col = "running_min" if metric_is_low else "running_max"
+    agg = "MIN" if metric_is_low else "MAX"
+    now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    owns_conn = world_conn is None
+    if owns_conn:
+        try:
+            from src.state.db import ZEUS_WORLD_DB_PATH
+
+            world_conn = sqlite3.connect(
+                f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True, timeout=2.0
+            )
+            world_conn.row_factory = sqlite3.Row
+        except Exception:  # noqa: BLE001 — read posture is best-effort; reseed continues without it
+            return None
+    try:
+        # Prefer an ATTACHed authoritative ``world`` schema when present (composite connections);
+        # fall back to unqualified ``observation_instants`` for the production case where the world
+        # DB itself is opened as main (consult REQ-20260623-184115 LOW: precedence must not read a
+        # stale main table over an attached authoritative world one).
+        for table_ref in ("world.observation_instants", "observation_instants"):
+            try:
+                row = world_conn.execute(
+                    f"""
+                    SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
+                           MAX(utc_timestamp) AS obs_time,
+                           COUNT(*) AS n_rows
+                    FROM {table_ref}
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND substr(local_timestamp, 1, 10) = target_date
+                      AND utc_timestamp <= ?
+                      AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                      AND COALESCE(causality_status, 'OK') = 'OK'
+                      AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                      AND {extreme_col} IS NOT NULL
+                    """,
+                    (city_name, target_date, now_iso),
+                ).fetchone()
+            except Exception:  # noqa: BLE001 — missing attachment/table fails soft to the next ref
+                continue
+            if row is None:
+                continue
+            extreme = row["extreme"] if hasattr(row, "keys") else row[0]
+            obs_time = row["obs_time"] if hasattr(row, "keys") else row[1]
+            n_rows = int((row["n_rows"] if hasattr(row, "keys") else row[2]) or 0)
+            if extreme is None or n_rows <= 0 or not obs_time:
+                continue
+            return float(extreme), str(obs_time), n_rows
+        return None
+    finally:
+        if owns_conn:
+            try:
+                world_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _compose_day0_observed_extreme(
+    *,
+    live: tuple[float, str, str, int] | None,
+    canonical: tuple[float, str, int] | None,
+    metric_is_low: bool,
+) -> tuple[float, str, str, int] | None:
+    """Compose live + canonical observed extremes by the ABSORBING LAW (consult
+    REQ-20260623-184115 BLOCKER): the canonical settlement-grade surface is a HARD bound; a live
+    reading may only IMPROVE the absorbing extreme (raise the high / lower the low), never undercut
+    it. Returns ``(observed_native, observation_time_iso, source, sample_count)`` for the dominant
+    source, with the LATER observation version on a tie so a fresh plateau still advances the
+    idempotency version. None when neither source is available. A stale/lower live value therefore
+    can NEVER suppress a higher canonical running extreme and materialise a fresh-but-wrong belief
+    (the 9h staleness guard cannot catch a semantically false but timestamp-fresh posterior).
+    ``live`` = (native, observation_time, source, sample_count); ``canonical`` = (native, time, n).
+    """
+    from src.data.replacement_cycle_advance_trigger import normalize_observation_version
+
+    candidates: list[tuple[float, str, str, int]] = []
+    if live is not None:
+        candidates.append((float(live[0]), str(live[1]), str(live[2]), int(live[3])))
+    if canonical is not None:
+        candidates.append(
+            (float(canonical[0]), str(canonical[1]), "durable_observation_instants", int(canonical[2]))
+        )
+    if not candidates:
+        return None
+    extreme = min(c[0] for c in candidates) if metric_is_low else max(c[0] for c in candidates)
+    dominant = [c for c in candidates if c[0] == extreme]
+    best = max(dominant, key=lambda c: normalize_observation_version(c[1]) or "")
+    return (extreme, best[1], best[2], best[3])
+
+
 def _day0_observed_extreme_reseed_payload(
     *, city: str, target_date: str, metric: str
 ) -> dict[str, object]:
@@ -1858,35 +1971,64 @@ def _day0_observed_extreme_reseed_payload(
         metric_id = MetricIdentity.from_raw(metric)
     except Exception:
         return {}
+    metric_is_low = metric_id.is_low()
+    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+
+    # LIVE candidate: a validated live-provider reading (lowest latency when providers serve).
+    live: tuple[float, str, str, int] | None = None
+    obs = None
     try:
         obs = _fetch_day0_observation(city_obj, target_d)
     except Exception as exc:
         logger.info(
-            "monitor belief reseed Day0 observation unavailable city=%s target_date=%s metric=%s exc=%s",
+            "monitor belief reseed Day0 live observation unavailable city=%s target_date=%s "
+            "metric=%s exc=%s (composing with canonical surface)",
             city, target_date, metric, exc,
         )
-        return {}
-    if obs is None:
-        return {}
-    if not _day0_observation_field(obs, "observation_time"):
-        return {}
-    source_rejection = _day0_observation_source_rejection_reason(
-        city_obj,
-        obs,
-        consumer_label="replacement belief reseed",
-    )
-    if source_rejection is not None:
-        logger.info(
-            "monitor belief reseed Day0 observation rejected city=%s target_date=%s metric=%s reason=%s",
-            city, target_date, metric, source_rejection,
+    if obs is not None and _day0_observation_field(obs, "observation_time"):
+        source_rejection = _day0_observation_source_rejection_reason(
+            city_obj,
+            obs,
+            consumer_label="replacement belief reseed",
         )
-        return {}
-    observed_native = _finite_day0_observation_float(
-        obs, "low_so_far" if metric_id.is_low() else "high_so_far"
+        if source_rejection is not None:
+            logger.info(
+                "monitor belief reseed Day0 live observation rejected city=%s target_date=%s "
+                "metric=%s reason=%s (composing with canonical surface)",
+                city, target_date, metric, source_rejection,
+            )
+        else:
+            live_native = _finite_day0_observation_float(
+                obs, "low_so_far" if metric_is_low else "high_so_far"
+            )
+            if live_native is not None:
+                try:
+                    live_sample = int(_day0_observation_field(obs, "sample_count", 0) or 0)
+                except Exception:
+                    live_sample = 0
+                live = (
+                    float(live_native),
+                    str(_day0_observation_field(obs, "observation_time", "") or ""),
+                    str(_day0_observation_field(obs, "source", "") or "live"),
+                    live_sample,
+                )
+
+    # CANONICAL candidate (ALWAYS read): the settlement-grade world.observation_instants surface
+    # the day0 hard-fact lane treats as authoritative. The live reading may only IMPROVE the
+    # absorbing extreme, never undercut this hard bound — a stale/lower live value cannot suppress
+    # the canonical running extreme and materialise a fresh-but-wrong belief (consult
+    # REQ-20260623-184115 BLOCKER). See docs/evidence/same_day_exit_blindness/.
+    canonical = _day0_observed_extreme_from_canonical_surface(
+        city_name=str(getattr(city_obj, "name", "") or city),
+        target_date=str(target_date),
+        metric_is_low=metric_is_low,
     )
-    if observed_native is None:
+    composed = _compose_day0_observed_extreme(
+        live=live, canonical=canonical, metric_is_low=metric_is_low
+    )
+    if composed is None:
         return {}
-    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+    observed_native, observation_time, source_label, sample_count = composed
     try:
         observed_c = _temperature_native_value_to_c(observed_native, unit=unit)
     except Exception as exc:
@@ -1896,14 +2038,10 @@ def _day0_observed_extreme_reseed_payload(
             city, target_date, metric, unit, exc,
         )
         return {}
-    try:
-        sample_count = int(_day0_observation_field(obs, "sample_count", 0) or 0)
-    except Exception:
-        sample_count = 0
     return {
         "day0_observed_extreme_c": float(observed_c),
-        "day0_observed_extreme_source": str(_day0_observation_field(obs, "source", "") or ""),
-        "day0_observed_extreme_observation_time": str(_day0_observation_field(obs, "observation_time", "") or ""),
+        "day0_observed_extreme_source": source_label,
+        "day0_observed_extreme_observation_time": observation_time,
         "day0_observed_extreme_sample_count": sample_count,
         "day0_observed_extreme_unit": unit,
     }

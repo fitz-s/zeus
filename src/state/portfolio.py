@@ -108,7 +108,6 @@ class ExitDecision:
 
 _CI_SEP_EPS: float = 1e-9
 
-
 def _ci_intervals_separated(
     a: Optional[tuple], b: Optional[tuple]
 ) -> Optional[bool]:
@@ -1056,16 +1055,41 @@ class Position:
             # loop forever in day0_window.
             applied = list(day0_decision.applied_validations or applied)
 
-        # Settlement imminent
+        # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
+        # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
+        # confirmed-win NO at 99.9c was force-sold). Route the decision through the SAME EV(hold)
+        # vs EV(sell) authority the rest of the exit path uses — HoldValue net of exit costs vs
+        # shares×bid — rather than any hardcoded "confirmed" price/belief threshold. HOLD only when
+        # holding genuinely beats selling now; a physics REVERSAL the market has not priced (fresh
+        # belief low) OR a market overpaying our fresh belief both SELL ("sell before the market
+        # notices"); an unprovable EV (no executable bid / no shares -> None) keeps the conservative
+        # force-sell. Freshness of fresh_prob is already gated by the missing-authority check above,
+        # so a stale belief cannot drive this branch.
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
-            applied.append("near_settlement_gate")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True, "SETTLEMENT_IMMINENT", "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="SETTLEMENT_IMMINENT",
+            sell_beats_hold = self._sell_value_exceeds_hold_value(
+                current_p_posterior=float(exit_context.fresh_prob),
+                best_bid=exit_context.best_bid,
+                hours_to_settlement=exit_context.hours_to_settlement,
+                applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
             )
+            if sell_beats_hold is not False:
+                # sell-EV dominant (physics REVERSAL, or the market overpaying our fresh belief)
+                # OR unprovable (no executable bid / no shares -> None): conservative force-sell.
+                applied.append("near_settlement_gate")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True, "SETTLEMENT_IMMINENT", "immediate",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="SETTLEMENT_IMMINENT",
+                )
+            # hold-EV dominant: do NOT blanket force-sell (the operator-reported false exit of a
+            # confirmed win). Fall through to the downstream adverse-signal checks (whale toxicity,
+            # model divergence, edge reversal). A genuine confirmed win clears them and holds; a
+            # near-settle position the market or velocity contradicts still exits there.
+            applied.append("near_settlement_hold_ev_dominant")
 
         # Whale toxicity
         if exit_context.whale_toxicity:

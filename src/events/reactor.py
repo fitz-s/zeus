@@ -314,6 +314,16 @@ class EventSubmissionReceipt:
     # execution sizing is accountable to this guarded payoff-space certificate.
     # Omitted when None so non-qkernel receipts keep stable JSON.
     qkernel_execution_economics: dict[str, Any] | None = None
+    # B3 authority stamp propagated from the proof (qkernel_spine_bridge sets
+    # selection_authority_applied="qkernel_spine" while PRESERVING q_source as the
+    # probability track label). The taker-quality proof reads this to recognize a
+    # spine-selected taker under the live "replacement_0_1" q_source.
+    selection_authority_applied: str | None = None
+    # B3 identity key: the reactor's _candidate_bin_id(proof) — byte-identical to the
+    # qkernel cert's bin_id — so the taker-quality proof can match the cert to THIS
+    # selected leg across the two candidate_id namespaces (qkernel SIDE:bin_id:route_id
+    # vs reactor family_id:condition_id). Threaded the same way q_source / the stamp are.
+    candidate_bin_id: str | None = None
     strategy_key: str | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
@@ -377,6 +387,29 @@ class EventSubmissionReceipt:
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
     belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
+    # When this receipt is an APPROVED same-token fill-up (stake overridden to the
+    # residual delta), the family-rebalance lease intent_id + the owned-exposure
+    # identity are carried here so the live submit wrapper can run the pre-submit
+    # family-exposure reread and advance the lease to a terminal status (COMPLETE on
+    # ack / ABORTED on a late abort). compare=False + repr=False so it NEVER affects
+    # receipt equality or the receipt hash (internal plumbing, never serialized into
+    # receipt_json). None on EVERY non-fill-up receipt — the fresh-entry path never
+    # populates it, so the entry path is byte-identical.
+    fill_up_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # D2 SHIFT-BIN LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
+    # The close-before-open carrier. Two shapes, both keyed by the SHIFT_BIN lease
+    # intent_id + old-leg identity (old_position_id / old_token_id):
+    #   - phase="EXIT_OLD_LEG": this receipt is a TYPED NO-SUBMIT for the new bin. The
+    #     live submit wrapper submits the reduce-only exit for the OLD token via the
+    #     existing exit path (execute_exit_order) and advances the lease EXIT_SUBMITTED
+    #     / EXIT_PARTIAL / EXIT_UNKNOWN by the exit OrderResult — NEVER a new-bin entry.
+    #   - phase="ENTER_NEW_BIN": the old leg is proven closed; this receipt IS a real
+    #     counter-entry submit, and the wrapper advances the lease COMPLETE on ack.
+    # compare=False + repr=False so it NEVER affects receipt equality or the receipt
+    # hash. None on EVERY fresh-entry / fill-up receipt — the entry + D1 paths never
+    # populate it, so both are byte-identical.
+    shift_bin_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
     # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
     # /tmp/allpass_nosubmit_rootcause.md). Records WHICH submit adapter actually
     # ran this decision so a full-pass receipt emitted by the no-submit adapter

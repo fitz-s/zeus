@@ -104,6 +104,26 @@ HUBER_TOL: float = 1e-9
 # in-envelope consensus, s = 1 trusts EMOS fully (still envelope-proofed below).
 EMOS_OOS_STRENGTH_DEFAULT: float = 0.0
 
+# ---------------------------------------------------------------------------
+# COLD-START GUARD (2026-06-22, Finding 1) — universal minimum settled-n gate.
+#
+# A forecast model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled
+# observations (n_train < MIN_SETTLED_N) contributes weight=0 to the fused center.
+# Driven purely by n_train — no model-name allow/deny list.
+#
+# Root cause: gfs_hrrr added to live fusion 2026-06-19 with n=8 obs,
+# causing +3.54°C Denver / +1.52°C Houston warm contamination of the fused center
+# (2026-06-22 centerDx Finding 1).
+#
+# All-immature fallback: when every model is below MIN_SETTLED_N, the guard is
+# lifted and equal 1/n weights apply (same no-signal posture as before — no center
+# refused). Mature-model path (n_train >= MIN_SETTLED_N) is byte-identical.
+#
+# Distinct from MIN_TRAIN=25 (which controls EB-shrink-to-equal; this guard zeros
+# the weight entirely).
+# ---------------------------------------------------------------------------
+MIN_SETTLED_N: int = 30  # exported: imported by materializer for provenance stamping
+
 
 # ---------------------------------------------------------------------------
 # CenterEstimate (spec lines 224-234) — EXACT field names, frozen.
@@ -198,6 +218,14 @@ def walk_forward_model_weights(
     for i, member in enumerate(members):
         raw_m2 = getattr(member, "walk_forward_raw_m2_native", None)
         n_train = int(getattr(member, "walk_forward_n", 0) or 0)
+        # COLD-START GUARD (2026-06-22, Finding 1): exclude immature models entirely.
+        # A model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled observations
+        # cannot contribute a reliable second-moment estimate — its history is too short to
+        # trust.  Zero its precision weight so it does not contaminate the center.
+        # The all-immature fallback (equal 1/n) fires below via have_any_signal=False path.
+        if n_train < MIN_SETTLED_N:
+            precisions[i] = 0.0
+            continue
         # Option C: grid-representativeness variance in the member's native unit²
         # (already serving-unit-scaled by the producer). 0.0 / non-finite ⇒ no penalty.
         try:
@@ -330,6 +358,14 @@ def raw_second_moment_weights(
     have_any_signal = False
     for model in models:
         raw_m2, n_train = raw_m2_and_n[model]
+        # COLD-START GUARD (2026-06-22, Finding 1): exclude immature models entirely.
+        # A model with fewer than MIN_SETTLED_N VERIFIED walk-forward settled observations
+        # cannot contribute a reliable second-moment estimate — its history is too short to
+        # trust.  Zero its precision weight so it does not contaminate the center.
+        # The all-immature fallback (equal 1/n) fires below via have_any_signal=False path.
+        if int(n_train or 0) < MIN_SETTLED_N:
+            precisions[model] = 0.0
+            continue
         repr_native = _repr_native(model)
         try:
             raw_m2_f = float(raw_m2) if raw_m2 is not None else None

@@ -1380,6 +1380,70 @@ tables:
       evidence; never a venue command, order truth, settlement truth, or
       calibration training input.
 
+  - name: exit_timing_attribution
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: attribution_id
+    required_columns:
+      - {name: attribution_id, type: TEXT, nullable: false}
+      - {name: position_id, type: TEXT, nullable: false}
+      - {name: category, type: TEXT, nullable: false}
+      - {name: is_skillful, type: INTEGER, nullable: false}
+      - {name: counts_in_skill_denominator, type: INTEGER, nullable: false}
+      - {name: graded_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Exit-timing grade ledger (2026-06-22, lifecycle design consult
+      REQ-20260622-060011 + operator "sell before market notice and gain is ALSO a
+      good trade"). One row per CLOSED (exited) position. The ORTHOGONAL second
+      attribution axis to settlement_attribution (entry skill): it grades the EXIT
+      decision by exit_alpha_usd = net_exit_proceeds - would_have_settled_value, so
+      a skillful reversal exit (sold before a loss) is credited
+      (SKILLFUL_REVERSAL_EXIT) instead of grading like a held loss, and a premature
+      exit is penalized (PREMATURE_EXIT_COST). Entry-independent (entry_cost
+      cancels) so realized_pnl = hold_counterfactual_pnl + exit_alpha_usd with no
+      double-counting. Categories: SKILLFUL_REVERSAL_EXIT / PREMATURE_EXIT_COST /
+      LUCKY_EXIT_SAVED_LOSS / NEUTRAL_EXIT / ADMIN_OR_RISK_EXIT_VALUE_DELTA /
+      EXIT_UNATTRIBUTABLE_{SETTLEMENT,PROCEEDS,Q}_MISSING (category CHECK upgraded in
+      place by a guarded rebuild for pre-existing live tables). Sole writer =
+      src/analysis/exit_timing_attribution.py (the exit-timing pass of the
+      settlement attribution job in src.main; idempotent per position via
+      UNIQUE(position_id)). NO daemon_writer field (runs in the trading daemon, not
+      src.ingest_main — same posture as settlement_attribution). Append/upsert-only
+      audit evidence; never a venue command, order truth, settlement truth, or
+      calibration training input.
+
+  - name: family_rebalance_intents
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: intent_id
+    required_columns:
+      - {name: intent_id, type: TEXT, nullable: false}
+      - {name: family_key, type: TEXT, nullable: false}
+      - {name: operation, type: TEXT, nullable: false}
+      - {name: status, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+      - {name: updated_at, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      Family-rebalance lifecycle LEASE (2026-06-22, lifecycle design consult
+      REQ-20260622-060011 — D1 fill-up / D2 shift-bin). One ACTIVE row per
+      (env,city,target_date,metric) family while a re-decide-held-exposure operation
+      is in flight; the partial UNIQUE index uq_family_rebalance_active over the
+      non-terminal statuses is THE concurrency guard against the duplicate-EDLI /
+      SUBMIT_UNKNOWN double-submit race (the 2026-06-16 double-rest class) — a second
+      concurrent acquire on the same family hits IntegrityError and the caller
+      no-ops. Released only on COMPLETE / ABORTED / EXIT_ONLY_COMPLETE. Sole writer =
+      src/strategy/family_rebalance.py (the lease manager; acquire/advance). NO
+      daemon_writer field (the rebalance runs in the trading daemon, not
+      src.ingest_main). Lifecycle-coordination ledger; never a venue command, order
+      truth, or settlement truth (those remain in venue_commands / venue_order_facts
+      / settlement tables).
+
   - name: outcome_fact
     db: world
     schema_class: legacy_archived

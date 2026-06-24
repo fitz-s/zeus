@@ -1706,38 +1706,40 @@ def screen_resting_orders(
                     bid = None
             if bid is not None:
                 drift = float(bid.price) - float(rest.limit_price)
-                if drift >= REST_BOOK_DRIFT_TICKS * TICK_SIZE - _EPS:
+                # Gate the BOOK_MOVED microstructure pull behind the same 300s
+                # maker-window floor the value-refresh pull uses (and the
+                # escalation-arming floor in event_reactor_adapter). Pre-fix this
+                # pull had NO age guard, so a rest whose bid moved a tick was
+                # cancelled sub-floor, re-decided as a fresh non-escalated
+                # REST_DEFAULT, and pulled again — an infinite rest->pull->re-rest
+                # loop with 0 crosses / 0 +EV-band fills. Holding within the
+                # window lets the rest survive to escalation-eligibility so the
+                # next certified decision crosses TAKER_ESCALATED_AFTER_REST (still
+                # +EV-gated). Belief-decay (screen_reprice) stays ungated above, so
+                # fair-value protection on NEW evidence is unchanged.
+                # (2026-06-23 entry fill-lane diagnosis.)
+                if (
+                    drift >= REST_BOOK_DRIFT_TICKS * TICK_SIZE - _EPS
+                    and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0
+                ):
                     decision = RepriceDecision(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
                         action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,
                     )
-        if decision is None and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0:
-            # 3) Confirmed-value refresh: the rest has had a real maker window,
-            # the book is fresh, and conservative held-side q_lcb still clears
-            # the live ask after fees. Pull the rest so the existing full cert
-            # path can re-price maker/taker/skip using current evidence. This
-            # is not age-alone cancellation and does not act on stale quotes.
-            ask = ask_by_cid.get((rest.condition_id, rest.side))
-            if ask is not None:
-                try:
-                    if _parse(ask.freshness_deadline) <= screen_time:
-                        ask = None
-                except (TypeError, ValueError):
-                    ask = None
-            if ask is not None:
-                belief = latest_cached_belief(world_conn, family_id=rest.family_id)
-                q_lcb = _held_side_q_lcb(belief, bin_label=rest.bin_label, side=rest.side) if belief else None
-                if q_lcb is not None:
-                    ask_edge = float(q_lcb) - float(ask.price) - _fee_at(float(ask.price))
-                    if ask_edge >= IMPROVE_DELTA - _EPS:
-                        decision = RepriceDecision(
-                            family_id=rest.family_id,
-                            bin_label=rest.bin_label,
-                            side=rest.side,
-                            action="CANCEL_REPLACE",
-                            reason="CONFIRMED_VALUE_REFRESH",
-                            detail=ask_edge,
-                        )
+        # 3) Confirmed-value refresh — GATED under GTC-FIRST (operator goal 2026-06-23 "GTC not
+        #    taker"; the screen partner of mode_consistent_ev rule 6a'). This pull existed to
+        #    re-price an aged rest into a CROSS when crossing the ask was still +EV. With 6a'
+        #    gated (fresh +EV candidates REST instead of crossing), the pull's re-decision now
+        #    just RE-RESTS at the same bid+tick maker limit — so firing it cancelled-and-re-rested
+        #    a still-+EV resting maker every value-refresh window: pure churn that reset the venue
+        #    order / queue position and stopped the GTC rest from surviving to fill (live
+        #    2026-06-23: GTC rests cancelled reason=CONFIRMED_VALUE_REFRESH before any fill). The
+        #    rest is therefore HELD: it survives the full escalation window to fill as a GTC maker,
+        #    and the maker-rest deadline (src.execution.maker_rest_escalation) still escalates it to
+        #    a cross if unfilled. Adverse moves are STILL caught by screen_reprice (belief-decay,
+        #    above) and BOOK_MOVED still re-pegs to keep us competitive — so fair-value protection
+        #    is unchanged; only the now-pointless cross-pull churn is removed. (Reversible: restore
+        #    this block to re-enable the value-refresh cross-pull alongside rule 6a'.)
         if decision is not None:
             out.append((rest, decision))
     return out

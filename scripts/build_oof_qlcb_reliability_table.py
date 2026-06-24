@@ -1,4 +1,10 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-24; last_reused=2026-06-24
+# 2026-06-24: schema_version 3 — add the precision_class COVERAGE STRATIFIER to the cell key
+#   (fine_nest vs coarse_global via precision_class_for_coord, derived identically to the live
+#   guard). Settlement-graded basis /tmp/qlcb_guard_effectiveness.md: coarse-only-nest buy_no
+#   realized -24.7%/bet vs fine +5.7%/bet (both POST-guard) because the pooled cell gave coarse
+#   cities the fine cities' calibration. OUT_PATH/FORECASTS_PATH/DB_PATH are now env-overridable
+#   so a validation build can target a TEMP artifact without touching the live one.
 # Purpose: Build the generated side-aware OOF q_lcb reliability artifact for live guard serving.
 # Reuse: Run when rebuilding the q_lcb OOF reliability artifact or changing guard cell schema.
 # Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md
@@ -64,12 +70,20 @@ from src.calibration.emos import bin_probability_settlement  # settlement-preima
 from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.forecast.center import raw_second_moment_weights, weighted_huber_location
 from src.forecast.model_selection import select_models
-from src.decision.qlcb_reliability_guard import cell_key, lead_bucket  # the LIVE guard cell scheme
+from src.decision.qlcb_reliability_guard import (  # the LIVE guard cell scheme
+    cell_key,
+    lead_bucket,
+    precision_class_for_coord,
+)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FORECASTS_PATH = "/tmp/multilead_forecasts.json"
-DB_PATH = os.path.join(REPO, "state", "zeus-forecasts.db")
-OUT_PATH = os.path.join(REPO, "state", "qlcb_oof_reliability.json")
+# Paths are overridable by env so a validation build can target a TEMP output (and a temp corpus)
+# WITHOUT touching the live artifact. The live deploy uses the defaults (no env set).
+FORECASTS_PATH = os.environ.get("QLCB_OOF_FORECASTS_PATH", "/tmp/multilead_forecasts.json")
+DB_PATH = os.environ.get("QLCB_OOF_DB_PATH", os.path.join(REPO, "state", "zeus-forecasts.db"))
+OUT_PATH = os.environ.get(
+    "QLCB_OOF_OUT_PATH", os.path.join(REPO, "state", "qlcb_oof_reliability.json")
+)
 
 # Band reproduction constants — byte-identical to src/probability/joint_q_band.py.
 N_DRAWS = 4000
@@ -239,6 +253,10 @@ def process_metric_lead(metric, lead, fc_block, settlements, cities_cfg, cells, 
         if cfg is None:
             continue
         lat, lon = float(cfg.lat), float(cfg.lon)
+        # The COVERAGE STRATIFIER (mirrors the live guard): a pure point-in-polygon property of
+        # the settlement coordinate (fine_nest iff a sub-9km regional nest covers it). Derived
+        # the SAME way at the live guard call site so coarse/fine cells split identically.
+        precision_class = precision_class_for_coord(lat, lon)
         by_date = {d: dict(ms) for d, ms in fc_block[city].items()}
         dates = sorted(by_date.keys())
         for td in dates:
@@ -337,6 +355,7 @@ def process_metric_lead(metric, lead, fc_block, settlements, cities_cfg, cells, 
                     side="YES",
                     bin_position=bin_position,
                     q_lcb=float(q_lcb[i]),
+                    precision_class=precision_class,
                 )
                 cells[yes_key][0] += 1
                 if i == settled_bin:
@@ -348,6 +367,7 @@ def process_metric_lead(metric, lead, fc_block, settlements, cities_cfg, cells, 
                     side="NO",
                     bin_position=bin_position,
                     q_lcb=float(q_lcb_no[i]),
+                    precision_class=precision_class,
                 )
                 cells[no_key][0] += 1
                 if i != settled_bin:
@@ -387,8 +407,8 @@ def main() -> int:
                  for k, (n, h) in cells.items() if n > 0}
     artifact = {
         "meta": {
-            "schema_version": 2,
-            "built_at": "2026-06-18",
+            "schema_version": 3,
+            "built_at": "2026-06-24",
             "n_predictions": int(ctr["n_predictions"]),
             "n_cells": len(out_cells),
             "metrics": list(METRICS),
@@ -400,7 +420,13 @@ def main() -> int:
             "draw_mu~N(mu*,center_se), draw_sigma floored, per-draw simplex integ (vectorized, "
             "validated ==scalar), marginal alpha-quantile",
             "bucket_grid": "QLCB_BUCKET_EDGES (refined uniform 0.05) imported from the live guard",
-            "cell_key_schema": "metric|lead_bucket|side|bin_position|q_lcb_bucket",
+            "cell_key_schema": "metric|lead_bucket|side|bin_position|q_lcb_bucket|precision_class",
+            "precision_class_semantics": "COVERAGE STRATIFIER (not a per-city de-bias): fine_nest "
+            "iff the city's settlement coordinate falls inside ANY sub-9km regional nest polygon "
+            "(model_selection.REGIONAL_MODELS via precision_class_for_coord); else coarse_global. "
+            "A pure point-in-polygon property derived identically at the live guard call site, so "
+            "coarse-only-nest (cold-biased) cells accrue their OWN realized hit-rate instead of "
+            "being propped up by fine-nest cities' calibration.",
             "side_semantics": "YES hit = settled in bin; NO hit = settled outside bin, with NO q_lcb computed as alpha-quantile of 1-q_bin draws",
             "source": "/tmp/multilead_forecasts.json (land-coord previous-runs corpus) + "
             "state/zeus-forecasts.db (immutable RO); strictly-prior rolling-origin training",

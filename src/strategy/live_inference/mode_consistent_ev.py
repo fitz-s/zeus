@@ -171,6 +171,7 @@ TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END = 360.0
 
 # Policy verdicts (travel on receipts; the settlement loop groups by these).
 POLICY_REST_DEFAULT = "REST_DEFAULT"
+POLICY_TAKER_EDGE_CLEARS_BOUND = "TAKER_EDGE_CLEARS_BOUND"
 POLICY_HOLD_REST_IN_PROGRESS = "HOLD_REST_IN_PROGRESS"
 POLICY_TAKER_ESCALATED_AFTER_REST = "TAKER_ESCALATED_AFTER_REST"
 POLICY_TAKER_EVENT_END_NEAR = "TAKER_EVENT_END_NEAR"
@@ -609,6 +610,23 @@ def select_rest_then_cross_mode(
     if escalated_after_rest and not taker_admissible:
         return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
 
-    # 6b. THE DEFAULT: the genuine FIRST rest for a family (no prior cancelled-unfilled
-    #    rest) rests post_only GTC with the measured escalation deadline.
+    # 6a'. GTC-FIRST RESTORE (operator goal 2026-06-23 "3 GTC fills, not taker"): the
+    #    2026-06-23 "cross-when-admissible" override (POLICY_TAKER_EDGE_CLEARS_BOUND) is GATED
+    #    OFF for the fresh, far-from-event admissible case. The operator now explicitly prefers
+    #    capturing the spread as a GTC maker over paying spread+fee as a taker, accepting
+    #    fewer/delayed taker fills. Fresh admissible candidates therefore fall through to the
+    #    original K4.0 REST_DEFAULT (6b): rest an aggressive maker (bid+tick, top of book) and
+    #    escalate to a taker cross only at the deadline (rule 3, TAKER_ESCALATED_AFTER_REST) —
+    #    so a maker fill captures the spread when the market trades into our top-of-book rest,
+    #    and the cross is the fallback when it does not. The immediate-cross exception lanes are
+    #    PRESERVED above: event-end-near (rule 4) and fleeting large edge < event_end_floor..6h
+    #    (rule 5) still cross, because near settlement a rest cannot complete. The ~3.5% maker
+    #    fill rate that motivated the 06-23 override was churn-bound (78/88 cancelled before
+    #    fill by BOOK_MOVED/VALUE_REFRESH); GTC viability is being re-measured on the live chain
+    #    under this restore. (Reversible: restore `if taker_admissible: return _as_taker(
+    #    POLICY_TAKER_EDGE_CLEARS_BOUND)` here to re-enable immediate cross-when-admissible.)
+
+    # 6b. FALLBACK: the cross is inadmissible (cannot clear the conservative bound at the fresh
+    #    ask, or the spread is too wide) — rest post_only GTC at the maker limit with the measured
+    #    escalation deadline; it fills only if the market comes to us, else cleanly no-trades.
     return _as_maker(POLICY_REST_DEFAULT, deadline=float(escalation_deadline_minutes))

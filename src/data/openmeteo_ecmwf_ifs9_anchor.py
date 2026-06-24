@@ -447,6 +447,13 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
         local_time = _parse_openmeteo_time(raw_time, city_timezone=city_timezone)
         if local_time.date() != target_local_date:
             continue
+        if raw_temperature is None:
+            # Open-Meteo returns null for a missing hour at the forecast-horizon edge (notably
+            # the 2-day-out low metric — London/Paris 2026-06-26 crashed the live materializer here
+            # on float(None), 2026-06-24). Skip the gap rather than crash; the min_hourly_samples /
+            # require_full_localday checks below still enforce coverage and raise a clear ValueError
+            # if the surviving in-day samples are genuinely insufficient.
+            continue
         contributing_local_times.append(local_time)
         contributing_valid_times_utc.append(local_time.astimezone(UTC))
         contributing_temperatures_c.append(_temperature_to_c(float(raw_temperature), temperature_unit))

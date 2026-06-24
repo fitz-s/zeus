@@ -722,8 +722,16 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # CYCLE_LEG_ARTIFACT_MISSING:<source>:<cycle>) instead of silently incrementing manifest_missing
     # — making the ALWAYS-DECIDABLE-violating gap visible rather than an invisible skip. Idempotent
     # ADD COLUMN for existing DBs.
+    # day0_observed_extreme_observation_time (same-day exit-blindness fix 2026-06-23): the OBSERVATION
+    # VERSION the marker was last enqueued at. The model cycle (target_cycle_time) does NOT advance
+    # intraday on the settlement day, so model-cycle idempotency alone freezes the day0-conditioned
+    # posterior (Toronto NO@24 -98.94% incident). Recording the observation version lets the held/day0
+    # reseed re-materialize on each fresh observed running-max version (climb OR plateau) without
+    # touching the non-day0 model-cycle idempotency. See
+    # docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md.
     for alter_sql in [
         "ALTER TABLE cycle_advance_enqueues ADD COLUMN reason TEXT",
+        "ALTER TABLE cycle_advance_enqueues ADD COLUMN day0_observed_extreme_observation_time TEXT",
     ]:
         try:
             conn.execute(alter_sql)

@@ -7008,12 +7008,20 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
 
 
 def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
+    # PARTIAL coverage routes to PER-FAMILY freshness admission — including when SOME
+    # families hit a transient `database is locked`. The per-family filter
+    # (_edli_families_with_fresh_executable_substrate) does an INDEPENDENT fresh read of
+    # every condition's executable substrate, so a lock that left some families stale
+    # cannot admit them; it only excludes them. Forcing a full-tick drop on any lock hit
+    # (the prior `and not _has_sqlite_lock_failures`) discarded EVERY candidate + reprice
+    # on the tick — even families with complete fresh substrate — which (with ~757 lock
+    # hits/run of WAL contention) was the dominant reason the candidate pipeline emitted
+    # for only ~2 families instead of the full universe (2026-06-23 candidate-pipeline fix).
     if not isinstance(summary, dict):
         return False
     return (
         str(summary.get("status") or "") == "refreshed"
         and str(summary.get("executable_substrate_coverage_status") or "") == "PARTIAL"
-        and not _edli_refresh_summary_has_sqlite_lock_failures(summary)
     )
 
 
@@ -7071,7 +7079,7 @@ def _edli_families_with_fresh_executable_substrate(
             }
             if not condition_ids:
                 continue
-            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
+            if any(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
                 out.add(family)
     finally:
         try:
@@ -7976,25 +7984,137 @@ def _edli_run_pre_submit_clob_call(label: str, fn):
     )
 
 
+def _edli_pre_submit_jit_book_timeout():
+    """STRICT connect/read timeout for the submit-time JIT ``/book`` fetch (GATE #84).
+
+    Runs inside the pre-submit guard's worker thread, so it must fail-closed BEFORE
+    the outer daemon guard (the 2026-06-19 invariant). httpcore applies the connect
+    timeout to ``connect_tcp`` AND ``start_tls`` separately, so the worst-case connect
+    cost is ``2*connect``; bound ``2*connect + read + write + pool`` strictly under the
+    outer guard. With outer=6.0 this yields connect≈2.25 (worst case 2*2.25+0.85+0.25+
+    0.10 = 5.70 < 6.0). This connect budget is a FAIL-CLOSED bound, not the normal
+    path — the boot pre-warm + keepalive pinger keep the socket warm so the submit-time
+    fetch reuses an established connection (~0.66s, measured forward 2026-06-22) and
+    does not pay a cold handshake here. Cold handshakes (~2.2-2.7s) are absorbed by the
+    generous warmup timeout OUTSIDE the worker.
+    """
+
+    import httpx
+
+    outer = _edli_pre_submit_clob_timeout_seconds()
+    read, write, pool = 0.85, 0.25, 0.10
+    # 0.3s headroom for Python overhead under the outer guard, halved for the
+    # TCP+TLS double-application of the connect budget.
+    connect = max(0.5, min(2.25, (outer - read - write - pool - 0.3) / 2.0))
+    return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
+def _edli_pre_submit_jit_warmup_timeout():
+    """GENEROUS connect timeout for the JIT client's boot pre-warm + keepalive ping.
+
+    Used ONLY by ``_edli_prewarm_pre_submit_jit_client`` / the pinger tick, which run
+    OUTSIDE the submit worker, so a connect budget large enough to absorb a cold TLS
+    handshake (~2.2-2.7s, with margin) does not threaten the pre-submit outer guard.
+    The read budget stays tight (the ``/time`` health probe is tiny).
+    """
+
+    import httpx
+
+    return httpx.Timeout(connect=4.5, read=0.75, write=0.25, pool=0.10)
+
+
+_PRE_SUBMIT_JIT_CLOB_CLIENT = None
+_PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK = threading.Lock()
+
+
+def _edli_reset_pre_submit_jit_clob_client():
+    """Drop and close the warm JIT CLOB client (clean shutdown + test isolation)."""
+
+    global _PRE_SUBMIT_JIT_CLOB_CLIENT
+    with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
+        client = _PRE_SUBMIT_JIT_CLOB_CLIENT
+        _PRE_SUBMIT_JIT_CLOB_CLIENT = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - best-effort close on shutdown
+            pass
+
+
+def _edli_pre_submit_jit_clob_client():
+    """Return a WARM, reused CLOB client for the submit-time JIT ``/book`` fetch.
+
+    Reusing one client keeps its TLS connection warm (httpx keepalive) across
+    submit candidates, so each fetch skips the ~2.2-2.7s cold handshake that timed
+    out 118/120 submits (warm reuse drops the fetch to ~0.66s, measured forward
+    2026-06-22). Thread-safe: httpx.Client is safe to share across the pre-submit
+    guard's worker threads; construction is lock-guarded (double-checked).
+    """
+
+    global _PRE_SUBMIT_JIT_CLOB_CLIENT
+    client = _PRE_SUBMIT_JIT_CLOB_CLIENT
+    if client is None:
+        with _PRE_SUBMIT_JIT_CLOB_CLIENT_LOCK:
+            client = _PRE_SUBMIT_JIT_CLOB_CLIENT
+            if client is None:
+                from src.data.polymarket_client import (
+                    PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+                    PolymarketClient,
+                )
+
+                client = PolymarketClient(
+                    public_http_timeout=_edli_pre_submit_jit_book_timeout(),
+                    public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+                )
+                _PRE_SUBMIT_JIT_CLOB_CLIENT = client
+    return client
+
+
+def _edli_prewarm_pre_submit_jit_client() -> bool:
+    """Construct the warm JIT CLOB client and complete a cold TLS handshake OUTSIDE
+    the submit worker (boot + keepalive pinger). Uses the generous warmup timeout so
+    a slow cold handshake is absorbed here, never on the money path. Fail-soft."""
+
+    try:
+        client = _edli_pre_submit_jit_clob_client()
+        ok = client.warm_public_connection(timeout=_edli_pre_submit_jit_warmup_timeout())
+        return bool(ok)
+    except Exception:  # noqa: BLE001 - pre-warm is best-effort; never block boot
+        return False
+
+
+def _edli_pre_submit_jit_keepalive_tick() -> None:
+    """Keepalive pinger: keep the submit-time JIT CLOB connection warm across reactor
+    cycles (keepalive_expiry=90s > 60s cycle) so an edge-positive submit candidate
+    never pays a cold TLS handshake at the pre-submit gate. Read-only /time probe;
+    touches NO trading state; logs success/failure only (GATE #84, 2026-06-22)."""
+
+    warmed = _edli_prewarm_pre_submit_jit_client()
+    if warmed:
+        logger.debug("pre-submit JIT keepalive: connection warm")
+    else:
+        logger.warning("pre-submit JIT keepalive: warm-up probe failed (will retry next tick)")
+
+
 def _edli_pre_submit_jit_book_quote_provider():
     """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
     authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
     live CLOB book for exactly the selected candidate at submit time, or ``None``
     if a CLOB client cannot be constructed (caller then falls back to the DB row).
 
-    The client is constructed per call so the provider holds no long-lived
-    connection across reactor cycles; the call only fires for an actual submit
-    candidate (rare, fully gated), so the per-call cost is negligible.
+    Uses a WARM, REUSED client (see ``_edli_pre_submit_jit_clob_client``) so the
+    TLS connection stays warm across submit candidates instead of paying a cold
+    handshake per call. A failed fetch propagates to the caller, which returns
+    ``None`` and falls back/requeues; httpx reopens a fresh pooled connection on
+    the next fetch, so a transiently-dead socket costs at most one requeue.
     """
 
     def _fetch(token_id: str) -> dict:
-        from src.data.polymarket_client import PolymarketClient
-
-        with PolymarketClient(public_http_timeout=_edli_pre_submit_inner_io_timeout_seconds()) as clob:
-            return _edli_run_pre_submit_clob_call(
-                "jit_book",
-                lambda: clob.get_orderbook_snapshot(token_id),
-            )
+        clob = _edli_pre_submit_jit_clob_client()
+        return _edli_run_pre_submit_clob_call(
+            "jit_book",
+            lambda: clob.get_orderbook_snapshot(token_id),
+        )
 
     return _fetch
 
@@ -9501,6 +9621,22 @@ def main():
             max_instances=1,
             coalesce=True,
             executor="reactor",
+        )
+        # GATE #84 keepalive pinger (2026-06-22): keep the submit-time JIT /book CLOB
+        # connection warm so an edge-positive submit candidate never pays a cold TLS
+        # handshake (~2.2-2.7s) at the pre-submit authority gate — the regression that
+        # timed out 118/120 JIT fetches (06-17..06-22) and requeued ~84% of orders. 25s
+        # cadence stays inside the 90s keepalive_expiry; read-only /time probe, touches
+        # no trading state, fail-soft. Pre-warm fires ~immediately so the first submit
+        # after boot is already warm. max_instances=1/coalesce so a slow ping can't stack.
+        scheduler.add_job(
+            _edli_pre_submit_jit_keepalive_tick,
+            "interval",
+            seconds=25,
+            id="edli_presubmit_jit_keepalive",
+            next_run_time=_utc_run_time_after(15.0),
+            max_instances=1,
+            coalesce=True,
         )
         # STRUCTURAL FIX (2026-05-31, #45 follow-up): dedicated ~60s on-chain bankroll
         # cache warmer, DECOUPLED from the slow (~330s) reactor cycle. The reactor's
