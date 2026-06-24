@@ -341,6 +341,9 @@ class ModeConsistentEv:
     # K4.0 REST-THEN-CROSS provenance (None on the legacy one-shot path):
     policy: str | None = None  # POLICY_* verdict that produced chosen_mode
     escalation_deadline_minutes: float | None = None  # set on REST_DEFAULT decisions
+    # P0-1 (2026-06-23) execution-conditioned bound supplied to the taker cap
+    # (None = plain q_lcb, today's behavior). Travels for settlement-loop audit.
+    q_exec_lcb: float | None = None
 
 
 def select_mode_consistent_ev(
@@ -440,6 +443,7 @@ def select_mode_consistent_ev(
 def select_rest_then_cross_mode(
     *,
     q_lcb: float,
+    q_exec_lcb: float | None = None,
     taker_all_in_cost: float | None,
     p_fill_taker: float,
     best_bid: float | None,
@@ -522,9 +526,16 @@ def select_rest_then_cross_mode(
     # guard and the REST_DEFAULT doctrine (a favorable all-in alone does NOT license
     # an immediate cross — the Karachi antibody) remain in force above this.
     _q = float(q_lcb)
+    # P0-1 (2026-06-23) EXECUTION-(PRICE)-CONDITIONED TIGHTENING. q_exec_lcb is the caller's
+    # settlement-evidenced corrected bound (the selection-curse realized-NO-rate at this price —
+    # src/decision/selection_curse_bound.py, supplied by event_reactor_adapter._event_bound_q_exec_lcb)
+    # and can ONLY lower the admissibility bound, never raise it (min with _q). None => plain q_lcb
+    # (identity, today's exact behavior). Honors the same HARD LAW as FIX B: this only makes the
+    # taker lane STRICTER, never loosens it.
+    _exec_bound = _q if q_exec_lcb is None else min(_q, float(q_exec_lcb))
     _taker_cost = _finite(taker_all_in_cost)
     taker_clears_conservative_bound = (
-        _taker_cost is not None and _taker_cost <= _q + 1e-9
+        _taker_cost is not None and _taker_cost <= _exec_bound + 1e-9
     )
     taker_admissible = (
         mode_ev.ev_taker is not None
@@ -546,6 +557,7 @@ def select_rest_then_cross_mode(
             placement=PLACEMENT_MAKER,
             policy=policy,
             escalation_deadline_minutes=deadline,
+            q_exec_lcb=q_exec_lcb,
         )
 
     def _as_taker(policy: str) -> ModeConsistentEv:
@@ -556,6 +568,7 @@ def select_rest_then_cross_mode(
             placement=PLACEMENT_TAKER,
             policy=policy,
             escalation_deadline_minutes=None,
+            q_exec_lcb=q_exec_lcb,
         )
 
     # 1. ANTIBODY: an unexpired same-family rest forbids ANY new order.

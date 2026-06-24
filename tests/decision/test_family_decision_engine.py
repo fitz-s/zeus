@@ -59,7 +59,6 @@ from src.contracts.executable_cost_curve import (
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import (
-    CALIBRATED_NONMODAL_Q_FLOOR,
     NO_TRADE_NO_DIRECTION_LAW,
     NO_TRADE_NO_POSITIVE_EDGE,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
@@ -481,38 +480,28 @@ def test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it():
     no_b27 = build_candidate_route(
         candidate_id="n27", instrument=_inst("NO", "b27"), route_cost=_rc("NO", "b27"), omega=space
     )
-    # YES on the forecast bin is always legal regardless of its point-q (it IS the modal bin).
-    assert direction_law_ok(yes_b25, forecast_bin=fbin, point_q=0.6) is True
-    # NO is legal ONLY off the forecast bin (NO direction unchanged by the 2026-06-15 relax).
-    assert direction_law_ok(no_b25, forecast_bin=fbin, point_q=0.6) is False
-    assert direction_law_ok(no_b27, forecast_bin=fbin, point_q=0.02) is True
-    # Non-modal YES (b27): legal IFF point-q reaches the settlement-validated calibrated floor.
-    # Below the floor (the far tail with no settlement coverage) it stays modal-only-illegal;
-    # at/above the floor it is admitted as a calibrated Arrow-Debreu claim (relax 2026-06-15).
-    assert (
-        direction_law_ok(yes_b27, forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR - 0.01)
-        is False
-    )
-    assert (
-        direction_law_ok(yes_b27, forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR)
-        is True
-    )
+    # MODAL-ONLY YES (2026-06-23 revert, operator mandate): YES is legal ONLY on the forecast
+    # (modal) bin; point-q is no longer consulted.
+    assert direction_law_ok(yes_b25, forecast_bin=fbin) is True
+    # NO is legal ONLY off the forecast bin (NO direction unchanged).
+    assert direction_law_ok(no_b25, forecast_bin=fbin) is False
+    assert direction_law_ok(no_b27, forecast_bin=fbin) is True
+    # A non-modal YES (b27) is ALWAYS illegal now — the 2026-06-15 calibrated-floor relaxation
+    # is removed (its "modal over-dispersed" premise was the flat-σ artifact since corrected).
+    assert direction_law_ok(yes_b27, forecast_bin=fbin) is False
 
 
-def test_nonmodal_yes_in_calibrated_domain_is_admitted_far_tail_still_modal_only():
-    """RED-on-revert for the 2026-06-15 settlement-justified direction-law relax.
+def test_buy_yes_is_modal_only_no_calibrated_floor_relaxation():
+    """Antibody for the MODAL-ONLY-YES revert (2026-06-23, operator mandate).
 
-    The modal-only YES rule (pre-2026-06-15) suppressed settlement-CALIBRATED non-modal YES
-    candidates: 6,450 settled non-modal bin-obs grade the non-modal tail in (0.05,0.35] at
-    pred/real 1.05× (docs/evidence/qkernel_rebuild/nonmodal_bin_calibration_2026-06-15.md F1),
-    while the modal bin the rule trusts grades 1.28× over-dispersed (F2) — the premise was
-    inverted. The relax admits a non-modal YES whose point-q is INSIDE the validated
-    calibrated domain (>= CALIBRATED_NONMODAL_Q_FLOOR), and keeps the far tail (below the
-    floor, no settlement coverage, where the over-dispersed served σ + the conservative
-    edge_lcb quantile amplify rather than shield) modal-only.
+    Operator standing rule: "buy_yes only on its own predicted bin, ±0.5 max." YES is legal
+    ONLY on the forecast (modal) bin; NO non-modal YES is admissible regardless of its point-q.
+    This reverts the 2026-06-15 calibrated-floor relaxation, whose "modal over-dispersed
+    (1.28×)" premise was an artifact of the served σ being too flat (stale σ-scale fit k=1.0;
+    corrected to C k=0.671 / F k=0.7322, post-sharpening modal d=0 ratio 1.20/1.09 — calibrated).
 
-    A reversion to the modal-only rule (``return route.bin_id == forecast_bin`` for YES) makes
-    the calibrated-domain assertion RED: the in-domain non-modal YES would flip to illegal.
+    RED-on-revert: re-introducing ``or point_q >= CALIBRATED_NONMODAL_Q_FLOOR`` (or any non-modal
+    YES admission) flips the non-modal assertions below to True.
     """
     fbin = "b25"
 
@@ -524,20 +513,14 @@ def test_nonmodal_yes_in_calibrated_domain_is_admitted_far_tail_still_modal_only
             omega=_outcome_space(_case()),
         )
 
-    # In-domain non-modal YES (point-q at/above the calibrated floor) — ADMITTED by the relax,
-    # REFUSED by a modal-only revert. This is the load-bearing RED-on-revert assertion.
-    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin, point_q=0.22) is True
-    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin, point_q=0.10) is True
-    assert (
-        direction_law_ok(yes_on("b26"), forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR)
-        is True
-    )
-    # Far-tail non-modal YES (point-q below the validated floor) — STILL modal-only-illegal:
-    # the settlement evidence does not reach here and edge_lcb amplifies the over-dispersed σ.
-    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin, point_q=0.02) is False
-    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin, point_q=0.0004) is False
-    # The forecast (modal) bin YES is always legal; its point-q is irrelevant.
-    assert direction_law_ok(yes_on("b25"), forecast_bin=fbin, point_q=0.0) is True
+    # The forecast (modal) bin YES is the ONLY legal YES.
+    assert direction_law_ok(yes_on("b25"), forecast_bin=fbin) is True
+    # EVERY non-modal YES is illegal — adjacent ring, near, and far tail alike. No q can admit it.
+    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b26"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin) is False
 
 
 # Small helpers for the primitive check above.
@@ -721,15 +704,13 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         )
     )
 
-    # Post-2026-06-15 relax: a non-modal YES whose point-q is INSIDE the settlement-validated
-    # calibrated domain (point_q >= CALIBRATED_NONMODAL_Q_FLOOR) is now direction-law-LEGAL.
-    # b24 is an adjacent ring bin with point_q ~0.22 (well above the 0.05 floor), so its YES is
-    # admitted as a calibrated Arrow-Debreu claim — it is no longer suppressed by the rule.
+    # MODAL-ONLY YES (2026-06-23 revert): a non-modal YES is direction-law-ILLEGAL regardless of
+    # its point-q. b24 is an adjacent ring bin (well-massed, ~0.22) but it is NOT the forecast
+    # (modal) bin, so its YES is rejected by the direction law — buy_yes only on the predicted bin.
     yes_b24 = [d for d in decision.candidate_decisions if d.route.side == "YES" and d.route.bin_id == "b24"]
-    assert yes_b24 and yes_b24[0].direction_law_ok is True
-    assert (
-        decision.candidate_decisions  # the b24 point-q clears the validated floor
-        and jq.q_by_bin_id["b24"] >= CALIBRATED_NONMODAL_Q_FLOOR
+    assert yes_b24 and yes_b24[0].direction_law_ok is False, (
+        "non-modal YES (b24) must be direction-law-illegal after the modal-only revert, "
+        "even with ample point-q"
     )
 
 
@@ -1199,12 +1180,17 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
         f"expected NO_TRADE_NO_DIRECTION_LAW for YES-on-non-modal; got {reason2!r}"
     )
 
+    # Modal-only-YES revert (2026-06-23, operator mandate "buy_yes only on its predicted bin
+    # ±0.5"): the OOF_WILSON_95 empirical license is now NO-only. A non-modal YES can NO LONGER
+    # be admitted via the empirical bypass — direction_law_ok=False + side="YES" is rejected even
+    # WITH an active OOF verdict. The σ-scale sharpening (C k=0.671, F k=0.7322) removed the modal
+    # over-dispersion that justified the 2026-06-15 non-modal-YES relaxation.
     selected3, reason3 = engine._select([licensed_yes_on_non_modal_cand])
-    assert reason3 is None
-    assert selected3 is not None
-    assert selected3.route.side == "YES"
-    assert selected3.route.bin_id == non_modal_bin_id
-    assert selected3.direction_law_ok is False
+    assert selected3 is None, (
+        "non-modal YES must NOT be admitted via the OOF license after the modal-only revert "
+        "(the empirical bypass is NO-only)"
+    )
+    assert reason3 == NO_TRADE_NO_DIRECTION_LAW
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
