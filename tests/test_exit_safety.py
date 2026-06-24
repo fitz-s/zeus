@@ -2360,6 +2360,77 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     assert loaded["exit_state"] == "backoff_exhausted"
 
 
+def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
+    from src.execution.exit_lifecycle import release_market_closed_pending_exit_hold
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-market-closed-hold",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="pending_exit",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        order_status="backoff_exhausted",
+        exit_state="backoff_exhausted",
+        exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        exit_retry_count=3,
+    )
+
+    assert release_market_closed_pending_exit_hold(position, conn=conn) is True
+
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+    assert position.exit_reason == ""
+    assert position.exit_retry_count == 0
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "day0_window",
+        "order_status": "filled",
+        "exit_reason": "",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "MONITOR_REFRESHED"
+    assert event["phase_after"] == "day0_window"
+    assert event["venue_status"] is None
+    assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+    assert payload["exit_order_submitted"] is False
+    assert payload["exit_failure"] is False
+
+
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position

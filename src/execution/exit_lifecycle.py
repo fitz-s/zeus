@@ -572,32 +572,156 @@ def _mark_pending_exit(position: Position) -> None:
     )
 
 
-def mark_market_closed_awaiting_settlement(
+def mark_market_closed_hold_to_settlement(
     position: Position,
     *,
     reason: str = "MARKET_CLOSED_AWAITING_SETTLEMENT",
     error: str = "market_closed_non_accepting_orders",
     conn: sqlite3.Connection | None = None,
 ) -> None:
-    """Stop live exit retry for a market that can no longer accept orders.
+    """Record a market-closed hold without manufacturing a sell failure.
 
     Once the market is closed, quote freshness is no longer a solvable exit
-    precondition. The position must remain in the settlement lane instead of
-    re-entering stale-price retry loops.
+    precondition. That is a held-to-settlement monitor fact, not an
+    EXIT_ORDER_REJECTED event: no sell was submitted, no venue order failed,
+    and the position must keep flowing through held-position redecision and
+    settlement harvesting.
     """
 
-    _mark_pending_exit(position)
-    position.exit_state = "backoff_exhausted"
+    position.state = LifecyclePhase.DAY0_WINDOW.value
+    position.pre_exit_state = ""
+    position.exit_state = ""
     position.next_exit_retry_at = ""
-    position.exit_reason = reason
-    position.last_exit_error = error[:500]
-    _dual_write_canonical_pending_exit_if_available(
+    position.exit_retry_count = 0
+    if str(getattr(position, "order_status", "") or "") in {
+        "backoff_exhausted",
+        "retry_pending",
+        "sell_pending",
+        "sell_placed",
+    }:
+        position.order_status = "filled"
+    position.exit_reason = ""
+    position.last_exit_error = f"{reason}:{error}"[:500]
+    validations = list(getattr(position, "applied_validations", []) or [])
+    if reason not in validations:
+        validations.append(reason)
+    position.applied_validations = validations
+    _dual_write_market_closed_hold_if_available(
         conn,
         position,
         reason=reason,
         error=error,
-        event_type="EXIT_ORDER_REJECTED",
     )
+
+
+def _dual_write_market_closed_hold_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+    error: str,
+) -> bool:
+    """Persist a no-transition Day0 monitor hold for closed markets."""
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+        from src.state.db import append_many_and_project
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        position.last_monitor_at = occurred_at
+        events, projection = build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_after=LifecyclePhase.DAY0_WINDOW.value,
+            source_module="src.execution.exit_lifecycle",
+        )
+        event = dict(events[0])
+        payload = json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                "hold_reason": reason,
+                "market_closed_error": error,
+                "exit_order_submitted": False,
+                "exit_failure": False,
+            }
+        )
+        event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
+        event["caused_by"] = "market_closed_hold_to_settlement"
+        event["occurred_at"] = occurred_at
+        event["venue_status"] = None
+        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+        projection["updated_at"] = occurred_at
+        projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
+        projection["order_status"] = getattr(position, "order_status", "") or "filled"
+        projection["exit_reason"] = ""
+        projection["exit_retry_count"] = 0
+        projection["next_exit_retry_at"] = ""
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle
+        logger.warning(
+            "market closed hold projection failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
+def release_market_closed_pending_exit_hold(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Repair legacy market-closed pending_exit rows back into held Day0 state.
+
+    This is deliberately narrow: only rows that were stranded by the old
+    MARKET_CLOSED_AWAITING_SETTLEMENT projection, still have chain-confirmed
+    shares, and have no EXIT venue command are repaired. Genuine dust/backoff
+    exit failures stay in the exit lifecycle lane.
+    """
+
+    if _runtime_state_value(position) != "pending_exit":
+        return False
+    exit_state = getattr(position, "exit_state", "")
+    exit_state = getattr(exit_state, "value", exit_state)
+    if str(exit_state or "") != "backoff_exhausted":
+        return False
+    if str(getattr(position, "exit_reason", "") or "") != "MARKET_CLOSED_AWAITING_SETTLEMENT":
+        return False
+    chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
+    if chain_shares is None or chain_shares <= 0:
+        return False
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands
+             WHERE position_id = ?
+               AND intent_kind = 'EXIT'
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is not None:
+        return False
+    mark_market_closed_hold_to_settlement(
+        position,
+        reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        error="legacy_pending_exit_projection_repaired",
+        conn=conn,
+    )
+    return True
 
 
 def _release_pending_exit(position: Position) -> None:

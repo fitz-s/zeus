@@ -3745,6 +3745,7 @@ def execute_monitoring_phase(
         execute_exit,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        release_market_closed_pending_exit_hold,
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
@@ -3832,8 +3833,14 @@ def execute_monitoring_phase(
         )
         if pos.state == "pending_exit":
             if pos.exit_state == "backoff_exhausted":
-                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
-                continue
+                if release_market_closed_pending_exit_hold(pos, conn=conn):
+                    portfolio_dirty = True
+                    summary["monitor_repaired_market_closed_pending_exit_hold"] = (
+                        summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
+                    )
+                else:
+                    summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
+                    continue
             if is_exit_cooldown_active(pos):
                 summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                 continue
@@ -4033,9 +4040,9 @@ def execute_monitoring_phase(
                     deferred_static_closed_market_info = closed_market_info
                     closed_market_info = None
             if closed_market_info is not None:
-                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+                from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_awaiting_settlement(
+                mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
@@ -4323,9 +4330,9 @@ def execute_monitoring_phase(
                 deferred_static_closed_market_info is not None
                 and not ExitContext._is_finite(getattr(exit_context, "best_bid", None))
             ):
-                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+                from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_awaiting_settlement(
+                mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(

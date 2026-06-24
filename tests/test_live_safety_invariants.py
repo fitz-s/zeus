@@ -3107,9 +3107,10 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
 
     assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert pos.state == "pending_exit"
-    assert pos.exit_state == "backoff_exhausted"
-    assert pos.exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+    assert pos.state == "day0_window"
+    assert pos.exit_state == ""
+    assert pos.exit_reason == ""
+    assert pos.last_exit_error == "MARKET_CLOSED_AWAITING_SETTLEMENT:clob_market_info"
     assert summary["monitor_skipped_closed_market_pending_settlement"] == 1
     assert "monitor_chain_missing" not in summary
     assert "monitor_incomplete_exit_context" not in summary

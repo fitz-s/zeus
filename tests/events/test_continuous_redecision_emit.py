@@ -1093,8 +1093,8 @@ def test_held_position_family_provider_excludes_closed_phases():
     }
 
 
-def test_held_position_family_provider_excludes_market_closed_pending_exit():
-    """Closed pending-exit rows wait for settlement; they must not refresh CLOB books."""
+def test_held_position_family_provider_includes_market_closed_hold_exposure():
+    """Market-closed rows with chain exposure remain held-family redecision inputs."""
 
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -1164,6 +1164,7 @@ def test_held_position_family_provider_excludes_market_closed_pending_exit():
     )
 
     assert _held_position_families(conn) == {
+        ("Seattle", "2026-06-19", "high"),
         ("Tokyo", "2026-06-21", "low"),
         ("Paris", "2026-06-20", "low"),
     }
