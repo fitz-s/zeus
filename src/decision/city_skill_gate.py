@@ -52,8 +52,6 @@ DEFAULT_SKILL_FLOOR: float = 0.0
 DEFAULT_POSTERIOR_VERSION: str = "openmeteo_ecmwf_ifs9_bayes_fusion"
 
 _CITY_SKILL_GATE_PATH: str = "state/city_skill_gate.json"
-_CITY_SKILL_GATE_LIVE_ENV: str = "ZEUS_CITY_SKILL_GATE_LIVE"
-
 _ARTIFACT_CACHE: Optional[dict] = None
 _ARTIFACT_LOADED: bool = False
 
@@ -194,11 +192,12 @@ def confirmed_blocked_cities(*, artifact: Optional[Mapping] = None) -> list[str]
 
 
 # ---------------------------------------------------------------------------
-# Seam helper (flag-gated; DEFAULT OFF — does NOT change live behavior).
+# Seam helper.
 # ---------------------------------------------------------------------------
 
 def city_skill_gate_live_enabled() -> bool:
-    return os.environ.get(_CITY_SKILL_GATE_LIVE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    """Compatibility seam: city-skill gating is direct when this helper is called."""
+    return True
 
 
 def city_skill_gate_admits(
@@ -207,11 +206,11 @@ def city_skill_gate_admits(
     artifact: Optional[Mapping] = None,
     expected_posterior_version: str = DEFAULT_POSTERIOR_VERSION,
 ) -> bool:
-    """The seam boolean: True = this city may emit new entries. DEFAULT OFF -> always True (no-op)
-    so wiring it into the admission path is inert until the orchestrator promotes the artifact and
-    flips ``ZEUS_CITY_SKILL_GATE_LIVE``. When LIVE: returns the gate's admit decision (fail-closed)."""
-    if not city_skill_gate_live_enabled():
-        return True
+    """The seam boolean: True = this city may emit new entries.
+
+    Directly returns the artifact-backed gate's admit decision. Missing/malformed/stale/unknown-city
+    artifacts fail closed in ``apply_city_skill_gate``.
+    """
     return apply_city_skill_gate(
         city=city, artifact=artifact, expected_posterior_version=expected_posterior_version
     ).admit

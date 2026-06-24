@@ -584,7 +584,7 @@ def apply_selection_calibrator(
 
 
 # ---------------------------------------------------------------------------
-# Seam integration helper (flag-gated; DEFAULT OFF — does NOT change live behavior).
+# Seam integration helper (live entry guard).
 # ---------------------------------------------------------------------------
 #
 # The live admission seam in src/engine/event_reactor_adapter.py builds, per candidate side, a robust
@@ -602,19 +602,19 @@ def apply_selection_calibrator(
 #         raw_side_prob=1.0 - q_yes, prior_lcb=no_lcb, side="NO", lead_days=<lead>, bin_class=<...>,
 #     )
 #
-# It returns the calibrated lower bound when the calibrator LICENSES the cell, 0.0 (no-trade) when it
-# fails closed, and — by DEFAULT (flag OFF) — the unchanged ``prior_lcb`` so wiring it in is a no-op
-# until the orchestrator flips the flag AFTER forward-validation promotes the artifact. This keeps
-# the build inert in the live tree (no deploy, no entry-pause change) while shipping the exact seam.
-
-# Live activation flag. DEFAULT OFF -> the seam helper returns prior_lcb unchanged (no live change).
-# The orchestrator flips this (settings / env) ONLY after forward-validation promotes the artifact.
-_SELECTION_CALIBRATOR_LIVE_ENV: str = "ZEUS_SELECTION_CALIBRATOR_LIVE"
+# It returns the calibrated lower bound when the calibrator LICENSES the cell and 0.0 (no-trade)
+# when it fails closed. There is no shadow/default-off alias in the live seam: the artifact was
+# promoted to runtime and absence/staleness/thinness must block entries rather than silently falling
+# back to the raw center-bootstrap bound.
 
 
 def selection_calibrator_live_enabled() -> bool:
-    """Whether the calibrator is the LIVE admission lower bound. DEFAULT OFF (inert seam)."""
-    return os.environ.get(_SELECTION_CALIBRATOR_LIVE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    """Whether the calibrator is the LIVE admission lower bound.
+
+    The calibrator is now direct live runtime law. The function remains only as a compatibility seam
+    for older callers/tests that ask the question explicitly.
+    """
+    return True
 
 
 def selection_calibrated_side_lcb(
@@ -628,18 +628,14 @@ def selection_calibrated_side_lcb(
     artifact: Optional[Mapping] = None,
     expected_posterior_version: str = DEFAULT_POSTERIOR_VERSION,
 ) -> float:
-    """The seam value: the calibrated admission lower bound for ONE side, or a fail-closed 0.0.
+    """The seam value: the calibrated admission lower bound for ONE side, or fail-closed 0.0.
 
-    DEFAULT OFF (``selection_calibrator_live_enabled()`` False) -> returns ``prior_lcb`` UNCHANGED so
-    wiring this into the adapter is a no-op until the orchestrator promotes the artifact and flips the
-    flag. When LIVE: returns ``min(prior_lcb, q_safe)`` on a licensed cell (the calibrator can only
-    LOWER the served bound, never raise it — it is a guard, not a new probability authority), and 0.0
-    when the calibrator fails closed (absent/malformed/stale/thin/missing-cell) so the downstream
-    ``edge_lcb = lcb - cost`` is non-positive and the candidate is NOT admitted. NEVER falls back to
-    the raw center-bootstrap ``prior_lcb`` on a fail-closed verdict.
+    Returns ``min(prior_lcb, q_safe)`` on a licensed cell (the calibrator can only LOWER the served
+    bound, never raise it; it is a guard, not a new probability authority), and 0.0 when the
+    calibrator fails closed (absent/malformed/stale/thin/missing-cell) so downstream
+    ``edge_lcb = lcb - cost`` is non-positive and the candidate is NOT admitted. It never falls back
+    to raw center-bootstrap ``prior_lcb`` on a fail-closed verdict.
     """
-    if not selection_calibrator_live_enabled():
-        return float(prior_lcb)
     verdict = apply_selection_calibrator(
         raw_side_prob=raw_side_prob, side=side, lead_days=lead_days, bin_class=bin_class,
         admission_margin=admission_margin, artifact=artifact,

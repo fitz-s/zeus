@@ -209,37 +209,11 @@ class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
 
-    def test_flag_default_off(self, monkeypatch):
-        """The CODE default for the remaining-day q flag is OFF: when the
-        `edli.day0_remaining_day_q_enabled` key is absent, the resolver returns
-        False. Flag-OFF compatibility is the only place the legacy full-day path
-        may still run; flag-ON unavailable vectors must block the live Day0 q seam.
-
-        Test updated 2026-06-15: the original read the LIVE config value, which
-        the operator has since flipped ON (config/settings.json, commit b2c052f8
-        "day0 remaining-day q ON (shadow-only, operator-flipped)"). Asserting the
-        live value here is wrong — the flag is operator-controlled, not a fixed
-        default, and this suite must not depend on (nor implicitly police) the
-        operator's flag state. We assert the resolver's CODE default instead, by
-        removing the key from a copy of the edli settings block — the actual
-        invariant this test was written to guard.
-        """
-        import src.engine.event_reactor_adapter as era
+    def test_remaining_day_q_is_live_without_setting(self):
+        """Remaining-day q is live Day0 law; missing settings cannot restore full-day masked q."""
         from src.engine.event_reactor_adapter import _day0_remaining_day_q_enabled
 
-        edli_without_flag = {
-            k: v for k, v in dict(era.settings["edli"]).items()
-            if k != "day0_remaining_day_q_enabled"
-        }
-
-        class _ShimSettings:
-            def __getitem__(self, key):
-                if key == "edli":
-                    return edli_without_flag
-                return era.settings[key]
-
-        monkeypatch.setattr(era, "settings", _ShimSettings())
-        assert _day0_remaining_day_q_enabled() is False
+        assert _day0_remaining_day_q_enabled() is True
 
     def test_post_peak_members_clamp_to_running_max_floor(self, monkeypatch):
         """All remaining-hours extremes BELOW the running max -> every pooled
@@ -452,3 +426,38 @@ class TestRequestHashProvenance:
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         )
         assert n == 1 and captured["request_hash"] == "sha256:realhash"
+
+    def test_no_regional_model_uses_global_ecmwf_fallback(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+
+        assert hv.day0_hourly_models_for_city(_paris()) == ["ecmwf_ifs"]
+
+    def test_refresh_uses_global_ecmwf_fallback_when_no_regional_model(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        captured = {}
+
+        def fake_fetch(city, *, models=None, now=None):
+            captured["models"] = list(models or [])
+            return [_vector(model="ecmwf_ifs")], "sha256:globalhash"
+
+        def fake_persist(vectors, *, target_date, request_hash, **kw):
+            captured["request_hash"] = request_hash
+            captured["vector_models"] = [v.model for v in vectors]
+            return len(vectors)
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        n = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        )
+
+        assert n == 1
+        assert captured["models"] == ["ecmwf_ifs"]
+        assert captured["request_hash"] == "sha256:globalhash"
+        assert captured["vector_models"] == ["ecmwf_ifs"]

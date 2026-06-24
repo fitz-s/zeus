@@ -603,6 +603,40 @@ def test_held_marker_with_present_seed_still_suppresses(tmp_path) -> None:
     ) is True, "a held marker with a present (pending) seed must suppress re-enqueue (no churn)"
 
 
+def test_recent_held_marker_with_moved_seed_cools_down(tmp_path) -> None:
+    """COOLDOWN GUARD: a moved held seed is re-healable, but not every 5-minute poll tick.
+
+    This prevents one transient materialization failure from flooding seeds/failed with identical
+    same-scope same-cycle work. A genuinely old marker still heals; Day0 observation-version
+    advancement has its own immediate bypass.
+    """
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    moved_seed = tmp_path / "seeds_processed" / "PanamaCity.moved.json"
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('2999-06-21T06:05:00+00:00','PanamaCity','2026-06-22','high',
+                   '2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is True, "recent moved held seed must cool down before re-enqueue"
+
+    conn.execute(
+        "UPDATE cycle_advance_enqueues SET enqueued_at='2000-06-21T05:00:00+00:00'"
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is False, "old moved held seed must re-heal after cooldown"
+
+
 def test_nonheld_marker_with_moved_seed_still_suppresses(tmp_path) -> None:
     """SCOPE GUARD: the auto re-heal is for MONEY-AT-RISK held rows only. A non-held marker with a
     moved seed keeps the prior behavior (suppress) unless the caller explicitly opts in via

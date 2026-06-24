@@ -17,7 +17,8 @@
 These verify the INVARIANT that holds across the materializer -> live-gate boundary:
   - shadow accrual is ALWAYS preserved (a posterior row materializes even when fusion/fused-q
     fails), so the q-mode is the ONLY thing that gates live eligibility — not row existence.
-  - real submit is admitted IFF replacement_q_mode in {FUSED_NORMAL_FULL, FUSED_NORMAL_PARTIAL}
+  - real submit is admitted IFF replacement_q_mode is a live Normal carrier
+    {FUSED_NORMAL_FULL, FUSED_NORMAL_PARTIAL, ANCHOR_ONLY_CURRENT}
     (or a grandfathered fused_normal_direct row with no mode key).
   - the settlement sigma floor the EMOS path uses ALSO widens the fused-q sigma when present.
 """
@@ -178,6 +179,30 @@ def test_partial_mode_gate_admits(monkeypatch) -> None:
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is True
     assert mode == "FUSED_NORMAL_PARTIAL"
+
+
+def test_anchor_only_current_mode_gate_admits_with_bootstrap_bounds(monkeypatch) -> None:
+    """Missing BPF extras may still produce a live current-anchor Normal carrier.
+
+    This is not the legacy soft-anchor fallback: q_shape is the settlement-preimage Normal and
+    q_lcb/q_ucb use the same certified bootstrap basis as fused rows.
+    """
+    _disable_other_layers(monkeypatch)
+    _enable_fusion(monkeypatch)
+    _enable_fused_shape(monkeypatch)
+    conn = _conn()
+    _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
+
+    prov = _materialize_provenance(conn)
+    assert prov["replacement_q_mode"] == "ANCHOR_ONLY_CURRENT"
+    assert prov["q_shape"] == "fused_normal_direct"
+    assert prov["capture_status"] == "ANCHOR_ONLY_CURRENT"
+    assert prov["q_lcb_basis"] == "fused_center_bootstrap_p05"
+    assert prov["bayes_precision_fusion"]["method"] == "anchor_only_current"
+
+    eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
+    assert eligible is True
+    assert mode == "ANCHOR_ONLY_CURRENT"
 
 
 def test_grandfathered_fused_row_without_mode_key_rejected() -> None:
@@ -348,8 +373,8 @@ def _check_live_gate(bundle) -> tuple[bool, str]:
         return False, f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{q_mode}"
     prov = getattr(bundle, "provenance_json", None) or {}
     q_shape = str(prov.get("q_shape") if isinstance(prov, Mapping) else "")
-    # Second gate: bounds required for fused_normal_direct shape rows that passed the first gate.
-    needs_bounds = q_shape == "fused_normal_direct"
+    # Second gate: bounds required for every live-eligible mode that passed the first gate.
+    needs_bounds = q_mode in {"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL", "ANCHOR_ONLY_CURRENT"}
     if needs_bounds:
         qlcb = getattr(bundle, "q_lcb", None) or {}
         qucb = getattr(bundle, "q_ucb", None) or {}
@@ -457,3 +482,29 @@ def test_happy_path_full_mode_with_bounds_passes_both_gates() -> None:
     eligible, reason = _check_live_gate(bundle)
     assert eligible is True
     assert reason == "OK"
+
+
+def test_anchor_only_current_requires_bounds_in_second_gate() -> None:
+    prov = {
+        "q_shape": "fused_normal_direct",
+        "replacement_q_mode": "ANCHOR_ONLY_CURRENT",
+        "q_lcb_basis": None,
+    }
+    bundle = _BundleStubWithBounds(prov, q_lcb=None, q_ucb=None)
+    eligible, reason = _check_live_gate(bundle)
+    assert eligible is False
+    assert "FUSED_NORMAL_BOUNDS_MISSING" in reason
+
+    prov_ok = {
+        "q_shape": "fused_normal_direct",
+        "replacement_q_mode": "ANCHOR_ONLY_CURRENT",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+    }
+    bundle_ok = _BundleStubWithBounds(
+        prov_ok,
+        q_lcb={"bin_25": 0.12},
+        q_ucb={"bin_25": 0.2},
+    )
+    eligible_ok, reason_ok = _check_live_gate(bundle_ok)
+    assert eligible_ok is True
+    assert reason_ok == "OK"

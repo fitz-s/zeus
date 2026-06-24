@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.data.replacement_forecast_readiness import SOURCE_ID
@@ -50,6 +50,7 @@ _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
 UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
+_HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
 
 
 def _parse_cycle(value: object) -> datetime | None:
@@ -82,6 +83,14 @@ def consumed_cycle_dt(value: str) -> datetime:
     if parsed is None:
         raise ValueError(f"unparseable consumed cycle: {value!r}")
     return parsed
+
+
+def _fresh_enough_to_retry_held_reheal(enqueued_at: object, *, now: datetime | None = None) -> bool:
+    """Bound same-scope held re-heal retries so one failed materialization cannot flood the queue."""
+    parsed = _parse_cycle(enqueued_at)
+    if parsed is None:
+        return True
+    return (now or datetime.now(tz=UTC)).astimezone(UTC) - parsed >= _HELD_REHEAL_COOLDOWN
 
 
 def _per_leg_max_cycle(conn: sqlite3.Connection, source_id: str) -> datetime | None:
@@ -287,7 +296,7 @@ def _already_enqueued(
     try:
         row = conn.execute(
             """
-            SELECT seed_file, reason, held_position, day0_observed_extreme_observation_time
+            SELECT seed_file, reason, held_position, day0_observed_extreme_observation_time, enqueued_at
             FROM cycle_advance_enqueues
             WHERE city = ? AND target_date = ? AND metric = ? AND target_cycle_time = ?
             LIMIT 1
@@ -322,6 +331,14 @@ def _already_enqueued(
     # (posterior present) never reaches here to churn; a still-PRESENT pending seed also suppresses.
     held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
     if (allow_missing_seed_file_reenqueue or held) and seed_file and not Path(seed_file).exists():
+        # A moved seed file is normal after the queue processed it. Re-enqueueing immediately every
+        # poll tick creates a live backlog of identical failed work. Only Day0 observation-version
+        # advancement bypasses this cooldown above; otherwise retry the same scope/cycle after the
+        # cooling period or when a newer model cycle changes the idempotency key.
+        if held and not allow_missing_seed_file_reenqueue:
+            enqueued_at = row["enqueued_at"] if hasattr(row, "keys") else row[4]
+            if not _fresh_enough_to_retry_held_reheal(enqueued_at):
+                return True
         return False
     return True
 

@@ -78,6 +78,7 @@ UTC = timezone.utc
 # ---------------------------------------------------------------------------
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
+REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
 REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
@@ -100,6 +101,7 @@ REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL = "FUSED_CENTER_ONLY_NORMAL"
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
 REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
+REPLACEMENT_CAPTURE_STATUS_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
@@ -227,7 +229,11 @@ def _replacement_is_live_layer(
 ) -> bool:
     """True only for the exact live q carrier."""
     live_q_carrier = (
-        replacement_q_mode in {REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+        replacement_q_mode in {
+            REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+            REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL,
+            REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT,
+        }
         and q_lcb_map is not None
         and q_ucb_map is not None
         and q_lcb_basis == _QLCB_BASIS
@@ -1007,6 +1013,62 @@ class _BayesPrecisionFusionFusionOverride:
     cold_start_excluded_models: tuple[str, ...] = ()
 
 
+def _anchor_only_current_override(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    anchor_value_corrected_c: float,
+) -> _BayesPrecisionFusionFusionOverride | None:
+    """Current-cycle anchor-only carrier used when BPF extras are temporarily absent.
+
+    This is not the legacy soft-anchor/member-vote fallback. It keeps the live posterior on the
+    same settlement-preimage Normal + certified bootstrap q_lcb seam as fused rows, but records
+    that only the current OM9 anchor was available. The wider ``anchor_sigma_c`` is used as both
+    predictive spread and center uncertainty, making the lower bound conservative until extras heal.
+    """
+    sigma = float(request.anchor_sigma_c)
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        return None
+    return _BayesPrecisionFusionFusionOverride(
+        anchor_value_c=float(anchor_value_corrected_c),
+        anchor_sigma_c=sigma,
+        method="anchor_only_current",
+        used_models=("openmeteo_ecmwf_ifs9_anchor",),
+        model_set_hash=_json_hash(["openmeteo_ecmwf_ifs9_anchor"]),
+        resolution_mix_hash=_json_hash({"models": ["openmeteo_ecmwf_ifs9_anchor"], "regional": []}),
+        lead_bucket="anchor_only",
+        dropped_models=(),
+        excluded_regionals=(),
+        dropped_aliases=(),
+        raw_model_forecast_ids=(),
+        anchor_bridge=None,
+        predictive_sigma_c=sigma,
+        decorrelated_providers_complete=False,
+        decorrelated_providers_served=1,
+        decorrelated_providers_expected=1,
+        current_value_serving=None,
+        precision_center_basis={
+            "openmeteo_ecmwf_ifs9_anchor": {
+                "raw_m2": float("nan"),
+                "n": 0.0,
+                "repr_m2": 0.0,
+                "weight": 1.0,
+            }
+        },
+        precision_basis_hash=_json_hash(
+            {
+                "openmeteo_ecmwf_ifs9_anchor": {
+                    "raw_m2": None,
+                    "n": 0,
+                    "repr_m2": 0.0,
+                    "weight": 1.0,
+                }
+            }
+        ),
+        cold_start_excluded_models=(),
+    )
+
+
 @dataclass(frozen=True)
 class _PosteriorComputeResult:
     """The pure (no-DB-write) product of the posterior compute.
@@ -1214,20 +1276,27 @@ def _replacement_bayes_precision_fusion_override(
         # An explicitly-assigned _live_fetch is honored ONLY as a per-model override seam for
         # models WITHOUT a persisted current row (legacy/test injection). It is never consulted
         # when the persisted row exists. It does NOT defeat the missing-capture gate: when the
-        # persisted capture is entirely absent the q path falls back to single-anchor regardless,
-        # because B5 forbids building the traded q from any non-persisted current value.
+        # persisted capture is entirely absent the q path serves the current OM9 anchor through
+        # the same settlement-preimage Normal + bootstrap-q_lcb carrier, because B5 forbids
+        # building the traded q from any non-persisted network value.
         injected_live_fetch = getattr(_replacement_bayes_precision_fusion_override, "_live_fetch", None)
 
         if conn is not None and not persisted_current:
-            # Missing current capture on the live path -> single-anchor fallback + logged reason.
-            # NEVER a network fetch in the q path (the persisted download is the sole q source).
+            # Missing current capture on the live path -> explicit anchor-only current carrier +
+            # logged reason. NEVER a network fetch in the q path (the persisted download is the
+            # sole q source). This is not the legacy soft-anchor/member-vote fallback.
             import logging  # noqa: PLC0415
             logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                 "replacement_0_1 BAYES_PRECISION_FUSION fusion: persisted current single_runs capture MISSING for "
-                "%s %s %s lead=%s cycle=%s -> single-anchor fallback (no network fetch in q path)",
+                "%s %s %s lead=%s cycle=%s -> ANCHOR_ONLY_CURRENT live carrier "
+                "(no network fetch in q path)",
                 request.city, metric, target_date, lead_days, source_cycle_iso,
             )
-            return None
+            return _anchor_only_current_override(
+                request,
+                metric=metric,
+                anchor_value_corrected_c=anchor_value_corrected_c,
+            )
 
         # ARRIVAL GUARD inputs (C1-AVAIL-CLOCK, 2026-06-16): the honest per-model availability is
         # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer
@@ -2299,6 +2368,8 @@ def _compute_posterior_payload(
             # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
             if q_lcb_map is None or q_ucb_map is None:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING
+            elif bayes_precision_fusion_override.method == "anchor_only_current":
+                replacement_q_mode = REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT
             elif bayes_precision_fusion_override.decorrelated_providers_complete:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
@@ -2448,12 +2519,18 @@ def _compute_posterior_payload(
     # Derived from the SAME K3 completeness verdict the fusion computed (no parallel re-derivation):
     #   FULL_CURRENT     — override present AND all 5 decorrelated providers' current values served.
     #   PARTIAL_CURRENT  — override present but the decorrelated set was INCOMPLETE (count present).
-    #   STALE_HISTORY_ONLY — no fusion override at all (capture/fusion raised or current capture
-    #                        missing -> the legacy single-anchor q; no current multi-model capture).
+    #   ANCHOR_ONLY_CURRENT — BPF extras are absent/transport-limited, but the current OM9 anchor
+    #                         is served through the same Normal + bootstrap-q_lcb carrier.
+    #   STALE_HISTORY_ONLY — no current live carrier could be built.
     # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
-    if bayes_precision_fusion_override is None:
+    if (
+        bayes_precision_fusion_override is not None
+        and bayes_precision_fusion_override.method == "anchor_only_current"
+    ):
+        capture_status = REPLACEMENT_CAPTURE_STATUS_ANCHOR_ONLY_CURRENT
+    elif bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
     elif bayes_precision_fusion_override.decorrelated_providers_complete:
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT

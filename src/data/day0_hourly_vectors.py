@@ -58,6 +58,7 @@ DAY0_HOURLY_MODELS: tuple[str, ...] = (
     "ukmo_uk_deterministic_2km",
     "ncep_nbm_conus",
 )
+GLOBAL_DAY0_HOURLY_FALLBACK_MODELS: tuple[str, ...] = ("ecmwf_ifs",)
 
 DAY0_VECTOR_RETENTION_DAYS = 3.0
 DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-ish
@@ -116,6 +117,21 @@ def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_
         return []
 
 
+def day0_hourly_models_for_city(city: Any) -> list[str]:
+    """Live Day0 remaining-day hourly model set for a city.
+
+    Regional high-resolution models are preferred when the domain gate admits at least one. Global
+    ECMWF IFS 9km is the universal fallback, matching the replacement forecast anchor source already
+    used by the live probability chain. Without this fallback, cities outside the regional polygons
+    enter the Day0 evaluator and then fail at ``DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`` forever.
+    """
+
+    regional = in_domain_models_for_city(city)
+    if regional:
+        return regional
+    return list(GLOBAL_DAY0_HOURLY_FALLBACK_MODELS)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_TABLE_DDL)
     conn.execute(_INDEX_DDL)
@@ -166,7 +182,7 @@ def fetch_day0_hourly_vectors(
     """
     from src.data.openmeteo_client import fetch
 
-    chosen = models if models is not None else in_domain_models_for_city(city)
+    chosen = models if models is not None else day0_hourly_models_for_city(city)
     if not chosen:
         return [], ""
     captured_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
@@ -479,7 +495,7 @@ def maybe_refresh_day0_hourly_vectors(
                 continue
             _LAST_REFRESH_MONOTONIC[name] = now_monotonic
         try:
-            models = in_domain_models_for_city(city)
+            models = day0_hourly_models_for_city(city)
             if not models:
                 continue
             tz = ZoneInfo(str(getattr(city, "timezone")))

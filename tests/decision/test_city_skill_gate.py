@@ -107,14 +107,13 @@ def test_fail_closed_malformed_cell():
     assert v.basis == "FAIL_CLOSED_MALFORMED"
 
 
-def test_seam_helper_default_off_is_noop(monkeypatch):
+def test_seam_helper_applies_gate_without_env_flag(monkeypatch):
     monkeypatch.delenv("ZEUS_CITY_SKILL_GATE_LIVE", raising=False)
-    # Flag OFF -> the seam helper licenses everything (no-op; wiring it in changes nothing live).
-    assert g.city_skill_gate_admits(city="Karachi", artifact=_artifact({"Karachi": {"prior_skill": -0.3, "prior_n": 9}})) is True
+    assert g.city_skill_gate_live_enabled() is True
+    assert g.city_skill_gate_admits(city="Karachi", artifact=_artifact({"Karachi": {"prior_skill": -0.3, "prior_n": 9}})) is False
 
 
-def test_seam_helper_live_blocks_bad_city(monkeypatch):
-    monkeypatch.setenv("ZEUS_CITY_SKILL_GATE_LIVE", "1")
+def test_seam_helper_blocks_bad_city():
     art = _artifact({"Karachi": {"prior_skill": -0.3, "prior_n": 9}})
     assert g.city_skill_gate_admits(city="Karachi", artifact=art) is False
     art2 = _artifact({"Tokyo": {"prior_skill": 0.06, "prior_n": 7}})

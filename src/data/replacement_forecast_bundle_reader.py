@@ -40,10 +40,12 @@ _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 #
 # A posterior is live-grade iff the row itself is in runtime_layer == "live",
 # carries certified bounds (q_lcb_json/q_ucb_json NOT NULL), and its provenance
-# replacement_q_mode is one of the fused-Normal modes. Mirrored here so LIVE
+# replacement_q_mode is one of the live Normal carrier modes. Mirrored here so LIVE
 # selection can prefer the latest live row WITHOUT importing the adapter
 # (no cycle); the constant set is asserted equal in a relationship test.
-_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset({"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"})
+_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
+    {"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL", "ANCHOR_ONLY_CURRENT"}
+)
 
 # H3 (REAUDIT_0_1.md §2): fail-closed staleness horizon. ``readiness.expires_at``
 # was loaded but NEVER compared to decision_time; a forecast cycle this many hours

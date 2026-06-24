@@ -12460,23 +12460,30 @@ def _live_yes_probabilities(
 
 # FIX 1 (2026-06-09) — replacement q-mode live eligibility gate. The materializer derives an
 # explicit `replacement_q_mode` into provenance_json (FUSED_NORMAL_FULL/PARTIAL,
-# SOFT_ANCHOR_FALLBACK, BAYES_PRECISION_FUSION_CAPTURE_MISSING, FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY
-# for the two fused-Normal modes (the constructed Normal shape the release evidence assumes).
+# ANCHOR_ONLY_CURRENT, SOFT_ANCHOR_FALLBACK, BAYES_PRECISION_FUSION_CAPTURE_MISSING,
+# FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY for live Normal carriers with certified
+# q_lcb/q_ucb; this excludes legacy member-vote fallback while letting current-anchor rows keep
+# redecision live when extras are temporarily unavailable.
 # This kills the silent-degradation category: a row that fell back to the legacy member-vote
 # soft-anchor q (or had no fusion at all) must NOT size live Kelly under the wrong probability
 # regime just because all flags were on.
 _REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
+_REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
-    {_REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+    {
+        _REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+        _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL,
+        _REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT,
+    }
 )
 
 
 def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
     """Return (live_eligible, mode) for a replacement posterior bundle. Fail-closed.
 
-    Reads provenance_json.replacement_q_mode. Eligible ONLY for the two fused-Normal modes
-    (FUSED_NORMAL_FULL / FUSED_NORMAL_PARTIAL). No grandfather clause.
+    Reads provenance_json.replacement_q_mode. Eligible only for live Normal carrier modes
+    (FUSED_NORMAL_FULL / FUSED_NORMAL_PARTIAL / ANCHOR_ONLY_CURRENT). No grandfather clause.
 
     GRANDFATHER REVOKED (operator directive 2026-06-10 P0): the former q_shape=="fused_normal_direct"
     grandfather branch that returned (True, "FUSED_NORMAL_GRANDFATHERED") has been DELETED. Old DB
@@ -13080,8 +13087,8 @@ def _replacement_authority_probability_and_fdr_proof(
     if provenance_capture is not None:
         provenance_capture["replacement_bundle"] = replacement_bundle
     # FIX 1 (2026-06-09) — q-mode live eligibility gate. Real submit is allowed ONLY when the
-    # replacement posterior's q was built as a fused-Normal (FUSED_NORMAL_FULL/PARTIAL, or a
-    # grandfathered q_shape=="fused_normal_direct" row). Every other mode (soft-anchor fallback,
+    # replacement posterior's q was built as a live Normal carrier
+    # (FUSED_NORMAL_FULL/PARTIAL or ANCHOR_ONLY_CURRENT). Every other mode (soft-anchor fallback,
     # capture missing, fused-q build failed, or a legacy non-fused row without the key) is a
     # deterministic no-submit: the row sizes Kelly under a DIFFERENT probability regime than the
     # release evidence assumes. Raising here becomes a LIVE_INFERENCE_INPUTS_MISSING no-submit
@@ -13095,8 +13102,8 @@ def _replacement_authority_probability_and_fdr_proof(
     # BEFORE the fix (which have FULL/PARTIAL mode but NULL q_lcb_json / q_ucb_json) and any
     # future code path that might set a live-eligible mode without writing bounds.
     #
-    # Requirement: when q_shape=="fused_normal_direct" the bundle MUST carry BOTH q_lcb and q_ucb
-    # as non-empty mappings AND q_lcb_basis must equal the fused-center bootstrap marker.
+    # Requirement: every live-eligible Normal carrier MUST carry BOTH q_lcb and q_ucb as non-empty
+    # mappings AND q_lcb_basis must equal the fused-center bootstrap marker.
     # Absent/mismatched => reject with FUSED_NORMAL_BOUNDS_MISSING.
     #
     # NOTE: grandfathered rows (q_shape="fused_normal_direct", no mode key) are now rejected by the
@@ -13107,7 +13114,7 @@ def _replacement_authority_probability_and_fdr_proof(
     _q_shape_for_bounds = str(
         _prov_bounds_check.get("q_shape") if isinstance(_prov_bounds_check, Mapping) else ""
     )
-    _needs_bounds = _q_shape_for_bounds == "fused_normal_direct"
+    _needs_bounds = _q_mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
     if _needs_bounds:
         _bundle_q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
         _bundle_q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
@@ -14509,8 +14516,8 @@ def _market_analysis_from_event_snapshot(
             )
             p_cal = np.asarray(p_raw, dtype=float)
     else:
-        # === DAY0 REMAINING-DAY MODE (review 2026-06-10 item B, flag-gated OFF) ===
-        # When enabled and fresh high-res hourly vectors are persisted for this family
+        # === DAY0 REMAINING-DAY MODE (review 2026-06-10 item B, live) ===
+        # When fresh hourly vectors are persisted for this family
         # (day0_hourly_vectors lane), the member array becomes the pooled per-model
         # REMAINING-day extremes (hours >= now, city-local), clamped to the absorbing
         # physical law (HIGH: max(model_remaining, running max)). This prices
@@ -16290,19 +16297,13 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
 
 
 def _day0_remaining_day_q_enabled() -> bool:
-    """REMAINING-DAY q mode flag (review 2026-06-10 item B). Default FALSE.
+    """REMAINING-DAY q mode is live Day0 pricing law.
 
-    Unlike the conservative-only guards (boundary suppression, anomaly pause,
-    bootstrap LCB), this CHANGES the day0 point q in both directions (it can
-    RAISE q for the bin containing the running extreme post-peak). When this is
-    enabled, missing/unavailable remaining-day vectors are a live input fault:
-    the Day0 q path blocks instead of falling back to the legacy full-day-masked
-    distribution.
+    This changes the day0 point q in both directions (it can raise q for the bin containing the
+    running extreme post-peak). Missing/unavailable remaining-day vectors are a live input fault:
+    the Day0 q path blocks instead of falling back to the legacy full-day-masked distribution.
     """
-    try:
-        return bool(settings["edli"].get("day0_remaining_day_q_enabled", False))
-    except Exception:
-        return False
+    return True
 
 
 def _day0_remaining_day_members(

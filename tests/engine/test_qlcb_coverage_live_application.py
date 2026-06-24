@@ -75,7 +75,7 @@ def _patch_per_day_claims(monkeypatch, claims_by_date):
     monkeypatch.setattr(
         adapter,
         "_per_day_claimed_qlcb_by_date",
-        lambda *, city, metric, direction, band_template: dict(claims_by_date),
+        lambda *, city, metric, direction, band_template, coverage_cache=None: dict(claims_by_date),
     )
 
 

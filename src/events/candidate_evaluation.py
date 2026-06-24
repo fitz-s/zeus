@@ -61,11 +61,10 @@ class CandidateEvaluation:
     maker_fill_probability_source: str | None = None
     support_index: int | None = None
     bin_id: str | None = None
-    # Live-path wiring of the selection-calibrator + city-skill gate (2026-06-22; team-lead). ALL
-    # OPTIONAL (default None) so NO existing construction site breaks and DEFAULT-OFF behavior is
-    # byte-identical. ``city`` enables the per-city skill gate + shadow log; the artifacts are
-    # injected by the caller (else the live serving rules load them from state/). ``lead_days`` /
-    # ``bin_class`` shape the calibrator cell; both have safe defaults.
+    # Live-path wiring of the selection calibrator. ``lead_days`` / ``bin_class`` shape the
+    # calibrated entry cell; the artifact is loaded from state/ unless injected by tests/callers.
+    # The city-skill fields are retained for explicit artifact-backed stable-bad blocking only; no
+    # artifact means the city-skill selector is not in the execution path.
     city: str | None = None
     target_date: str | None = None
     decision_time: str | None = None
@@ -175,8 +174,7 @@ class CandidateEvaluation:
 
     @property
     def calibrated_admission_q_lcb(self) -> float:
-        """The admission q_lcb after the selection-calibrator deflation. DEFAULT OFF
-        (``ZEUS_SELECTION_CALIBRATOR_LIVE`` unset) -> the raw ``q_lcb_5pct`` unchanged."""
+        """The live admission q_lcb after selection-calibrator deflation."""
         from src.strategy.live_inference.live_admission import selection_calibrated_admission_q_lcb
 
         return selection_calibrated_admission_q_lcb(
@@ -192,16 +190,14 @@ class CandidateEvaluation:
 
     @property
     def selection_calibrator_admissible(self) -> bool:
-        """The calibrator-deflated q_lcb must still clear the execution price (edge_lcb > 0). DEFAULT
-        OFF -> the deflated q_lcb == raw q_lcb_5pct so this is the existing edge check (no change)."""
+        """The calibrator-deflated q_lcb must still clear the execution price (edge_lcb > 0)."""
         if self.execution_price is None:
             return True
         return float(self.calibrated_admission_q_lcb) > float(self.execution_price)
 
     @property
     def city_skill_block_reason(self) -> str | None:
-        """A rejection reason when the candidate's city is a confirmed temporally-stable loser.
-        DEFAULT OFF (``ZEUS_CITY_SKILL_GATE_LIVE`` unset) -> None."""
+        """A rejection reason when an explicit artifact marks the city stable-bad."""
         from src.strategy.live_inference.live_admission import city_skill_block_rejection_reason
 
         return city_skill_block_rejection_reason(
@@ -215,9 +211,7 @@ class CandidateEvaluation:
         return self.city_skill_block_reason is None
 
     def shadow_log(self, *, path: str | None = None) -> bool:
-        """Record this candidate's would-admit decision to the shadow log (accrual). DEFAULT OFF
-        (``ZEUS_SHADOW_ADMIT_LOG`` unset) -> no-op. Fail-soft. Call at EVERY evaluation, admitted or
-        not, so the would-admit population accrues."""
+        """Record this candidate to the optional observational admit log."""
         from src.strategy.live_inference.live_admission import shadow_log_admission
 
         return shadow_log_admission(
@@ -250,7 +244,6 @@ class CandidateEvaluation:
             and self.live_lcb_consistency_admissible
             and self.live_capital_efficiency_admissible
             and self.live_buy_no_conservative_evidence_admissible
-            # Live-path wiring (2026-06-22; flag-gated default OFF = no change):
             and self.selection_calibrator_admissible
             and self.city_skill_admissible
         )

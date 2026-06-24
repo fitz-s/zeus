@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pytest
 
+from src.control import live_health
 from src.control.live_health import compute_composite_live_health, STATUS_FRESH_BUDGET_SECONDS
 
 
@@ -167,8 +168,11 @@ def test_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["heartbeat"]["ok"] is True
 
 
-def test_mode_specific_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
+def test_mode_specific_run_mode_failed_yields_degraded_in_legacy_cron(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """_run_mode catches exceptions, so mode-specific failure is the authority."""
+    monkeypatch.setattr(live_health, "_live_execution_mode", lambda: "legacy_cron")
     sd = tmp_path / "state"
     sd.mkdir()
     cycle_time = _now_iso(-30)
@@ -207,6 +211,28 @@ def test_mode_specific_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["run_mode"]["issue"] == (
         "RUN_MODE_FAILED[run_mode:opening_hunt]: exchange reconcile stuck"
     )
+
+
+def test_legacy_run_mode_failure_ignored_in_edli_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """edli_live does not register legacy cron run_mode jobs; stale rows are not live evidence."""
+    monkeypatch.setattr(live_health, "_live_execution_mode", lambda: "edli_live")
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    scheduler = json.loads((sd / "scheduler_jobs_health.json").read_text())
+    scheduler["run_mode:day0_capture"] = {
+        "status": "FAILED",
+        "last_run_at": "2026-06-14T00:47:10+00:00",
+        "last_failure_reason": "legacy cron stale row",
+    }
+    _write(sd / "scheduler_jobs_health.json", scheduler)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["surfaces"]["run_mode"]["ok"] is True
+    assert "run_mode" not in result["failing_surfaces"]
 
 
 def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) -> None:
