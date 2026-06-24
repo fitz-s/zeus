@@ -234,6 +234,11 @@ def acquire_rebalance_lease(
     or None when an ACTIVE lease already holds the family (the partial-unique index
     collision — caller MUST no-op, never emit a second order)."""
 
+    _release_shift_unknown_without_durable_command(
+        conn,
+        family_key=family_key,
+        now_iso=now_iso,
+    )
     intent_id = str(uuid.uuid4())
     try:
         conn.execute(
@@ -259,6 +264,78 @@ def acquire_rebalance_lease(
         # An ACTIVE lease already holds this family — fail closed (no second order).
         return None
     return intent_id
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _shift_exit_command_exists(conn: sqlite3.Connection, held_position_id: str | None) -> bool | None:
+    """Return None when command truth is unavailable, else whether a command exists."""
+
+    if not str(held_position_id or "").strip():
+        return False
+    try:
+        if not _table_exists(conn, "venue_commands"):
+            return None
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands
+             WHERE decision_id = ?
+               AND intent_kind = 'EXIT'
+             LIMIT 1
+            """,
+            (f"shift_bin_exit:{str(held_position_id).strip()}",),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return None
+
+
+def _release_shift_unknown_without_durable_command(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+    now_iso: str,
+) -> int:
+    """Release stale SHIFT_BIN EXIT_UNKNOWN leases only when command truth proves no side effect."""
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT intent_id, held_position_id
+              FROM family_rebalance_intents
+             WHERE family_key = ?
+               AND operation = 'SHIFT_BIN'
+               AND status = 'EXIT_UNKNOWN'
+               AND COALESCE(old_exit_command_id, '') = ''
+             ORDER BY updated_at DESC
+            """,
+            (family_key,),
+        ).fetchall()
+    except sqlite3.Error:
+        return 0
+    released = 0
+    for row in rows:
+        intent_id = row["intent_id"] if isinstance(row, sqlite3.Row) else row[0]
+        held_position_id = row["held_position_id"] if isinstance(row, sqlite3.Row) else row[1]
+        command_exists = _shift_exit_command_exists(conn, held_position_id)
+        if command_exists is not False:
+            continue
+        advance_rebalance_lease(
+            conn,
+            str(intent_id),
+            status="ABORTED",
+            now_iso=now_iso,
+            abort_reason="SHIFT_BIN_EXIT_UNKNOWN_NO_DURABLE_COMMAND_RECOVERED",
+        )
+        released += 1
+    return released
 
 
 def advance_rebalance_lease(

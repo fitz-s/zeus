@@ -1223,6 +1223,31 @@ def _read_old_leg_exit_inputs(
     return shares, current_price, best_bid, dict(snap_ctx)
 
 
+def _shift_exit_has_durable_command(
+    conn: sqlite3.Connection | None,
+    *,
+    decision_id: str,
+) -> bool:
+    if conn is None or not str(decision_id or "").strip():
+        return False
+    try:
+        if not _adapter_table_exists(conn, "venue_commands"):
+            return False
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands
+             WHERE decision_id = ?
+               AND intent_kind = 'EXIT'
+             LIMIT 1
+            """,
+            (str(decision_id),),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+
+
 def _submit_shift_bin_old_leg_exit(
     conn: sqlite3.Connection,
     *,
@@ -1250,6 +1275,7 @@ def _submit_shift_bin_old_leg_exit(
     now_iso = decision_time.isoformat() if hasattr(decision_time, "isoformat") else str(decision_time)
     if not (intent_id and old_position_id and old_token_id):
         return
+    decision_id = f"shift_bin_exit:{old_position_id}"
     inputs = _read_old_leg_exit_inputs(conn, old_token_id=old_token_id)
     if inputs is None:
         # Old leg not readable / already closed / no seed price — leave the lease in
@@ -1269,16 +1295,24 @@ def _submit_shift_bin_old_leg_exit(
             executable_snapshot_min_tick_size=snap_ctx.get("executable_snapshot_min_tick_size"),
             executable_snapshot_min_order_size=snap_ctx.get("executable_snapshot_min_order_size"),
             executable_snapshot_neg_risk=snap_ctx.get("executable_snapshot_neg_risk"),
-            decision_id=f"shift_bin_exit:{old_position_id}",
+            decision_id=decision_id,
         )
     except Exception as exc:  # noqa: BLE001 — venue boundary unknown → block the family.
-        _shift_bin_wiring.record_exit_submitted(
-            conn, intent_id, now_iso=now_iso, status="EXIT_UNKNOWN",
-        )
+        reason = f"SHIFT_BIN_EXIT_EXCEPTION:{type(exc).__name__}:{exc}"
+        lease_status = "EXIT_UNKNOWN"
+        if not _shift_exit_has_durable_command(conn, decision_id=decision_id):
+            _shift_bin_wiring.abort_shift_bin_lease(
+                conn, intent_id, now_iso=now_iso, reason=f"{reason}:NO_DURABLE_COMMAND"
+            )
+            lease_status = "ABORTED_NO_DURABLE_COMMAND"
+        else:
+            _shift_bin_wiring.record_exit_submitted(
+                conn, intent_id, now_iso=now_iso, status="EXIT_UNKNOWN", reason=reason
+            )
         import logging as _logging
         _logging.getLogger(__name__).warning(
-            "SHIFT_BIN old-leg exit raised (treated as EXIT_UNKNOWN): %s: %s",
-            type(exc).__name__, exc,
+            "SHIFT_BIN old-leg exit raised (lease_status=%s): %s: %s",
+            lease_status, type(exc).__name__, exc,
         )
         return
     status = str(getattr(result, "status", "") or "")
@@ -1289,10 +1323,18 @@ def _submit_shift_bin_old_leg_exit(
             old_exit_command_id=command_id or None, status="EXIT_SUBMITTED",
         )
     elif status == "unknown_side_effect":
-        _shift_bin_wiring.record_exit_submitted(
-            conn, intent_id, now_iso=now_iso,
-            old_exit_command_id=command_id or None, status="EXIT_UNKNOWN",
-        )
+        reason = str(getattr(result, "reason", "") or "unknown_side_effect")
+        if command_id or _shift_exit_has_durable_command(conn, decision_id=decision_id):
+            _shift_bin_wiring.record_exit_submitted(
+                conn, intent_id, now_iso=now_iso,
+                old_exit_command_id=command_id or None, status="EXIT_UNKNOWN",
+                reason=f"SHIFT_BIN_EXIT_UNKNOWN:{reason}",
+            )
+        else:
+            _shift_bin_wiring.abort_shift_bin_lease(
+                conn, intent_id, now_iso=now_iso,
+                reason=f"SHIFT_BIN_EXIT_UNKNOWN_NO_DURABLE_COMMAND:{reason}",
+            )
     else:
         # Clean pre-venue rejection (mutex held, collateral, snapshot gate, malformed
         # price, shares→0): no side effect. Release the lease for a legitimate retry.

@@ -589,6 +589,7 @@ def build_monitor_refreshed_canonical_write(
     exit_decision: Any | None = None,
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
+    final_exit_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
     if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
@@ -639,12 +640,17 @@ def build_monitor_refreshed_canonical_write(
             if final_exit_reason is not None
             else str(getattr(exit_decision, "reason", "") or "")
         )
+        trigger = (
+            str(final_exit_trigger)
+            if final_exit_trigger is not None
+            else str(getattr(exit_decision, "trigger", "") or "")
+        )
         payload_dict.update(
             {
                 "exit_decision_available": True,
                 "exit_decision_should_exit": should_exit,
                 "exit_decision_reason": reason,
-                "exit_decision_trigger": str(getattr(exit_decision, "trigger", "") or ""),
+                "exit_decision_trigger": trigger,
                 "exit_decision_urgency": str(getattr(exit_decision, "urgency", "") or ""),
                 "exit_decision_selected_method": str(
                     getattr(exit_decision, "selected_method", "") or ""

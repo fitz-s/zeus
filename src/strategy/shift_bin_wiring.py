@@ -389,6 +389,7 @@ def record_exit_submitted(
     now_iso: str,
     old_exit_command_id: Optional[str] = None,
     status: str = "EXIT_SUBMITTED",
+    reason: Optional[str] = None,
 ) -> None:
     """Record the old-leg exit command id on the lease and set the EXIT_* status.
 
@@ -400,6 +401,7 @@ def record_exit_submitted(
     advance_rebalance_lease(
         conn, intent_id, status=status, now_iso=now_iso,
         old_exit_command_id=old_exit_command_id,
+        abort_reason=reason,
     )
 
 

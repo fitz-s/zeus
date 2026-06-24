@@ -131,9 +131,10 @@ def test_unknown_side_effect_blocks_family(monkeypatch):
     )
     era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
     row = conn.execute(
-        "SELECT status FROM family_rebalance_intents WHERE intent_id=?", (intent,),
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?", (intent,),
     ).fetchone()
     assert row["status"] == "EXIT_UNKNOWN"  # block the family; reconciliation owns it
+    assert str(row["abort_reason"]).startswith("SHIFT_BIN_EXIT_UNKNOWN:")
 
 
 def test_clean_rejection_releases_lease(monkeypatch):
@@ -156,7 +157,7 @@ def test_clean_rejection_releases_lease(monkeypatch):
     assert "exit_mutex_held" in (row["abort_reason"] or "")
 
 
-def test_exit_raises_treated_as_unknown_block(monkeypatch):
+def test_exit_raises_without_durable_command_releases_for_retry(monkeypatch):
     conn = _conn()
     _insert_old_leg(conn)
     intent = _acquire_shift_lease(conn)
@@ -169,9 +170,11 @@ def test_exit_raises_treated_as_unknown_block(monkeypatch):
     monkeypatch.setattr(xl, "place_sell_order", _boom)
     era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
     row = conn.execute(
-        "SELECT status FROM family_rebalance_intents WHERE intent_id=?", (intent,),
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?", (intent,),
     ).fetchone()
-    assert row["status"] == "EXIT_UNKNOWN"  # venue boundary unknown → block, never enter
+    assert row["status"] == "ABORTED"
+    assert "NO_DURABLE_COMMAND" in (row["abort_reason"] or "")
+    assert "network blip at venue boundary" in (row["abort_reason"] or "")
 
 
 def test_old_leg_already_closed_leaves_lease_blocking(monkeypatch):

@@ -2782,6 +2782,7 @@ def _emit_monitor_refreshed_canonical_if_available(
     exit_decision=None,
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
+    final_exit_trigger: str | None = None,
 ) -> bool:
     if conn is None:
         return True
@@ -2803,6 +2804,7 @@ def _emit_monitor_refreshed_canonical_if_available(
             exit_decision=exit_decision,
             final_should_exit=final_should_exit,
             final_exit_reason=final_exit_reason,
+            final_exit_trigger=final_exit_trigger,
         )
         append_many_and_project(conn, events, projection)
     except Exception as exc:
@@ -2825,6 +2827,18 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
         "EDGE_REVERSAL",
     }
 )
+
+_FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
+_FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_FRACTION = 0.0025
+
+
+def _family_direct_sell_advantage_threshold_usd(sell_value: float) -> float:
+    if not math.isfinite(sell_value) or sell_value <= 0.0:
+        return _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD
+    return max(
+        _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD,
+        sell_value * _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_FRACTION,
+    )
 
 
 def _family_monitor_key(pos) -> tuple[str, str, str] | None:
@@ -2969,6 +2983,10 @@ def _apply_family_monitor_overlay(
     payload["family_hold_value_usd"] = hold_value
     payload["family_direct_sell_value_usd"] = sell_value
     payload["family_value_edge_usd"] = hold_value - sell_value
+    sell_advantage = sell_value - hold_value
+    sell_advantage_threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
+    payload["family_direct_sell_advantage_usd"] = sell_advantage
+    payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
         if hold_value + 1e-9 >= sell_value:
@@ -2983,12 +3001,31 @@ def _apply_family_monitor_overlay(
             )
             return False, "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
 
+    if (not should_exit) and sell_advantage > sell_advantage_threshold:
+        payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+        payload["promoted_exit_reason"] = exit_reason
+        setattr(pos, "_monitor_family_redecision", payload)
+        validations = list(getattr(pos, "applied_validations", []) or [])
+        validations.append("family_direct_sell_dominates_hold_exit")
+        pos.applied_validations = list(dict.fromkeys(validations))
+        summary["family_redecision_hold_exits_promoted"] = (
+            summary.get("family_redecision_hold_exits_promoted", 0) + 1
+        )
+        return True, "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+
     payload["decision"] = "FAMILY_OVERLAY_NO_OVERRIDE"
     setattr(pos, "_monitor_family_redecision", payload)
     summary["family_redecision_overlay_evaluated"] = (
         summary.get("family_redecision_overlay_evaluated", 0) + 1
     )
     return should_exit, exit_reason
+
+
+def _effective_exit_trigger(exit_decision, exit_reason: str) -> str:
+    original_reason = str(getattr(exit_decision, "reason", "") or "")
+    if exit_reason and exit_reason != original_reason:
+        return str(exit_reason)
+    return str(getattr(exit_decision, "trigger", "") or exit_reason or "")
 
 
 def _dual_write_canonical_entry_if_available(
@@ -4156,8 +4193,8 @@ def execute_monitoring_phase(
                     summary=summary,
                 )
 
+            exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
             if should_exit:
-                exit_trigger = exit_decision.trigger or exit_reason
                 gate_allowed, gate_reason = _exit_evidence_gate_allows_statistical_exit(
                     conn=conn,
                     pos=pos,
@@ -4188,6 +4225,7 @@ def execute_monitoring_phase(
                 exit_decision=exit_decision,
                 final_should_exit=should_exit,
                 final_exit_reason=exit_reason,
+                final_exit_trigger=exit_trigger,
             )
             if not monitor_canonical_written:
                 summary["monitor_canonical_write_failed"] = (
@@ -4237,7 +4275,7 @@ def execute_monitoring_phase(
             summary["monitors"] += 1
 
             if should_exit:
-                pos.exit_trigger = exit_decision.trigger or exit_reason
+                pos.exit_trigger = exit_trigger
                 pos.exit_reason = exit_reason
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h

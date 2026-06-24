@@ -156,6 +156,71 @@ def test_lease_intermediate_status_keeps_family_locked():
     assert second is None  # mid-flight rebalance still holds the family
 
 
+def test_shift_unknown_without_durable_command_releases_on_next_acquire():
+    from src.strategy.family_rebalance import acquire_rebalance_lease, advance_rebalance_lease
+
+    conn = _lease_conn()
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT
+        )
+        """
+    )
+    fk = "live|Shenzhen|2026-06-26|high"
+    first = acquire_rebalance_lease(
+        conn,
+        family_key=fk,
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="old-pos",
+    )
+    advance_rebalance_lease(conn, first, status="EXIT_UNKNOWN", now_iso="t1")
+
+    second = acquire_rebalance_lease(
+        conn,
+        family_key=fk,
+        operation="SHIFT_BIN",
+        now_iso="t2",
+        held_position_id="old-pos",
+    )
+
+    assert second is not None
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (first,),
+    ).fetchone()
+    assert row[0] == "ABORTED"
+    assert row[1] == "SHIFT_BIN_EXIT_UNKNOWN_NO_DURABLE_COMMAND_RECOVERED"
+
+
+def test_shift_unknown_stays_locked_when_command_truth_unavailable():
+    from src.strategy.family_rebalance import acquire_rebalance_lease, advance_rebalance_lease
+
+    conn = _lease_conn()
+    fk = "live|Wellington|2026-06-25|high"
+    first = acquire_rebalance_lease(
+        conn,
+        family_key=fk,
+        operation="SHIFT_BIN",
+        now_iso="t0",
+        held_position_id="old-pos",
+    )
+    advance_rebalance_lease(conn, first, status="EXIT_UNKNOWN", now_iso="t1")
+
+    second = acquire_rebalance_lease(
+        conn,
+        family_key=fk,
+        operation="SHIFT_BIN",
+        now_iso="t2",
+        held_position_id="old-pos",
+    )
+
+    assert second is None
+
+
 def test_lease_distinct_families_independent():
     from src.strategy.family_rebalance import acquire_rebalance_lease
 
