@@ -366,7 +366,7 @@ def selection_calibrated_admission_q_lcb(
         margin = None
         if own_side_cost is not None and math.isfinite(float(own_side_cost)):
             margin = prior - float(own_side_cost)
-        return float(
+        sc_lcb = float(
             selection_calibrated_side_lcb(
                 raw_side_prob=float(raw_side_prob),
                 prior_lcb=prior,
@@ -378,6 +378,22 @@ def selection_calibrated_admission_q_lcb(
                 expected_posterior_version=expected_posterior_version or _SC_DEFAULT_VER,
             )
         )
+        # 2026-06-23: compose the PRICE-CONDITIONED selection-curse deflation at ENTRY (the primary
+        # curse site — the gate admits mid-price buy_no whose realized rate (~0.69) is well below its
+        # claim (~0.83)). min() with the prior path: both only TIGHTEN. Absent/unarmed/out-of-support
+        # -> raw (identity). See src/decision/selection_curse_bound.py + the counterfactual evidence.
+        if own_side_cost is not None and math.isfinite(float(own_side_cost)):
+            from src.decision.selection_curse_bound import corrected_side_q_lcb
+            from src.decision.selection_curse_bound_loader import load_bound
+
+            curse_lcb, _ = corrected_side_q_lcb(
+                load_bound(),
+                side=str(direction or ""),
+                price=float(own_side_cost),
+                raw_q_lcb=prior,
+            )
+            return min(sc_lcb, curse_lcb)
+        return sc_lcb
     except Exception:  # noqa: BLE001 — observability/safety: never break admission for the calibrator.
         try:
             return float(q_lcb)  # type: ignore[arg-type]

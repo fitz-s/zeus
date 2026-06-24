@@ -4995,8 +4995,18 @@ def _fresh_rest_then_cross_mode(
         )
     if q_lcb is None or reservation is None:
         return "MAKER"
+    # P0-1 (2026-06-23): mode selection must use the SAME execution-conditioned bound the taker
+    # quality proof gate uses (_build_event_bound_taker_quality_proof), else mode could pick TAKER
+    # off the plain q_lcb while the proof refuses it -> a MODE_FLIPPED abort loop. Absent/thin
+    # cell -> q_exec_lcb == q_lcb (identity).
+    q_exec_lcb_value, _ = _event_bound_q_exec_lcb(
+        direction=str(actionable_payload.get("direction") or ""),
+        price=fresh_best_ask,
+        q_decision_lcb=float(q_lcb),
+    )
     mode_ev = select_rest_then_cross_mode(
         q_lcb=float(q_lcb),
+        q_exec_lcb=q_exec_lcb_value,
         taker_all_in_cost=taker_all_in,
         p_fill_taker=1.0,
         best_bid=fresh_best_bid,
@@ -5048,6 +5058,36 @@ def _validate_final_order_mode_or_abort(
             f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
         )
     return _proof
+
+
+def _event_bound_q_exec_lcb(
+    *, direction: str, price: float | None, q_decision_lcb: float
+) -> tuple[float, str]:
+    """Execution-(price)-conditioned tightening of the buy_no authorization bound.
+
+    Returns ``(min(q_decision_lcb, realized_no_rate_lcb(price)), basis)``. The selection-curse bound
+    (src/decision/selection_curse_bound.py) is loaded read-only and FAIL-SOFT: absent / unarmed
+    side / price out of training support (or a missing direction/price) yields the plain
+    ``q_decision_lcb`` (identity no-op, today's exact behavior), so this can ONLY ever TIGHTEN, never
+    loosen. The bound is the settlement-evidenced realized NO win-rate as a monotone function of the
+    NO price, fit walk-forward on the counterfactual admission ledger — it deflates mid-price buy_no
+    (the +14pp winner's curse) toward its realized rate while leaving deep favorites and buy_yes
+    untouched (docs/evidence/live_order_pathology/2026-06-23_selection_curse_*.md).
+
+    Called by ALL THREE taker mode/admission seams off the SAME (side, price) so the bound is one
+    consistent value: the proof-side mode decision (_mode_consistent_ev_for_proof), the submit-time
+    fresh re-eval (_fresh_rest_then_cross_mode), and the taker quality proof gate
+    (_build_event_bound_taker_quality_proof). The basis travels on the receipt for settlement audit.
+    """
+    from src.decision.selection_curse_bound import corrected_side_q_lcb
+    from src.decision.selection_curse_bound_loader import load_bound
+
+    side = str(direction or "").strip().lower()
+    if not side or price is None:
+        return float(q_decision_lcb), "BOUND_INPUTS_MISSING"
+    return corrected_side_q_lcb(
+        load_bound(), side=side, price=float(price), raw_q_lcb=float(q_decision_lcb)
+    )
 
 
 def _build_event_bound_taker_quality_proof(
@@ -5147,7 +5187,15 @@ def _build_event_bound_taker_quality_proof(
     q_lcb_dec = Decimal(str(q_lcb))
     notional_dec = Decimal(str(max(float(notional), 0.0)))
     fee_dec = Decimal("0.05") * touch_dec * (Decimal("1") - touch_dec)
-    taker_edge_dec = q_lcb_dec - touch_dec - fee_dec
+    # P0-1 (2026-06-23): the after-cost admissibility edge is gated on the EXECUTION-CONDITIONED
+    # bound q_exec_lcb = min(q_lcb, settlement-evidenced cell LCB), never the plain q_lcb. Absent/
+    # thin cell -> q_exec_lcb == q_lcb (identity). q_lcb_dec is still used for model_confidence (a
+    # belief-gap telemetry, not a gate). This only TIGHTENS the cross, consistent with FIX B.
+    q_exec_lcb_value, q_exec_lcb_basis = _event_bound_q_exec_lcb(
+        direction=direction, price=float(touch), q_decision_lcb=float(q_lcb)
+    )
+    q_gate_dec = Decimal(str(q_exec_lcb_value))
+    taker_edge_dec = q_gate_dec - touch_dec - fee_dec
     taker_expected_profit_usd = (
         max(Decimal("0"), taker_edge_dec)
         * notional_dec
@@ -5218,6 +5266,8 @@ def _build_event_bound_taker_quality_proof(
         "notional_usd": str(notional_dec),
         "maker_context_source": "proof_mode_ev",
         "q_lcb_source": q_lcb_source,
+        "q_exec_lcb": str(q_exec_lcb_value),
+        "q_exec_lcb_basis": q_exec_lcb_basis,
     }
 
 
@@ -10450,8 +10500,15 @@ def _mode_consistent_ev_for_proof(
     _is_maker_quote = str(getattr(execution_price, "price_type", "")) == "bid"
     taker_all_in_cost = None if _is_maker_quote else c_cost_95pct
     p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior()
+    # P0-1 (2026-06-23): PROOF-SIDE mode decision uses the execution-conditioned bound so the
+    # proven proof_mode (and rest_then_cross_policy) is MAKER/no-cross for a side whose settlement-
+    # evidenced fill pay-rate cannot support the cross cost. Absent/thin cell -> identity (== q_lcb).
+    q_exec_lcb_value, _ = _event_bound_q_exec_lcb(
+        direction=direction, price=best_ask, q_decision_lcb=float(q_lcb)
+    )
     mode_ev = select_rest_then_cross_mode(
         q_lcb=q_lcb,
+        q_exec_lcb=q_exec_lcb_value,
         taker_all_in_cost=taker_all_in_cost,
         p_fill_taker=p_fill_lcb,
         best_bid=best_bid,
