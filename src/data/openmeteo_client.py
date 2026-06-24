@@ -40,6 +40,7 @@ def fetch(
     max_retries: int = DEFAULT_MAX_RETRIES,
     backoff_sec: float = DEFAULT_BACKOFF_SEC,
     endpoint_label: str = "",
+    fast_fail_429: bool = False,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -48,6 +49,10 @@ def fetch(
     Raises:
         httpx.HTTPError: after all retries exhausted on transport errors.
         RuntimeError: if quota is exhausted.
+
+    ``fast_fail_429`` is for callers with an independent transport fallback. They still mark
+    the quota cooldown, but they receive the 429 immediately instead of sleeping inside this
+    shared client and blocking the fallback ladder.
     """
     if not quota_tracker.can_call():
         raise RuntimeError(
@@ -73,6 +78,8 @@ def fetch(
                     f" [{endpoint_label}]" if endpoint_label else "",
                     wait,
                 )
+                if fast_fail_429:
+                    resp.raise_for_status()
                 time.sleep(wait)
                 continue
 
@@ -82,6 +89,12 @@ def fetch(
 
         except httpx.HTTPError as e:
             last_exc = e
+            if (
+                fast_fail_429
+                and isinstance(e, httpx.HTTPStatusError)
+                and e.response.status_code == 429
+            ):
+                raise
             if attempt < max_retries - 1:
                 wait = backoff_sec * (attempt + 1)
                 logger.debug(

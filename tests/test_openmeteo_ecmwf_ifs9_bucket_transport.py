@@ -351,7 +351,7 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     # rung 1 always 400 (run not yet served)
     monkeypatch.setattr(
         dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(_make_http_status(400)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_make_http_status(400)),
     )
     # rung 3 stub: returns a sentinel so we can assert we reached it without unbinding errors
     captured = {}
@@ -366,7 +366,7 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     # Case A: rung-2 raises a 502 (provider 5xx) → degrades to rung 3 (no UnboundLocalError).
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: (_ for _ in ()).throw(_make_http_status(502)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_make_http_status(502)),
     )
     payload, prov = dl._resolve_anchor_payload(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
@@ -377,7 +377,7 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     # Case B: rung-2 raises a transport error (provider unreachable) -> degrades to rung 3.
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: (_ for _ in ()).throw(httpx.ConnectError("ssl eof")),
+        lambda r, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("ssl eof")),
     )
     payload2, prov2 = dl._resolve_anchor_payload(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
@@ -388,11 +388,11 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     # whole current-target download batch.
     monkeypatch.setattr(
         dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(_make_http_status(429)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_make_http_status(429)),
     )
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: (_ for _ in ()).throw(_make_http_status(429)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_make_http_status(429)),
     )
     payload3, prov3 = dl._resolve_anchor_payload(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
@@ -404,11 +404,14 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     monkeypatch.setattr(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
+        lambda r, **kwargs: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
     )
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: ({"hourly": {"time": [], "temperature_2m": []}}, {"run_authority": "meta_stamped"}),
+        lambda r, **kwargs: (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"run_authority": "meta_stamped"},
+        ),
     )
     payload4, prov4 = dl._resolve_anchor_payload(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
@@ -421,11 +424,11 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     monkeypatch.setattr(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
+        lambda r, **kwargs: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
     )
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
+        lambda r, **kwargs: (_ for _ in ()).throw(RuntimeError("Open-Meteo fetch exhausted retries")),
     )
     payload5, prov5 = dl._resolve_anchor_payload(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
@@ -437,11 +440,11 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     monkeypatch.setattr(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(_make_http_status(429)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_make_http_status(429)),
     )
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: (_ for _ in ()).throw(RuntimeError("Open-Meteo quota exhausted (2 calls today)")),
+        lambda r, **kwargs: (_ for _ in ()).throw(RuntimeError("Open-Meteo quota exhausted (2 calls today)")),
     )
     payload6, prov6 = dl._resolve_anchor_payload(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
@@ -487,7 +490,7 @@ def test_resolve_anchor_payload_reraises_non_degradable_errors(monkeypatch) -> N
     # single-runs 401 (auth) must raise, not degrade.
     monkeypatch.setattr(
         dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(_status(401)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_status(401)),
     )
     with pytest.raises(httpx.HTTPStatusError):
         dl._resolve_anchor_payload(request=_Req(), city="X", target_date="2026-06-13", timezone_name="UTC")
@@ -495,14 +498,60 @@ def test_resolve_anchor_payload_reraises_non_degradable_errors(monkeypatch) -> N
     # single-runs 400 → rung 2 raises 404 (client defect) must raise, not degrade to rung 3.
     monkeypatch.setattr(
         dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
-        lambda r: (_ for _ in ()).throw(_status(400)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_status(400)),
     )
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
-        lambda r: (_ for _ in ()).throw(_status(404)),
+        lambda r, **kwargs: (_ for _ in ()).throw(_status(404)),
     )
     with pytest.raises(httpx.HTTPStatusError):
         dl._resolve_anchor_payload(request=_Req(), city="X", target_date="2026-06-13", timezone_name="UTC")
+
+
+def test_resolve_anchor_payload_fast_fails_429_to_transport_ladder(monkeypatch) -> None:
+    """The live current-target ladder has bucket fallback, so it must not sleep/retry 429s."""
+    import httpx
+
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    class _Req:
+        latitude = 39.9
+        longitude = 116.4
+        run = datetime(2026, 6, 11, 0, tzinfo=UTC)
+        forecast_hours = 120
+
+    calls: list[tuple[str, bool]] = []
+
+    def _single_runs(request, *, fast_fail_429=False):
+        calls.append(("single", fast_fail_429))
+        req = httpx.Request("GET", "https://x")
+        raise httpx.HTTPStatusError(
+            "429", request=req, response=httpx.Response(429, request=req)
+        )
+
+    def _meta_stamped(request, *, fast_fail_429=False):
+        calls.append(("meta", fast_fail_429))
+        req = httpx.Request("GET", "https://x")
+        raise httpx.HTTPStatusError(
+            "429", request=req, response=httpx.Response(429, request=req)
+        )
+
+    def _fake_rung3(*, request, city, target_date, timezone_name, meta_refusal, single_runs_exc):
+        return {"hourly": {"time": [], "temperature_2m": []}}, {"run_authority": "bucket_partial_run_unverified"}
+
+    monkeypatch.setattr(dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", _single_runs)
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        _meta_stamped,
+    )
+    monkeypatch.setattr(dl, "_try_bucket_rung_three", _fake_rung3)
+
+    _, prov = dl._resolve_anchor_payload(
+        request=_Req(), city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
+    )
+
+    assert prov["run_authority"] == "bucket_partial_run_unverified"
+    assert calls == [("single", True), ("meta", True)]
 
 
 def test_parse_bucket_manifest_round_trips_live_shape() -> None:

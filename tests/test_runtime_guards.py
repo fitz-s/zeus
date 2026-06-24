@@ -21,8 +21,10 @@ import tempfile
 
 import numpy as np
 import pytest
+import httpx
 
 import src.data.ensemble_client as ensemble_client
+import src.data.openmeteo_client as openmeteo_client
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
@@ -13499,6 +13501,33 @@ def test_openmeteo_quota_cooldown_blocks_after_429():
 
     assert tracker.cooldown_remaining_seconds() >= 299
     assert tracker.can_call() is False
+
+
+def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch):
+    class _Resp:
+        status_code = 429
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self):
+            req = httpx.Request("GET", "https://x")
+            raise httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req))
+
+    slept: list[float] = []
+    monkeypatch.setattr(openmeteo_client.quota_tracker, "can_call", lambda: True)
+    monkeypatch.setattr(openmeteo_client.quota_tracker, "note_rate_limited", lambda wait: None)
+    monkeypatch.setattr(openmeteo_client.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(openmeteo_client.time, "sleep", lambda seconds: slept.append(float(seconds)))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        openmeteo_client.fetch(
+            "https://x",
+            {},
+            max_retries=3,
+            endpoint_label="test",
+            fast_fail_429=True,
+        )
+
+    assert slept == []
 
 
 def test_fetch_ensemble_caches_identical_request(monkeypatch):

@@ -288,7 +288,7 @@ def _resolve_anchor_payload(
     # Rung 1: run-pinned single-runs (strongest provenance).
     single_runs_exc: Exception
     try:
-        payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+        payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, fast_fail_429=True)
         return payload, {
             "openmeteo_endpoint": "single_runs_api",
             "run_authority": "run_pinned_single_runs",
@@ -306,7 +306,9 @@ def _resolve_anchor_payload(
 
     # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
     try:
-        payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(request)
+        payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
+            request, fast_fail_429=True
+        )
         provenance = dict(meta_provenance)
         provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
         return payload, provenance
