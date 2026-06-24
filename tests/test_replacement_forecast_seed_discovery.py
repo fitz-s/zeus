@@ -18,6 +18,7 @@ from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOU
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
     _manifest_allows_target_date,
+    _latest_manifest,
     discover_replacement_forecast_materialization_seeds,
 )
 
@@ -220,6 +221,52 @@ def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) 
     assert _manifest_allows_target_date(manifest, target_date="2026-06-19")
     assert _manifest_allows_target_date(manifest, target_date="2026-06-21")
     assert not _manifest_allows_target_date(manifest, target_date="2026-06-26")
+
+
+def test_latest_manifest_rejects_horizon_admitted_payload_without_target_day_samples(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    payload = _write_file(
+        raw_dir / "openmeteo.json",
+        {
+            "hourly": {
+                "time": ["2026-06-24T13:00", "2026-06-24T14:00"],
+                "temperature_2m": [21.0, 22.0],
+            }
+        },
+    )
+    manifest = RawForecastArtifactManifest.from_file(
+        payload,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-24T12:00:00+00:00",
+        source_available_at="2026-06-24T19:31:00+00:00",
+        captured_at="2026-06-24T19:31:00+00:00",
+        request_url="https://example.invalid/openmeteo",
+        request_params={"run": "2026-06-24T12:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "London",
+            "city_timezone": "Europe/London",
+            "target_date": "2026-06-24",
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(payload),
+        },
+    )
+
+    assert _manifest_allows_target_date(manifest, target_date="2026-06-25")
+    assert (
+        _latest_manifest(
+            (manifest,),
+            source_id="openmeteo_ecmwf_ifs_9km",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            city="London",
+            target_date="2026-06-25",
+            city_timezone="Europe/London",
+        )
+        is None
+    )
 
 
 def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_manifest(tmp_path: Path) -> None:

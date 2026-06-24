@@ -241,10 +241,15 @@ def _latest_manifest(
             manifest, city_timezone=tz_name, target_date=target_date
         )
 
+    if tz_name:
+        covering = [manifest for manifest in candidates if _covers(manifest)]
+        if not covering:
+            return None
+        candidates = covering
+
     return max(
         candidates,
         key=lambda manifest: (
-            _covers(manifest),
             manifest.source_cycle_time,
             manifest.source_available_at,
             manifest.captured_at,
