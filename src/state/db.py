@@ -5081,6 +5081,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
             f"init_schema_trade_only: DDL did not create expected trade-class tables: {sorted(_missing)}"
         )
 
+    conn.commit()
+
     # NOTE: The 66 non-trade-class tables that pre-PR-S4b init_schema(trade_conn)
     # created on zeus_trades.db (including shadow_signals with 27k rows,
     # probability_trace_fact with 33k rows, availability_fact with 24k rows) are

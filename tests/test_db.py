@@ -1499,6 +1499,31 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
+def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    conn.close()
+
+    reopened = sqlite3.connect(trade_db)
+    try:
+        indexes = {
+            row[1]
+            for row in reopened.execute(
+                "PRAGMA index_list('execution_feasibility_evidence')"
+            ).fetchall()
+        }
+    finally:
+        reopened.close()
+
+    assert "idx_execution_feasibility_evidence_token_created" in indexes
+
+
 def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):
     from src.state.portfolio import load_portfolio
     from src.state.db import get_connection, init_schema
