@@ -2384,6 +2384,7 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
         chain_cost_basis_usd=8.4,
         strategy_key="center_buy",
         env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
         order_status=ExitState.BACKOFF_EXHAUSTED,
         exit_state="backoff_exhausted",
         exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
@@ -2430,6 +2431,64 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
     assert payload["exit_order_submitted"] is False
     assert payload["exit_failure"] is False
+
+
+def test_day0_monitor_projection_clears_stale_backoff_order_status():
+    from src.contracts.semantic_types import ExitState
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import Position
+
+    held = Position(
+        trade_id="pos-day0-held-stale-backoff",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="day0_window",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status=ExitState.BACKOFF_EXHAUSTED,
+        exit_state="",
+        exit_reason="",
+    )
+    assert build_position_current_projection(held)["order_status"] == "filled"
+
+    pending_exit = Position(
+        trade_id="pos-pending-exit-real-backoff",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="pending_exit",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status=ExitState.BACKOFF_EXHAUSTED,
+        exit_state=ExitState.BACKOFF_EXHAUSTED,
+        exit_reason="EXIT_CHAIN_DUST_STILL_HELD",
+    )
+    assert build_position_current_projection(pending_exit)["order_status"] == "backoff_exhausted"
 
 
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):

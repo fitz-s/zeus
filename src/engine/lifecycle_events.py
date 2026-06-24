@@ -196,7 +196,9 @@ def _nullable_bool_int(value: Any) -> int | None:
 def build_position_current_projection(position: Any) -> dict:
     _position_metric = resolve_position_metric(position)
     order_status = getattr(position, "order_status", "")
-    exit_state = str(getattr(position, "exit_state", "") or "")
+    order_status_value = getattr(order_status, "value", order_status)
+    exit_state_raw = getattr(position, "exit_state", "")
+    exit_state = str(getattr(exit_state_raw, "value", exit_state_raw) or "")
     exit_reason = str(getattr(position, "exit_reason", "") or "")
     if exit_state == "backoff_exhausted" and exit_reason:
         # position_current does not have a dedicated exit_state column. Persist
@@ -204,6 +206,11 @@ def build_position_current_projection(position: Any) -> dict:
         # restarted monitor reloads the same hold-to-settlement state instead
         # of treating dust as a fresh pending exit.
         order_status = "backoff_exhausted"
+    elif str(order_status_value or "") == "backoff_exhausted":
+        # A backoff order_status is meaningful only while the exit lifecycle is
+        # actually in backoff. Held positions repaired back to active/day0 must
+        # not keep a stale sell-failure label through later monitor refreshes.
+        order_status = "filled"
     return {
         "position_id": getattr(position, "trade_id"),
         "phase": canonical_phase_for_position(position),
