@@ -1,49 +1,28 @@
-schema_version: 1
+schema_version: 2
 metadata:
-  created: "2026-04-14"
-  owner_packet: "Reference Replacement Matrix"
+  updated: '2026-06-23'
+  owner: docs authority isolation rebuild
   purpose: >
-    Track whether bulky reference docs have been replaced by machine manifests,
-    lore cards, contracts, tests, or digest routing. This manifest does not
-    delete files; it records deletion eligibility.
+    Replacement/demotion matrix for durable reference docs. This file prevents
+    old bulky references, dated strategy papers, consults, reports, and packet
+    evidence from remaining in the default agent boot path after their surviving
+    content has been promoted into canonical references or machine manifests.
 
 allowed_replacement_statuses:
   - not_replaced
   - partial_replacement_candidate
   - mostly_replaced
   - replaced
+  - superseded_by_canonical
+  - historical_only
 
 allowed_actions:
   - keep_default
   - keep_conditional
   - demote_from_default_reads
-  - extract_lore_then_reassess
-  - keep_until_machine_inventory
-
-allowed_claim_roles:
-  - fact_spec
-  - failure_lore
-  - authority_candidate
-  - breadcrumb
-  - stale_claim
-  - derived_diagnostic
-
-allowed_claim_statuses:
-  - not_replaced
-  - partial_replacement_candidate
-  - mostly_replaced
-  - replaced
-  - intentionally_unpromoted
-  - stale_superseded
-
-allowed_proof_target_kinds:
-  - executable_contract
-  - blocking_test
-  - machine_manifest
-  - history_lore
-  - digest_route
-  - authority_doc
-  - operations_pointer
+  - retain_as_evidence
+  - archive_after_closeout
+  - delete_candidate_after_registry
 
 required_entry_fields:
   - path
@@ -56,288 +35,246 @@ required_entry_fields:
   - rationale
 
 entries:
-  - path: docs/reference/zeus_domain_model.md
+  - path: docs/reference/zeus_prediction_market_quant_reference.md
     default_read: true
-    replacement_status: not_replaced
-    delete_allowed: false
-    replaced_by:
-      - AGENTS.md
-      - architecture/history_lore.yaml
-      - architecture/runtime_modes.yaml
-    unique_remaining:
-      - worked domain examples
-      - strategy shape explanations
-      - translation loss and structural decision methodology
-      - data provenance model narrative
-    allowed_action: keep_default
-    rationale: >
-      Root AGENTS keeps only the first-read mental model. This file remains the
-      conditional deep "why" reference for domain/math work.
-
-  - path: docs/reference/zeus_architecture_reference.md
-    default_read: false
     replacement_status: not_replaced
     delete_allowed: false
     replaced_by: []
     unique_remaining:
-      - compact runtime/workspace architecture map
-      - truth/control surface orientation
-      - dual-track architecture routing
-      - high-blast-radius code hotspot map
+      - complete current deploy money-path reference
+      - contract/source/q/decision/execution/lifecycle/data/docs isolation in one file
+      - rebuild blueprint for zero-context agents
+    allowed_action: keep_default
+    rationale: >
+      Canonical broad reference created by the docs authority isolation rebuild.
+      This is the default reference when a task needs system-wide Zeus cognition.
+
+  - path: docs/reference/zeus_domain_model.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by:
+      - docs/reference/zeus_prediction_market_quant_reference.md
+    unique_remaining:
+      - compact domain/family/bin/native-side model
+      - fast orientation after the broad reference
     allowed_action: keep_conditional
     rationale: >
-      P1 populated this as the compact canonical architecture reference after
-      demoting legacy root snapshots to reports/artifacts evidence.
+      Retained as focused domain model. It no longer carries stale dated strategy
+      claims and is routed conditionally by docs/reference/AGENTS.md.
+
+  - path: docs/reference/zeus_math_spec.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by:
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - src/forecast/bayes_precision_fusion.py
+      - src/calibration/emos.py
+      - src/decision/family_decision_engine.py
+    unique_remaining:
+      - q/q_lcb/q_ucb coherence explanation
+      - payoff-vector and utility math reference
+      - math-change validation checklist
+    allowed_action: keep_conditional
+    rationale: >
+      Retained as current math reference. Old ENS/Platt/market_fusion material was
+      removed from the default strategy-of-record position.
+
+  - path: docs/reference/zeus_strategy_spec.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by:
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - src/engine/qkernel_spine_bridge.py
+      - src/decision/family_decision_engine.py
+      - src/strategy/live_inference/direction_law.py
+    unique_remaining:
+      - q-kernel admission/selection reference
+      - direction-law and no-trade taxonomy guidance
+    allowed_action: keep_conditional
+    rationale: >
+      Rewritten from a draft packet-style authority spec into a canonical strategy
+      reference. It is not authority and it routes through current source.
 
   - path: docs/reference/zeus_market_settlement_reference.md
     default_read: false
     replacement_status: not_replaced
     delete_allowed: false
-    replaced_by: []
+    replaced_by:
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - src/contracts/settlement_semantics.py
+      - src/probability/outcome_space.py
     unique_remaining:
-      - compact settlement semantics and market structure routing
-      - source provenance risk model
-      - settlement mismatch triage map
+      - market hierarchy and native YES/NO semantics
+      - source role separation
+      - settlement/bin topology checklist
     allowed_action: keep_conditional
     rationale: >
-      P1 populated this as the compact canonical market/settlement reference.
-      The detailed source table remains as a conditional reference because it
-      carries city/station evidence too dense for the compact anchor.
-
-  - path: docs/reference/zeus_data_and_replay_reference.md
-    default_read: false
-    replacement_status: not_replaced
-    delete_allowed: false
-    replaced_by: []
-    unique_remaining:
-      - compact current data reality summary
-      - replay bottleneck map
-      - dual-track data identity implications
-      - active data-risk routing
-    allowed_action: keep_conditional
-    rationale: >
-      P1 populated this as the compact canonical data/replay reference while
-      keeping detailed inventory and roadmap sources conditional.
-
-  - path: docs/reference/zeus_failure_modes_reference.md
-    default_read: false
-    replacement_status: not_replaced
-    delete_allowed: false
-    replaced_by: []
-    unique_remaining:
-      - compact durable failure-class taxonomy
-      - mitigation and antibody crosswalk
-      - authority/projection and workspace failure routing
-    allowed_action: keep_conditional
-    rationale: >
-      P1 populated this as the compact canonical failure-mode reference after
-      demoting the legacy pathology registry to reports evidence.
+      Focused settlement/market reference retained for source and contract tasks.
 
   - path: docs/reference/zeus_execution_lifecycle_reference.md
     default_read: false
     replacement_status: not_replaced
     delete_allowed: false
-    replaced_by: []
+    replaced_by:
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - src/execution/executor.py
+      - src/execution/exit_lifecycle.py
+      - src/state/lifecycle_manager.py
+      - src/state/venue_command_repo.py
     unique_remaining:
-      - lifecycle state machine with phase transitions and write gates
-      - chain reconciliation logic and dedup contract
-      - executor order placement and authority contracts
-      - exit trigger evaluation and monitoring lanes
-      - settlement harvest flow and learning pipeline
+      - execution boundary and command/idempotency reference
+      - exit/lifecycle/settlement distinction
+      - pre-submit witness checklist
     allowed_action: keep_conditional
     rationale: >
-      Code-grounded reference for the execution and lifecycle subsystems.
-      Contains exact thresholds, transition tables, and invariant anchors.
+      Focused execution/lifecycle reference retained for runtime side-effect work.
 
   - path: docs/reference/zeus_risk_strategy_reference.md
     default_read: false
     replacement_status: not_replaced
     delete_allowed: false
-    replaced_by: []
+    replaced_by:
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - src/riskguard/riskguard.py
+      - src/risk_allocator/governor.py
+      - architecture/negative_constraints.yaml
     unique_remaining:
-      - risk level state machine with runtime behavior table
-      - strategy family taxonomy with alpha profiles
-      - Kelly sizing formula and position limits
-      - edge decay model and confidence interval construction
+      - DATA_DEGRADED and behavior-changing risk semantics
+      - robust utility and exposure sizing guide
     allowed_action: keep_conditional
     rationale: >
-      Code-grounded reference for risk management and strategy classification.
-      Contains exact formulas, risk escalation rules, and sizing parameters.
+      Focused risk/sizing reference retained. Live capital/current balances remain
+      current facts and are not embedded here.
 
-  - path: docs/reference/zeus_oracle_density_discount_reference.md
+  - path: docs/reference/zeus_data_and_replay_reference.md
     default_read: false
     replacement_status: not_replaced
     delete_allowed: false
     replaced_by:
-      - src/strategy/oracle_penalty.py
-      - scripts/bridge_oracle_to_calibration.py
-      - tests/test_bridge_oracle_to_calibration.py
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - architecture/db_table_ownership.yaml
+      - src/data/replacement_forecast_materializer.py
     unique_remaining:
-      - Data Density Discount design rationale
-      - Mismatch versus DDD versus Platt-regime-absorption relationship
-      - anomaly-based coverage discount parameter framing
-      - Day0 absolute observation-gap rail notes
+      - current DB topology reference
+      - source/product provenance and replay boundary checklist
     allowed_action: keep_conditional
     rationale: >
-      Conditional reference for oracle penalty and DDD work. Runtime behavior
-      must still be encoded in source, tests, and manifests before it becomes
-      binding.
+      Focused data/replay reference retained; current data/source posture stays in
+      operations current-fact pointers.
 
-  - path: docs/reference/zeus_math_spec.md
+  - path: docs/reference/zeus_failure_modes_reference.md
     default_read: false
-    replacement_status: partial_replacement_candidate
+    replacement_status: not_replaced
     delete_allowed: false
     replaced_by:
-      - architecture/history_lore.yaml
-      - architecture/data_rebuild_topology.yaml
-      - tests/test_data_rebuild_relationships.py
-      - tests/test_instrument_invariants.py
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - architecture/fatal_misreads.yaml
+      - architecture/negative_constraints.yaml
     unique_remaining:
-      - full math/statistics fact specification
-      - decision-group and calibration construction details
-      - known defects and deferred upgrade inventory
+      - live-money failure-mode taxonomy
+      - docs contamination and q-kernel failure antibodies
     allowed_action: keep_conditional
     rationale: >
-      This is not top-level authority, but its factual content is still a dense
-      reference until fully reflected in executable contracts and manifests.
-    claim_proofs:
-      - claim_id: WMO_HALF_UP_FORMULA
-        source:
-          path: docs/reference/zeus_math_spec.md
-          locator: "1.2 WMO asymmetric half-up rounding"
-        claim_role: fact_spec
-        claim_status: replaced
-        assertion: "Settlement-aligned WU values use floor(x + 0.5), not banker rounding."
-        proof_targets:
-          - kind: executable_contract
-            path: src/contracts/settlement_semantics.py
-            locator: SettlementSemantics
-          - kind: blocking_test
-            path: tests/test_instrument_invariants.py
-            locator: WMO_ROUNDING
-          - kind: history_lore
-            path: architecture/history_lore.yaml
-            locator: WMO_ROUNDING_BANKER_FAILURE
-        gates:
-          - python3 scripts/semantic_linter.py
-          - pytest -q tests/test_instrument_invariants.py
-        invalidation_condition: "Only an explicit WU/Polymarket settlement-source rule change."
-      - claim_id: ZEUS_MATH_SPEC_REFERENCE_ONLY
-        source:
-          path: docs/reference/zeus_math_spec.md
-          locator: "Purpose / Authority status"
-        claim_role: fact_spec
-        claim_status: replaced
-        assertion: "zeus_math_spec.md is high-confidence math reference, not top-level authority."
-        proof_targets:
-          - kind: machine_manifest
-            path: architecture/topology.yaml
-            locator: reference_fact_specs
-          - kind: machine_manifest
-            path: architecture/context_budget.yaml
-            locator: file_budgets
-          - kind: authority_doc
-            path: docs/reference/AGENTS.md
-            locator: "Default vs conditional read path"
-          - kind: digest_route
-            path: architecture/topology.yaml
-            locator: "reference artifact extraction"
-        gates:
-          - python3 scripts/topology_doctor.py --reference-replacement
-          - python3 scripts/topology_doctor.py --context-budget
-        invalidation_condition: "Only a governance packet may promote this fact spec into authority."
-      - claim_id: DECISION_GROUP_INDEPENDENCE
-        source:
-          path: docs/reference/zeus_math_spec.md
-          locator: "12.1 Decision group: the independent sample unit"
-        claim_role: fact_spec
-        claim_status: partial_replacement_candidate
-        assertion: "Calibration and bootstrap logic must treat decision_group as the independent sample unit."
-        proof_targets:
-          - kind: machine_manifest
-            path: architecture/data_rebuild_topology.yaml
-            locator: decision_group_sample_independence
-          - kind: blocking_test
-            path: tests/test_data_rebuild_relationships.py
-            locator: decision_group
-        gates:
-          - python3 scripts/topology_doctor.py --data-rebuild
-          - pytest -q tests/test_data_rebuild_relationships.py
-        invalidation_condition: "Only a strategy-math packet may redefine calibration sample independence."
-      - claim_id: OPEN_BOUNDARY_BINS
-        source:
-          path: docs/reference/zeus_math_spec.md
-          locator: "5.1 Bin definition (including open-boundary outer bins)"
-        claim_role: fact_spec
-        claim_status: partial_replacement_candidate
-        assertion: "Outer market bins are represented with -inf/+inf boundaries, not finite sentinels."
-        proof_targets:
-          - kind: machine_manifest
-            path: architecture/data_rebuild_topology.yaml
-            locator: inf_boundary_serialization
-          - kind: blocking_test
-            path: tests/test_data_rebuild_relationships.py
-            locator: "R4/R5 Bin ±inf"
-        gates:
-          - python3 scripts/topology_doctor.py --data-rebuild
-          - pytest -q tests/test_data_rebuild_relationships.py
-        invalidation_condition: "Only a market-contract topology packet may replace open-boundary bin semantics."
+      Focused failure-mode reference retained for adversarial review and incident
+      analysis.
 
-  - path: docs/reference/zeus_calibration_weighting_authority.md
+  - path: docs/reference/zeus_architecture_reference.md
+    default_read: false
+    replacement_status: superseded_by_canonical
+    delete_allowed: false
+    replaced_by:
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - workspace_map.md
+    unique_remaining:
+      - possible historical architecture orientation not yet extracted
+    allowed_action: demote_from_default_reads
+    rationale: >
+      Superseded as a default architecture entry by current architecture law and
+      the new broad quant reference. Keep only as conditional/historical lookup
+      until a later cleanup decides whether to archive it.
+
+  - path: docs/authority/replacement_final_form_2026_06_09.md
+    default_read: false
+    replacement_status: historical_only
+    delete_allowed: true
+    replaced_by:
+      - docs/reports/authority_history/replacement_final_form_2026_06_09.demoted.md
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - docs/reference/zeus_math_spec.md
+    unique_remaining:
+      - historical provenance for the 2026-06-09 replacement forecast note
+    allowed_action: retain_as_evidence
+    rationale: >
+      Removed from docs/authority. Surviving law was promoted; dated paper remains
+      evidence only through authority_history.
+
+  - path: docs/authority/regime_unification_2026-06-12.md
+    default_read: false
+    replacement_status: historical_only
+    delete_allowed: true
+    replaced_by:
+      - docs/reports/authority_history/regime_unification_2026_06_12.demoted.md
+      - docs/authority/zeus_current_architecture.md
+      - docs/authority/zeus_current_delivery.md
+      - docs/reference/zeus_prediction_market_quant_reference.md
+    unique_remaining:
+      - historical provenance for one-authority/degraded-mode cleanup
+    allowed_action: retain_as_evidence
+    rationale: >
+      Removed from docs/authority. Surviving one-authority/degraded-mode rules were
+      promoted into active law/reference.
+
+  - path: docs/reference/modules/
     default_read: false
     replacement_status: not_replaced
     delete_allowed: false
-    replaced_by: []
+    replaced_by:
+      - architecture/module_manifest.yaml
+      - docs/reference/modules/AGENTS.md
     unique_remaining:
-      - mathematical authority for LOW-track binary→continuous training_allowed→precision_weight transition
-      - per-city calibration eligibility opt-outs (coastal/monsoon physics)
-      - ΔT-magnitude weighting forbidden in production (empirical basis PoC v4+v5 on 1.7M pairs)
-      - Extended Platt regime absorption relationship to calibration weight
+      - dense module-specific cognition
     allowed_action: keep_conditional
     rationale: >
-      Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
-      docs/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
-      Doc was added ~2026-04-29 by calibration-weight authority packet without a
-      companion yaml entry. Content is current and load-bearing; no drift found.
-      Conditional load for calibration/Platt/LOW-track work. AGENTS.md conditional
-      reads block already listed this doc correctly.
+      Module books are routed only by scoped work/module manifest. They are never
+      recursive default boot context.
 
-  - path: docs/reference/zeus_kelly_asymmetric_loss_handoff.md
+  - path: docs/evidence/
     default_read: false
-    replacement_status: not_replaced
+    replacement_status: historical_only
     delete_allowed: false
-    replaced_by: []
+    replaced_by:
+      - docs/archive_registry.md
+      - docs/authority/ARCHIVAL_RULES.md
     unique_remaining:
-      - authority that asymmetric loss must be per-city Kelly multipliers, NOT DDD floor overrides
-      - composition order (base_kelly × per_city_multiplier × (1 - ddd_discount))
-      - open wiring point at src/engine/evaluator.py and src/engine/replay.py (operator-owned)
-      - two-stage rollout rationale (module landed 2026-05-03; live wiring is operator schedule)
-    allowed_action: keep_conditional
-    rationale: >
-      Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
-      docs/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
-      Doc was added 2026-05-03 by Kelly asymmetric loss handoff packet without a
-      companion yaml entry. Content is current; kelly.py implementation verified.
-      Conditional load for Kelly sizing, per-city asymmetric loss, or DDD↔Kelly
-      composition work. AGENTS.md conditional reads updated in same P8 commit.
+      - raw evidence and receipts
+    allowed_action: retain_as_evidence
+    rationale: Evidence is discoverable but never default law.
 
-  - path: docs/reference/zeus_vendor_change_response_registry.md
+  - path: docs/reports/
     default_read: false
-    replacement_status: not_replaced
+    replacement_status: historical_only
     delete_allowed: false
-    replaced_by: []
+    replaced_by:
+      - docs/archive_registry.md
+      - docs/authority/ARCHIVAL_RULES.md
     unique_remaining:
-      - 14-layer vendor dependency surface map (Layers 1-14)
-      - T1 PM source-switch playbook
-      - T2 WU silent-mutation playbook
-      - T3 Lagos-class catastrophic-failure playbook
-      - T4 Shenzhen-class new-city onboarding playbook
-      - T5 vendor outage / data-gap playbook
-    allowed_action: keep_conditional
-    rationale: >
-      Companion-update: P8 authority-drift remediation 2026-05-15 (POSTMORTEM at
-      docs/archive/2026-Q2/task_2026-05-15_p8_authority_drift_3_blocking/POSTMORTEM.md).
-      Doc was added ~2026-05-03 by vendor-response registry packet without a
-      companion yaml entry. Content is current; all cited files exist. Conditional
-      load for any work touching vendor dependencies or source-change response.
-      AGENTS.md conditional reads block already listed this doc correctly.
+      - interpreted historical reports and reviews
+    allowed_action: retain_as_evidence
+    rationale: Reports are history/evidence and must not authorize runtime.
+
+  - path: docs/rebuild/
+    default_read: false
+    replacement_status: historical_only
+    delete_allowed: false
+    replaced_by:
+      - docs/archive_registry.md
+      - docs/authority/ARCHIVAL_RULES.md
+    unique_remaining:
+      - rebuild/consult implementation history
+    allowed_action: retain_as_evidence
+    rationale: Rebuild notes are non-default history. Current behavior must be code-proven.
