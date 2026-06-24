@@ -156,6 +156,13 @@ class ExitContext:
     chain_is_fresh: Optional[bool] = None
     divergence_score: float = 0.0
     market_velocity_1h: float = 0.0
+    # 2026-06-24 (Shanghai 25C "wrong exit"): True when the held cell is low-reliability
+    # (coarse_global — no fine nest). divergence_score = max(0, market - belief) only ever fires in
+    # the market-favors-us direction; for a cold-biased coarse cell that divergence reflects forecast
+    # under-confidence, NOT a tradeable exit signal, so MODEL_DIVERGENCE_PANIC must not harvest/cut on
+    # it. Symmetric to the entry-side q_lcb reliability guard (which abstains the same cells). Genuine
+    # adverse moves still exit via FLASH_CRASH / SETTLEMENT / day0 absorbing hard-fact (all untouched).
+    divergence_reliability_suppressed: bool = False
 
     # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
     # cost computation in HoldValue.compute_with_exit_costs. Threaded by
@@ -1102,7 +1109,20 @@ class Position:
                 trigger="WHALE_TOXICITY",
             )
 
-        if exit_context.divergence_score >= divergence_hard_threshold():
+        # 2026-06-24 (Shanghai 25C "wrong exit"): a divergence (market > belief) in a low-reliability
+        # coarse_global cell is forecast cold-bias, not a real signal — refuse to PANIC-harvest/cut.
+        # Stamp the reason so the monitor shows WHY the position is held, then fall through to HOLD.
+        # Genuine adverse moves still exit via FLASH_CRASH (below), SETTLEMENT, and day0 hard-fact.
+        if (
+            exit_context.divergence_reliability_suppressed
+            and exit_context.divergence_score >= divergence_soft_threshold()
+        ):
+            applied.append("model_divergence_panic_suppressed:coarse_global_low_reliability")
+
+        if (
+            exit_context.divergence_score >= divergence_hard_threshold()
+            and not exit_context.divergence_reliability_suppressed
+        ):
             applied.append("divergence_hard_trigger")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -1117,6 +1137,7 @@ class Position:
         if (
             exit_context.divergence_score >= divergence_soft_threshold()
             and exit_context.market_velocity_1h <= divergence_velocity_confirm()
+            and not exit_context.divergence_reliability_suppressed
         ):
             applied.append("divergence_soft_trigger")
             self.applied_validations = _dedupe_validations(applied)

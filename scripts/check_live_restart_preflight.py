@@ -88,6 +88,7 @@ EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
 FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
+MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
@@ -581,25 +582,28 @@ def _execution_feasibility_exposure_freshness(
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
 
 
-def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResult:
+def _full_family_executable_substrate_redecision_check(rows: list[sqlite3.Row]) -> CheckResult:
     now = datetime.now(timezone.utc)
     evidence: dict[str, Any] = {
         "table": "executable_market_snapshots",
         "max_age_seconds": EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS,
+        "restart_blocking": False,
+        "price_exit_authority": "execution_feasibility_evidence",
+        "scope": "full_family_redecision_shift_fillup",
     }
     if not rows:
         evidence["scoped_exposure_count"] = 0
         evidence["row_count"] = "not_scanned_no_open_exposures"
         return CheckResult(
-            "executable_substrate_freshness",
+            "full_family_executable_substrate_redecision_coverage",
             True,
-            "no open exposures require executable market substrate",
+            "no open exposures require full-family executable substrate",
             evidence,
         )
     with _connect_live_ro() as conn:
         if not _table_exists(conn, "main", "executable_market_snapshots"):
             return CheckResult(
-                "executable_substrate_freshness",
+                "full_family_executable_substrate_redecision_coverage",
                 False,
                 "executable market snapshot table is missing",
                 evidence,
@@ -631,14 +635,14 @@ def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResul
     age_ok = 0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS
     evidence["age_seconds"] = age
     evidence["freshness_deadline_ok"] = deadline_ok
-    ok = (age_ok or deadline_ok) and not exposure_results["risky"]
+    ok = True
     return CheckResult(
-        "executable_substrate_freshness",
+        "full_family_executable_substrate_redecision_coverage",
         ok,
         (
-            "executable market substrate is fresh for open exposures"
+            "full-family executable substrate table exists; stale rows are reported as redecision coverage risk, not restart exit blocker"
             if ok
-            else "executable market substrate is stale/missing for open exposures"
+            else "full-family executable substrate table is missing"
         ),
         evidence,
     )
@@ -1099,6 +1103,85 @@ def _single_family_reseed_repair_evidence(item: dict[str, Any]) -> dict[str, Any
         return None
 
 
+def _latest_monitor_projection_evidence(
+    position_id: str,
+    *,
+    day0_required: bool,
+) -> dict[str, Any] | None:
+    """Return fresh monitor belief evidence from the trade event projection.
+
+    Non-Day0 held positions may refresh belief through the canonical replacement
+    read-through path before the durable forecast_posteriors row is re-materialized.
+    Day0 positions are stricter: only the observation remaining-window or absorbing
+    hard-fact monitor lanes count, never a forecast posterior stamped during the
+    settlement day.
+    """
+
+    now = datetime.now(timezone.utc)
+    with _connect_live_ro() as conn:
+        row = conn.execute(
+            """
+            SELECT occurred_at, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+             ORDER BY datetime(occurred_at) DESC, sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    occurred_at = str(row["occurred_at"] or "")
+    occurred_dt = _parse_dt(occurred_at)
+    if occurred_dt is None:
+        return None
+    age_seconds = (now - occurred_dt).total_seconds()
+    if age_seconds < 0.0 or age_seconds > MONITOR_PROJECTION_MAX_AGE_SECONDS:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except Exception:
+        payload = {}
+    validations_raw = payload.get("applied_validations") if isinstance(payload, dict) else None
+    validations = [str(item) for item in validations_raw] if isinstance(validations_raw, list) else []
+    if day0_required:
+        accepted = any(
+            item == "day0_observation_remaining_window"
+            or item == "day0_absorbing_hard_fact"
+            or item.startswith("belief_source=day0_observation_remaining_window")
+            or item.startswith("belief_source=day0_absorbing_hard_fact")
+            for item in validations
+        )
+        if not accepted:
+            return None
+        source = "day0_monitor_observation_authority"
+    else:
+        accepted = any(
+            item == "replacement_posterior"
+            or item.startswith("belief_source=forecast_posteriors")
+            for item in validations
+        )
+        if not accepted:
+            return None
+        source = "monitor_replacement_authority"
+    return {
+        "position_id": position_id,
+        "occurred_at": occurred_at,
+        "age_seconds": age_seconds,
+        "source": source,
+        "accepted_validations": [
+            item
+            for item in validations
+            if item == "replacement_posterior"
+            or item == "day0_observation_remaining_window"
+            or item == "day0_absorbing_hard_fact"
+            or item.startswith("belief_source=")
+        ][:6],
+        "max_age_seconds": MONITOR_PROJECTION_MAX_AGE_SECONDS,
+    }
+
+
 def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
 
@@ -1141,6 +1224,24 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             risky.append({**evidence, "risk": "settled_position_harvester_disabled"})
             continue
 
+        if str(row["phase"] or "") == "day0_window":
+            monitor_evidence = _latest_monitor_projection_evidence(
+                str(row["position_id"] or ""),
+                day0_required=True,
+            )
+            if monitor_evidence is not None:
+                covered.append(
+                    {
+                        **item,
+                        "fresh": True,
+                        "freshness_basis": "day0_monitor_projection",
+                        "monitor_projection": monitor_evidence,
+                    }
+                )
+                continue
+            risky.append({**item, "risk": "day0_monitor_observation_belief_missing_or_stale"})
+            continue
+
         belief = load_replacement_belief(
             city=str(row["city"] or ""),
             target_date=str(row["target_date"] or ""),
@@ -1171,6 +1272,20 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         covered.append(evidence)
         if not belief.fresh:
+            monitor_evidence = _latest_monitor_projection_evidence(
+                str(row["position_id"] or ""),
+                day0_required=False,
+            )
+            if monitor_evidence is not None:
+                covered.append(
+                    {
+                        **evidence,
+                        "fresh": True,
+                        "freshness_basis": "monitor_projection_readthrough",
+                        "monitor_projection": monitor_evidence,
+                    }
+                )
+                continue
             repair = _single_family_reseed_repair_evidence({**item, **evidence})
             if repair is not None:
                 repairable.append(
@@ -1244,7 +1359,7 @@ def evaluate() -> dict[str, Any]:
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
-        _executable_substrate_freshness_check(quote_rows),
+        _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
         _belief_check(rows),

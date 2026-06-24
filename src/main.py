@@ -6368,9 +6368,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             held_families,
             decision_time=now,
         )
-        all_families = set(family_keys) | rest_pull_families
+        held_reemit_families = _edli_reemittable_held_position_family_keys(
+            held_families,
+            decision_time=now,
+        )
+        all_families = set(family_keys) | rest_pull_families | held_reemit_families
         confirmed_entry_scope = set(family_keys)
         confirmed_rest_scope = set(rest_pull_families)
+        confirmed_held_scope = set(held_reemit_families)
         confirm_families = set(all_families) | set(held_families)
         confirm_refresh_summary: dict = {}
         if confirm_families:
@@ -6386,17 +6391,19 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 )
                 confirmed_entry_scope &= fresh_confirmed_families
                 confirmed_rest_scope &= fresh_confirmed_families
+                confirmed_held_scope &= fresh_confirmed_families
                 confirm_families &= fresh_confirmed_families
                 logger.info(
                     "edli_redecision_screen: partial confirmation refresh admitted "
-                    "fresh families=%d/%d entry_scope=%d rest_scope=%d summary=%r",
+                    "fresh families=%d/%d entry_scope=%d rest_scope=%d held_scope=%d summary=%r",
                     len(fresh_confirmed_families),
                     len(set(all_families) | set(held_families)),
                     len(confirmed_entry_scope),
                     len(confirmed_rest_scope),
+                    len(confirmed_held_scope),
                     confirm_refresh_summary,
                 )
-                if not confirmed_entry_scope and not confirmed_rest_scope:
+                if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
                     logger.info(
                         "edli_redecision_screen: confirmation refresh partial but no "
                         "screened family has complete fresh substrate; skipping emit "
@@ -6484,7 +6491,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 decision_time=now,
             )
             family_keys &= confirmed_entry_scope
-            all_families = set(family_keys) | rest_pull_families
+            held_reemit_families = _edli_reemittable_held_position_family_keys(
+                held_families,
+                decision_time=now,
+            )
+            held_reemit_families &= confirmed_held_scope
+            all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
@@ -6508,7 +6520,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             logger.info(
                 "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
                 "entry_families=0 rest_pulls=%d "
-                "held_monitor_families=%d families_reemitted=0 "
+                "held_monitor_families=%d held_reemit_families=0 families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(entry_redecisions),
@@ -6601,10 +6613,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         logger.info(
             "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
             "entry_families=%d rest_pulls=%d "
-            "held_monitor_families=%d families_reemitted=%d "
+            "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
             len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
+            len(held_reemit_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
@@ -6844,9 +6857,11 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     """Current held-position families for monitor and duplicate-entry suppression.
 
     Any family with real position_current exposure must keep receiving position-monitor
-    attention even when no new-entry edge fires. Held exposure is not re-emitted as an
-    EDLI_REDECISION_PENDING entry event; the monitor/exit lane owns hold/exit/shift
-    decisions for already-owned tokens.
+    attention even when no new-entry edge fires. Future/pre-settlement held exposure
+    also re-enters EDLI_REDECISION_PENDING so the full family selector can exercise
+    the already-owned-token fill-up / close-before-open shift lane. Same-day Day0
+    remains on the observation-aware monitor lane because forecast-only redecision
+    is phase-closed once the target local day starts.
     Fail-soft matches the reactor held-family provider; a read failure must not crash the daemon.
     """
 
@@ -7144,12 +7159,14 @@ def _edli_entry_redecision_family_keys(
     *,
     decision_time: datetime,
 ) -> set[tuple[str, str, str]]:
-    """Entry-redecision families after removing already-held exposure.
+    """New-entry redecision families after removing already-held exposure.
 
-    A held position is re-evaluated by the monitor/exit lane, where the decision
-    surface is hold/exit with fresh held-side probability and price. Sending the
-    same family back through the entry reactor turns a profitable hold into a
-    misleading duplicate-entry rejection and can keep stale pending rows alive.
+    Fresh entry and held redecision have different safety semantics. New-entry
+    screening excludes held families so it cannot duplicate owned exposure. Held
+    families that are still forecast-lane admissible are re-emitted separately by
+    _edli_reemittable_held_position_family_keys and enter the reactor with
+    allow_same_family_monitor_owned=True, where fill-up and shift-bin leases own
+    the only permitted same-family side effects.
     """
 
     return _edli_reemittable_forecast_family_keys(
@@ -7164,17 +7181,22 @@ def _edli_reemittable_held_position_family_keys(
     *,
     decision_time: datetime,
 ) -> set[tuple[str, str, str]]:
-    """Legacy compatibility shim: held exposure never enters entry redecision.
+    """Held-position families eligible for full pre-settlement redecision.
 
-    The live held-position decision path is monitor_refresh -> Position.evaluate_exit
-    -> exit_lifecycle. Returning families here would re-emit FSR-shaped entry
-    events for already-owned tokens, which the executor can only reject as a
-    duplicate entry instead of recording a real hold/exit decision.
+    Monitor refresh owns the cheap hold/direct-sell check for all active positions.
+    It does not own same-family fill-up or close-before-open shift execution. While
+    a held family is still in the forecast-lane admit phase, re-emit it through
+    EDLI_REDECISION_PENDING so the existing reactor path runs with
+    allow_same_family_monitor_owned=True and the family-rebalance lease enforces
+    one active fill-up/shift per family. Day0/phase-closed held positions are left
+    on the observation-aware monitor path.
     """
 
-    _ = decision_time
-    _ = families
-    return set()
+    return _edli_reemittable_forecast_family_keys(
+        set(families or set()),
+        decision_time=decision_time,
+        log_context="held-redecision",
+    )
 
 
 def _edli_expire_unadmitted_redecision_pending(

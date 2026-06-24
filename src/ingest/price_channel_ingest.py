@@ -101,6 +101,7 @@ EDLI_EVENT_DRIVEN_MODES = {
 }
 
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 15.0
+MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 45.0
 
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
 USER_CHANNEL_REQUIRED_ENV_VARS = (
@@ -1290,6 +1291,49 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     return tokens
 
 
+def _edli_order_token_ids_by_feasibility_age(
+    trade_conn,
+    token_ids: set[str],
+) -> list[str]:
+    """Oldest/missing quote evidence first for bounded held-position refreshes."""
+
+    tokens = sorted({str(token_id) for token_id in token_ids if str(token_id or "").strip()})
+    if not tokens:
+        return []
+    try:
+        has_table = trade_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
+        ).fetchone()
+    except Exception:
+        return tokens
+    if not has_table:
+        return tokens
+    latest_by_token: dict[str, str | None] = {}
+    for token in tokens:
+        try:
+            row = trade_conn.execute(
+                """
+                SELECT created_at
+                  FROM execution_feasibility_evidence
+                 WHERE token_id = ?
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                (token,),
+            ).fetchone()
+        except Exception:
+            return tokens
+        latest_by_token[token] = str(row[0]) if row and row[0] else None
+    return sorted(
+        tokens,
+        key=lambda token: (
+            latest_by_token.get(token) is not None,
+            latest_by_token.get(token) or "",
+            token,
+        ),
+    )
+
+
 def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
@@ -1340,7 +1384,10 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
     )
 
 
-def _edli_refresh_held_position_quote_evidence() -> dict:
+def _edli_refresh_held_position_quote_evidence(
+    *,
+    budget_seconds: float | None = None,
+) -> dict:
     """Refresh executable quote evidence for currently held exposure.
 
     The long-lived market-channel WebSocket can be healthy while quiet markets
@@ -1360,14 +1407,35 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
     )
     from src.state.db import get_trade_connection, get_world_connection
 
+    edli_cfg = _settings_section("edli_v1", {})
+    budget = max(
+        0.001,
+        float(
+            budget_seconds
+            if budget_seconds is not None
+            else _edli_bounded_positive_float(
+                edli_cfg,
+                "market_channel_held_quote_refresh_budget_seconds",
+                default=MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
+                maximum=55.0,
+            )
+        ),
+    )
+    started_monotonic = time.monotonic()
+    deadline = started_monotonic + budget
+
     trade_read = get_trade_connection(write_class=None)
     try:
         held_token_ids = _edli_held_position_priority_token_ids(trade_read)
         if not held_token_ids:
             return {"held_priority_token_ids": 0, "held_quote_refresh_events": 0}
+        ordered_held_token_ids = _edli_order_token_ids_by_feasibility_age(
+            trade_read,
+            held_token_ids,
+        )
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
-            token_ids=held_token_ids,
+            token_ids=ordered_held_token_ids,
         )
     finally:
         trade_read.close()
@@ -1390,6 +1458,10 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
     # same INV-37 atomic-commit shape the EDLI position bridge uses.
     from src.state.db import world_connection_with_trades_flocked
 
+    ordered_metadata_tokens = [
+        token_id for token_id in ordered_held_token_ids if token_id in token_metadata
+    ]
+
     with world_connection_with_trades_flocked(write_class="live") as conn:
         def _commit_atomic_cross_db() -> None:
             conn.commit()
@@ -1407,16 +1479,23 @@ def _edli_refresh_held_position_quote_evidence() -> dict:
                 fetch_orderbook=clob.get_orderbook_snapshot,
             )
             written = service.seed_rest_books_in_chunks(
-                token_ids=set(token_metadata),
+                token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
                 world_mutex=_world_write_mutex(),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
+                deadline_monotonic=deadline,
             )
+        elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         return {
             "held_priority_token_ids": len(held_token_ids),
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_events": int(written),
+            "held_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
+            "budget_seconds": budget,
+            "elapsed_seconds": elapsed_seconds,
+            "budget_exhausted": elapsed_seconds >= budget,
+            "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
 
 

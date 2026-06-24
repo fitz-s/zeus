@@ -479,3 +479,16 @@ def test_dispatch_matrix_per_strategy_constraint_combinations(
         f"direction_ok={direction_ok}, topology_ok={topology_ok}, "
         f"phase_ok={phase_ok}; combined={actual_allowed}, expected={expected_allowed}"
     )
+
+
+def test_center_buy_supports_low_buy_yes_live_metric():
+    """LOW center-bin YES must not be structurally blocked before economics."""
+
+    profile = sp.get("center_buy")
+
+    assert profile.is_runtime_live()
+    assert profile.is_direction_allowed("buy_yes")
+    assert profile.is_bin_topology_allowed("finite_range")
+    assert profile.is_phase_allowed("pre_settlement_day")
+    assert profile.metric_is_live("high")
+    assert profile.metric_is_live("low")

@@ -508,6 +508,55 @@ class TestMonitorPrimaryAuthority:
         assert "day0_observation_remaining_window" in refresh_pos.applied_validations
         assert is_fresh is True
 
+    def test_day0_observation_dominates_even_fresh_replacement_belief(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(
+            pb,
+            "load_replacement_belief",
+            lambda **kw: (_ for _ in ()).throw(
+                AssertionError("Day0 monitor must not read forecast posterior first")
+            ),
+        )
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.64, ["day0_observation"]
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        monkeypatch.setattr(
+            mr,
+            "_refresh_ens_member_counting",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("ENS fallback must not run")),
+        )
+        pos = self._pos()
+        pos.state = "active"
+        pos.target_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Asia/Shanghai", "settlement_source_type": "wu_icao"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.64)
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert "day0_observation_remaining_window" in refresh_pos.applied_validations
+        assert is_fresh is True
+
     def test_hko_day0_window_uses_day0_observation_lane(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb

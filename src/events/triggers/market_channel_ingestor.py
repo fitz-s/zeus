@@ -748,10 +748,13 @@ class MarketChannelOnlineService:
         if self.fetch_orderbook is None:
             return 0
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
+        raw_token_ids = [str(token_id) for token_id in token_ids]
+        if isinstance(token_ids, (set, frozenset)):
+            raw_token_ids = sorted({str(token_id) for token_id in token_ids})
         ordered = [
-            str(token_id)
-            for token_id in sorted({str(token_id) for token_id in token_ids})
-            if str(token_id) in self.ingestor._active_token_ids
+            token_id
+            for token_id in dict.fromkeys(raw_token_ids)
+            if token_id in self.ingestor._active_token_ids
         ]
         written = 0
         for offset in range(0, len(ordered), size):

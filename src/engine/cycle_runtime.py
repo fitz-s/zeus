@@ -3446,6 +3446,24 @@ def _build_exit_context(
         # Shift edge-space band → belief space by adding the held-side price back.
         _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
 
+    # 2026-06-24 (Shanghai 25C "wrong exit"): suppress MODEL_DIVERGENCE_PANIC for low-reliability
+    # (coarse_global, no fine nest) cells. precision_class is a pure point-in-polygon coverage
+    # property; precision_class_for_city itself fail-safes unknown cities to coarse_global (treat
+    # unsure as unreliable → suppress, symmetric to the entry-side q_lcb guard's abstain). The outer
+    # guard fails soft to NOT suppressing only on a hard classification crash, never blocking an exit.
+    _divergence_reliability_suppressed = False
+    try:
+        from src.decision.qlcb_reliability_guard import (
+            PRECISION_CLASS_COARSE,
+            precision_class_for_city,
+        )
+
+        _divergence_reliability_suppressed = (
+            precision_class_for_city(getattr(pos, "city", None)) == PRECISION_CLASS_COARSE
+        )
+    except Exception:  # noqa: BLE001 - reliability gate must fail soft; never block the exit path
+        _divergence_reliability_suppressed = False
+
     return ExitContext(
         fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
         fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
@@ -3461,6 +3479,7 @@ def _build_exit_context(
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
+        divergence_reliability_suppressed=_divergence_reliability_suppressed,
         portfolio_positions=portfolio_positions,
         bankroll=bankroll,
         entry_posterior=_entry_posterior,
@@ -4333,12 +4352,12 @@ def execute_monitoring_phase(
                 boundary="position_monitor",
             )
 
-    _emit_portfolio_rotation_live_status(conn, summary, deps=deps)
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=deps)
     _release_monitor_write_lock_boundary(
         conn,
         summary,
         deps,
-        boundary="portfolio_rotation_live_status",
+        boundary="portfolio_rotation_evaluation_status",
     )
     return portfolio_dirty, tracker_dirty
 
@@ -4682,11 +4701,16 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
     return candidates, skipped
 
 
-def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
-    """Evaluate live portfolio rotation posture from current held and candidate evidence."""
+def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> None:
+    """Evaluate portfolio rotation value without implying executable live action.
+
+    Actual same-family fill-up/shift actions are driven by EDLI_REDECISION_PENDING
+    in the event reactor. This summary is read-side evidence only; it must not say
+    a rotation is live-ready when no cross-family rotation actuator consumes it.
+    """
 
     if conn is None:
-        summary["portfolio_rotation_live_status"] = "unavailable:no_connection"
+        summary["portfolio_rotation_evaluation_status"] = "unavailable:no_connection"
         return
     now_fn = getattr(deps, "_utcnow", None)
     try:
@@ -4707,10 +4731,10 @@ def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
     if candidate_missing:
         summary["portfolio_rotation_candidate_input_gaps"] = candidate_missing[:10]
     if not holds:
-        summary["portfolio_rotation_live_status"] = "evaluated:no_held_positions_with_fresh_rotation_inputs"
+        summary["portfolio_rotation_evaluation_status"] = "evaluated:no_held_positions_with_fresh_rotation_inputs"
         return
     if not candidates:
-        summary["portfolio_rotation_live_status"] = "evaluated:no_capital_constrained_positive_candidates"
+        summary["portfolio_rotation_evaluation_status"] = "evaluated:no_capital_constrained_positive_candidates"
         return
 
     from src.strategy.portfolio_rotation import best_rotation
@@ -4727,9 +4751,11 @@ def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
         require_fill_lcb=True,
     )
     if decision is None:
-        summary["portfolio_rotation_live_status"] = "evaluated:hold_value_dominant"
+        summary["portfolio_rotation_evaluation_status"] = "evaluated:hold_value_dominant"
         return
-    summary["portfolio_rotation_live_status"] = "evaluated:rotate_candidate_ready"
+    summary["portfolio_rotation_evaluation_status"] = (
+        "evaluated:positive_rotation_value_no_cross_family_actuator"
+    )
     summary["portfolio_rotation_best"] = {
         "hold_position_id": decision.hold.position_id,
         "hold_city": decision.hold.city,

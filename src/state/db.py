@@ -9752,6 +9752,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         )
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
+        if phase != "pending_exit":
+            exit_state = "none"
         entry_fill_verified = bool(
             hints.get("entry_fill_verified", False)
             or fill_economics["entry_fill_verified"]
@@ -9971,6 +9973,9 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
         hints = transitional_hints.get(trade_id, {})
+        exit_state_hint = str(hints.get("exit_state") or "")
+        if phase != "pending_exit":
+            exit_state_hint = ""
         fill_economics = _position_current_effective_entry_economics(
             row,
             fill_hints.get(trade_id),
@@ -10029,7 +10034,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "env": explicit_env,
                 "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
-                "exit_state": str(hints.get("exit_state") or ""),
+                "exit_state": exit_state_hint,
                 "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
                 "entry_fill_verified": bool(
                     hints.get("entry_fill_verified", False)

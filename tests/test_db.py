@@ -1522,6 +1522,41 @@ def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):
     assert getattr(state.positions[0].exit_state, "value", state.positions[0].exit_state) == ""
 
 
+def test_portfolio_loader_ignores_exit_backoff_hint_for_day0_held_position(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "day0-backoff-hint.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="day0-held-after-exit-backoff",
+        phase="day0_window",
+        order_status="backoff_exhausted",
+        shares=2.5,
+        submitted_size_usd=1.5,
+        projected_cost_basis_usd=1.5,
+        entry_price=0.60,
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="day0-held-after-exit-backoff",
+        event_type="EXIT_ORDER_REJECTED",
+        status="backoff_exhausted",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    status_view = query_position_current_status_view(conn)
+    conn.close()
+
+    position = loader_view["positions"][0]
+    assert position["state"] == "day0_window"
+    assert position["exit_state"] == ""
+    assert status_view["positions"][0]["exit_state"] == "none"
+    assert status_view["exit_state_counts"] == {"none": 1}
+
+
 def test_position_current_views_use_fill_authority_current_open_economics(tmp_path):
     from src.state.db import (
         query_portfolio_loader_view,

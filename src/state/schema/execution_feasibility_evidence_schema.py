@@ -56,7 +56,13 @@ CREATE INDEX IF NOT EXISTS idx_execution_feasibility_evidence_token_time
     ON execution_feasibility_evidence(token_id, quote_seen_at)
 """
 
+CREATE_TOKEN_CREATED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_execution_feasibility_evidence_token_created
+    ON execution_feasibility_evidence(token_id, created_at DESC)
+"""
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_TOKEN_TIME_INDEX_SQL)
+    conn.execute(CREATE_TOKEN_CREATED_INDEX_SQL)

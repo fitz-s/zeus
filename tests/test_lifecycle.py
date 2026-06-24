@@ -42,6 +42,7 @@ def _call_exit(
     entry_ci: tuple[float, float] | None = None,
     current_ci: tuple[float, float] | None = None,
     entry_posterior: float | None = None,
+    divergence_reliability_suppressed: bool = False,
 ):
     """Thin wrapper: call the one live exit path."""
     ctx = ExitContext(
@@ -59,6 +60,7 @@ def _call_exit(
         entry_ci=entry_ci,
         current_ci=current_ci,
         entry_posterior=entry_posterior,
+        divergence_reliability_suppressed=divergence_reliability_suppressed,
     )
     return pos.evaluate_exit(ctx)
 
@@ -821,6 +823,23 @@ class TestExitTriggers:
         )
         assert decision.should_exit
         assert decision.trigger == "MODEL_DIVERGENCE_PANIC"
+
+    def test_reliability_suppressed_hard_divergence_does_not_panic_exit(self):
+        pos = _make_position()
+        decision = _call_exit(
+            pos,
+            0.20,
+            0.40,
+            divergence_score=0.31,
+            market_velocity_1h=0.0,
+            divergence_reliability_suppressed=True,
+        )
+
+        assert not decision.should_exit
+        assert (
+            "model_divergence_panic_suppressed:coarse_global_low_reliability"
+            in pos.applied_validations
+        )
 
     def test_edge_reversal_needs_two_confirmations(self):
         """CLAUDE.md §4.2: EDGE_REVERSAL needs 2 confirmations, 1st doesn't trigger.

@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from src.engine.cycle_runtime import _emit_portfolio_rotation_live_status
+from src.engine.cycle_runtime import _emit_portfolio_rotation_evaluation_status
 
 
 class _Logger:
@@ -86,7 +86,7 @@ def _create_world_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_path) -> None:
+def test_portfolio_rotation_evaluation_status_reports_positive_value_without_actuator(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -122,9 +122,12 @@ def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_pat
     )
     summary: dict = {}
 
-    _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "evaluated:rotate_candidate_ready"
+    assert (
+        summary["portfolio_rotation_evaluation_status"]
+        == "evaluated:positive_rotation_value_no_cross_family_actuator"
+    )
     assert summary["portfolio_rotation_held_positions_evaluated"] == 1
     assert summary["portfolio_rotation_candidates_evaluated"] == 1
     best = summary["portfolio_rotation_best"]
@@ -133,7 +136,7 @@ def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_pat
     assert best["net_improvement_usd"] > 0.0
 
 
-def test_portfolio_rotation_live_status_holds_without_positive_candidate(tmp_path) -> None:
+def test_portfolio_rotation_evaluation_status_holds_without_positive_candidate(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -159,16 +162,16 @@ def test_portfolio_rotation_live_status_holds_without_positive_candidate(tmp_pat
     )
     summary: dict = {}
 
-    _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "evaluated:no_capital_constrained_positive_candidates"
+    assert summary["portfolio_rotation_evaluation_status"] == "evaluated:no_capital_constrained_positive_candidates"
     assert summary["portfolio_rotation_held_positions_evaluated"] == 1
     assert summary["portfolio_rotation_candidates_evaluated"] == 0
 
 
-def test_portfolio_rotation_live_status_is_noop_without_connection() -> None:
+def test_portfolio_rotation_evaluation_status_is_noop_without_connection() -> None:
     summary: dict = {}
 
-    _emit_portfolio_rotation_live_status(None, summary, deps=_deps())
+    _emit_portfolio_rotation_evaluation_status(None, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "unavailable:no_connection"
+    assert summary["portfolio_rotation_evaluation_status"] == "unavailable:no_connection"

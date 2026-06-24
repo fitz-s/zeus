@@ -1871,12 +1871,9 @@ def _day0_observed_extreme_from_canonical_surface(
     owns_conn = world_conn is None
     if owns_conn:
         try:
-            from src.state.db import ZEUS_WORLD_DB_PATH
+            from src.state.db import get_world_connection_read_only
 
-            world_conn = sqlite3.connect(
-                f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True, timeout=2.0
-            )
-            world_conn.row_factory = sqlite3.Row
+            world_conn = get_world_connection_read_only()
         except Exception:  # noqa: BLE001 — read posture is best-effort; reseed continues without it
             return None
     try:
@@ -3081,6 +3078,92 @@ def _day0_absorbing_hard_fact_overlay(
     return float(belief.held_side_prob), hard_pos, True
 
 
+def _would_use_day0_monitor_lane(pos: Position, city, target_d) -> bool:
+    """Whether same-day monitor probability must be observation-aware Day0 belief."""
+
+    return (
+        pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
+        or (
+            _position_state_value(pos) == "day0_window"
+            and _city_supports_executable_day0_observation(city)
+        )
+        or (
+            _is_position_target_local_day(pos, city, target_d)
+            and _city_supports_executable_day0_observation(city)
+        )
+    )
+
+
+def _refresh_day0_monitor_probability(
+    pos: Position,
+    *,
+    conn,
+    city,
+    target_d,
+) -> tuple[float, Position, bool | None]:
+    """Refresh same-day held probability from Day0 observation remaining-window."""
+
+    registry = {
+        EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
+        EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
+    }
+    refresh_pos = pos
+    if pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
+        refresh_pos = copy.copy(pos)
+        refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
+    setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
+
+    # recompute_native_probability still carries a legacy current_p_market
+    # parameter for dispatch compatibility. Do not pass the just-refreshed
+    # executable quote through this seam.
+    probability_reference_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+    try:
+        current_p_posterior = recompute_native_probability(
+            refresh_pos,
+            current_p_market=probability_reference_price,
+            registry=registry,
+            conn=conn,
+            city=city,
+            target_d=target_d,
+        )
+    except ObservationUnavailableError:
+        _set_monitor_probability_fresh(refresh_pos, False)
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unavailable:replacement_belief_reseed",
+        )
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
+        )
+        return pos.p_posterior, refresh_pos, False
+
+    if getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True:
+        try:
+            _day0_metric = MetricIdentity.from_raw(
+                getattr(refresh_pos, "temperature_metric", None)
+            ).temperature_metric
+        except Exception:
+            _day0_metric = None
+        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
+    else:
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unavailable:replacement_belief_reseed",
+        )
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
+        )
+    return (
+        current_p_posterior,
+        refresh_pos,
+        getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None),
+    )
+
+
 def monitor_probability_refresh(
     pos: Position,
     *,
@@ -3107,6 +3190,14 @@ def monitor_probability_refresh(
     )
     if hard_fact_overlay is not None:
         return hard_fact_overlay
+
+    if _would_use_day0_monitor_lane(pos, city, target_d):
+        return _refresh_day0_monitor_probability(
+            pos,
+            conn=conn,
+            city=city,
+            target_d=target_d,
+        )
 
     from src.engine.position_belief import (
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
@@ -3144,22 +3235,6 @@ def monitor_probability_refresh(
     else:
         _append_monitor_validation(pos, "replacement_posterior_missing")
 
-    # Determine whether the fallthrough would use the day0 nowcast lane (a
-    # DISTINCT settlement-day observation authority that MUST remain) or the
-    # legacy ENS forecast-belief path (the CROSS-ERA substitution the regime law
-    # U1/U2 retires for replacement-managed positions).
-    _would_use_day0_lane = (
-        pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
-        or (
-            _position_state_value(pos) == "day0_window"
-            and _city_supports_executable_day0_observation(city)
-        )
-        or (
-            _is_position_target_local_day(pos, city, target_d)
-            and _city_supports_executable_day0_observation(city)
-        )
-    )
-
     # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a position whose
     # replacement belief is stale/missing must NOT have the gap papered over by
     # the legacy ENS forecast belief (the Denver 2026-06-12 incident: stale 0.79
@@ -3183,119 +3258,52 @@ def monitor_probability_refresh(
     # for their family, so widening never strands a held position with NO belief
     # source. The same-family reseed is the only repair lane; the ensemble
     # registry below is retained ONLY as applied-list telemetry.
-    if not _would_use_day0_lane:
-        _metric_for_family = resolve_position_metric(pos)[0]
-        # LAYER 2 (2026-06-21 held-belief freeze fix): BEFORE fail-closing, attempt a
-        # SYNCHRONOUS single-family read-through recompute of THIS family's replacement
-        # posterior via the SAME canonical fusion authority, using whatever single_runs
-        # are CURRENTLY persisted. This is NOT a loosening of the BELIEF_AUTHORITY_FAULT
-        # guard: it makes the belief FRESH legitimately (canonical fusion, honestly wider
-        # CI when fewer providers) instead of substituting the cold legacy ENS center.
-        # If it yields a fresh posterior, the exit organ regains a fresh same-authority
-        # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
-        # before AND record a durable, retryable belief_debt marker (never a silent freeze).
-        readthrough_prob = _attempt_held_belief_readthrough(
-            pos, city=city, target_d=target_d, metric=_metric_for_family
-        )
-        if readthrough_prob is not None:
-            fresh_pos = replace(pos)
-            setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
-            _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
-            _append_monitor_validation(
-                fresh_pos,
-                "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
-            )
-            _set_monitor_probability_fresh(fresh_pos, True)
-            _clear_belief_debt(
-                city=str(pos.city), target_date=str(pos.target_date),
-                metric=_metric_for_family, pos=fresh_pos,
-            )
-            return float(readthrough_prob), fresh_pos, True
-        _set_monitor_probability_fresh(pos, False)
-        _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
-        _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
-        # Durable, retryable belief-debt: the read-through could not honestly recompute
-        # (no current single_runs / no on-disk anchor) — record it so a held position is
-        # never silently frozen. The reseed below is the repair lane.
-        _record_belief_debt(
-            pos, city=str(pos.city), target_date=str(pos.target_date),
-            metric=_metric_for_family, reason="readthrough_inputs_insufficient",
-        )
-        _enqueue_single_family_belief_reseed_failsoft(
-            city=str(pos.city),
-            target_date=str(pos.target_date),
-            metric=_metric_for_family,
-        )
-        # Return the stored entry-time posterior as the value carrier but with
-        # is_fresh=False so refresh_position records NaN current_p_posterior and
-        # the exit organ treats belief as unavailable (never a stale-as-fresh).
-        return pos.p_posterior, pos, False
-
-    registry = {
-        EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
-        EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
-    }
-    refresh_pos = pos
-    if _would_use_day0_lane and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-        if _city_supports_executable_day0_observation(city):
-            refresh_pos = copy.copy(pos)
-            refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
-    setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
-
-    # recompute_native_probability still carries a legacy current_p_market
-    # parameter for dispatch compatibility. Do not pass the just-refreshed
-    # executable quote through this seam.
-    probability_reference_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
-    try:
-        current_p_posterior = recompute_native_probability(
-            refresh_pos,
-            current_p_market=probability_reference_price,
-            registry=registry,
-            conn=conn,
-            city=city,
-            target_d=target_d,
-        )
-    except ObservationUnavailableError:
-        _set_monitor_probability_fresh(refresh_pos, False)
-        _append_monitor_validation(
-            refresh_pos,
-            "day0_observation_unavailable:replacement_belief_reseed",
-        )
-        _enqueue_single_family_belief_reseed_failsoft(
-            city=str(pos.city),
-            target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
-        )
-        return pos.p_posterior, refresh_pos, False
-    if (
-        _would_use_day0_lane
-        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True
-    ):
-        try:
-            _day0_metric = MetricIdentity.from_raw(
-                getattr(refresh_pos, "temperature_metric", None)
-            ).temperature_metric
-        except Exception:
-            _day0_metric = None
-        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
-    if (
-        _would_use_day0_lane
-        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is not True
-    ):
-        _append_monitor_validation(
-            refresh_pos,
-            "day0_observation_unavailable:replacement_belief_reseed",
-        )
-        _enqueue_single_family_belief_reseed_failsoft(
-            city=str(pos.city),
-            target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
-        )
-    return (
-        current_p_posterior,
-        refresh_pos,
-        getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None),
+    _metric_for_family = resolve_position_metric(pos)[0]
+    # LAYER 2 (2026-06-21 held-belief freeze fix): BEFORE fail-closing, attempt a
+    # SYNCHRONOUS single-family read-through recompute of THIS family's replacement
+    # posterior via the SAME canonical fusion authority, using whatever single_runs
+    # are CURRENTLY persisted. This is NOT a loosening of the BELIEF_AUTHORITY_FAULT
+    # guard: it makes the belief FRESH legitimately (canonical fusion, honestly wider
+    # CI when fewer providers) instead of substituting the cold legacy ENS center.
+    # If it yields a fresh posterior, the exit organ regains a fresh same-authority
+    # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
+    # before AND record a durable, retryable belief_debt marker (never a silent freeze).
+    readthrough_prob = _attempt_held_belief_readthrough(
+        pos, city=city, target_d=target_d, metric=_metric_for_family
     )
+    if readthrough_prob is not None:
+        fresh_pos = replace(pos)
+        setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(
+            fresh_pos,
+            "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
+        )
+        _set_monitor_probability_fresh(fresh_pos, True)
+        _clear_belief_debt(
+            city=str(pos.city), target_date=str(pos.target_date),
+            metric=_metric_for_family, pos=fresh_pos,
+        )
+        return float(readthrough_prob), fresh_pos, True
+    _set_monitor_probability_fresh(pos, False)
+    _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
+    _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
+    # Durable, retryable belief-debt: the read-through could not honestly recompute
+    # (no current single_runs / no on-disk anchor) — record it so a held position is
+    # never silently frozen. The reseed below is the repair lane.
+    _record_belief_debt(
+        pos, city=str(pos.city), target_date=str(pos.target_date),
+        metric=_metric_for_family, reason="readthrough_inputs_insufficient",
+    )
+    _enqueue_single_family_belief_reseed_failsoft(
+        city=str(pos.city),
+        target_date=str(pos.target_date),
+        metric=_metric_for_family,
+    )
+    # Return the stored entry-time posterior as the value carrier but with
+    # is_fresh=False so refresh_position records NaN current_p_posterior and
+    # the exit organ treats belief as unavailable (never a stale-as-fresh).
+    return pos.p_posterior, pos, False
 
 
 def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:
