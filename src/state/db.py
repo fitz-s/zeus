@@ -9934,6 +9934,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "entry_ci_width": "0.0",
         "exit_retry_count": "0",
         "next_exit_retry_at": "NULL",
+        "exit_reason": "NULL",
+        "admin_exit_reason": "NULL",
         "last_monitor_prob_is_fresh": "0",
         "last_monitor_market_price_is_fresh": "0",
     }
@@ -10037,7 +10039,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
                 "exit_state": exit_state_hint,
-                "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
+                "exit_reason": str(row["exit_reason"] or ""),
+                "admin_exit_reason": str(row["admin_exit_reason"] or hints.get("admin_exit_reason") or ""),
                 "entry_fill_verified": bool(
                     hints.get("entry_fill_verified", False)
                     or fill_economics["entry_fill_verified"]

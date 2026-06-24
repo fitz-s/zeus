@@ -2402,6 +2402,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         order_posted_at=order_posted_at,
         chain_state=str(row.get("chain_state") or ""),
         exit_state=runtime_exit_state,
+        exit_reason=str(row.get("exit_reason") or ""),
         last_monitor_prob=row.get("last_monitor_prob"),
         last_monitor_prob_is_fresh=bool(row.get("last_monitor_prob_is_fresh") or False),
         last_monitor_edge=row.get("last_monitor_edge"),

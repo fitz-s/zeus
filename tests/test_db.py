@@ -1665,6 +1665,7 @@ def test_portfolio_loader_view_projects_runtime_monitor_columns(tmp_path):
            SET entry_ci_width = 0.12,
                exit_retry_count = 3,
                next_exit_retry_at = '2026-04-01T00:10:00+00:00',
+               exit_reason = 'MARKET_CLOSED_AWAITING_SETTLEMENT',
                last_monitor_prob = 0.64,
                last_monitor_prob_is_fresh = 1,
                last_monitor_market_price = 0.43,
@@ -1682,6 +1683,7 @@ def test_portfolio_loader_view_projects_runtime_monitor_columns(tmp_path):
     assert loader_position["entry_ci_width"] == pytest.approx(0.12)
     assert loader_position["exit_retry_count"] == 3
     assert loader_position["next_exit_retry_at"] == "2026-04-01T00:10:00+00:00"
+    assert loader_position["exit_reason"] == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert loader_position["last_monitor_prob"] == pytest.approx(0.64)
     assert loader_position["last_monitor_prob_is_fresh"] is True
     assert loader_position["last_monitor_market_price"] == pytest.approx(0.43)
