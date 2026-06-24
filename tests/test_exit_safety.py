@@ -2362,6 +2362,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
 
 def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     from src.execution.exit_lifecycle import release_market_closed_pending_exit_hold
+    from src.contracts.semantic_types import ExitState
     from src.state.portfolio import Position
 
     position = Position(
@@ -2383,7 +2384,7 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
         chain_cost_basis_usd=8.4,
         strategy_key="center_buy",
         env="live",
-        order_status="backoff_exhausted",
+        order_status=ExitState.BACKOFF_EXHAUSTED,
         exit_state="backoff_exhausted",
         exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
         exit_retry_count=3,

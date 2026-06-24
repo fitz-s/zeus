@@ -593,7 +593,9 @@ def mark_market_closed_hold_to_settlement(
     position.exit_state = ""
     position.next_exit_retry_at = ""
     position.exit_retry_count = 0
-    if str(getattr(position, "order_status", "") or "") in {
+    order_status = getattr(position, "order_status", "")
+    order_status = getattr(order_status, "value", order_status)
+    if str(order_status or "") in {
         "backoff_exhausted",
         "retry_pending",
         "sell_pending",
