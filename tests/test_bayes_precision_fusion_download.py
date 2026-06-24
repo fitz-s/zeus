@@ -45,6 +45,22 @@ def _targets():
     ]
 
 
+def _two_city_targets():
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
+    return [
+        BayesPrecisionFusionDownloadTarget(
+            city="Paris", metric="high", target_date="2026-06-09",
+            lead_days=1, latitude=48.967, longitude=2.428,
+            timezone_name="Europe/Paris",
+        ),
+        BayesPrecisionFusionDownloadTarget(
+            city="Berlin", metric="high", target_date="2026-06-09",
+            lead_days=1, latitude=52.520, longitude=13.405,
+            timezone_name="Europe/Berlin",
+        ),
+    ]
+
+
 def _count(db: Path, **where) -> int:
     conn = sqlite3.connect(str(db))
     clause = " AND ".join(f"{k}=?" for k in where)
@@ -461,8 +477,11 @@ def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tm
     from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
+    single_calls: list[tuple[str, ...]] = []
+    previous_calls: list[tuple[str, ...]] = []
 
-    def _single_batch_fail(**_kwargs):
+    def _single_batch_fail(**kwargs):
+        single_calls.append(tuple(kwargs["models"]))
         return {
             dl._BATCH_TRANSPORT_ERROR_KEY: (
                 "Open-Meteo quota exhausted (2 calls today)",
@@ -471,18 +490,26 @@ def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tm
         }
 
     monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch_fail)
-    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", lambda **_kwargs: {})
+
+    def _previous_batch(**kwargs):
+        previous_calls.append(tuple(kwargs["models"]))
+        return {}
+
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", _previous_batch)
 
     report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db,
         cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
-        targets=_targets(),
+        targets=_two_city_targets(),
     )
 
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
     assert report["written_row_count"] == 0
     assert report["transport_errors"]
     assert "Open-Meteo quota exhausted" in report["transport_errors"][0]
+    assert report["transport_aborted_remaining_targets"] is True
+    assert len(single_calls) == 1
+    assert previous_calls == []
 
 
 def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(monkeypatch) -> None:

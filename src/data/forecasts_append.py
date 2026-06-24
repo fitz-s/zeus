@@ -94,6 +94,16 @@ _EARTH_HIGH_C = 56.7
 _EARTH_LOW_C = -89.2
 
 
+def _is_openmeteo_quota_transport_error(exc: object) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "open-meteo quota exhausted" in text
+        or "too many requests" in text
+        or "429" in text
+        or "rate limit" in text
+    )
+
+
 def _retry_embargo(hours: int = 1) -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=hours)
 
@@ -157,6 +167,7 @@ def _fetch_previous_runs_chunk(
         },
         timeout=60.0,
         endpoint_label="previous_runs",
+        fast_fail_429=True,
     )
 
 
@@ -344,6 +355,7 @@ def append_forecasts_window(
         "fetched_rows": 0, "inserted": 0,
         "fetch_errors": 0, "dates_marked_written": 0,
         "dates_marked_legitimate_gap": 0,
+        "transport_aborted": 0,
     }
     if start_date > end_date:
         return stats
@@ -394,6 +406,7 @@ def append_forecasts_window(
             )
         except Exception as e:
             stats["fetch_errors"] += 1
+            transport_aborted = _is_openmeteo_quota_transport_error(e)
             logger.warning(
                 "forecasts chunk failed %s %s..%s: %s: %s",
                 city.name, current, chunk_end, type(e).__name__, e,
@@ -414,6 +427,13 @@ def append_forecasts_window(
                     )
                     d += timedelta(days=1)
             conn.commit()
+            if transport_aborted:
+                stats["transport_aborted"] = 1
+                logger.warning(
+                    "forecasts append aborting remaining chunks for %s after Open-Meteo transport quota/rate-limit error",
+                    city.name,
+                )
+                break
             current = chunk_end + timedelta(days=1)
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
@@ -487,6 +507,7 @@ def daily_tick(
         "cities_processed": 0, "fetched_rows": 0, "inserted": 0,
         "fetch_errors": 0, "dates_marked_written": 0,
         "dates_marked_legitimate_gap": 0,
+        "transport_aborted": 0,
     }
     for city in cities:
         stats = append_forecasts_window(
@@ -494,8 +515,10 @@ def daily_tick(
         )
         totals["cities_processed"] += 1
         for k in ("fetched_rows", "inserted", "fetch_errors",
-                  "dates_marked_written", "dates_marked_legitimate_gap"):
+                  "dates_marked_written", "dates_marked_legitimate_gap", "transport_aborted"):
             totals[k] += stats.get(k, 0)
+        if stats.get("transport_aborted"):
+            break
     return totals
 
 
@@ -529,6 +552,7 @@ def catch_up_missing(
     totals = {
         "cities_touched": 0, "fetched_rows": 0, "inserted": 0,
         "fetch_errors": 0, "dates_marked_written": 0,
+        "transport_aborted": 0,
     }
     for i, (city_name, dates) in enumerate(by_city.items()):
         if i >= max_cities:
@@ -540,6 +564,8 @@ def catch_up_missing(
             city, min(dates), max(dates), conn, rebuild_run_id=rebuild_run_id,
         )
         totals["cities_touched"] += 1
-        for k in ("fetched_rows", "inserted", "fetch_errors", "dates_marked_written"):
+        for k in ("fetched_rows", "inserted", "fetch_errors", "dates_marked_written", "transport_aborted"):
             totals[k] += stats.get(k, 0)
+        if stats.get("transport_aborted"):
+            break
     return totals

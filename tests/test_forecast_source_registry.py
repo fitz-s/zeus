@@ -303,6 +303,48 @@ def test_forecasts_append_persists_source_id_and_raw_payload_hash(monkeypatch) -
     assert row["authority_tier"] == "FORECAST"
 
 
+def test_forecasts_daily_tick_aborts_city_loop_on_openmeteo_quota(monkeypatch) -> None:
+    class Config:
+        model_retro_starts = {}
+
+    calls: list[str] = []
+
+    def _quota_fail(city, *_args, **_kwargs):
+        calls.append(city.name)
+        raise RuntimeError("Open-Meteo quota exhausted (2 calls today)")
+
+    monkeypatch.setattr(forecasts_append, "_get_exceptions_config", lambda: Config())
+    monkeypatch.setattr(forecasts_append, "_fetch_previous_runs_chunk", _quota_fail)
+
+    conn = _memdb()
+    try:
+        stats = forecasts_append.daily_tick(
+            conn,
+            now_utc=datetime(2026, 4, 27, tzinfo=timezone.utc),
+            cities=(
+                _city(),
+                City(
+                    name="Secondopolis",
+                    lat=41.0,
+                    lon=-74.0,
+                    timezone="UTC",
+                    settlement_unit="F",
+                    cluster="test",
+                    wu_station="KBBB",
+                ),
+            ),
+            past_days=0,
+            future_days=0,
+        )
+    finally:
+        conn.close()
+
+    assert calls == ["Testopolis"]
+    assert stats["cities_processed"] == 1
+    assert stats["fetch_errors"] == 1
+    assert stats["transport_aborted"] == 1
+
+
 def test_ensemble_fetch_result_carries_registry_provenance(monkeypatch) -> None:
     city = _city()
     ensemble_client._clear_cache()

@@ -1012,7 +1012,7 @@ def _replacement_forecast_download_cycle() -> None:
     if bayes_precision_fusion_capture_report is not None and bayes_precision_fusion_capture_report.get("status") not in {
         "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
     }:
-        logger.info("BAYES_PRECISION_FUSION extra-model diagnostic capture report: %s", bayes_precision_fusion_capture_report)
+        logger.info("BAYES_PRECISION_FUSION extra-model raw-input capture report: %s", bayes_precision_fusion_capture_report)
     # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails, probe-skips,
     # or downloads with missing global instruments, the parent download job still
     # shows OK. Write a distinct component entry so preflight can fail on the

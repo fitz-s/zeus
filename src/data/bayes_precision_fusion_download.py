@@ -395,6 +395,16 @@ PreviousRunsFetchFn = Callable[..., float | None]
 _BATCH_TRANSPORT_ERROR_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_ERROR__"
 
 
+def _is_quota_transport_error(message: object) -> bool:
+    text = str(message or "").lower()
+    return (
+        "open-meteo quota exhausted" in text
+        or "too many requests" in text
+        or "429" in text
+        or "rate limit" in text
+    )
+
+
 @dataclass(frozen=True)
 class BayesPrecisionFusionDownloadTarget:
     """One current-target the extra models are captured for."""
@@ -531,6 +541,7 @@ def _default_live_fetch_batched(
             params,
             endpoint_label="bayes_precision_fusion_single_runs_batched",
             quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+            fast_fail_429=True,
         )
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
@@ -626,6 +637,7 @@ def _default_previous_runs_fetch_batched(
             params,
             endpoint_label="bayes_precision_fusion_previous_runs_batched",
             quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+            fast_fail_429=True,
         )
         return _parse_batched_previous_runs_payload(payload, models, hourly_var)
     except Exception as exc:
@@ -962,6 +974,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     dropped: list[str] = []
     domain_excluded: list[str] = []
     transport_errors: list[str] = []
+    abort_transport = False
 
     # ROW-LEVEL SKIP (2026-06-09, K-root instance #5 resolution): preload the logical keys
     # already persisted for THIS cycle so a re-run only fetches what is MISSING. This replaces
@@ -1019,6 +1032,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         targets_by_city_date[(t.city, t.target_date)].append(t)
 
     for (city, target_date), city_targets in targets_by_city_date.items():
+        if abort_transport:
+            break
         # All targets for the same (city, target_date) share lat/lon/timezone/lead_days.
         ref = city_targets[0]
         target_local_date = date.fromisoformat(target_date)
@@ -1135,9 +1150,12 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if single_transport_error is not None:
+                    single_error_text = str(single_transport_error[0])
                     transport_errors.append(
-                        f"single_runs:{city}:{target_date}:{single_transport_error[0]}"
+                        f"single_runs:{city}:{target_date}:{single_error_text}"
                     )
+                    if _is_quota_transport_error(single_error_text):
+                        abort_transport = True
                 for model in single_models:
                     hilo = sv_map.get(model)
                     if hilo is None:
@@ -1179,7 +1197,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     prev_models.append(model)
 
             # ONE batched previous_runs fetch covers all models with missing history.
-            if prev_models:
+            if prev_models and not abort_transport:
                 pv_map = _default_previous_runs_fetch_batched(
                     models=prev_models,
                     latitude=ref.latitude,
@@ -1190,9 +1208,12 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 )
                 previous_transport_error = pv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if previous_transport_error is not None:
+                    previous_error_text = str(previous_transport_error[0])
                     transport_errors.append(
-                        f"previous_runs:{city}:{target_date}:{previous_transport_error[0]}"
+                        f"previous_runs:{city}:{target_date}:{previous_error_text}"
                     )
+                    if _is_quota_transport_error(previous_error_text):
+                        abort_transport = True
                 for model in prev_models:
                     hilo = pv_map.get(model)
                     if hilo is None:
@@ -1261,7 +1282,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
     status = (
         "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-        if transport_errors and not single_success_models
+        if transport_errors
         else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
     return {
@@ -1275,6 +1296,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "dropped": tuple(dropped),
         "domain_excluded": tuple(sorted(set(domain_excluded))),
         "transport_errors": tuple(transport_errors),
+        "transport_aborted_remaining_targets": abort_transport,
         # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
         "global_models_expected": len(global_models_expected),
         "global_models_dropped_scoped": sorted(global_single_dropped_scoped),

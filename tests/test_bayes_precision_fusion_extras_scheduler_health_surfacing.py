@@ -135,8 +135,10 @@ def test_extras_global_models_unavailable_writes_health_failed():
 def test_extras_clean_success_writes_health_ok():
     """BAYES_PRECISION_FUSION extras clean success → health failed=False for bayes_precision_fusion_capture."""
     success_report = {
-        "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURED",
+        "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+        "cycle": "2026-06-09T00:00:00+00:00",
         "captured_count": 40,
+        "written_row_count": 40,
         "global_models_unavailable": [],
     }
 
