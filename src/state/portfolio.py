@@ -885,6 +885,18 @@ class Position:
             )
         return shares * executable_bid > hold_value.net_value
 
+    def _near_settlement_hold_is_confirmed_win(
+        self,
+        *,
+        current_p_posterior: float,
+        best_bid: Optional[float],
+    ) -> bool:
+        """Return whether near-settle hold is a confirmed-win posture, not generic EV drift."""
+
+        if not ExitContext._is_finite(best_bid):
+            return False
+        return float(best_bid) >= 0.95 and float(current_p_posterior) >= 0.95
+
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
@@ -1073,6 +1085,19 @@ class Position:
         # force-sell. Freshness of fresh_prob is already gated by the missing-authority check above,
         # so a stale belief cannot drive this branch.
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
+            if self._near_settlement_hold_is_confirmed_win(
+                current_p_posterior=float(exit_context.fresh_prob),
+                best_bid=exit_context.best_bid,
+            ):
+                # Confirmed-win hold: do NOT blanket force-sell at 99c+ and do NOT let
+                # model-divergence telemetry rename the decision into a panic exit.
+                applied.append("near_settlement_confirmed_win_hold")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
             sell_beats_hold = self._sell_value_exceeds_hold_value(
                 current_p_posterior=float(exit_context.fresh_prob),
                 best_bid=exit_context.best_bid,
@@ -1092,11 +1117,17 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="SETTLEMENT_IMMINENT",
                 )
-            # hold-EV dominant: do NOT blanket force-sell (the operator-reported false exit of a
-            # confirmed win). Fall through to the downstream adverse-signal checks (whale toxicity,
-            # model divergence, edge reversal). A genuine confirmed win clears them and holds; a
-            # near-settle position the market or velocity contradicts still exits there.
-            applied.append("near_settlement_hold_ev_dominant")
+            # Hold-EV is mathematically positive but not a confirmed win. Near settlement this is not
+            # enough to hand control to panic/divergence gates; exit under the deterministic time gate.
+            applied.append("near_settlement_hold_ev_unconfirmed")
+            applied.append("near_settlement_gate")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                True, "SETTLEMENT_IMMINENT", "immediate",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="SETTLEMENT_IMMINENT",
+            )
 
         # Whale toxicity
         if exit_context.whale_toxicity:

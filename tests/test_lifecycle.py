@@ -801,6 +801,21 @@ class TestExitTriggers:
         assert decision.should_exit
         assert decision.trigger == "SETTLEMENT_IMMINENT"
 
+    def test_settlement_imminent_confirmed_win_holds(self):
+        pos = _make_position()
+        decision = _call_exit(
+            pos,
+            0.99,
+            0.998,
+            best_bid=0.998,
+            hours_to_settlement=0.5,
+            divergence_score=0.40,
+            market_velocity_1h=-0.20,
+        )
+        assert not decision.should_exit
+        assert "near_settlement_confirmed_win_hold" in decision.applied_validations
+        assert decision.trigger != "MODEL_DIVERGENCE_PANIC"
+
     def test_whale_toxicity(self):
         pos = _make_position()
         decision = _call_exit(pos, 0.60, 0.40, whale_toxicity=True)
