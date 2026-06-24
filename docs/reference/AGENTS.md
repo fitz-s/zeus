@@ -25,6 +25,7 @@ Do not start from old replacement papers, support-reference snapshots, rebuild s
 | full deploy money path | `zeus_prediction_market_quant_reference.md` |
 | domain/family/bin/native side | `zeus_domain_model.md` |
 | q/q_lcb/math/probability | `zeus_math_spec.md` |
+| forecast source/product/regional models | `zeus_forecast_source_and_regional_model_reference.md` |
 | strategy/admission/selection | `zeus_strategy_spec.md` |
 | settlement/source/market topology | `zeus_market_settlement_reference.md` |
 | execution/commands/lifecycle/exit/settlement | `zeus_execution_lifecycle_reference.md` |
@@ -44,6 +45,7 @@ Other legacy or specialized references are non-default unless the task explicitl
 | `zeus_prediction_market_quant_reference.md` | canonical durable reference | Complete current deploy money-path reference from contract truth through settlement/learning |
 | `zeus_domain_model.md` | canonical durable reference | Domain model: family, Ω, bins, native sides, high/low identity, truth hierarchy |
 | `zeus_math_spec.md` | canonical durable reference | Current probability/q/q_lcb/payoff/utility math, with executable-vs-reference-vs-target labels |
+| `zeus_forecast_source_and_regional_model_reference.md` | canonical durable reference | Forecast source/product identity, regional model inclusion, residual discipline, source-role separation |
 | `zeus_strategy_spec.md` | canonical durable reference | Direction law, admission, candidate selection, no-trade reasons, q-kernel strategy path |
 | `zeus_market_settlement_reference.md` | canonical durable reference | Market/settlement/source/bin topology and settlement semantics |
 | `zeus_execution_lifecycle_reference.md` | canonical durable reference | Entry, command, fill, monitor, exit, lifecycle, chain reconciliation, settlement/redeem |
