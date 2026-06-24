@@ -118,7 +118,22 @@ def _precision_metadata(city: str, target_date: str, *, anchor_sigma_c: float) -
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    body = json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n"
+    # Validate the exact bytes we are about to publish. A malformed raw payload
+    # is worse than a missing payload because manifest discovery will keep
+    # reusing it for every held-position reseed.
+    json.loads(body)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _json_file_valid(path: Path) -> bool:
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+        return True
+    except Exception:
+        return False
 
 
 def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest) -> Path:
@@ -374,7 +389,7 @@ def download_current_target_raw_inputs(
         # whole batch. The city is recorded as skipped and the loop continues; it falls to
         # a higher rung next tick. This preserves — never weakens — the rung-2 refusal:
         # a non-admissible city simply gets no artifact this cycle.
-        if not payload_path.exists():
+        if (not payload_path.exists()) or (not _json_file_valid(payload_path)):
             # Transport ladder (operator directive 2026-06-11, K4.0b(f)): rung 1 run-pinned
             # single-runs → rung 2 meta-stamped standard → rung 3 S3 bucket partial-run.
             # _resolve_anchor_payload encapsulates the whole ladder and returns

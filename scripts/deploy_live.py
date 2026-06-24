@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
-#   checkout's runtime surface (src/ config/) is uncommitted or unpushed.
-# Reuse: read-mostly (git status/rev-parse + launchctl list); the only state change is
-#   kickstart after the clean-tree gate passes. Opens NO database.
+#   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
+#   before booting the trading daemon.
+# Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
+#   state change is kickstart after the gates pass.
 # Last reused/audited: 2026-06-12
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
@@ -25,11 +26,13 @@ COMMANDS
         them. REFUSES when the live checkout's src/ or config/ has
         uncommitted changes, OR when HEAD != origin/<branch> (unpushed) —
         printing exactly what is dirty / unpushed. Pass --allow-dirty to
-        bypass with a loud warning listing the dirty surface.
+        bypass only the git-surface gate with a loud warning. live-trading
+        restarts still require scripts/check_live_restart_preflight.py to pass.
 
 SAFETY
     Read-mostly: the only state-changing action is `launchctl kickstart`,
-    and only after the clean-tree gate passes (or --allow-dirty is given).
+    and only after the clean-tree gate passes (or --allow-dirty is given) and
+    the live-money restart preflight passes for trading-daemon restarts.
     `status` never changes anything.
 
 END-STATE (documented, NOT implemented here)
@@ -218,6 +221,36 @@ def _gate(allow_dirty: bool) -> tuple[bool, list[str]]:
     return True, blockers
 
 
+def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
+    """Run the live-money preflight before booting the trading daemon.
+
+    ``--allow-dirty`` is only a git-surface override. It must not bypass current
+    DB/artifact/sidecar/held-position safety checks.
+    """
+
+    if "com.zeus.live-trading" not in labels:
+        return True, "preflight not required for this daemon"
+    py = os.path.join(LIVE_REPO, ".venv", "bin", "python")
+    if not os.path.exists(py):
+        py = sys.executable
+    cmd = [py, "scripts/check_live_restart_preflight.py", "--json"]
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=LIVE_REPO,
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"live restart preflight could not run: {exc}"
+    output = (res.stdout or res.stderr or "").strip()
+    if res.returncode == 0:
+        return True, "live restart preflight passed"
+    tail = "\n".join(output.splitlines()[-80:]) if output else "<no output>"
+    return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
+
+
 def cmd_restart(args: argparse.Namespace) -> int:
     target = args.daemon
     if target == "all":
@@ -242,6 +275,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
         for b in blockers:
             print(f"  {b}")
         print("!" * 64)
+
+    preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
+    if not preflight_ok:
+        print("REFUSING to restart — live restart preflight is not green:")
+        print(preflight_detail)
+        return 1
+    print(preflight_detail)
 
     rc_all = 0
     for label in labels:

@@ -39,6 +39,13 @@ from src.data.replacement_forecast_materializer import (
     SOURCE_ID as MAT_SOURCE_ID,
     _cycle_monotone_block_reasons,
 )
+from src.data.openmeteo_ecmwf_ifs9_anchor import (
+    HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION,
+    PRODUCT_ID as OPENMETEO_PRODUCT_ID,
+    SOURCE_ID as OPENMETEO_SOURCE_ID,
+)
+from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
+from src.data.replacement_forecast_seed_discovery import _latest_manifest
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
@@ -111,6 +118,79 @@ def _insert_artifact(conn: sqlite3.Connection, *, source_id: str, cycle_iso: str
     qs = ", ".join("?" for _ in values)
     conn.execute(f"INSERT INTO raw_forecast_artifacts ({names}) VALUES ({qs})", tuple(values.values()))
     conn.commit()
+
+
+def _openmeteo_manifest_for_test(
+    path: Path,
+    *,
+    cycle: datetime,
+    city: str = "Buenos Aires",
+    target_date: str = "2026-06-24",
+) -> RawForecastArtifactManifest:
+    precision = path.with_name(path.stem + ".precision.json")
+    precision.write_text("{}", encoding="utf-8")
+    return RawForecastArtifactManifest.from_file(
+        path,
+        source_id=OPENMETEO_SOURCE_ID,
+        product_id=OPENMETEO_PRODUCT_ID,
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time=cycle,
+        source_available_at=cycle + timedelta(minutes=1),
+        captured_at=cycle + timedelta(minutes=2),
+        request_url="https://single-runs-api.open-meteo.com/v1/forecast",
+        request_params={"run": cycle.isoformat()},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "city": city,
+            "target_date": target_date,
+            "city_timezone": "America/Argentina/Buenos_Aires",
+            "metric": "high",
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(path),
+            "precision_metadata_json": str(precision),
+        },
+    )
+
+
+def test_latest_manifest_rejects_corrupt_openmeteo_payload(tmp_path: Path) -> None:
+    corrupt = tmp_path / "openmeteo_Buenos_Aires_2026-06-24_high_20260624T000000Z.json"
+    corrupt.write_text('{"hourly": {}}\n}\n', encoding="utf-8")
+    valid = tmp_path / "openmeteo_Buenos_Aires_2026-06-24_high_20260624T060000Z.json"
+    valid.write_text(
+        '{"hourly": {"time": ["2026-06-24T12:00"], "temperature_2m": [10.0]}}\n',
+        encoding="utf-8",
+    )
+
+    corrupt_manifest = _openmeteo_manifest_for_test(
+        corrupt,
+        cycle=datetime(2026, 6, 24, 0, tzinfo=UTC),
+    )
+    valid_manifest = _openmeteo_manifest_for_test(
+        valid,
+        cycle=datetime(2026, 6, 24, 6, tzinfo=UTC),
+    )
+
+    selected = _latest_manifest(
+        (corrupt_manifest, valid_manifest),
+        source_id=OPENMETEO_SOURCE_ID,
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Buenos Aires",
+        target_date="2026-06-24",
+        city_timezone="America/Argentina/Buenos_Aires",
+    )
+
+    assert selected is valid_manifest
+    assert (
+        _latest_manifest(
+            (corrupt_manifest,),
+            source_id=OPENMETEO_SOURCE_ID,
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            city="Buenos Aires",
+            target_date="2026-06-24",
+            city_timezone="America/Argentina/Buenos_Aires",
+        )
+        is None
+    )
 
 
 # ===========================================================================

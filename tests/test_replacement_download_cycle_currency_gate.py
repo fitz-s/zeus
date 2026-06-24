@@ -218,3 +218,16 @@ def test_stale_cycle_download_includes_covered_targets(tmp_path, monkeypatch) ->
         "a stale-cycle download must fetch raw inputs for ALL current targets — filtering "
         "to uncovered rows self-perpetuates staleness (coverage never implies currency)"
     )
+
+
+def test_existing_corrupt_openmeteo_payload_is_not_reused(tmp_path: Path) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    payload = tmp_path / "openmeteo_Buenos_Aires_2026-06-24_high_20260624T000000Z.json"
+    payload.write_text('{"hourly": {}}\n}\n', encoding="utf-8")
+
+    assert dl._json_file_valid(payload) is False
+
+    dl._write_json(payload, {"hourly": {"time": [], "temperature_2m": []}})
+
+    assert dl._json_file_valid(payload) is True

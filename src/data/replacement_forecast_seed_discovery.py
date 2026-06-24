@@ -162,6 +162,39 @@ def _manifest_payload_covers_target_local_day(
     return False
 
 
+def _json_path_valid(path_text: str | None, *, base_dir: Path | None = None) -> bool:
+    if path_text is None or not str(path_text).strip():
+        return False
+    path = Path(str(path_text))
+    if base_dir is not None and not path.is_absolute():
+        path = base_dir / path
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def _manifest_materialization_inputs_valid(manifest: RawForecastArtifactManifest) -> bool:
+    """Reject corrupt raw JSON before it becomes a live materialization request.
+
+    Manifest byte/hash checks prove the file matches the manifest; they do not
+    prove the bytes are parseable JSON. A corrupt but self-consistent payload
+    must be treated as not materializable so held-position reseeds do not loop
+    on the same failing request.
+    """
+
+    if manifest.source_id != "openmeteo_ecmwf_ifs_9km":
+        return True
+    base_dir = _manifest_base_dir(manifest, fallback=Path(manifest.artifact_path).parent)
+    payload = _manifest_path_value(manifest, "openmeteo_payload_json") or manifest.artifact_path
+    precision = _manifest_path_value(manifest, "precision_metadata_json")
+    return _json_path_valid(payload, base_dir=base_dir) and _json_path_valid(
+        precision,
+        base_dir=base_dir,
+    )
+
+
 def _latest_manifest(
     manifests: tuple[RawForecastArtifactManifest, ...],
     *,
@@ -177,6 +210,7 @@ def _latest_manifest(
         if manifest.source_id == source_id and manifest.data_version == data_version
         and _manifest_allows_city(manifest, city=city)
         and _manifest_allows_target_date(manifest, target_date=target_date)
+        and _manifest_materialization_inputs_valid(manifest)
     ]
     if not candidates:
         return None

@@ -46,7 +46,7 @@ def test_well_calibrated_cell_serves_min_band_and_Lg():
     # band_q_lcb of 0.72 (bucket [0.7, 0.8) -> floor 0.7). L_g for 0.85 over n=500 is ~0.82.
     band_q_lcb = 0.72
     bucket_idx, bucket_floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|YES|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}|coarse_global"
     table = {key: (500, 0.85)}
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
@@ -66,7 +66,7 @@ def test_miscalibrated_deep_cell_deflates_to_wilson_not_zero():
     # does not add a binary veto. Route cost decides whether that deflated q still trades.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|YES|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}|coarse_global"
     table = {key: (500, 0.55)}
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
@@ -82,7 +82,7 @@ def test_thin_cell_abstains_even_with_high_point_rate():
     # n < N_MIN -> the N_MIN gate fires regardless of the point hit-rate -> abstain.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|YES|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}|coarse_global"
     table = {key: (N_MIN - 1, 1.0)}  # perfect but thin
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
@@ -125,7 +125,7 @@ def test_injected_active_empty_table_abstains():
 
 def test_missing_cell_inside_active_table_abstains():
     # Once an artifact is active, an unseen side-aware cell is not authority.
-    active_table = {"high|L1|YES|modal|qb1": (500, 0.5)}
+    active_table = {"high|L1|YES|modal|qb1|coarse_global": (500, 0.5)}
     v = apply_guard(
         band_q_lcb=0.76,
         metric="high",
@@ -143,7 +143,7 @@ def test_missing_cell_inside_active_table_abstains():
 def test_side_specific_cell_required_for_no_claim():
     band_q_lcb = 0.72
     bucket_idx, _bucket_floor = qlcb_bucket(band_q_lcb)
-    yes_only = {f"high|L1|YES|nonmodal|qb{bucket_idx}": (500, 0.90)}
+    yes_only = {f"high|L1|YES|nonmodal|qb{bucket_idx}|coarse_global": (500, 0.90)}
     no_missing = apply_guard(
         band_q_lcb=band_q_lcb,
         metric="high",
@@ -154,7 +154,7 @@ def test_side_specific_cell_required_for_no_claim():
     )
     assert no_missing.abstained is True
 
-    no_table = {f"high|L1|NO|nonmodal|qb{bucket_idx}": (500, 0.90)}
+    no_table = {f"high|L1|NO|nonmodal|qb{bucket_idx}|coarse_global": (500, 0.90)}
     no_licensed = apply_guard(
         band_q_lcb=band_q_lcb,
         metric="high",
