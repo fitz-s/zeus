@@ -61,6 +61,7 @@ Task-specific supplemental reads after the default boot:
 | full money-path orientation | `docs/reference/zeus_prediction_market_quant_reference.md` |
 | domain/family/bin/native-side basics | `docs/reference/zeus_domain_model.md` |
 | probability/q/q_lcb/math | `docs/reference/zeus_math_spec.md` |
+| forecast source/product/regional model work | `docs/reference/zeus_forecast_source_and_regional_model_reference.md` |
 | strategy/admission/selection | `docs/reference/zeus_strategy_spec.md` |
 | settlement/source/bin topology | `docs/reference/zeus_market_settlement_reference.md` |
 | execution/lifecycle/exit/settlement | `docs/reference/zeus_execution_lifecycle_reference.md` |
