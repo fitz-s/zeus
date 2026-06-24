@@ -119,6 +119,7 @@ def family_materializable_cycle(
     city: str,
     target_date: str,
     metric: str,
+    city_timezone: str | None = None,
     expected_identity,
     latest_manifest,
 ) -> tuple[datetime | None, tuple[tuple[str, str], ...]]:
@@ -141,6 +142,7 @@ def family_materializable_cycle(
             data_version=identity.data_version,
             city=city,
             target_date=target_date,
+            city_timezone=city_timezone,
         )
         if man is None:
             missing.append((role, str(identity.source_id)))
@@ -658,11 +660,16 @@ def enqueue_cycle_advance_reseeds(
             # freshest cycle, which can be a FALSE advance signal when a leg's raw artifact is
             # missing for THIS family at that cycle. Re-check materializability AT FAMILY SCOPE.
             try:
+                from src.config import cities_by_name  # noqa: PLC0415
+
+                city_cfg = cities_by_name.get(city)
+                city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
                 family_cycle, missing_legs = family_materializable_cycle(
                     manifests,
                     city=city,
                     target_date=target_date,
                     metric=metric,
+                    city_timezone=city_timezone,
                     expected_identity=expected_replacement_dependency_identity_by_role,
                     latest_manifest=_latest_manifest,
                 )
@@ -1103,12 +1110,17 @@ def _build_and_write_advance_seed(
     materializer's monotone guard admits it (request cycle >= current posterior cycle). Mirrors the
     fusion-upgrade trigger's _build_and_write_upgrade_seed (single seed-build shape)."""
     expected = expected_identity(metric)
+    from src.config import cities_by_name  # noqa: PLC0415
+
+    city_cfg = cities_by_name.get(city)
+    city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
         data_version=expected["openmeteo_ifs9_anchor"].data_version,
         city=city,
         target_date=target_date,
+        city_timezone=city_timezone,
     )
     if openmeteo is None:
         return None

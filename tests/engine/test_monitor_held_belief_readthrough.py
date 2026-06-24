@@ -25,6 +25,8 @@ removing the belief_debt record makes (2) fail.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.contracts import EntryMethod
@@ -155,3 +157,65 @@ def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):
     assert prob == pytest.approx(0.80)
     from src.state.portfolio import Position
     assert isinstance(refresh_pos, Position)
+
+
+def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypatch):
+    """Newest seed can be a poison file; read-through must pick the newest usable one."""
+    import src.data.replacement_forecast_production as prod
+    import src.engine.monitor_refresh as mr
+
+    root = tmp_path / "replacement_forecast_live"
+    seed_dir = root / "seeds"
+    processed_dir = root / "seeds_processed"
+    queue_processed_dir = root / "processed"
+    raw_dir = root / "raw_manifests"
+    for path in (seed_dir, processed_dir, queue_processed_dir, raw_dir):
+        path.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "seed_dir": str(seed_dir),
+            "seed_processed_dir": str(processed_dir),
+            "processed_dir": str(queue_processed_dir),
+        },
+    )
+
+    bad_payload = raw_dir / "openmeteo_Hong_Kong_2026-06-25_low.json"
+    bad_payload.write_text(
+        json.dumps({"hourly": {"time": ["2026-06-25T01:00"], "temperature_2m": [28.0]}}),
+        encoding="utf-8",
+    )
+    good_payload = raw_dir / "openmeteo_Hong_Kong_2026-06-26_low.json"
+    good_payload.write_text(
+        json.dumps({"hourly": {"time": ["2026-06-26T01:00"], "temperature_2m": [27.0]}}),
+        encoding="utf-8",
+    )
+
+    def write_seed(stamp: str, payload_path) -> None:
+        seed = {
+            "city": "Hong Kong",
+            "target_date": "2026-06-26",
+            "temperature_metric": "low",
+            "city_timezone": "Asia/Hong_Kong",
+            "openmeteo_payload_json": f"../raw_manifests/{payload_path.name}",
+        }
+        (seed_dir / f"Hong_Kong.2026-06-26.low.{stamp}.json").write_text(
+            json.dumps(seed),
+            encoding="utf-8",
+        )
+
+    write_seed("20260624T222604Z", bad_payload)
+    write_seed("20260624T222503Z", good_payload)
+
+    selected = mr._freshest_family_seed_on_disk(
+        city="Hong Kong",
+        target_date="2026-06-26",
+        metric="low",
+    )
+
+    assert selected is not None
+    selected_path, selected_payload = selected
+    assert selected_path.name.endswith("20260624T222503Z.json")
+    assert selected_payload["openmeteo_payload_json"].endswith("2026-06-26_low.json")

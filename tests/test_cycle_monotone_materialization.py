@@ -357,7 +357,15 @@ class _FakeManifest:
         self._target_date = target_date
 
 
-def _fake_latest_manifest(manifests, *, source_id, data_version, city, target_date):
+def _fake_latest_manifest(
+    manifests,
+    *,
+    source_id,
+    data_version,
+    city,
+    target_date,
+    city_timezone=None,
+):
     """Mirror _latest_manifest's contract: newest manifest matching source_id+data_version that is
     allowed for (city, target_date), or None when no manifest matches the scope+leg. This is the
     SAME scope-filtered selection the seed builder uses — it returns None precisely when THIS

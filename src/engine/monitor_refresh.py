@@ -573,8 +573,7 @@ def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
         cfg.get("seed_processed_dir"),
         cfg.get("processed_dir"),
     ]
-    best_path = None
-    best_stamp = ""
+    candidates: list[tuple[str, Path]] = []
     for d in candidate_dirs:
         if not d:
             continue
@@ -588,20 +587,50 @@ def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
                     continue
                 # Compare by the trailing stamp portion (ISO timestamps sort lexically).
                 stamp = name[len(prefix):]
-                if stamp > best_stamp:
-                    best_stamp = stamp
-                    best_path = path
+                candidates.append((stamp, path))
         except OSError:
             continue
-    if best_path is None:
-        return None
+    for _stamp, path in sorted(candidates, reverse=True):
+        try:
+            payload = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if not _seed_payload_covers_target_local_day(seed_path=path, payload=payload):
+            continue
+        return path, payload
+    return None
+
+
+def _seed_payload_covers_target_local_day(*, seed_path, payload: dict) -> bool:
+    """True iff a held-belief seed can extract its requested local day."""
+    from pathlib import Path
+
     try:
-        payload = _json.loads(best_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return best_path, payload
+        target = date.fromisoformat(str(payload.get("target_date") or "").strip())
+        city_timezone = str(payload.get("city_timezone") or "").strip()
+        payload_text = str(payload.get("openmeteo_payload_json") or "").strip()
+        if not city_timezone or not payload_text:
+            return False
+        openmeteo_payload_path = Path(payload_text)
+        if not openmeteo_payload_path.is_absolute():
+            openmeteo_payload_path = Path(seed_path).parent / openmeteo_payload_path
+        openmeteo_payload = json.loads(openmeteo_payload_path.read_text(encoding="utf-8"))
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (
+            extract_openmeteo_ecmwf_ifs9_localday_anchor,
+        )
+
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            openmeteo_payload,
+            city_timezone=city_timezone,
+            target_local_date=target,
+            min_hourly_samples=1,
+            require_full_localday=False,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def _attempt_held_belief_readthrough(

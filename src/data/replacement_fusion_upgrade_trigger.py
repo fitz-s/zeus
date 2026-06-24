@@ -590,12 +590,17 @@ def _build_and_write_upgrade_seed(
     absent (the scope's raw inputs are not on disk — recorded as manifest_missing, retried next
     tick once they land). Kept separate so the enqueue loop stays readable."""
     expected = expected_identity(metric)
+    from src.config import cities_by_name  # noqa: PLC0415
+
+    city_cfg = cities_by_name.get(city)
+    city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
         data_version=expected["openmeteo_ifs9_anchor"].data_version,
         city=city,
         target_date=target_date,
+        city_timezone=city_timezone,
     )
     if openmeteo is None:
         return None
