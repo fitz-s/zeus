@@ -1273,6 +1273,10 @@ def _first_present(raw: dict | None, *keys: str):
     return None
 
 
+def _normalised_order_side(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
 def _point_order_has_live_order_data(point_order: dict | None) -> bool:
     if not isinstance(point_order, dict):
         return False
@@ -1331,25 +1335,45 @@ def _point_order_transaction_hashes(point_order: dict | None) -> tuple[str, ...]
     return ()
 
 
-def _point_order_matched_size(point_order: dict | None, *, fallback: object = None) -> str:
+def _point_order_matched_size(
+    point_order: dict | None,
+    *,
+    fallback: object = None,
+    side: str | None = None,
+) -> str:
     value = _first_present(
         point_order,
         "matched_size",
         "matchedSize",
         "size_matched",
         "sizeMatched",
-        "takingAmount",
-        "taking_amount",
     )
+    if value not in (None, ""):
+        return str(value)
+    side_value = _normalised_order_side(side) or _normalised_order_side(_first_present(point_order, "side"))
+    amount_keys = (
+        ("makingAmount", "making_amount")
+        if side_value == "SELL"
+        else ("takingAmount", "taking_amount")
+    )
+    value = _first_present(point_order, *amount_keys)
     if value not in (None, ""):
         return str(value)
     return str(fallback or "0")
 
 
-def _point_order_fill_price(point_order: dict | None, *, fallback: object = None) -> str:
+def _point_order_fill_price(
+    point_order: dict | None,
+    *,
+    fallback: object = None,
+    side: str | None = None,
+) -> str:
     making = _decimal_or_none(_first_present(point_order, "makingAmount", "making_amount"))
     taking = _decimal_or_none(_first_present(point_order, "takingAmount", "taking_amount"))
     if making is not None and taking is not None and making > 0 and taking > 0:
+        side_value = _normalised_order_side(side) or _normalised_order_side(_first_present(point_order, "side"))
+        if side_value == "SELL":
+            return _decimal_text(taking / making)
         return _decimal_text(making / taking)
     value = _first_present(point_order, "avgPrice", "avg_price", "fillPrice", "fill_price", "price")
     if _positive_decimal_or_none(value) is not None:
@@ -4481,11 +4505,12 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
             matched_size = _point_order_matched_size(
                 point_order,
                 fallback=row.get("order_fact_matched_size") or row.get("size") or "0",
+                side=row.get("side"),
             )
             if not _positive_decimal_or_none(matched_size):
                 summary["stayed"] += 1
                 continue
-            fill_price = _point_order_fill_price(point_order, fallback=row.get("price"))
+            fill_price = _point_order_fill_price(point_order, fallback=row.get("price"), side=row.get("side"))
             if not _positive_decimal_or_none(fill_price):
                 summary["errors"] += 1
                 continue
@@ -5861,7 +5886,11 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             if fact_state is None:
                 summary["stayed"] += 1
                 continue
-            matched_size = _point_order_matched_size(point_order, fallback=row.get("order_fact_matched_size") or "0")
+            matched_size = _point_order_matched_size(
+                point_order,
+                fallback=row.get("order_fact_matched_size") or "0",
+                side=row.get("side"),
+            )
             if _is_positive_decimal(matched_size):
                 summary["stayed"] += 1
                 continue
@@ -6301,7 +6330,11 @@ def _append_cancel_unknown_confirmed_trade_fill(
     filled_size, fill_price = _confirmed_trade_command_leg(trade, venue_order_id)
     tx_hash = str(trade.get("transaction_hash") or trade.get("tx_hash") or "") or None
     venue_status = _order_status(point_order)
-    matched_size = _point_order_matched_size(point_order, fallback=filled_size)
+    matched_size = _point_order_matched_size(
+        point_order,
+        fallback=filled_size,
+        side=command.get("side"),
+    )
     remaining_size = _matched_remaining_size(command, matched_size, venue_status=venue_status)
     event_type = _matched_event_type(command, matched_size, venue_status=venue_status)
     payload = {
@@ -6699,7 +6732,9 @@ def _review_required_cancel_unknown_live_order_recovery(
         if (
             order_id == venue_order_id
             and fact_state is not None
-            and not _is_positive_decimal(_point_order_matched_size(order, fallback=matched_size))
+            and not _is_positive_decimal(
+                _point_order_matched_size(order, fallback=matched_size, side=getattr(cmd, "side", None))
+            )
             and _trade_fact_count(conn, cmd.command_id) == 0
         ):
             command = _dict_row(
@@ -7027,7 +7062,7 @@ def _review_required_post_ack_terminal_no_fill_recovery(
         point_order = None
     if point_order:
         point_order_status = _order_status(point_order)
-        point_order_matched = _point_order_matched_size(point_order)
+        point_order_matched = _point_order_matched_size(point_order, side=command.get("side"))
 
     latest_fact_is_live = (
         latest_fact is not None
@@ -8875,7 +8910,7 @@ def _review_required_no_venue_live_order_recovery(
     order = dict(matching_open_orders[0])
     venue_order_id = str(_extract_order_id(order) or "").strip()
     status = _order_status(order) or "LIVE"
-    matched_size = _point_order_matched_size(order)
+    matched_size = _point_order_matched_size(order, side=command.get("side"))
     if not venue_order_id or status not in _LIVE_ORDER_STATUSES or not _decimal_is_zero(matched_size):
         logger.info(
             "recovery: command %s REVIEW_REQUIRED no-venue stayed; "

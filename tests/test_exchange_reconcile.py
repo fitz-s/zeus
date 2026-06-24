@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-17
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-17
+# Last reused/audited: 2026-06-24
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-24
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -2001,6 +2001,107 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     }
 
 
+def test_recorded_nonfinal_full_exit_trade_terminalizes_command_without_economic_close(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_order_fact
+
+    token = "exit-recorded-matched-token"
+    seed_position_baseline(conn, position_id="pos-exit-recorded-matched", order_id="ord-entry-recorded-matched")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-exit-recorded-matched',
+               order_status = 'sell_pending_confirmation',
+               shares = 15.5,
+               cost_basis_usd = 10.8425,
+               entry_price = 0.6995,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-recorded-matched'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-recorded-exit-matched",
+        venue_order_id="ord-exit-recorded-matched",
+        position_id="pos-exit-recorded-matched",
+        token_id=token,
+        side="SELL",
+        size=15.5,
+        price=0.69,
+        state="PARTIAL",
+    )
+    append_order_fact(
+        conn,
+        command_id="cmd-recorded-exit-matched",
+        venue_order_id="ord-exit-recorded-matched",
+        state="MATCHED",
+        matched_size="10.85",
+        remaining_size="4.65",
+        source="REST",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="d" * 64,
+        raw_payload_json={
+            "status": "matched",
+            "makingAmount": "15.5",
+            "takingAmount": "10.85",
+        },
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-recorded-exit-matched",
+        venue_order_id="ord-exit-recorded-matched",
+        token_id=token,
+        trade_id="trade-recorded-exit-matched",
+        size="15.5",
+        fill_price="0.7",
+        state="MATCHED",
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW)
+
+    assert summary["exit_command_terminalized"] == 1
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-recorded-exit-matched'"
+    ).fetchone()["state"] == "FILLED"
+    latest_order_fact = conn.execute(
+        """
+        SELECT state, remaining_size, matched_size, source
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-recorded-exit-matched'
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    assert dict(latest_order_fact) == {
+        "state": "MATCHED",
+        "remaining_size": "0",
+        "matched_size": "15.5",
+        "source": "REST",
+    }
+    current = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-exit-recorded-matched'"
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "pending_exit",
+        "order_status": "sell_pending_confirmation",
+    }
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM execution_fact
+             WHERE intent_id = 'pos-exit-recorded-matched:exit'
+               AND terminal_exec_status = 'filled'
+            """
+        ).fetchone()[0]
+        == 0
+    )
+
+
 @pytest.mark.parametrize("status", ["MATCHED", "MINED"])
 def test_nonconfirmed_exit_trade_does_not_economically_close_position(conn, status):
     from src.execution.exchange_reconcile import run_reconcile_sweep
@@ -2052,7 +2153,11 @@ def test_nonconfirmed_exit_trade_does_not_economically_close_position(conn, stat
         observed_at=NOW,
     )
 
-    assert event_types(conn, f"cmd-exit-{status.lower()}")[-1] == "PARTIAL_FILL_OBSERVED"
+    assert event_types(conn, f"cmd-exit-{status.lower()}")[-1] == "FILL_CONFIRMED"
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = ?",
+        (f"cmd-exit-{status.lower()}",),
+    ).fetchone()["state"] == "FILLED"
     assert conn.execute(
         """
         SELECT phase
@@ -2156,6 +2261,11 @@ def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(co
         "phase": "pending_exit",
         "order_status": "sell_pending_confirmation",
     }
+    command_state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-exit-finality-wait'"
+    ).fetchone()["state"]
+    assert command_state == "FILLED"
+    assert event_types(conn, "cmd-exit-finality-wait")[-1] == "FILL_CONFIRMED"
     assert (
         conn.execute(
             """

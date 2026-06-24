@@ -1868,6 +1868,14 @@ def reconcile_recorded_maker_fill_economics(
         summary["exit_projected"] = exit_summary["projected"]
     summary["stayed"] += exit_summary["stayed"]
     summary["errors"] += exit_summary["errors"]
+    nonfinal_summary = _reconcile_recorded_nonfinal_exit_command_fill_state(
+        conn,
+        observed_at=observed,
+    )
+    if nonfinal_summary["advanced"]:
+        summary["exit_command_terminalized"] = nonfinal_summary["advanced"]
+    summary["stayed"] += nonfinal_summary["stayed"]
+    summary["errors"] += nonfinal_summary["errors"]
     return summary
 
 
@@ -1881,6 +1889,129 @@ def _trade_payload_for_maker_economics(raw: Mapping[str, Any]) -> Mapping[str, A
     if isinstance(trade, Mapping):
         return trade
     return raw
+
+
+def _reconcile_recorded_nonfinal_exit_command_fill_state(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime,
+) -> dict[str, int]:
+    """Terminalize full-size MATCHED/MINED exit commands without economic close.
+
+    MATCHED/MINED proves the sell order consumed the local CTF shares, so the
+    command must not stay PARTIAL and retry a second full-size sell. Economic
+    close still waits for CONFIRMED trade finality in
+    _reconcile_recorded_exit_fill_projections().
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not (
+        _table_exists(conn, "venue_trade_facts")
+        and _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_order_facts")
+    ):
+        return summary
+    rows = conn.execute(
+        "WITH " + _canonical_trade_fact_cte() + """
+        SELECT
+            cmd.command_id,
+            cmd.venue_order_id,
+            cmd.size AS command_size,
+            cmd.state AS command_state,
+            SUM(CAST(COALESCE(tf.filled_size, '0') AS REAL)) AS filled_size,
+            GROUP_CONCAT(DISTINCT tf.state) AS trade_states,
+            GROUP_CONCAT(DISTINCT tf.trade_id) AS trade_ids,
+            MAX(tf.observed_at) AS fill_observed_at
+          FROM venue_commands cmd
+          JOIN canonical_trade_fact tf
+            ON tf.command_id = cmd.command_id
+         WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+           AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+           AND cmd.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
+           AND cmd.venue_order_id IS NOT NULL
+           AND TRIM(cmd.venue_order_id) != ''
+           AND tf.state IN ('MATCHED', 'MINED')
+           AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+         GROUP BY cmd.command_id, cmd.venue_order_id, cmd.size, cmd.state
+         ORDER BY MAX(tf.observed_at), cmd.command_id
+        """
+    ).fetchall()
+    from src.state.venue_command_repo import append_event, append_order_fact
+
+    for row in rows:
+        summary["scanned"] += 1
+        command_id = str(row["command_id"] or "")
+        venue_order_id = str(row["venue_order_id"] or "")
+        try:
+            command_size = _positive_decimal_or_none(row["command_size"])
+            filled_size = _positive_decimal_or_none(row["filled_size"])
+            if command_size is None or filled_size is None or filled_size < command_size:
+                summary["stayed"] += 1
+                continue
+            existing = conn.execute(
+                """
+                SELECT 1
+                  FROM venue_command_events
+                 WHERE command_id = ?
+                   AND event_type = 'FILL_CONFIRMED'
+                 LIMIT 1
+                """,
+                (command_id,),
+            ).fetchone()
+            if existing is not None:
+                summary["stayed"] += 1
+                continue
+            matched_text = _decimal_text(filled_size)
+            occurred_at = str(row["fill_observed_at"] or observed_at.isoformat())
+            payload = {
+                "schema_version": 1,
+                "reason": "nonfinal_exit_full_size_matched_terminalized",
+                "proof_class": "full_size_exit_trade_fact_without_finality",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "filled_size": matched_text,
+                "command_size": _decimal_text(command_size),
+                "trade_states": str(row["trade_states"] or ""),
+                "trade_ids": str(row["trade_ids"] or ""),
+                "economic_close_written": False,
+                "economic_close_deferred_until_trade_state": "CONFIRMED",
+            }
+            sp_name = f"sp_nonfinal_exit_fill_{uuid.uuid4().hex[:12]}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_order_fact(
+                    conn,
+                    venue_order_id=venue_order_id,
+                    command_id=command_id,
+                    state="MATCHED",
+                    remaining_size="0",
+                    matched_size=matched_text,
+                    source="REST",
+                    observed_at=occurred_at,
+                    venue_timestamp=occurred_at,
+                    raw_payload_hash=_hash_payload(payload),
+                    raw_payload_json=payload,
+                )
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type="FILL_CONFIRMED",
+                    occurred_at=occurred_at,
+                    payload=payload,
+                )
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
+            summary["advanced"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception(
+                "exchange_reconcile: nonfinal exit command terminalization failed for command_id=%s",
+                command_id,
+            )
+    return summary
 
 
 def _reconcile_recorded_exit_fill_projections(
@@ -3604,7 +3735,7 @@ def _append_linkable_trade_fact_if_missing(
                 filled_size=filled_size,
                 fill_price=fill_price,
                 observed_at=observed_at,
-                command_event=existing_event,
+                command_event=existing_event if state == "CONFIRMED" else None,
             )
             return _record_nonfinal_full_exit_fill_finality_finding(
                 conn,
@@ -3757,7 +3888,7 @@ def _append_linkable_trade_fact_if_missing(
         filled_size=filled_size,
         fill_price=fill_price,
         observed_at=observed_at,
-        command_event=event,
+        command_event=event if state == "CONFIRMED" else None,
     )
     return finality_finding
 
@@ -4597,10 +4728,17 @@ def _fill_event_for_command(
         return None
     if trade_state in {"FAILED", "RETRYING"}:
         return None
-    if trade_state != "CONFIRMED":
-        return "PARTIAL_FILL_OBSERVED"
     size = _decimal(command.get("size", 0))
     filled = _decimal(filled_size)
+    if (
+        trade_state in {"MATCHED", "MINED"}
+        and str(command.get("intent_kind") or "").upper() == "EXIT"
+        and str(command.get("side") or "").upper() == "SELL"
+        and filled >= size
+    ):
+        return "FILL_CONFIRMED"
+    if trade_state != "CONFIRMED":
+        return "PARTIAL_FILL_OBSERVED"
     if filled >= size:
         return "FILL_CONFIRMED"
     return "PARTIAL_FILL_OBSERVED"

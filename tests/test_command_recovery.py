@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-20
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-06-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -3123,6 +3123,68 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("1.7")
         assert Decimal(str(current["entry_price"])) == Decimal("0.34")
         assert current["order_status"] == "filled"
+
+    def test_exit_point_order_matched_uses_sell_making_amount_as_share_size(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, intent_kind="EXIT", side="SELL", size=15.5, price=0.7)
+        _advance_to_acked(conn, venue_order_id="ord-sell-matched")
+        _append_order_fact(
+            conn,
+            order_id="ord-sell-matched",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="15.5",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-sell-matched",
+            "status": "MATCHED",
+            "makingAmount": "15.5",
+            "takingAmount": "10.85",
+            "associate_trades": ["trade-sell-matched"],
+            "transactionsHashes": ["0xhash-sell-matched"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "15.5",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-sell-matched",
+            "venue_order_id": "ord-sell-matched",
+            "state": "MATCHED",
+            "filled_size": "15.5",
+            "fill_price": "0.7",
+            "tx_hash": "0xhash-sell-matched",
+        }
 
     def test_matched_order_recovery_finalizes_when_venue_normalizes_size_below_command(
         self,
@@ -6348,7 +6410,7 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
-        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        assert _get_state(conn, "cmd-exit") == "FILLED"
         current = conn.execute(
             """
             SELECT phase, shares, cost_basis_usd, order_id, order_status

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-06-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 legacy execute_intent override.
@@ -2547,6 +2547,75 @@ class TestExitOrderCommandSplit:
             "state": "LIVE",
             "remaining_size": "10.0",
             "matched_size": "0",
+            "source": "REST",
+        }
+
+    def test_exit_matched_submit_uses_sell_making_amount_as_share_size(self, mem_conn):
+        """SELL submit responses report shares in makingAmount and proceeds in takingAmount."""
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import get_command
+
+        intent = _make_exit_intent(
+            mem_conn,
+            trade_id="trd-exit-matched-sell",
+            shares=15.5,
+            current_price=0.7,
+        )
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-exit-matched-sell",
+                    status="matched",
+                    success=True,
+                    raw_extra={
+                        "makingAmount": "15.5",
+                        "takingAmount": "10.85",
+                        "transactionsHashes": ["0xhash-exit-matched"],
+                    },
+                )
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-matched-sell",
+            )
+
+        assert result.status == "pending"
+        assert len(command_ids_seen) == 1
+        cmd = get_command(mem_conn, command_ids_seen[0])
+        assert cmd is not None
+        assert cmd["state"] == "ACKED"
+        order_fact = mem_conn.execute(
+            """
+            SELECT venue_order_id, state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "venue_order_id": "ord-exit-matched-sell",
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "15.5",
             "source": "REST",
         }
 
