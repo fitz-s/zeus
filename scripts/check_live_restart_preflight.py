@@ -1009,6 +1009,8 @@ def _verified_settlement_truth_for(rows: list[sqlite3.Row]) -> dict[tuple[str, s
 def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     risky: list[dict[str, Any]] = []
     tolerated: list[dict[str, Any]] = []
+    full_fill_repairable = _exit_full_fill_repairable_by_position()
+    retry_resumable = _exit_retry_resumable_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -1026,6 +1028,20 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         if reason == "MARKET_CLOSED_AWAITING_SETTLEMENT":
             tolerated.append(item)
+        elif str(row["position_id"] or "") in full_fill_repairable:
+            item = {
+                **item,
+                "restart_resolution": "command_recovery_full_exit_fill_close",
+                "repair_evidence": full_fill_repairable[str(row["position_id"] or "")],
+            }
+            tolerated.append(item)
+        elif str(row["position_id"] or "") in retry_resumable:
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_retry_resume",
+                "repair_evidence": retry_resumable[str(row["position_id"] or "")],
+            }
+            tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
             tolerated.append(item)
             if order_status != "backoff_exhausted":
@@ -1040,6 +1056,115 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
     )
+
+
+def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "venue_trade_facts")
+            and _table_exists(conn, "main", "position_current")
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            SELECT pc.position_id,
+                   cmd.command_id,
+                   cmd.venue_order_id,
+                   cmd.size AS command_size,
+                   COALESCE(pc.chain_shares, pc.shares, 0) AS position_shares,
+                   SUM(CAST(COALESCE(tf.filled_size, '0') AS REAL)) AS filled_size,
+                   SUM(CAST(COALESCE(tf.filled_size, '0') AS REAL)
+                       * CAST(COALESCE(tf.fill_price, '0') AS REAL)) AS fill_notional,
+                   GROUP_CONCAT(DISTINCT tf.state) AS trade_states,
+                   MAX(tf.observed_at) AS observed_at
+              FROM position_current pc
+              JOIN venue_commands cmd
+                ON cmd.position_id = pc.position_id
+               AND cmd.intent_kind = 'EXIT'
+              JOIN venue_trade_facts tf
+                ON tf.command_id = cmd.command_id
+               AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+             WHERE pc.phase = 'pending_exit'
+             GROUP BY pc.position_id, cmd.command_id, cmd.venue_order_id, cmd.size, pc.chain_shares, pc.shares
+            """
+        ).fetchall()
+    repairable: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            filled_size = float(row["filled_size"] or 0.0)
+            command_size = float(row["command_size"] or 0.0)
+            position_shares = float(row["position_shares"] or 0.0)
+            fill_notional = float(row["fill_notional"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        target_size = max(command_size, position_shares)
+        if target_size <= 0.0 or filled_size + 1e-9 < target_size or fill_notional <= 0.0:
+            continue
+        repairable[str(row["position_id"])] = {
+            "command_id": row["command_id"],
+            "venue_order_id": row["venue_order_id"],
+            "filled_size": filled_size,
+            "target_size": target_size,
+            "avg_fill_price": fill_notional / filled_size if filled_size > 0 else None,
+            "trade_states": row["trade_states"],
+            "observed_at": row["observed_at"],
+        }
+    return repairable
+
+
+def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_current")
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE cmd.intent_kind = 'EXIT'
+            )
+            SELECT pc.position_id,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   latest_exit.command_id,
+                   latest_exit.state AS command_state,
+                   latest_exit.venue_order_id,
+                   latest_exit.updated_at AS command_updated_at
+              FROM position_current pc
+              JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+             WHERE pc.phase = 'pending_exit'
+               AND COALESCE(pc.exit_retry_count, 0) > 0
+               AND COALESCE(pc.next_exit_retry_at, '') != ''
+            """
+        ).fetchall()
+    resumable: dict[str, dict[str, Any]] = {}
+    terminal_no_resting = {"REJECTED", "EXPIRED", "FAILED", "CANCELED", "CANCELLED", "FILLED"}
+    for row in rows:
+        state = str(row["command_state"] or "").upper()
+        venue_order_id = str(row["venue_order_id"] or "")
+        if state not in terminal_no_resting:
+            continue
+        if state == "FILLED":
+            continue
+        resumable[str(row["position_id"])] = {
+            "command_id": row["command_id"],
+            "command_state": row["command_state"],
+            "venue_order_id": venue_order_id,
+            "exit_retry_count": row["exit_retry_count"],
+            "next_exit_retry_at": row["next_exit_retry_at"],
+            "command_updated_at": row["command_updated_at"],
+        }
+    return resumable
 
 
 def _single_family_reseed_repair_evidence(item: dict[str, Any]) -> dict[str, Any] | None:

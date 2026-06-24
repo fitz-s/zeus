@@ -3781,6 +3781,8 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
                    SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)) AS filled_size,
+                   SUM(CAST(COALESCE(fact.filled_size, '0') AS REAL)
+                       * CAST(COALESCE(fact.fill_price, '0') AS REAL)) AS fill_notional,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.observed_at) AS observed_at
               FROM canonical_trade_fact fact
@@ -3799,6 +3801,11 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
                cmd.updated_at AS cmd_updated_at,
                exit_fill.fill_fact_count AS fill_fact_count,
                exit_fill.filled_size AS fill_filled_size,
+               CASE
+                   WHEN exit_fill.filled_size > 0
+                   THEN exit_fill.fill_notional / exit_fill.filled_size
+                   ELSE NULL
+               END AS fill_avg_price,
                exit_fill.fill_states AS fill_states,
                exit_fill.observed_at AS fill_observed_at,
                {pc_select}
@@ -3824,6 +3831,122 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
     return [_dict_row(row) for row in rows]
 
 
+def _exit_close_target_size(candidate: dict, current: dict) -> Decimal | None:
+    sizes = [
+        _positive_decimal_or_none(candidate.get("cmd_size")),
+        _positive_decimal_or_none(current.get("chain_shares")),
+        _positive_decimal_or_none(current.get("shares")),
+    ]
+    sizes = [size for size in sizes if size is not None]
+    if not sizes:
+        return None
+    return max(sizes)
+
+
+def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
+    filled_size = _positive_decimal_or_none(candidate.get("fill_filled_size"))
+    fill_price = _positive_decimal_or_none(candidate.get("fill_avg_price"))
+    target_size = _exit_close_target_size(candidate, current)
+    return (
+        filled_size is not None
+        and fill_price is not None
+        and target_size is not None
+        and filled_size >= target_size
+    )
+
+
+def _append_exit_filled_projection(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+    current: dict,
+    occurred_at: str,
+) -> None:
+    from src.engine.lifecycle_events import build_economic_close_canonical_write, build_position_current_projection
+    from src.state.db import append_many_and_project, log_execution_fact
+    from src.state.projection import upsert_position_current
+
+    position_id = str(current.get("position_id") or "")
+    command_id = str(candidate.get("cmd_command_id") or "")
+    venue_order_id = str(candidate.get("cmd_venue_order_id") or "")
+    phase_before = str(current.get("phase") or "")
+    if not position_id or not command_id or not venue_order_id:
+        raise ValueError("exit fill projection requires position, command, and venue order ids")
+    if phase_before not in {"active", "day0_window", "pending_exit"}:
+        raise ValueError(
+            "exit fill projection only repairs active/day0/pending_exit positions; "
+            f"got phase={phase_before!r}"
+        )
+    filled_size = _positive_decimal_or_none(candidate.get("fill_filled_size"))
+    fill_price = _positive_decimal_or_none(candidate.get("fill_avg_price"))
+    if filled_size is None or fill_price is None:
+        raise ValueError("exit fill projection requires positive fill size and price")
+
+    position = SimpleNamespace(
+        **{
+            **current,
+            "trade_id": position_id,
+            "state": "economically_closed",
+            "exit_state": "sell_filled",
+            "pre_exit_state": phase_before,
+            "chain_state": current.get("chain_state") or "synced",
+            "env": _latest_position_env(conn, position_id),
+            "order_id": current.get("order_id") or "",
+            "order_status": "sell_filled",
+            "last_exit_order_id": venue_order_id,
+            "last_exit_at": occurred_at,
+            "exit_price": _decimal_text(fill_price),
+            "exit_reason": current.get("exit_reason") or "COMMAND_RECOVERY_EXIT_FILL",
+            "shares": current.get("shares") or _decimal_text(filled_size),
+            "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
+            "unit": current.get("unit") or "F",
+        }
+    )
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_FILLED'
+           AND order_id = ?
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    if existing is not None:
+        projection = build_position_current_projection(position)
+        upsert_position_current(conn, projection)
+    else:
+        sequence_no = _latest_position_sequence(conn, position_id) + 1
+        events, projection = build_economic_close_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_before="pending_exit",
+            source_module="src.execution.command_recovery",
+        )
+        for event in events:
+            if event.get("event_type") == "EXIT_ORDER_FILLED":
+                event["command_id"] = command_id
+        append_many_and_project(conn, events, projection)
+
+    log_execution_fact(
+        conn,
+        intent_id=f"{position_id}:exit",
+        position_id=position_id,
+        decision_id=str(candidate.get("cmd_decision_id") or "") or None,
+        command_id=command_id,
+        order_role="exit",
+        strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
+        posted_at=str(candidate.get("cmd_updated_at") or "") or None,
+        filled_at=occurred_at,
+        submitted_price=_float_or_none(candidate.get("cmd_price")),
+        fill_price=_float_or_none(fill_price),
+        shares=_float_or_none(filled_size),
+        venue_status="FILLED",
+        terminal_exec_status="filled",
+    )
+
+
 def _append_exit_pending_projection(
     conn: sqlite3.Connection,
     *,
@@ -3839,6 +3962,14 @@ def _append_exit_pending_projection(
         col: candidate.get(f"pc_{col}")
         for col in current_cols
     }
+    if _exit_trade_fact_covers_full_close(candidate, current):
+        _append_exit_filled_projection(
+            conn,
+            candidate=candidate,
+            current=current,
+            occurred_at=occurred_at,
+        )
+        return
     position_id = str(current.get("position_id") or "")
     command_id = str(candidate.get("cmd_command_id") or "")
     venue_order_id = str(candidate.get("cmd_venue_order_id") or "")
@@ -3913,10 +4044,9 @@ def _append_exit_pending_projection(
 def reconcile_exit_pending_projections(conn: sqlite3.Connection) -> dict:
     """Repair restart-visible exit side effects into canonical pending_exit.
 
-    MATCHED/MINED exit trade facts prove a sell-side venue side effect, but not
-    economic-close finality.  The canonical position projection must therefore
-    leave P&L untouched while preventing reload from treating the row as a
-    normal active position eligible for another full sell attempt.
+    Full-size MATCHED/MINED exit trade facts are economic-close proof. Partial
+    positive exit facts still project pending_exit so reload cannot attempt a
+    second full sell while the remainder is unresolved.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}

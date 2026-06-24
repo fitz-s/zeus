@@ -374,7 +374,7 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
     assert prov["run_authority"] == "bucket_partial_run_unverified"
     assert "single_runs_exc" in captured and captured["single_runs_exc"]  # name survived
 
-    # Case B: rung-2 raises a transport error (provider unreachable) → degrades to rung 3.
+    # Case B: rung-2 raises a transport error (provider unreachable) -> degrades to rung 3.
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
         lambda r: (_ for _ in ()).throw(httpx.ConnectError("ssl eof")),
@@ -383,6 +383,21 @@ def test_resolve_anchor_payload_ladder_degrades_rung1_400_then_rung2_then_rung3(
         request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
     )
     assert prov2["run_authority"] == "bucket_partial_run_unverified"
+
+    # Case C: provider rate-limit is transient, so it also degrades instead of poisoning the
+    # whole current-target download batch.
+    monkeypatch.setattr(
+        dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
+        lambda r: (_ for _ in ()).throw(_make_http_status(429)),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        lambda r: (_ for _ in ()).throw(_make_http_status(429)),
+    )
+    payload3, prov3 = dl._resolve_anchor_payload(
+        request=req, city="Beijing", target_date="2026-06-13", timezone_name="Asia/Shanghai",
+    )
+    assert prov3["run_authority"] == "bucket_partial_run_unverified"
 
 
 def test_bucket_artifact_source_available_at_is_capture_time_not_api_lag() -> None:
@@ -405,7 +420,7 @@ def test_bucket_artifact_source_available_at_is_capture_time_not_api_lag() -> No
 
 
 def test_resolve_anchor_payload_reraises_non_degradable_errors(monkeypatch) -> None:
-    """A 4xx (non-400) on meta, or a non-400 on single-runs, must RAISE (never degrade)."""
+    """Client-defect 4xx statuses still raise; 429 is handled by the ladder test."""
     import httpx
 
     import scripts.download_replacement_forecast_current_targets as dl

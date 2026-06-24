@@ -5703,7 +5703,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["completed_partial_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-exit") == "FILLED"
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
         event_types = [e["event_type"] for e in _get_events(conn, "cmd-exit")]
         assert event_types[-1] == "FILL_CONFIRMED"
         current = conn.execute(
@@ -6359,7 +6359,7 @@ class TestRecoveryResolutionTable:
             "order_status": "partial",
         }
 
-    def test_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
+    def test_partial_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
         self,
         conn,
         mock_client,
@@ -6396,7 +6396,7 @@ class TestRecoveryResolutionTable:
             order_id="ord-exit",
             trade_id="trade-exit-001",
             state="MATCHED",
-            filled_size="23.7",
+            filled_size="10.85",
             fill_price="0.04",
         )
 
@@ -6410,7 +6410,7 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
-        assert _get_state(conn, "cmd-exit") == "FILLED"
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
         current = conn.execute(
             """
             SELECT phase, shares, cost_basis_usd, order_id, order_status
@@ -6904,11 +6904,11 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "pending_exit",
+            "phase": "economically_closed",
             "shares": 6.0,
             "cost_basis_usd": 1.86,
-            "order_id": "ord-exit",
-            "order_status": "sell_pending_confirmation",
+            "order_id": "ord-entry",
+            "order_status": "sell_filled",
         }
         lifecycle_events = conn.execute(
             """
@@ -6919,14 +6919,13 @@ class TestRecoveryResolutionTable:
             """
         ).fetchall()
         assert dict(lifecycle_events[-1]) == {
-            "event_type": "EXIT_ORDER_POSTED",
+            "event_type": "EXIT_ORDER_FILLED",
             "phase_before": "pending_exit",
-            "phase_after": "pending_exit",
+            "phase_after": "economically_closed",
             "order_id": "ord-exit",
             "command_id": "cmd-exit",
-            "venue_status": "MATCHED",
+            "venue_status": "sell_filled",
         }
-        assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
 
     def test_exit_matched_trade_fact_repairs_existing_event_torn_projection(
         self,
@@ -7005,9 +7004,9 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "pending_exit",
-            "order_id": "ord-exit",
-            "order_status": "sell_pending_confirmation",
+            "phase": "economically_closed",
+            "order_id": "ord-entry",
+            "order_status": "sell_filled",
         }
         event_count = conn.execute(
             """

@@ -717,6 +717,120 @@ def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monk
     assert pending["evidence"]["risky"][0]["risk"] == "dust_projection_needs_backoff_exhausted_reload_repair"
 
 
+def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'exit-filled-pos', 'pending_exit', 'Seoul', '2026-06-26', 'low',
+            'Will the lowest temperature in Seoul be 18°C on June 26?',
+            'buy_no', 15.5, 15.5, 'backoff_exhausted', 'FAMILY_DIRECT_SELL_DOMINATES_HOLD',
+            19, '2026-06-24T17:40:08+00:00', 0.60, 1, 0.70, 1,
+            '2026-06-24T17:45:21+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-exit', 'exit-filled-pos', 'EXIT', 'FILLED', 'ord-exit', 15.5,
+            '2026-06-24T15:34:59+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-exit', 'MATCHED', '15.5', '0.70', '2026-06-24T15:34:59+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "command_recovery_full_exit_fill_close"
+    assert tolerated["repair_evidence"]["filled_size"] == 15.5
+
+
+def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'retry-pos', 'pending_exit', 'Houston', '2026-06-24', 'high',
+            'Will the highest temperature in Houston be between 92-93°F on June 24?',
+            'buy_no', 36.0, 36.0, 'filled', 'CI_SEPARATED_REVERSAL',
+            4, '2026-06-24T18:22:42+00:00', 0.055, 1, 0.53, 1,
+            '2026-06-24T17:42:42+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-exit', 'retry-pos', 'EXIT', 'REJECTED', '', 36.0,
+            '2026-06-24T17:42:42+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_retry_resume"
+    assert tolerated["repair_evidence"]["command_state"] == "REJECTED"
+
+
 def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tmp_path):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)

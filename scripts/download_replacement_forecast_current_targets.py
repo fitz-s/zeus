@@ -258,8 +258,8 @@ def _resolve_anchor_payload(
     partial-run). Returns ``(payload, transport_provenance)``. Raises
     ``BucketTransportNotAdmissible`` only when NO rung can serve this city THIS cycle (so the
     caller skips the city, never the batch). Genuine defects still raise loudly:
-      * rung 1: only HTTP 400 (run-not-yet-served) degrades to rung 2; any other single-runs
-        status (auth, 4xx, schema) re-raises.
+      * rung 1: HTTP 400 (run-not-yet-served), 429, and 5xx degrade to rung 2; auth/client
+        defects re-raise.
       * rung 2: three outcomes degrade to rung 3 — the meta REFUSAL (ValueError: provider
         declares an older run; never weakened), a transport error (provider unreachable), and
         a 5xx (provider server-side unavailability, e.g. intermittent 502 on meta.json). A 4xx
@@ -280,8 +280,9 @@ def _resolve_anchor_payload(
             "run_authority": "run_pinned_single_runs",
         }
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 400:
-            raise  # only run-not-yet-served (400) degrades; everything else is loud
+        status_code = exc.response.status_code
+        if status_code != 400 and status_code != 429 and status_code < 500:
+            raise
         # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
         single_runs_exc = exc
 
@@ -294,8 +295,9 @@ def _resolve_anchor_payload(
         )
         return payload, provenance
     except httpx.HTTPStatusError as meta_status_exc:
-        # 5xx = provider server-side unavailability (degrade to rung 3); 4xx = our defect (raise).
-        if meta_status_exc.response.status_code < 500:
+        # 429/5xx = provider-side unavailability (degrade to rung 3); other 4xx = our defect.
+        status_code = meta_status_exc.response.status_code
+        if status_code != 429 and status_code < 500:
             raise
         rung2_reason: Exception = meta_status_exc
     except (ValueError, httpx.TransportError) as meta_exc:
