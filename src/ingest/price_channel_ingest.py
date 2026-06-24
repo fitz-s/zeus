@@ -1456,13 +1456,19 @@ def _edli_refresh_held_position_quote_evidence(
     # insert reaches the runtime-read trades table, never the world shadow). A single
     # conn.commit() on the ATTACHed connection is atomic across BOTH databases — the
     # same INV-37 atomic-commit shape the EDLI position bridge uses.
-    from src.state.db import world_connection_with_trades_flocked
+    from src.state.db import get_world_connection_with_trades_required
 
     ordered_metadata_tokens = [
         token_id for token_id in ordered_held_token_ids if token_id in token_metadata
     ]
 
-    with world_connection_with_trades_flocked(write_class="live") as conn:
+    # The single ATTACHed connection preserves the atomic world-event +
+    # trades.feasibility commit. Do not use the flocked context here: REST book
+    # fetches happen inside seed_rest_books_in_chunks before each DB chunk write,
+    # and holding cross-process trade/world writer flocks across those network
+    # calls starves live redecision's executable snapshot refresh.
+    conn = get_world_connection_with_trades_required(write_class="live")
+    try:
         def _commit_atomic_cross_db() -> None:
             conn.commit()
 
@@ -1497,6 +1503,8 @@ def _edli_refresh_held_position_quote_evidence(
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
+    finally:
+        conn.close()
 
 
 def _edli_refresh_candidate_priority_quote_evidence(
@@ -1557,9 +1565,13 @@ def _edli_refresh_candidate_priority_quote_evidence(
     # world-event + trade-feasibility cross-DB pair (see the held-priority twin above
     # for the full rationale + the shadow-table hazard this world-MAIN + ATTACHed
     # 'trades' + schema-qualified-feasibility shape avoids).
-    from src.state.db import world_connection_with_trades_flocked
+    from src.state.db import get_world_connection_with_trades_required
 
-    with world_connection_with_trades_flocked(write_class="live") as conn:
+    # Same lock discipline as held-position refresh: one world-main connection
+    # with trades attached, but no cross-process writer flock held across REST
+    # fetches. Each seed chunk still commits atomically on this single connection.
+    conn = get_world_connection_with_trades_required(write_class="live")
+    try:
         def _commit_atomic_cross_db() -> None:
             conn.commit()
 
@@ -1592,6 +1604,8 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
         }
+    finally:
+        conn.close()
 
 
 def _edli_held_quote_refresh_cycle() -> dict:
