@@ -324,7 +324,7 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert not main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
         {
             "status": "refreshed",
             "executable_substrate_coverage_status": "PARTIAL",

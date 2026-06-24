@@ -171,6 +171,15 @@ class _AnomalyRecord:
     ttl_hours: float = DEFAULT_PAUSE_TTL_HOURS
 
 
+@dataclass(frozen=True)
+class Day0OracleAnomalyAction:
+    action: str
+    city: str
+    target_date: str
+    detail: str
+    ttl_hours: float = DEFAULT_PAUSE_TTL_HOURS
+
+
 _REGISTRY: dict[tuple[str, str], _AnomalyRecord] = {}
 _REGISTRY_LOCK = threading.Lock()
 
@@ -204,8 +213,7 @@ def _persist_flag(
     city: str, target_date: str, *, flagged_at: datetime, ttl_hours: float,
     detail: str, conn=None,
 ) -> None:
-    """Best-effort durable write (fail-soft: the in-memory pause already holds
-    for this process; persistence failure is loud, never blocking)."""
+    """Durably write an anomaly pause so fail-closed state survives restart."""
     own = conn is None
     try:
         if own:
@@ -213,10 +221,7 @@ def _persist_flag(
             from src.state.db_writer_lock import WriteClass, db_writer_lock
 
             conn = get_world_connection(write_class=WriteClass.LIVE)
-            # NON-BLOCKING flock (PR#404 round-2): durability is best-effort
-            # BY DESIGN (the in-process pause already holds); a contended
-            # LIVE writer flock must never stall the prefetch/monitor path.
-            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE, blocking=False)
+            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE)
         else:
             from contextlib import nullcontext
 
@@ -232,7 +237,7 @@ def _persist_flag(
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "DAY0_ORACLE_ANOMALY_PERSIST_FAILED city=%s date=%s exc=%s: %s "
-            "(pause holds in-process; will NOT survive a restart)",
+            "(pause holds in-process; durable fail-closed write did not complete)",
             city, target_date, type(exc).__name__, exc,
         )
     finally:
@@ -283,6 +288,7 @@ def flag_day0_oracle_anomaly(
     now: Optional[datetime] = None,
     ttl_hours: float = DEFAULT_PAUSE_TTL_HOURS,
     conn=None,
+    persist: bool = True,
 ) -> None:
     """Pause the day0 lane for (city, target_date). Loud by design; persisted
     to the world DB so the pause SURVIVES daemon restarts (PR#404 P1)."""
@@ -296,12 +302,19 @@ def flag_day0_oracle_anomaly(
         "DAY0_ORACLE_ANOMALY_FLAGGED city=%s target_date=%s detail=%s — day0 entries PAUSED (fail-closed)",
         city, target_date, detail,
     )
-    _persist_flag(
-        city, target_date, flagged_at=moment, ttl_hours=ttl_hours, detail=detail, conn=conn,
-    )
+    if persist:
+        _persist_flag(
+            city, target_date, flagged_at=moment, ttl_hours=ttl_hours, detail=detail, conn=conn,
+        )
 
 
-def clear_day0_oracle_anomaly(city: str, target_date: str, *, conn=None) -> bool:
+def clear_day0_oracle_anomaly(
+    city: str,
+    target_date: str,
+    *,
+    conn=None,
+    persist: bool = True,
+) -> bool:
     """Operator/cleanup hook. Returns True when a record was removed (memory
     or durable). Clears BOTH surfaces."""
     key = (str(city), str(target_date))
@@ -310,6 +323,8 @@ def clear_day0_oracle_anomaly(city: str, target_date: str, *, conn=None) -> bool
     with _REGISTRY_LOCK:
         removed = _REGISTRY.pop(key, None) is not None
         _DB_MISS_CACHE[key] = _time.monotonic()
+    if not persist:
+        return removed
     own = conn is None
     try:
         if own:
@@ -317,7 +332,7 @@ def clear_day0_oracle_anomaly(city: str, target_date: str, *, conn=None) -> bool
             from src.state.db_writer_lock import WriteClass, db_writer_lock
 
             conn = get_world_connection(write_class=WriteClass.LIVE)
-            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE, blocking=False)
+            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE)
         else:
             from contextlib import nullcontext
 
@@ -397,7 +412,7 @@ def _delete_expired_flag_best_effort(city: str, target_date: str, *, conn=None) 
             from src.state.db_writer_lock import WriteClass, db_writer_lock
 
             conn = get_world_connection(write_class=WriteClass.LIVE)
-            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE, blocking=False)
+            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE)
         else:
             from contextlib import nullcontext
 
@@ -422,6 +437,28 @@ def active_day0_anomalies() -> dict[tuple[str, str], str]:
     """Observability snapshot: {(city, target_date): detail}."""
     with _REGISTRY_LOCK:
         return {key: record.detail for key, record in _REGISTRY.items()}
+
+
+def apply_day0_oracle_anomaly_action(
+    action: Day0OracleAnomalyAction,
+    *,
+    conn=None,
+) -> None:
+    """Persist a prefetch-phase anomaly action on the caller's write connection."""
+
+    kind = str(action.action or "").strip().lower()
+    if kind == "flag":
+        flag_day0_oracle_anomaly(
+            action.city,
+            action.target_date,
+            detail=action.detail,
+            ttl_hours=action.ttl_hours,
+            conn=conn,
+        )
+    elif kind == "clear":
+        clear_day0_oracle_anomaly(action.city, action.target_date, conn=conn)
+    else:
+        raise ValueError(f"unknown day0 oracle anomaly action: {action.action!r}")
 
 
 #: Quarantined-print observability (adversarial review fix 4): counts per
@@ -472,8 +509,10 @@ _WU_CHECK_FAILURE_MEMO: dict[str, float] = {}
 _WU_CHECK_MEMO_LOCK = threading.Lock()
 
 
-def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> None:
-    """Throttled WU-vs-METAR divergence check; flags the registry on divergence.
+def wu_metar_anomaly_action(
+    city: Any, extremes: Any, metar_reports: list
+) -> Optional[Day0OracleAnomalyAction]:
+    """Throttled WU-vs-METAR divergence check; returns a durable write action.
 
     Signature matches Day0FastObsEmitter.prefetch(anomaly_check=...). Any
     WU-side failure is fail-SOFT for emission (the fast lane keeps running)
@@ -495,9 +534,9 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
         last_success = _WU_CHECK_MEMO.get(city_name, 0.0)
         last_failure = _WU_CHECK_FAILURE_MEMO.get(city_name, 0.0)
         if now_monotonic - last_success < _WU_CHECK_INTERVAL_S:
-            return
+            return None
         if now_monotonic - last_failure < _WU_CHECK_FAILURE_RETRY_S:
-            return
+            return None
 
     from src.data.observation_client import get_current_observation
 
@@ -511,7 +550,7 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
             "(retry in %ss; success memo NOT consumed)",
             city_name, target_date, type(exc).__name__, exc, _WU_CHECK_FAILURE_RETRY_S,
         )
-        return
+        return None
     wu_time_raw = getattr(wu_obs, "observation_time", None)
     try:
         wu_last_obs_time = (
@@ -551,12 +590,23 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
             "(retry in %ss; success memo NOT consumed)",
             city_name, target_date, verdict.detail, _WU_CHECK_FAILURE_RETRY_S,
         )
-        return
+        return None
     with _WU_CHECK_MEMO_LOCK:
         _WU_CHECK_MEMO[city_name] = now_monotonic
         _WU_CHECK_FAILURE_MEMO.pop(city_name, None)
     if verdict.diverged:
-        flag_day0_oracle_anomaly(city_name, target_date, detail=verdict.detail)
+        flag_day0_oracle_anomaly(
+            city_name,
+            target_date,
+            detail=verdict.detail,
+            persist=False,
+        )
+        return Day0OracleAnomalyAction(
+            action="flag",
+            city=city_name,
+            target_date=target_date,
+            detail=verdict.detail,
+        )
     else:
         # CLEAN-VERDICT CLEARS A STALE FLAG (false-pause TTL fix 2026-06-15). The
         # detector previously only ADDED flags and relied on the 24h TTL to expire,
@@ -570,7 +620,21 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
         # preserved: a genuine persistent sensor divergence diverges on EVERY check
         # and never reaches this branch; only a self-resolving (cadence/coverage)
         # divergence — the false-pause class — is cleared by a later clean read.
-        clear_day0_oracle_anomaly(city_name, target_date)
+        clear_day0_oracle_anomaly(city_name, target_date, persist=False)
+        return Day0OracleAnomalyAction(
+            action="clear",
+            city=city_name,
+            target_date=target_date,
+            detail=verdict.detail,
+        )
+
+
+def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> None:
+    """Throttled WU-vs-METAR divergence check; persists the resulting action."""
+
+    action = wu_metar_anomaly_action(city, extremes, metar_reports)
+    if action is not None:
+        apply_day0_oracle_anomaly_action(action)
 
 
 def check_wu_metar_divergence(

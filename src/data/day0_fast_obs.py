@@ -656,6 +656,7 @@ class FastObsPrefetch:
     freshness_status: str
     cache_age_s: Optional[float]
     decision_time: datetime
+    anomaly_actions: tuple = ()
 
 
 @dataclass
@@ -937,6 +938,7 @@ class Day0FastObsEmitter:
                 status, cache_age,
             )
         if reports and anomaly_check is not None and anomaly_input_ok:
+            anomaly_actions = []
             for city, _source, target_date in eligible:
                 try:
                     extremes = running_extremes_for_local_day(
@@ -944,12 +946,22 @@ class Day0FastObsEmitter:
                         as_of=decision_time.astimezone(UTC),
                     )
                     if extremes.sample_count:
-                        anomaly_check(city, extremes, reports)
+                        action = anomaly_check(city, extremes, reports)
+                        if action is not None:
+                            anomaly_actions.append(action)
                 except Exception as exc:  # noqa: BLE001 — detector must never block the lane
                     logger.warning(
                         "DAY0_FAST_OBS_ANOMALY_CHECK_FAILED city=%s exc=%s: %s",
                         getattr(city, "name", "?"), type(exc).__name__, exc,
                     )
+            return FastObsPrefetch(
+                tuple(eligible),
+                tuple(reports),
+                status,
+                cache_age,
+                decision_time,
+                tuple(anomaly_actions),
+            )
         return FastObsPrefetch(tuple(eligible), tuple(reports), status, cache_age, decision_time)
 
     def emit_prefetched(
@@ -977,7 +989,16 @@ class Day0FastObsEmitter:
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
         from src.contracts.settlement_semantics import SettlementSemantics
         from src.signal.day0_obs_latency import staleness_budget_minutes
+        from src.data.day0_oracle_anomaly import apply_day0_oracle_anomaly_action
 
+        for action in getattr(prefetch, "anomaly_actions", ()) or ():
+            try:
+                apply_day0_oracle_anomaly_action(action, conn=world_conn)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "DAY0_ORACLE_ANOMALY_EMIT_ACTION_FAILED action=%r exc=%s: %s",
+                    action, type(exc).__name__, exc,
+                )
         if not prefetch.eligible or not prefetch.reports:
             return 0
         reports = list(prefetch.reports)

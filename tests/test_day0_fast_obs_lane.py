@@ -758,6 +758,46 @@ class TestMutexNoHttpSplit:
         )
         assert n == 2  # high + low emitted with ZERO fetcher invocations
 
+    def test_emit_prefetched_persists_anomaly_actions_with_world_conn(self, monkeypatch):
+        from src.data import day0_oracle_anomaly as oa
+        from src.data.day0_fast_obs import Day0FastObsEmitter, FastObsPrefetch
+        from src.state import db_writer_lock
+
+        def forbidden_lock(*_args, **_kwargs):
+            raise AssertionError("emit-phase anomaly persistence must use world_conn")
+
+        monkeypatch.setattr(db_writer_lock, "db_writer_lock", forbidden_lock)
+        conn = _world_conn()
+        action = oa.Day0OracleAnomalyAction(
+            action="flag",
+            city="Tokyo",
+            target_date="2026-06-10",
+            detail="paris-class",
+        )
+        prefetch = FastObsPrefetch(
+            eligible=(),
+            reports=(),
+            freshness_status="fresh_fetch",
+            cache_age_s=0.0,
+            decision_time=datetime(2026, 6, 10, 4, 0, tzinfo=UTC),
+            anomaly_actions=(action,),
+        )
+
+        emitted = Day0FastObsEmitter().emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at="2026-06-10T04:00:00+00:00",
+        )
+
+        assert emitted == 0
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused(
+            "Tokyo",
+            "2026-06-10",
+            now=datetime(2026, 6, 10, 5, 0, tzinfo=UTC),
+            conn=conn,
+        ) is True
+
     def test_main_prefetches_before_mutex_and_emit_is_write_only(self):
         """Source-order pin: the HTTP prefetch (_edli_prefetch_day0_fast_obs,
         which also hosts the open-meteo hourly-vector refresh) happens BEFORE
@@ -863,6 +903,45 @@ class TestAnomalyPausePersistence:
 
         oa.flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="t", conn=_BrokenConn())
         assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=_BrokenConn()) is True
+
+    def test_anomaly_flag_uses_blocking_live_writer_lock(self, monkeypatch):
+        from contextlib import contextmanager
+        from src.data import day0_oracle_anomaly as oa
+        from src.state import db as state_db
+        from src.state import db_writer_lock
+
+        raw_conn = self._flags_conn()
+
+        class _Conn:
+            def execute(self, *args, **kwargs):
+                return raw_conn.execute(*args, **kwargs)
+
+            def commit(self):
+                return raw_conn.commit()
+
+            def close(self):
+                return None
+
+        conn = _Conn()
+        calls = []
+
+        @contextmanager
+        def _lock(db_path, write_class, *, blocking=True):
+            calls.append((db_path, write_class, blocking))
+            yield
+
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kwargs: conn)
+        monkeypatch.setattr(db_writer_lock, "db_writer_lock", _lock)
+
+        oa.flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="t")
+
+        assert calls, "production anomaly flag path must acquire the world writer lock"
+        assert calls[-1][1] == db_writer_lock.WriteClass.LIVE
+        assert calls[-1][2] is True
+        rows = raw_conn.execute(
+            "SELECT COUNT(*) FROM day0_oracle_anomaly_flags WHERE city='Tokyo'"
+        ).fetchone()[0]
+        assert rows == 1
 
     def test_wu_outage_does_not_consume_success_memo(self, monkeypatch):
         """The old code armed the 10-min memo BEFORE calling WU — an outage

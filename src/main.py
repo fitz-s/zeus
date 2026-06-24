@@ -7094,7 +7094,7 @@ def _edli_families_with_fresh_executable_substrate(
             }
             if not condition_ids:
                 continue
-            if any(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
+            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in condition_ids):
                 out.add(family)
     finally:
         try:
@@ -7740,12 +7740,12 @@ def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
     try:
         from src.config import runtime_cities
         from src.data.day0_fast_obs import get_fast_obs_emitter
-        from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
+        from src.data.day0_oracle_anomaly import wu_metar_anomaly_action
 
         prefetch = get_fast_obs_emitter().prefetch(
             cities=runtime_cities(),
             decision_time=decision_time,
-            anomaly_check=wu_metar_anomaly_check,
+            anomaly_check=wu_metar_anomaly_action,
         )
     except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive
         logger.warning(
