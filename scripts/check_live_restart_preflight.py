@@ -1418,20 +1418,6 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         covered.append(evidence)
         if not belief.fresh:
-            monitor_evidence = _latest_monitor_projection_evidence(
-                str(row["position_id"] or ""),
-                day0_required=False,
-            )
-            if monitor_evidence is not None:
-                covered.append(
-                    {
-                        **evidence,
-                        "fresh": True,
-                        "freshness_basis": "monitor_projection_readthrough",
-                        "monitor_projection": monitor_evidence,
-                    }
-                )
-                continue
             repair = _single_family_reseed_repair_evidence({**item, **evidence})
             if repair is not None:
                 repairable.append(
