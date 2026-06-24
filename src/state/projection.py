@@ -215,7 +215,6 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "no_token_id",
         "condition_id",
         "order_id",
-        "order_status",
         "size_usd",
         "shares",
         "cost_basis_usd",

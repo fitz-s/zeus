@@ -2433,7 +2433,7 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert payload["exit_failure"] is False
 
 
-def test_day0_monitor_projection_clears_stale_backoff_order_status():
+def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
     from src.contracts.semantic_types import ExitState
     from src.engine.lifecycle_events import (
         build_monitor_refreshed_canonical_write,
@@ -2474,6 +2474,18 @@ def test_day0_monitor_projection_clears_stale_backoff_order_status():
     )
     assert projection["order_status"] == "filled"
     assert events[0]["venue_status"] == "filled"
+    from src.state.db import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    stale_projection = dict(projection)
+    stale_projection["order_status"] = "backoff_exhausted"
+    upsert_position_current(conn, stale_projection)
+    append_many_and_project(conn, events, projection)
+    current = conn.execute(
+        "SELECT order_status FROM position_current WHERE position_id = ?",
+        (held.trade_id,),
+    ).fetchone()
+    assert current["order_status"] == "filled"
 
     pending_exit = Position(
         trade_id="pos-pending-exit-real-backoff",
