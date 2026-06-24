@@ -1,472 +1,461 @@
-schema_version: 1
+schema_version: 2
 metadata:
-  created: "2026-04-23"
-  owner_packet: "authority rehydration P0 scaffold"
-  # SIDECAR-1 2026-04-28: source_plan reference repaired. The cited path
-  # docs/operations/task_2026-04-23_authority_rehydration/plan.md is GONE on
-  # HEAD (caught by scripts/r3_drift_check.py --architecture-yaml in BATCH B).
-  # The closest descendent is
-  # docs/operations/zeus_topology_system_deep_evaluation_package_2026-04-24/repair_blueprints/p2_module_book_rehydration.md
-  # which inherited the rehydration design from the original P0 scaffold plan;
-  # the original plan was archived/sunset without leaving a forwarding stub.
-  # Marking source_plan as ARCHIVED to preserve provenance; downstream tooling
-  # should treat module_manifest.yaml as self-contained (per its purpose: line).
-  source_plan: ARCHIVED  # was: docs/operations/task_2026-04-23_authority_rehydration/plan.md
-  source_plan_descendent: docs/operations/zeus_topology_system_deep_evaluation_package_2026-04-24/repair_blueprints/p2_module_book_rehydration.md
+  updated: '2026-06-23'
+  owner: docs authority isolation rebuild
   purpose: >
-    Machine registry for dense module books, scoped module routers, and
-    module-level law/current-fact/test dependencies. This manifest routes the
-    cognition layer; it does not create a second authority plane.
-  status: active  # was: skeletal — promoted 2026-05-16; manifest is in active use by topology_doctor
+    Machine registry for dense module books, scoped module routers, and module-level
+    law/current-fact/test dependencies. This manifest routes cognition only; it does
+    not create a second authority plane and it must not point default agents into
+    packet, consult, PR review, report, rebuild, or dated evidence material.
+  status: active
 
-placeholder_policy:
-  law_dependencies: "Populate in P1/P2 from active law and machine manifests."
-  current_fact_dependencies: "Populate only where a module genuinely depends on time-bound operational facts."
-  required_tests: "Populate with load-bearing current tests, not exhaustive catalogs."
-  graph_appendix_status: "Tracked-only placeholder; graph appendices stay derived context, never authority."
-  archive_extraction_status: "Tracked-only placeholder until archive extraction review lands."
+module_policy:
+  default_read_all_modules: false
+  authority_plane: false
+  law_dependency_rule: >
+    Law dependencies must be active authority files or machine manifests. Historical
+    packet/evidence/report/rebuild files are forbidden here as law dependencies.
+  current_fact_rule: >
+    Current facts may reference only operations current pointer files and must be
+    task-required/fresh. Module books must not embed current runtime facts.
+  evidence_rule: >
+    Evidence/report/archive/rebuild references may appear only inside a focused task
+    or archive registry, never as default module boot dependencies.
+
+shared_law_dependencies:
+  - docs/authority/zeus_current_architecture.md
+  - docs/authority/zeus_current_delivery.md
+  - architecture/invariants.yaml
+  - architecture/negative_constraints.yaml
+  - architecture/fatal_misreads.yaml
+  - architecture/db_table_ownership.yaml
+  - architecture/money_path_objects.yaml
 
 modules:
-  state:
-    path: src/state
-    scoped_agents: src/state/AGENTS.md
-    module_book: docs/reference/modules/state.md
-    priority: p1_first_wave
+  contracts:
+    path: src/contracts
+    scoped_agents: src/contracts/AGENTS.md
+    module_book: docs/reference/modules/contracts.md
+    priority: kernel
     maturity: stable
-    zone: source
-    authority_role: canonical_runtime_truth
+    zone: K0_frozen_kernel
+    authority_role: semantic_contracts
     high_risk_files:
-      - src/state/db.py
-      - src/state/portfolio.py
-      - src/state/lifecycle_manager.py
-      - src/state/chain_reconciliation.py
-      - src/state/collateral_ledger.py
-      - src/state/snapshot_repo.py
-      - src/state/venue_command_repo.py
-      - src/state/ledger.py
-      - src/state/projection.py
-      - src/state/job_run_repo.py
-      - src/state/source_run_repo.py
-      - src/state/readiness_repo.py
-      - src/state/market_topology_repo.py
+      - src/contracts/settlement_semantics.py
+      - src/contracts/execution_price.py
+      - src/contracts/executable_cost_curve.py
+      - src/contracts/native_side_candidate.py
+      - src/contracts/execution_intent.py
+      - src/contracts/venue_submission_envelope.py
+      - src/contracts/reality_contract.py
     public_entry_files:
-      - src/state/db.py
-      - src/state/portfolio.py
-      - src/state/lifecycle_manager.py
-      - src/state/collateral_ledger.py
-      - src/state/snapshot_repo.py
-      - src/state/venue_command_repo.py
-      - src/state/job_run_repo.py
-      - src/state/source_run_repo.py
-      - src/state/readiness_repo.py
-      - src/state/market_topology_repo.py
+      - src/contracts/settlement_semantics.py
+      - src/contracts/execution_price.py
+      - src/contracts/executable_cost_curve.py
+      - src/contracts/native_side_candidate.py
+      - src/contracts/execution_intent.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - docs/authority/zeus_current_delivery.md
-      - architecture/invariants.yaml
-    current_fact_dependencies:
-      - docs/operations/current_data_state.md
-    required_tests:
-      - tests/test_db.py
-      - tests/test_dt1_commit_ordering.py
-      - tests/test_dt1_savepoint_integration.py
-      - tests/test_dt4_chain_three_state.py
-      - tests/test_b070_control_overrides_history_v2.py
-      - tests/test_chronicle_dedup.py
-      - tests/test_cross_module_invariants.py
-      - tests/test_collateral_ledger.py
-      - tests/test_executable_market_snapshot.py
-      - tests/test_command_bus_types.py
-      - tests/test_command_grammar_amendment.py
-      - tests/test_riskguard_red_durable_cmd.py
-      - tests/test_command_recovery.py
-      - tests/test_venue_command_repo.py
-      - tests/test_provenance_5_projections.py
-      - tests/test_job_run_schema.py
-      - tests/test_source_run_schema.py
-      - tests/test_readiness_state_schema.py
-      - tests/test_market_topology_state_schema.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  engine:
-    path: src/engine
-    scoped_agents: src/engine/AGENTS.md
-    module_book: docs/reference/modules/engine.md
-    priority: p1_first_wave
-    maturity: stable
-    zone: source
-    authority_role: orchestration_runtime
-    high_risk_files:
-      - src/engine/cycle_runner.py
-      - src/engine/cycle_runtime.py
-      - src/engine/evaluator.py
-      - src/engine/event_bound_final_intent.py
-      - src/engine/monitor_refresh.py
-      - src/engine/replay.py
-      - src/engine/lifecycle_events.py
-    public_entry_files:
-      - src/engine/cycle_runner.py
-      - src/engine/evaluator.py
-      - src/engine/monitor_refresh.py
-    law_dependencies:
-      - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
-      - architecture/task_boot_profiles.yaml
-    current_fact_dependencies:
-      - docs/operations/current_source_validity.md
-    required_tests:
-      - tests/test_day0_exit_gate.py
-      - tests/test_day0_runtime_observation_context.py
-      - tests/test_day0_window.py
-      - tests/test_cross_module_invariants.py
-      - tests/test_cross_module_relationships.py
-      - tests/test_bug100_k1_k2_structural.py
-      - tests/test_riskguard_red_durable_cmd.py
-      - tests/test_risk_allocator.py
-      - tests/test_evaluator_strategy_key_failclosed.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  events:
-    path: src/events
-    scoped_agents: src/events/AGENTS.md
-    module_book: null
-    priority: edli_v1
-    maturity: initial
-    zone: source
-    authority_role: event_sourced_opportunity_runtime
-    high_risk_files:
-      - src/events/event_store.py
-      - src/events/opportunity_event.py
-      - src/events/candidate_binding.py
-      - src/events/decision_engine.py
-      - src/events/forecast_completeness.py
-      - src/events/day0_authority.py
-      - src/events/money_path_adapters.py
-      - src/events/live_cap.py
-      - src/events/live_order_aggregate.py
-      - src/events/live_order_reconcile.py
-      - src/events/event_writer.py
-      - src/events/event_coalescer.py
-      - src/events/dead_letter.py
-      - src/events/replay.py
-      - src/events/triggers/forecast_snapshot_ready.py
-      - src/events/triggers/day0_extreme_updated.py
-      - src/events/triggers/market_channel_ingestor.py
-      - src/events/triggers/user_channel_ingestor.py
-      - src/events/reactor.py
-    public_entry_files:
-      - src/events/event_store.py
-      - src/events/opportunity_event.py
-      - src/events/event_writer.py
-    law_dependencies:
-      - AGENTS.md
-      - architecture/db_table_ownership.yaml
+      - architecture/negative_constraints.yaml
       - architecture/money_path_objects.yaml
-      - architecture/money_path_ci.yaml
-    current_fact_dependencies:
-      - docs/operations/edli_v1/EDLI_IMPLEMENTATION_CONTEXT_LOCK.md
-      - docs/operations/edli_v1/REPO_REALITY_CROSS_REFERENCE.md
-      - docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md
-      - docs/operations/edli_v1/REDEMPTION_ROOT_CAUSE.md
+    current_fact_dependencies: []
     required_tests:
-      - tests/events/test_opportunity_event.py
-      - tests/events/test_event_candidate_binding.py
-      - tests/events/test_event_bound_decision_engine_no_runtime.py
-      - tests/events/test_event_store_idempotency.py
-      - tests/events/test_event_writer_single_writer.py
-      - tests/events/test_market_event_coalescer.py
-      - tests/events/test_forecast_snapshot_ready.py
-      - tests/events/test_day0_extreme_updated_trigger.py
-      - tests/strategy/live_inference/test_day0_absorbing_boundary.py
-      - tests/strategy/live_inference/test_live_bin_inference.py
-      - tests/strategy/live_inference/test_executable_cost.py
-      - tests/strategy/live_inference/test_trade_score.py
-      - tests/events/test_market_channel_ingestor.py
-      - tests/events/test_reactor.py
-      - tests/events/test_live_cap.py
-      - tests/events/test_live_order_aggregate.py
-      - tests/events/test_live_order_reconcile.py
-      - tests/engine/test_event_reactor_no_bypass.py
-      - tests/strategy/live_inference/test_no_trade_regret.py
-      - tests/analysis/test_event_opportunity_report.py
-      - tests/money_path/test_edli_online_invariants.py
-      - tests/money_path/test_edli_live_canary.py
-      - tests/money_path/test_edli_order_lifecycle.py
-      - tests/state/test_edli_table_ownership.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: not_started
+      - tests/test_instrument_invariants.py
+      - tests/test_execution_price.py
+      - tests/test_no_bare_float_seams.py
+      - tests/test_executable_market_snapshot.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
   data:
     path: src/data
     scoped_agents: src/data/AGENTS.md
     module_book: docs/reference/modules/data.md
-    priority: p1_first_wave
-    maturity: stable
-    zone: source
-    authority_role: external_data_ingest
+    priority: money_path
+    maturity: active
+    zone: K2_runtime
+    authority_role: source_and_forecast_provenance
     high_risk_files:
-      - src/data/daily_obs_append.py
-      - src/data/daily_observation_writer.py
-      - src/data/observation_client.py
-      - src/data/hourly_instants_append.py
-      - src/data/observation_instants_writer.py
-      - src/data/tier_resolver.py
-      - src/data/forecast_source_registry.py
-      - src/data/forecast_ingest_protocol.py
-      - src/data/tigge_client.py
-      - src/data/forecasts_append.py
-      - src/data/release_calendar.py
+      - src/data/replacement_forecast_materializer.py
+      - src/data/replacement_forecast_readiness.py
+      - src/data/replacement_forecast_runtime_policy.py
+      - src/data/replacement_current_value_serving.py
+      - src/data/bayes_precision_fusion_capture.py
+      - src/data/bayes_precision_fusion_history_provider.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
-    public_entry_files:
-      - src/data/daily_obs_append.py
-      - src/data/daily_observation_writer.py
-      - src/data/observation_client.py
       - src/data/forecast_source_registry.py
-      - src/data/forecast_ingest_protocol.py
-      - src/data/tigge_client.py
-      - src/data/forecasts_append.py
-      - src/data/release_calendar.py
+    public_entry_files:
+      - src/data/replacement_forecast_materializer.py
+      - src/data/forecast_source_registry.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_data_and_replay_reference.md
+      - architecture/db_table_ownership.yaml
+      - architecture/source_rationale.yaml
       - architecture/city_truth_contract.yaml
-      - config/cities.json
     current_fact_dependencies:
-      - docs/operations/current_source_validity.md
       - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
     required_tests:
-      - tests/test_audit_city_data_readiness.py
-      - tests/test_cities_config_authoritative.py
-      - tests/test_ensemble_client.py
-      - tests/test_backfill_openmeteo_previous_runs.py
+      - tests/test_replacement_forecast_materializer.py
+      - tests/test_replacement_qlcb_materialization.py
+      - tests/test_replacement_fused_q_shape.py
+      - tests/test_cycle_monotone_materialization.py
       - tests/test_forecast_source_registry.py
-      - tests/test_tigge_ingest.py
-      - tests/test_backfill_scripts_match_live_config.py
-      - tests/test_tier_resolver.py
-      - tests/test_obs_v2_writer.py
-      - tests/test_hk_rejects_vhhh_source.py
-      - tests/test_hourly_clients_parse.py
-      - tests/test_v2_adapter.py
       - tests/test_release_calendar.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  execution:
-    path: src/execution
-    scoped_agents: src/execution/AGENTS.md
-    module_book: docs/reference/modules/execution.md
-    priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 3 test_execution_*.py + 53-62 tests import src.execution (flat layout in tests/; verify: grep -rl 'src\.execution' tests/test_*.py | wc -l)
-    zone: source
-    authority_role: live_execution
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  forecast:
+    path: src/forecast
+    scoped_agents: null
+    module_book: null
+    priority: money_path
+    maturity: active
+    zone: K3_probability
+    authority_role: predictive_distribution_and_fusion
     high_risk_files:
-      - src/execution/executor.py
-      - src/execution/exchange_reconcile.py
-      - src/execution/settlement_commands.py
-      - src/execution/exit_triggers.py
-      - src/execution/exit_lifecycle.py
-      - src/execution/exit_safety.py
-      - src/execution/harvester.py
-      - src/execution/collateral.py
-      - src/execution/wrap_unwrap_commands.py
-      - src/execution/command_bus.py
-      - src/execution/exit_safety.py
+      - src/forecast/bayes_precision_fusion.py
+      - src/forecast/predictive_distribution_builder.py
+      - src/forecast/day0_conditioner.py
+      - src/forecast/forecast_case_factory.py
+      - src/forecast/types.py
     public_entry_files:
-      - src/execution/executor.py
-      - src/execution/exchange_reconcile.py
-      - src/execution/settlement_commands.py
-      - src/execution/exit_triggers.py
-      - src/execution/harvester.py
-      - src/execution/collateral.py
-      - src/execution/wrap_unwrap_commands.py
-      - src/execution/command_bus.py
-      - src/execution/exit_safety.py
+      - src/forecast/bayes_precision_fusion.py
+      - src/forecast/predictive_distribution_builder.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
+      - docs/reference/zeus_math_spec.md
+      - docs/reference/zeus_prediction_market_quant_reference.md
     current_fact_dependencies:
-      - docs/operations/current_source_validity.md
-    required_tests:
-      - tests/test_executor.py
-      - tests/test_exit_authority.py
-      - tests/test_entry_exit_symmetry.py
-      - tests/test_live_safety_invariants.py
-      - tests/test_collateral_ledger.py
-      - tests/test_command_grammar_amendment.py
-      - tests/test_command_bus_types.py
-      - tests/test_exit_safety.py
-      - tests/test_exchange_reconcile.py
-      - tests/test_settlement_commands.py
-      - tests/test_risk_allocator.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  venue:
-    path: src/venue
-    scoped_agents: src/venue/AGENTS.md
-    module_book: docs/reference/modules/venue.md
-    priority: r3_z2
-    maturity: provisional
-    zone: source
-    authority_role: live_venue_adapter
-    high_risk_files:
-      - src/venue/polymarket_v2_adapter.py
-      - src/contracts/venue_submission_envelope.py
-      - src/data/polymarket_client.py
-      - src/execution/executor.py
-    public_entry_files:
-      - src/venue/polymarket_v2_adapter.py
-      - src/contracts/venue_submission_envelope.py
-    law_dependencies:
-      - architecture/invariants.yaml
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
-    current_fact_dependencies:
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/py_clob_client_v2_surface_2026-04-27.md
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md
-    required_tests:
-      - tests/test_v2_adapter.py
-      - tests/test_fake_polymarket_venue.py
-      - tests/integration/test_p0_live_money_safety.py
-      - tests/test_executor_command_split.py
-      - tests/test_neg_risk_passthrough.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: packet_owned
-  ingest:
-    path: src/ingest
-    scoped_agents: src/ingest/AGENTS.md
-    module_book: docs/reference/modules/ingest.md
-    priority: r3_m3
-    maturity: provisional
-    zone: source
-    authority_role: runtime_event_ingest
-    high_risk_files:
-      - src/ingest/forecast_live_daemon.py
-      - src/ingest/polymarket_user_channel.py
-      - src/control/ws_gap_guard.py
-      - src/state/venue_command_repo.py
-    public_entry_files:
-      - src/ingest/forecast_live_daemon.py
-      - src/ingest/polymarket_user_channel.py
-    law_dependencies:
-      - architecture/invariants.yaml
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M3.yaml
-    current_fact_dependencies:
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/reference_excerpts/polymarket_user_ws_2026-04-27.md
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md
-    required_tests:
-      - tests/test_forecast_live_daemon.py
-      - tests/test_user_channel_ingest.py
-      - tests/test_digest_profile_matching.py::test_r3_m3_user_channel_routes_to_m3_profile
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: packet_owned
-  signal:
-    path: src/signal
-    scoped_agents: src/signal/AGENTS.md
-    module_book: docs/reference/modules/signal.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: signal_generation
-    high_risk_files:
-      - src/signal/ensemble_signal.py
-      - src/signal/day0_signal.py
-      - src/signal/day0_window.py
-      - src/signal/diurnal.py
-      - src/signal/day0_router.py
-    public_entry_files:
-      - src/signal/ensemble_signal.py
-      - src/signal/day0_signal.py
-      - src/signal/day0_router.py
-    law_dependencies:
-      - docs/authority/zeus_current_architecture.md
-      - src/contracts/settlement_semantics.py
-    current_fact_dependencies:
-      - docs/operations/current_source_validity.md
       - docs/operations/current_data_state.md
     required_tests:
-      - tests/test_ensemble_signal.py
-      - tests/test_day0_window.py
-      - tests/test_day0_exit_gate.py
-      - tests/test_day0_runtime_observation_context.py
-      - tests/test_diurnal.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
+      - tests/test_bayes_precision_fusion_port_fidelity.py
+      - tests/test_predictive_distribution_builder.py
+      - tests/test_replacement_fused_q_shape.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  probability:
+    path: src/probability
+    scoped_agents: null
+    module_book: null
+    priority: money_path
+    maturity: active
+    zone: K3_probability
+    authority_role: outcome_space_and_q_band
+    high_risk_files:
+      - src/probability/outcome_space.py
+      - src/probability/joint_q.py
+      - src/probability/joint_q_band.py
+      - src/probability/event_resolution.py
+      - src/probability/instruments.py
+    public_entry_files:
+      - src/probability/outcome_space.py
+      - src/probability/joint_q.py
+      - src/probability/joint_q_band.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_math_spec.md
+      - docs/reference/zeus_market_settlement_reference.md
+    current_fact_dependencies: []
+    required_tests:
+      - tests/probability/test_outcome_space.py
+      - tests/probability/test_joint_q.py
+      - tests/probability/test_joint_q_band.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
   calibration:
     path: src/calibration
     scoped_agents: src/calibration/AGENTS.md
     module_book: docs/reference/modules/calibration.md
-    priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 19 test_calibration_*.py files (flat layout in tests/), LAW antibodies enforced
-    zone: source
-    authority_role: calibration_runtime
+    priority: money_path
+    maturity: active
+    zone: K3_probability
+    authority_role: settlement_preimage_and_calibration_support
     high_risk_files:
-      - src/calibration/platt.py
+      - src/calibration/emos.py
       - src/calibration/manager.py
       - src/calibration/store.py
-      - src/calibration/retrain_trigger.py
-      - src/calibration/effective_sample_size.py
-      - src/calibration/forecast_calibration_domain.py
+      - src/calibration/platt.py
     public_entry_files:
-      - src/calibration/platt.py
+      - src/calibration/emos.py
       - src/calibration/manager.py
-      - src/calibration/store.py
-      - src/calibration/forecast_calibration_domain.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - src/contracts/calibration_bins.py
+      - docs/reference/zeus_math_spec.md
+      - architecture/negative_constraints.yaml
     current_fact_dependencies:
       - docs/operations/current_data_state.md
     required_tests:
       - tests/test_platt.py
       - tests/test_calibration_manager.py
-      - tests/test_calibration_bins_canonical.py
-      - tests/test_calibration_unification.py
-      - tests/test_calibration_retrain.py
-      - tests/test_forecast_calibration_domain.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
+      - tests/test_replacement_fused_q_shape.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  decision:
+    path: src/decision
+    scoped_agents: null
+    module_book: null
+    priority: money_path
+    maturity: active
+    zone: K3_decision
+    authority_role: qkernel_family_decision
+    high_risk_files:
+      - src/decision/family_decision_engine.py
+      - src/decision/payoff_vector.py
+      - src/decision/market_coherence.py
+      - src/decision/qlcb_reliability_guard.py
+    public_entry_files:
+      - src/decision/family_decision_engine.py
+      - src/decision/payoff_vector.py
+      - src/decision/market_coherence.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_strategy_spec.md
+      - docs/reference/zeus_math_spec.md
+      - architecture/negative_constraints.yaml
+    current_fact_dependencies: []
+    required_tests:
+      - tests/integration/test_qkernel_spine_routing.py
+      - tests/integration/test_qkernel_spine_blockers_pr409.py
+      - tests/strategy/live_inference/test_trade_score.py
+      - tests/strategy/live_inference/test_no_trade_regret.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
   strategy:
     path: src/strategy
     scoped_agents: src/strategy/AGENTS.md
     module_book: docs/reference/modules/strategy.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: strategy_identity
+    priority: money_path
+    maturity: active
+    zone: K3_strategy
+    authority_role: direction_selection_utility_support
     high_risk_files:
-      - src/strategy/market_analysis.py
+      - src/strategy/live_inference/direction_law.py
+      - src/strategy/utility_ranker.py
       - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
-      - src/strategy/market_fusion.py
-      - src/strategy/selection_family.py
-      - src/strategy/benchmark_suite.py
+      - src/strategy/fill_up_wiring.py
+      - src/strategy/shift_bin_wiring.py
+      - src/strategy/family_rebalance.py
     public_entry_files:
-      - src/strategy/market_analysis.py
-      - src/strategy/fdr_filter.py
+      - src/strategy/live_inference/direction_law.py
+      - src/strategy/utility_ranker.py
       - src/strategy/kelly.py
-      - src/strategy/benchmark_suite.py
-      - src/strategy/data_lake.py
-      - src/strategy/candidates/__init__.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
+      - docs/reference/zeus_strategy_spec.md
+      - docs/reference/zeus_risk_strategy_reference.md
+      - architecture/negative_constraints.yaml
     current_fact_dependencies:
       - docs/operations/current_data_state.md
     required_tests:
-      - tests/test_market_analysis.py
+      - tests/strategy/live_inference/test_live_bin_inference.py
+      - tests/strategy/live_inference/test_executable_cost.py
+      - tests/strategy/live_inference/test_trade_score.py
       - tests/test_fdr.py
       - tests/test_kelly.py
-      - tests/test_kelly_cascade_bounds.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  engine:
+    path: src/engine
+    scoped_agents: src/engine/AGENTS.md
+    module_book: docs/reference/modules/engine.md
+    priority: money_path
+    maturity: active
+    zone: K2_orchestration
+    authority_role: live_orchestration_and_reactor
+    high_risk_files:
+      - src/engine/event_reactor_adapter.py
+      - src/engine/qkernel_spine_bridge.py
+      - src/engine/cycle_runner.py
+      - src/engine/evaluator.py
+      - src/engine/monitor_refresh.py
+      - src/engine/replay.py
+    public_entry_files:
+      - src/engine/event_reactor_adapter.py
+      - src/engine/qkernel_spine_bridge.py
+      - src/engine/cycle_runner.py
+      - src/engine/monitor_refresh.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_prediction_market_quant_reference.md
+      - docs/reference/zeus_execution_lifecycle_reference.md
+      - architecture/runtime_modes.yaml
+      - architecture/runtime_posture.yaml
+    current_fact_dependencies:
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+    required_tests:
+      - tests/engine/test_event_reactor_no_bypass.py
+      - tests/integration/test_qkernel_spine_routing.py
+      - tests/test_day0_exit_gate.py
+      - tests/test_day0_window.py
+      - tests/test_cross_module_invariants.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  events:
+    path: src/events
+    scoped_agents: src/events/AGENTS.md
+    module_book: null
+    priority: money_path
+    maturity: active
+    zone: K2_event_runtime
+    authority_role: event_sourced_opportunity_runtime
+    high_risk_files:
+      - src/events/event_store.py
+      - src/events/opportunity_event.py
+      - src/events/decision_engine.py
+      - src/events/reactor.py
+      - src/events/triggers/forecast_snapshot_ready.py
+      - src/events/triggers/day0_extreme_updated.py
+      - src/events/triggers/market_channel_ingestor.py
+      - src/events/triggers/user_channel_ingestor.py
+    public_entry_files:
+      - src/events/event_store.py
+      - src/events/opportunity_event.py
+      - src/events/reactor.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/db_table_ownership.yaml
+      - architecture/money_path_objects.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/events/test_opportunity_event.py
+      - tests/events/test_event_store_idempotency.py
+      - tests/events/test_reactor.py
+      - tests/money_path/test_edli_online_invariants.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  execution:
+    path: src/execution
+    scoped_agents: src/execution/AGENTS.md
+    module_book: docs/reference/modules/execution.md
+    priority: money_path
+    maturity: active
+    zone: K2_execution
+    authority_role: live_execution_boundary
+    high_risk_files:
+      - src/execution/executor.py
+      - src/execution/exit_lifecycle.py
+      - src/execution/exit_safety.py
+      - src/execution/harvester.py
+      - src/execution/settlement_commands.py
+      - src/execution/command_bus.py
+      - src/execution/collateral.py
+    public_entry_files:
+      - src/execution/executor.py
+      - src/execution/exit_lifecycle.py
+      - src/execution/harvester.py
+      - src/execution/settlement_commands.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_execution_lifecycle_reference.md
+      - architecture/money_path_objects.yaml
+      - architecture/negative_constraints.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_executor.py
+      - tests/test_exit_authority.py
+      - tests/test_exit_safety.py
+      - tests/test_exchange_reconcile.py
+      - tests/test_settlement_commands.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  venue:
+    path: src/venue
+    scoped_agents: src/venue/AGENTS.md
+    module_book: docs/reference/modules/venue.md
+    priority: money_path
+    maturity: active
+    zone: K2_venue_boundary
+    authority_role: polymarket_adapter_boundary
+    high_risk_files:
+      - src/venue/polymarket_v2_adapter.py
+      - src/contracts/venue_submission_envelope.py
+      - src/data/polymarket_client.py
+      - src/execution/executor.py
+    public_entry_files:
+      - src/venue/polymarket_v2_adapter.py
+      - src/contracts/venue_submission_envelope.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - docs/reference/zeus_execution_lifecycle_reference.md
+      - architecture/negative_constraints.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+    required_tests:
+      - tests/test_v2_adapter.py
+      - tests/test_fake_polymarket_venue.py
+      - tests/integration/test_p0_live_money_safety.py
+      - tests/test_neg_risk_passthrough.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  state:
+    path: src/state
+    scoped_agents: src/state/AGENTS.md
+    module_book: docs/reference/modules/state.md
+    priority: kernel
+    maturity: stable
+    zone: K0_K1_truth
+    authority_role: canonical_runtime_truth
+    high_risk_files:
+      - src/state/db.py
+      - src/state/lifecycle_manager.py
+      - src/state/ledger.py
+      - src/state/projection.py
+      - src/state/portfolio.py
+      - src/state/chain_reconciliation.py
+      - src/state/venue_command_repo.py
+      - src/state/collateral_ledger.py
+      - src/state/readiness_repo.py
+      - src/state/market_topology_repo.py
+    public_entry_files:
+      - src/state/db.py
+      - src/state/lifecycle_manager.py
+      - src/state/portfolio.py
+      - src/state/chain_reconciliation.py
+      - src/state/venue_command_repo.py
+    law_dependencies:
+      - docs/authority/zeus_current_architecture.md
+      - architecture/kernel_manifest.yaml
+      - architecture/db_table_ownership.yaml
+      - architecture/money_path_objects.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+      - docs/operations/current_data_state.md
+    required_tests:
+      - tests/test_db.py
+      - tests/test_dt1_commit_ordering.py
+      - tests/test_dt4_chain_three_state.py
+      - tests/test_venue_command_repo.py
+      - tests/test_collateral_ledger.py
+      - tests/test_canonical_position_current_schema_alignment.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
   riskguard:
     path: src/riskguard
     scoped_agents: src/riskguard/AGENTS.md
     module_book: docs/reference/modules/riskguard.md
-    priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 4 test_riskguard_*.py files (flat layout in tests/), INV-05/INV-19 antibodies enforced
-    zone: source
-    authority_role: risk_control
+    priority: money_path
+    maturity: stable
+    zone: K1_protection
+    authority_role: behavior_changing_risk
     high_risk_files:
       - src/riskguard/riskguard.py
       - src/riskguard/risk_level.py
@@ -477,20 +466,22 @@ modules:
       - src/riskguard/risk_level.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - docs/authority/zeus_current_delivery.md
+      - docs/reference/zeus_risk_strategy_reference.md
+      - architecture/money_path_objects.yaml
     current_fact_dependencies: []
     required_tests:
       - tests/test_riskguard.py
       - tests/test_live_safety_invariants.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
   risk_allocator:
     path: src/risk_allocator
     scoped_agents: src/risk_allocator/AGENTS.md
     module_book: docs/reference/modules/riskguard.md
-    priority: r3_a2
-    maturity: provisional
-    zone: source
+    priority: money_path
+    maturity: active
+    zone: K1_protection
     authority_role: capital_allocation_governor
     high_risk_files:
       - src/risk_allocator/governor.py
@@ -501,458 +492,77 @@ modules:
       - src/risk_allocator/__init__.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
-      - docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+      - docs/reference/zeus_risk_strategy_reference.md
+      - architecture/money_path_objects.yaml
     current_fact_dependencies: []
     required_tests:
       - tests/test_risk_allocator.py
       - tests/test_executor.py
       - tests/test_heartbeat_supervisor.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: r3_a2_new
-  contracts:
-    path: src/contracts
-    scoped_agents: src/contracts/AGENTS.md
-    module_book: docs/reference/modules/contracts.md
-    priority: p2_remaining
-    maturity: stable  # promoted 2026-05-16: 10 test_settlement_*.py + test_contract_*.py files (flat layout in tests/)
-    zone: source
-    authority_role: runtime_contracts
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
+  ingest:
+    path: src/ingest
+    scoped_agents: src/ingest/AGENTS.md
+    module_book: docs/reference/modules/ingest.md
+    priority: runtime_support
+    maturity: active
+    zone: K2_ingest
+    authority_role: split_ingest_daemons
     high_risk_files:
-      - src/contracts/settlement_semantics.py
-      - src/contracts/calibration_bins.py
-      - src/contracts/execution_price.py
-      - src/contracts/execution_intent.py
-      - src/contracts/executable_market_snapshot.py
-      - src/contracts/venue_submission_envelope.py
-      - src/contracts/fx_classification.py
-      - src/contracts/provenance_registry.py
-      - src/contracts/reality_contract.py
+      - src/ingest/substrate_observer_daemon.py
+      - src/ingest/price_channel_daemon.py
+      - src/ingest/post_trade_capital_daemon.py
+      - src/ingest/forecast_live_daemon.py
+      - src/ingest/polymarket_user_channel.py
     public_entry_files:
-      - src/contracts/settlement_semantics.py
-      - src/contracts/calibration_bins.py
-      - src/contracts/executable_market_snapshot.py
-      - src/contracts/venue_submission_envelope.py
-      - src/contracts/fx_classification.py
-      - src/contracts/semantic_types.py
-      - src/contracts/execution_intent.py
+      - src/ingest/substrate_observer_daemon.py
+      - src/ingest/price_channel_daemon.py
+      - src/ingest/post_trade_capital_daemon.py
+      - src/ingest/forecast_live_daemon.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
-    current_fact_dependencies: []
+      - docs/reference/zeus_data_and_replay_reference.md
+      - architecture/db_table_ownership.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
+      - docs/operations/current_data_state.md
     required_tests:
-      - tests/test_v2_adapter.py
-      - tests/test_instrument_invariants.py
-      - tests/test_execution_price.py
-      - tests/test_calibration_bins_canonical.py
-      - tests/test_reality_contracts.py
-      - tests/test_collateral_ledger.py
-      - tests/test_executable_market_snapshot.py
-      - tests/test_risk_allocator.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
+      - tests/test_forecast_live_daemon.py
+      - tests/test_user_channel_ingest.py
+      - tests/test_p2_substrate_observer_lift.py
+      - tests/test_p3_price_channel_ingest_lift.py
+      - tests/test_p4_post_trade_capital_lift.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
+
   control:
     path: src/control
     scoped_agents: src/control/AGENTS.md
     module_book: docs/reference/modules/control.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: operator_control
+    priority: protective_boundary
+    maturity: active
+    zone: K1_control
+    authority_role: control_and_submit_guards
     high_risk_files:
-      - src/control/control_plane.py
       - src/control/cutover_guard.py
       - src/control/heartbeat_supervisor.py
       - src/control/ws_gap_guard.py
-      - src/control/gate_decision.py
+      - src/control/control_plane.py
     public_entry_files:
-      - src/control/control_plane.py
       - src/control/cutover_guard.py
       - src/control/heartbeat_supervisor.py
       - src/control/ws_gap_guard.py
-      - src/control/gate_decision.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - docs/authority/zeus_current_delivery.md
-    current_fact_dependencies: []
+      - architecture/money_path_objects.yaml
+    current_fact_dependencies:
+      - docs/operations/current_state.md
     required_tests:
-      - tests/test_cutover_guard.py
       - tests/test_heartbeat_supervisor.py
-      - tests/test_user_channel_ingest.py
-      - tests/test_gate_decision.py
-      - tests/test_runtime_guards.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  supervisor_api:
-    path: src/supervisor_api
-    scoped_agents: src/supervisor_api/AGENTS.md
-    module_book: docs/reference/modules/supervisor_api.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: supervisory_interface
-    high_risk_files:
-      - src/supervisor_api/contracts.py
-    public_entry_files:
-      - src/supervisor_api/contracts.py
-    law_dependencies:
-      - docs/authority/zeus_current_delivery.md
-      - src/control/control_plane.py
-    current_fact_dependencies: []
-    required_tests:
-      - tests/test_supervisor_contracts.py
-      - tests/test_runtime_guards.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  observability:
-    path: src/observability
-    scoped_agents: src/observability/AGENTS.md
-    module_book: docs/reference/modules/observability.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: monitoring_support
-    high_risk_files:
-      - src/observability/status_summary.py
-      - src/observability/scheduler_health.py
-    public_entry_files:
-      - src/observability/status_summary.py
-    law_dependencies:
-      - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_healthcheck.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  types:
-    path: src/types
-    scoped_agents: src/types/AGENTS.md
-    module_book: docs/reference/modules/types.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: shared_types
-    high_risk_files:
-      - src/types/temperature.py
-      - src/types/market.py
-      - src/types/observation_atom.py
-      - src/types/metric_identity.py
-    public_entry_files:
-      - src/types/temperature.py
-      - src/types/market.py
-      - src/types/observation_atom.py
-    law_dependencies:
-      - docs/authority/zeus_current_architecture.md
-      - architecture/invariants.yaml
-    current_fact_dependencies: []
-    required_tests:
-      - tests/test_temperature.py
-      - tests/test_observation_atom.py
-      - tests/test_instrument_invariants.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  analysis:
-    path: src/analysis
-    scoped_agents: src/analysis/AGENTS.md
-    module_book: docs/reference/modules/analysis.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: source
-    authority_role: analytical_support
-    high_risk_files:
-      - src/analysis/__init__.py
-    public_entry_files:
-      - src/analysis/__init__.py
-    law_dependencies:
-      - docs/reference/modules/analysis.md
-    current_fact_dependencies: []
-    required_tests: []
-    graph_appendix_status: LOCAL_VERIFICATION_REQUIRED
-    archive_extraction_status: partial
-  scripts:
-    path: scripts
-    scoped_agents: scripts/AGENTS.md
-    module_book: docs/reference/modules/scripts.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: scripts
-    authority_role: operator_script_surface
-    high_risk_files:
-      - scripts/topology_doctor.py
-      - scripts/backfill_obs.py
-      - scripts/rebuild_calibration_pairs_canonical.py
-      - scripts/check_daemon_heartbeat.py
-    public_entry_files:
-      - scripts/topology_doctor.py
-      - scripts/backfill_obs.py
-    law_dependencies:
-      - docs/authority/zeus_current_delivery.md
-      - architecture/script_manifest.yaml
-    current_fact_dependencies:
-      - docs/operations/current_source_validity.md
-    required_tests:
-      - tests/test_topology_doctor.py
-      - tests/test_tier_resolver.py
-      - tests/test_obs_v2_writer.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  tests:
-    path: tests
-    scoped_agents: tests/AGENTS.md
-    module_book: docs/reference/modules/tests.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: tests
-    authority_role: proof_surface
-    high_risk_files:
-      - tests/test_topology_doctor.py
-      - tests/test_cross_module_invariants.py
-      - tests/test_cross_module_relationships.py
-      - tests/test_day0_runtime_observation_context.py
-    public_entry_files:
-      - tests/test_topology_doctor.py
-      - tests/test_cross_module_invariants.py
-    law_dependencies:
-      - docs/authority/zeus_current_architecture.md
-      - architecture/test_topology.yaml
-    current_fact_dependencies: []
-    required_tests:
-      - tests/test_topology_doctor.py
-      - tests/test_cross_module_invariants.py
-      - tests/test_cross_module_relationships.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  docs_system:
-    path: docs
-    scoped_agents: docs/AGENTS.md
-    module_book: docs/reference/modules/docs_system.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: docs
-    authority_role: docs_mesh
-    high_risk_files:
-      - docs/AGENTS.md
-      - docs/README.md
-      - docs/operations/current_state.md
-      - docs/archive_registry.md
-    public_entry_files:
-      - docs/AGENTS.md
-      - docs/README.md
-    law_dependencies:
-      - architecture/docs_registry.yaml
-      - architecture/topology.yaml
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_topology_doctor.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  topology_system:
-    path: architecture
-    scoped_agents: architecture/AGENTS.md
-    module_book: docs/reference/modules/topology_system.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: architecture
-    authority_role: machine_routing_kernel
-    high_risk_files:
-      - architecture/topology.yaml
-      - architecture/docs_registry.yaml
-      - architecture/source_rationale.yaml
-      - architecture/test_topology.yaml
-      - architecture/script_manifest.yaml
-    public_entry_files:
-      - architecture/topology.yaml
-      - architecture/docs_registry.yaml
-    law_dependencies:
-      - docs/authority/zeus_current_delivery.md
-      - docs/authority/zeus_current_architecture.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_topology_doctor.py
-      - tests/test_structural_linter.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  topology_doctor_system:
-    path: scripts
-    scoped_agents: scripts/AGENTS.md
-    module_book: docs/reference/modules/topology_doctor_system.md
-    priority: p2_topology_rehydration
-    maturity: stable
-    zone: scripts
-    authority_role: topology_checker
-    high_risk_files:
-      - scripts/topology_doctor.py
-      - scripts/topology_doctor_cli.py
-      - scripts/topology_doctor_closeout.py
-    public_entry_files:
-      - scripts/topology_doctor.py
-    law_dependencies:
-      - architecture/topology.yaml
-      - docs/authority/zeus_current_delivery.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_topology_doctor.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  manifests_system:
-    path: architecture
-    scoped_agents: architecture/AGENTS.md
-    module_book: docs/reference/modules/manifests_system.md
-    priority: p2_topology_rehydration
-    maturity: stable
-    zone: architecture
-    authority_role: manifest_ownership_reference
-    high_risk_files:
-      - architecture/topology.yaml
-      - architecture/docs_registry.yaml
-      - architecture/module_manifest.yaml
-      - architecture/source_rationale.yaml
-      - architecture/test_topology.yaml
-      - architecture/script_manifest.yaml
-    public_entry_files:
-      - architecture/topology.yaml
-      - architecture/docs_registry.yaml
-      - architecture/module_manifest.yaml
-    law_dependencies:
-      - docs/authority/zeus_current_architecture.md
-      - docs/authority/zeus_current_delivery.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_topology_doctor.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  closeout_and_receipts_system:
-    path: docs/operations
-    scoped_agents: docs/operations/AGENTS.md
-    module_book: docs/reference/modules/closeout_and_receipts_system.md
-    priority: p2_topology_rehydration
-    maturity: stable
-    zone: docs
-    authority_role: packet_closeout_evidence
-    high_risk_files:
-      - scripts/topology_doctor_closeout.py
-      - architecture/artifact_lifecycle.yaml
-      - architecture/change_receipt_schema.yaml
-      - architecture/map_maintenance.yaml
-      - docs/operations/current_state.md
-    public_entry_files:
-      - scripts/topology_doctor.py
-      - docs/operations/current_state.md
-    law_dependencies:
-      - docs/authority/zeus_current_delivery.md
-      - architecture/artifact_lifecycle.yaml
-      - architecture/change_receipt_schema.yaml
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_topology_doctor.py
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: partial
-  code_review_graph:
-    path: .code-review-graph
-    scoped_agents: AGENTS.md
-    module_book: docs/reference/modules/code_review_graph.md
-    priority: p2_remaining
-    maturity: provisional
-    zone: derived_context
-    authority_role: tracked_derived_context
-    high_risk_files:
-      - .code-review-graph/graph.db
-      - architecture/code_review_graph_protocol.yaml
-      - scripts/topology_doctor_code_review_graph.py
-    public_entry_files:
-      - .code-review-graph/graph.db
-      - architecture/code_review_graph_protocol.yaml
-    law_dependencies:
-      - architecture/code_review_graph_protocol.yaml
-      - docs/authority/zeus_current_delivery.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/test_topology_doctor.py
-    graph_appendix_status: TRACKED_AVAILABLE
-    archive_extraction_status: partial
-
-  maintenance_worker:
-    path: maintenance_worker/
-    scoped_agents: AGENTS.md
-    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
-    priority: p2_runtime
-    maturity: new
-    zone: tool
-    authority_role: automated_hygiene_proposer
-    high_risk_files:
-      - maintenance_worker/core/engine.py
-      - maintenance_worker/core/apply_publisher.py
-      - maintenance_worker/core/validator.py
-      - maintenance_worker/core/subprocess_guard.py
-      - maintenance_worker/core/git_operation_guard.py
-      - maintenance_worker/core/gh_operation_guard.py
-      - maintenance_worker/core/refusal.py
-      - maintenance_worker/core/kill_switch.py
-    public_entry_files:
-      - maintenance_worker/cli/entry.py
-      - maintenance_worker/core/engine.py
-    law_dependencies:
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/maintenance_worker/
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: none
-
-  topology_v_next:
-    path: scripts/topology_v_next/
-    scoped_agents: AGENTS.md
-    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
-    priority: p1_first_wave
-    maturity: shadow
-    zone: tool
-    authority_role: admission_advisor
-    high_risk_files:
-      - scripts/topology_v_next/admission_engine.py
-      - scripts/topology_v_next/dataclasses.py
-      - scripts/topology_v_next/validator.py
-    public_entry_files:
-      - scripts/topology_v_next/admission_engine.py
-    law_dependencies:
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/topology_v_next/
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: none
-
-  zeus_bindings:
-    path: bindings/zeus/
-    scoped_agents: AGENTS.md
-    module_book: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
-    priority: p2_runtime
-    maturity: config
-    zone: config
-    authority_role: zeus_binding_config
-    high_risk_files:
-      - bindings/zeus/safety_overrides.yaml
-      - bindings/zeus/config.yaml
-    public_entry_files:
-      - bindings/zeus/config.yaml
-      - bindings/zeus/safety_overrides.yaml
-    law_dependencies:
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
-      - docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md
-    current_fact_dependencies:
-      - docs/operations/current_state.md
-    required_tests:
-      - tests/maintenance_worker/test_bindings/
-    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
-    archive_extraction_status: none
+      - tests/test_live_safety_invariants.py
+      - tests/test_command_recovery.py
+    graph_appendix_status: derived_only
+    archive_extraction_status: not_default
