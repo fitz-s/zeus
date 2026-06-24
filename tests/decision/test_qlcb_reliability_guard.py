@@ -14,8 +14,9 @@
     bound on a thin sample is conservative AND the N_MIN gate fires).
   * an UNKNOWN cell with no artifact ⇒ INERT pass-through (q_safe == band_q_lcb, trade=True,
     NOT abstained) — byte-identical to pre-guard behavior.
-  * a MISSING cell inside an active artifact ⇒ abstain; an active live artifact cannot silently
-    authorize a side/bin it did not grade.
+  * a MISSING/thin fine bucket inside an active artifact ⇒ first coarsen into a same-family
+    q_lcb right-tail cell; abstain only when the same side/lead/bin-position/precision family
+    still lacks N_MIN evidence.
 
 Reverting the guard to "serve band.q_lcb unconditionally" makes the abstain cases RED.
 """
@@ -124,7 +125,7 @@ def test_injected_active_empty_table_abstains():
 
 
 def test_missing_cell_inside_active_table_abstains():
-    # Once an artifact is active, an unseen side-aware cell is not authority.
+    # Once an artifact is active, an unseen side-aware family is not authority.
     active_table = {"high|L1|YES|modal|qb1|coarse_global": (500, 0.5)}
     v = apply_guard(
         band_q_lcb=0.76,
@@ -138,6 +139,38 @@ def test_missing_cell_inside_active_table_abstains():
     assert v.abstained is True
     assert v.trade is False
     assert v.q_safe == 0.0
+
+
+def test_missing_high_bucket_uses_same_family_pooled_tail():
+    # Shanghai-style center YES: the exact high q_lcb bucket can be sparse/missing,
+    # but lower high-confidence buckets in the SAME metric/lead/side/modal/precision
+    # family provide enough OOF evidence. The guard serves the pooled Wilson lower
+    # bound instead of hard-zeroing the candidate.
+    table = {
+        "high|L2_3|YES|modal|qb5|coarse_global": (64, 0.3125),
+        "high|L2_3|YES|modal|qb6|coarse_global": (23, 0.391304347826087),
+        "high|L2_3|YES|modal|qb7|coarse_global": (10, 0.4),
+        "high|L2_3|YES|modal|qb8|coarse_global": (9, 0.4444444444444444),
+        "high|L2_3|YES|modal|qb9|coarse_global": (4, 0.25),
+        "high|L2_3|YES|modal|qb15|coarse_global": (1, 0.0),
+    }
+
+    v = apply_guard(
+        band_q_lcb=0.65,
+        metric="high",
+        lead_days=2.0,
+        side="YES",
+        bin_position="modal",
+        reliability_table=table,
+        reliability_artifact_active=True,
+    )
+
+    assert v.basis == "OOF_WILSON_95_POOLED_TAIL"
+    assert v.abstained is False
+    assert v.trade is True
+    assert v.n_g >= N_MIN
+    assert 0.20 < v.q_safe < 0.65
+    assert "->tail_qb" in v.cell_key
 
 
 def test_side_specific_cell_required_for_no_claim():

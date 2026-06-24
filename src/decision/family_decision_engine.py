@@ -123,7 +123,7 @@ that the 2026-06-23 σ-scale path + F-family fixes corrected; post-sharpening mo
 1.20/1.09 — calibrated). With the premise removed and on the operator's explicit standing rule
 "buy_yes only on its own predicted bin, ±0.5 max" (highest authority), YES is modal-only again:
 a YES on a non-modal bin buys the forecast's unreliable tail, not its skilled center. The
-empirical OOF_WILSON_95 license that can admit a ``direction_law_ok=False`` candidate is now
+empirical OOF reliability license that can admit a ``direction_law_ok=False`` candidate is now
 NO-only (the favorite-longshot NO harvest), so a non-modal YES can never be licensed onto a
 tail. A NO on the modal bin remains unconstructable.
 
@@ -234,6 +234,12 @@ NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
 NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE = (
     "SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE"
+)
+_OOF_LIVE_RELIABILITY_BASES = frozenset(
+    {
+        "OOF_WILSON_95",
+        "OOF_WILSON_95_POOLED_TAIL",
+    }
 )
 
 
@@ -762,16 +768,16 @@ class FamilyDecisionEngine:
 
         # --- the market-coherence report over the candidate bins (spec 891) ------
         # A large model/market logit gap is not automatically a live-money incident.
-        # When the same qkernel candidate has a side-aware OOF reliability cell
-        # (OOF_WILSON_95), did not abstain, and still has positive guarded edge and
-        # positive guarded ΔU, that cell is the receipt-carrying model-superiority
-        # license the coherence module was designed to consume. INERT/missing/error guard
-        # states license nothing, preserving the Tokyo tick-floor block.
+        # When the same qkernel candidate has side-aware OOF reliability evidence, did not
+        # abstain, and still has positive guarded edge and positive guarded ΔU, that cell is
+        # the receipt-carrying model-superiority license the coherence module was designed
+        # to consume. INERT/missing/error guard states license nothing, preserving the Tokyo
+        # tick-floor block.
         empirical_license_bins = frozenset(
             d.route.bin_id
             for d in guarded
             if d.direction_law_ok
-            and d.q_lcb_guard_basis == "OOF_WILSON_95"
+            and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
             and not d.q_lcb_guard_abstained
             and d.economics.edge_lcb > 0.0
             and d.economics.optimal_delta_u > 0.0
@@ -1296,7 +1302,7 @@ class FamilyDecisionEngine:
                 d.route.side == "NO"
                 and d.economics.edge_lcb > 0.0
                 and d.economics.optimal_delta_u > 0.0
-                and d.q_lcb_guard_basis == "OOF_WILSON_95"
+                and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
                 and not d.q_lcb_guard_abstained
             )
 

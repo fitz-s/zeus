@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import types
 from pathlib import Path
 
@@ -399,3 +400,56 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     assert built == ["Kuala Lumpur"]
     assert (request_dir / held_seed.name).exists()
     assert not (request_dir / nonheld_seed.name).exists()
+
+
+def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request = {
+        "city": "London",
+        "target_date": "2026-06-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-24T12:00:00+00:00",
+        "computed_at": "2026-06-24T20:20:45+00:00",
+        "baseline_source_run_id": "b0-run",
+        "aifs_source_run_id": "aifs-run",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "aifs_samples_json": "samples.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    request_path = request_dir / "London.2026-06-25.high.timeout.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+
+    def _timeout_runner(argv):
+        raise subprocess.TimeoutExpired(cmd=list(argv), timeout=1.5, output="", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_timeout_runner,
+    )
+
+    assert report.status == "FAILED"
+    assert report.failed_count == 1
+    assert not request_path.exists()
+    assert len(report.failed_files) == 1
+    failed_request = Path(report.failed_files[0])
+    assert failed_request.exists()
+    sidecar = json.loads(
+        failed_request.with_suffix(failed_request.suffix + ".receipt.json").read_text()
+    )
+    assert sidecar["returncode"] == 124
+    assert sidecar["timeout_seconds"] == 1.5
+    assert sidecar["reason_codes"] == [
+        "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+    ]

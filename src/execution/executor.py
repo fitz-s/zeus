@@ -135,6 +135,33 @@ def _risk_allocator_order_type_allows_intent(
     return False
 
 
+def _exit_order_type(selected_order_type: str) -> str:
+    """Role-scoped exit order-type: an exit is IOC, never all-or-nothing.
+
+    The global allocator returns ``FOK`` for a TAKER decision (governor.
+    select_global_order_type), but its own docstring states the intended
+    semantics is "immediate-or-cancel" — which is ``FAK`` (fill-and-kill /
+    IOC), not ``FOK`` (fill-or-kill / atomic). For an EXIT that distinction is
+    money-path-critical: once we have DECIDED to exit, a partial fill out beats
+    zero fill. FOK on a thin/dying book means the whole sell is killed, the
+    position never realizes, and recoverable value bleeds to ~0 (live evidence
+    2026-06-24: Houston 92-93F NO, exit_retry_count=6, market 0.356->0.076,
+    every retry "order couldn't be fully filled. FOK orders are fully filled or
+    killed").
+
+    The exit lifecycle re-derives shares from chain truth each retry and parks
+    sub-min remainders as dust, so FAK partial fills converge. Resting types
+    (GTC/GTD — a maker-resting exit on a deep book) are returned unchanged; only
+    the FOK all-or-nothing hazard is rewritten. Taker ENTRY semantics are NOT
+    affected — this coercion is applied only on the exit submit seam.
+    """
+
+    normalized = str(selected_order_type or "").strip().upper()
+    if normalized == "FOK":
+        return "FAK"
+    return normalized
+
+
 _ENTRY_DUPLICATE_TERMINAL_PHASES = frozenset(
     {"voided", "economically_closed", "settled", "quarantined", "admin_closed"}
 )
@@ -3317,7 +3344,12 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        # Exit is IOC, never all-or-nothing: coerce a TAKER FOK selection to FAK
+        # so a thin/dying book realizes a partial exit instead of killing the
+        # whole sell (live 2026-06-24: Houston FOK rejects, market 0.356->0.076).
+        order_type = _exit_order_type(
+            _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        )
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
         collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)

@@ -136,17 +136,14 @@ def _manifest_payload_covers_target_local_day(
     admits that 24h file for a LATER target date it physically cannot serve; the materialize
     subprocess then raises "insufficient Open-Meteo hourly samples inside target local day"
     and the whole eastward family produces no posterior (a discovery blackout). Selecting on
-    the declared horizon alone is therefore unsafe — the truth is the payload's actual time
-    coverage. This reuses the SAME local-day windowing the extractor uses (parse each
-    ``hourly.time`` into the city timezone, count samples on ``target_date``), so the
-    selector and the extractor can never disagree on coverage. Fail-OPEN: any read/parse
-    error returns True so a transient FS/JSON hiccup never makes an otherwise-admissible
-    manifest vanish (the extractor remains the fail-closed backstop). NO daily extreme is
-    computed or fabricated here — coverage is a count of in-day samples only, so the
-    ``require_full_localday`` guard's intent (reject horizon-clipped partial days at
-    extraction) is untouched.
+    the declared horizon alone is therefore unsafe — the truth is the payload's actual
+    extractor-grade coverage. Fail-CLOSED here: if seed discovery cannot prove that the exact
+    payload can be extracted for the target local day, it must not enqueue a live request that
+    will predictably fail in the materializer.
     """
-    from src.data.openmeteo_ecmwf_ifs9_anchor import _parse_openmeteo_time  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
 
     payload_text = _manifest_path_value(manifest, "openmeteo_payload_json") or manifest.artifact_path
     if not payload_text:
@@ -156,16 +153,19 @@ def _manifest_payload_covers_target_local_day(
     try:
         wanted = date.fromisoformat(str(target_date).strip())
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        times = payload["hourly"]["time"]
     except Exception:
-        return True  # fail-open: extractor stays the fail-closed backstop
-    for raw_time in times:
-        try:
-            if _parse_openmeteo_time(str(raw_time), city_timezone=city_timezone).date() == wanted:
-                return True
-        except Exception:
-            continue
-    return False
+        return False
+    try:
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            payload,
+            city_timezone=city_timezone,
+            target_local_date=wanted,
+            min_hourly_samples=1,
+            require_full_localday=False,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def _json_path_valid(path_text: str | None, *, base_dir: Path | None = None) -> bool:
@@ -354,14 +354,14 @@ def _manifest_cycle_has_fusion_current_values(
     target_date: str,
     metric: str,
 ) -> bool | None:
-    """Return whether this manifest cycle can actually be fused by the live materializer.
+    """Return whether this manifest cycle has persisted BPF current values.
 
-    Seed discovery must not select a newer Open-Meteo anchor cycle unless the
-    same cycle has persisted current model values for the Bayesian precision
-    fusion path. Otherwise discovery creates a live seed that the materializer
-    can only reject with REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET. A
-    missing test/legacy schema is neutral so stripped fixtures keep exercising
-    manifest discovery rather than fusion readiness.
+    This is telemetry, not an admission filter. Seed discovery owns raw anchor
+    materialization freshness; the materializer and reactor own q-mode/live
+    eligibility. Blocking seed discovery here freezes held-position belief on
+    an older cycle whenever BPF extras are temporarily absent, even though the
+    materializer can publish an explicitly non-live-eligible capture-missing
+    posterior and the live gate will refuse submit from that q_mode.
     """
 
     if not _fusion_current_values_schema_ready(conn):
@@ -522,35 +522,23 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
                 city_timezone=_city_tz,
-                cycle_admissible=(
-                    lambda manifest, _city=city, _target_date=target_date, _metric=metric: bool(
-                        _manifest_cycle_has_fusion_current_values(
-                            conn,
-                            manifest,
-                            city=_city,
-                            target_date=_target_date,
-                            metric=_metric,
-                        )
-                    )
-                )
-                if fusion_schema_ready
-                else None,
             )
             if openmeteo is None:
                 failed.append(target_key)
-                fallback_manifest = _latest_manifest(
-                    manifests,
-                    source_id=expected["openmeteo_ifs9_anchor"].source_id,
-                    data_version=expected["openmeteo_ifs9_anchor"].data_version,
+                reasons.append("REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING")
+                continue
+            if fusion_schema_ready:
+                fusion_current_ready = _manifest_cycle_has_fusion_current_values(
+                    conn,
+                    openmeteo,
                     city=city,
                     target_date=target_date,
-                    city_timezone=_city_tz,
+                    metric=metric,
                 )
-                if fusion_schema_ready and fallback_manifest is not None:
-                    reasons.append("REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING")
-                else:
-                    reasons.append("REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING")
-                continue
+                if fusion_current_ready is False:
+                    reasons.append(
+                        "REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING_NON_BLOCKING"
+                    )
             openmeteo_payload = _manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
             precision_metadata = _manifest_path_value(openmeteo, "precision_metadata_json")
             if not openmeteo_payload or not precision_metadata:

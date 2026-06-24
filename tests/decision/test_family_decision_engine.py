@@ -1183,6 +1183,111 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
         ), decision.no_trade_reason
 
 
+def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monkeypatch):
+    """Pooled-tail OOF evidence is live empirical evidence, not a second-class receipt.
+
+    This pins the Shanghai-class failure mode: a center/modal YES can have valid same-side
+    OOF support after sparse-bucket pooling, but the coherence layer used to accept only the
+    exact ``OOF_WILSON_95`` basis. That left a model-superiority receipt stranded below the
+    market-coherence gate and structurally favored NO routes. The pooled basis may license
+    only a direction-law-legal modal YES with positive guarded edge/Delta-U; it does not
+    bypass the modal-only-YES constraint tested below.
+    """
+
+    from src.decision.qlcb_reliability_guard import GuardVerdict
+
+    case = _case()
+    space = _outcome_space(case)
+    model_set = _model_set([24.6, 25.0, 25.4], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    assert forecast_bin_id(jq) == "b25"
+
+    def factory(bin_id: str) -> MarketBook:
+        if bin_id == "b25":
+            return _market_book(
+                bin_id,
+                yes_bid=0.001,
+                yes_ask=0.001,
+                no_bid=0.999,
+                no_ask=0.999,
+                size=5000.0,
+            )
+        return _market_book(
+            bin_id,
+            yes_bid=0.090,
+            yes_ask=0.100,
+            no_bid=0.900,
+            no_ask=0.910,
+            size=5000.0,
+        )
+
+    def _pooled_tail_license(**kwargs):
+        if kwargs["side"] != "YES" or kwargs["bin_position"] != "modal":
+            return GuardVerdict(
+                q_safe=0.0,
+                trade=False,
+                abstained=True,
+                cell_key="test_non_target_abstain",
+                L_g=0.0,
+                n_g=0,
+                bucket_floor=0.0,
+                basis="OOF_WILSON_95_MISSING_CELL",
+            )
+        return GuardVerdict(
+            q_safe=0.30,
+            trade=True,
+            abstained=False,
+            cell_key="high|L1|YES|modal|qb10->tail_qb6+",
+            L_g=0.30,
+            n_g=64,
+            bucket_floor=0.30,
+            basis="OOF_WILSON_95_POOLED_TAIL",
+        )
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _pooled_tail_license)
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    sizing = {
+        ("b25", "YES"): _yes_sizing(
+            space,
+            "b25",
+            q_point=float(jq.q_by_bin_id["b25"]),
+            q_lcb=0.30,
+            price="0.050",
+        ),
+    }
+
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=_no_obs(), family_book=fb)
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=exposure,
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    assert decision.market_coherence is not None
+    assert "b25" not in decision.market_coherence.offending_bins
+    selected = decision.selected
+    assert selected is not None
+    selected_decision = next(
+        d for d in decision.candidate_decisions if d.economics.candidate_id == selected.candidate_id
+    )
+    assert selected_decision.route.side == "YES"
+    assert selected_decision.route.bin_id == "b25"
+    assert selected_decision.direction_law_ok is True
+    assert selected_decision.coherence_allows is True
+    assert selected_decision.q_lcb_guard_basis == "OOF_WILSON_95_POOLED_TAIL"
+
+
 # ===========================================================================
 # SPEC RED-on-revert #4: direction-law override requires side-aware OOF evidence.
 # ===========================================================================

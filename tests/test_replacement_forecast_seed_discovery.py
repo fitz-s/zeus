@@ -42,6 +42,21 @@ def _write_manifest(
     captured_at: str = "2026-06-06T03:00:00+00:00",
 ) -> Path:
     artifact = _write_file(raw_dir / f"{name}.json", {"name": name})
+    payload_name = metadata.get("openmeteo_payload_json")
+    if isinstance(payload_name, str) and payload_name.strip():
+        payload_path = Path(payload_name)
+        if not payload_path.is_absolute():
+            payload_path = raw_dir / payload_path
+        if not payload_path.exists() or payload_path == artifact:
+            _write_file(
+                payload_path,
+                {
+                    "hourly": {
+                        "time": ["2026-06-08T00:00", "2026-06-08T12:00"],
+                        "temperature_2m": [20.0, 24.0],
+                    }
+                },
+            )
     manifest = RawForecastArtifactManifest.from_file(
         artifact,
         source_id=source_id,
@@ -291,7 +306,7 @@ def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_man
     assert seed["precision_metadata_json"].endswith("raw/20260607T000000Z/precision_metadata.json")
 
 
-def test_seed_discovery_selects_latest_fusion_materializable_cycle(tmp_path: Path) -> None:
+def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
     seed_dir = tmp_path / "seeds"
@@ -371,8 +386,12 @@ def test_seed_discovery_selects_latest_fusion_materializable_cycle(tmp_path: Pat
 
     assert report.status == "DISCOVERED"
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
-    assert seed["openmeteo_source_run_id"] == "openmeteo-06z-run"
-    assert seed["openmeteo_manifest_json"].endswith("openmeteo-06z.manifest.json")
+    assert seed["openmeteo_source_run_id"] == "openmeteo-12z-run"
+    assert seed["openmeteo_manifest_json"].endswith("openmeteo-12z.manifest.json")
+    assert (
+        "REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING_NON_BLOCKING"
+        in report.reason_codes
+    )
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:

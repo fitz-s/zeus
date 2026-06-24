@@ -159,6 +159,69 @@ def _openmeteo_source_run_id(metadata: Mapping[str, object]) -> str | None:
     return str(value).strip()
 
 
+def _path_from_metadata_path(
+    path_text: object,
+    *,
+    base_dir: Path,
+) -> Path | None:
+    if path_text is None or not str(path_text).strip():
+        return None
+    path = Path(str(path_text))
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
+
+
+def _openmeteo_payload_covers_target_local_day(
+    metadata: Mapping[str, object],
+    *,
+    artifact_path: str,
+    city_timezone: str | None,
+    target_date: str,
+) -> bool:
+    """Return whether an explicit Open-Meteo payload has target-local-day samples.
+
+    ``raw_forecast_artifacts`` rows can point at a manifest whose metadata says a
+    target date is in horizon while the on-disk payload is a clipped partial
+    response. That false positive makes the downloader skip the fresh cycle and
+    lets the materializer fail later with "insufficient Open-Meteo hourly
+    samples inside target local day". Only explicit ``openmeteo_payload_json``
+    payloads are checked here so old fixture/dummy artifacts keep their legacy
+    existence-only semantics.
+    """
+
+    if not city_timezone:
+        return True
+    payload_path = _path_from_metadata_path(
+        metadata.get("openmeteo_payload_json"),
+        base_dir=Path(artifact_path).parent,
+    )
+    if payload_path is None:
+        return True
+    if not payload_path.exists():
+        return False
+    try:
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            extract_openmeteo_ecmwf_ifs9_localday_anchor,
+        )
+
+        wanted = date.fromisoformat(str(target_date).strip())
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    try:
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            payload,
+            city_timezone=city_timezone,
+            target_local_date=wanted,
+            min_hourly_samples=1,
+            require_full_localday=False,
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _openmeteo_manifest_coverage(
     conn: sqlite3.Connection,
     *,
@@ -168,6 +231,8 @@ def _openmeteo_manifest_coverage(
     data_version: str,
     city: str,
     target_date: str,
+    city_timezone: str | None = None,
+    required_source_cycle_time: str | None = None,
 ) -> tuple[int, str | None]:
     if metadata_column is None:
         return 0, None
@@ -177,6 +242,17 @@ def _openmeteo_manifest_coverage(
         if col in raw_artifact_columns
     ]
     select_optional = "".join(f", {col}" for col in optional_columns)
+    cycle_predicates: list[str] = []
+    cycle_params: list[str] = []
+    if required_source_cycle_time:
+        if "source_cycle_time" in raw_artifact_columns:
+            cycle_predicates.append("source_cycle_time = ?")
+            cycle_params.append(required_source_cycle_time)
+        cycle_predicates.append(f"json_extract({metadata_column}, '$.source_cycle_time') = ?")
+        cycle_params.append(required_source_cycle_time)
+    cycle_clause = ""
+    if cycle_predicates:
+        cycle_clause = f" AND ({' OR '.join(cycle_predicates)})"
     rows = conn.execute(
         f"""
         SELECT artifact_path, {metadata_column} AS metadata_json{select_optional}
@@ -201,6 +277,7 @@ def _openmeteo_manifest_coverage(
                 WHERE value = ?
             )
           )
+          {cycle_clause}
         """,
         (
             source_id,
@@ -209,6 +286,7 @@ def _openmeteo_manifest_coverage(
             city,
             target_date,
             target_date,
+            *cycle_params,
         ),
     ).fetchall()
     candidates: list[tuple[tuple[str, str, str, str], str | None]] = []
@@ -217,6 +295,13 @@ def _openmeteo_manifest_coverage(
         if not artifact_path or not os.path.exists(artifact_path):
             continue
         metadata = _json_object(manifest["metadata_json"])
+        if not _openmeteo_payload_covers_target_local_day(
+            metadata,
+            artifact_path=artifact_path,
+            city_timezone=city_timezone,
+            target_date=target_date,
+        ):
+            continue
         source_run_id = _openmeteo_source_run_id(metadata)
         source_cycle_time = str(
             _row_value(manifest, "source_cycle_time")
@@ -434,6 +519,7 @@ def build_replacement_forecast_current_target_plan(
     min_target_date: date | str | None = None,
     require_raw_artifacts: bool = True,
     now_utc: datetime | None = None,
+    required_openmeteo_source_cycle_time: datetime | str | None = None,
 ) -> ReplacementForecastCurrentTargetPlan:
     """Return current market targets and the replacement artifacts needed for them."""
 
@@ -446,6 +532,13 @@ def build_replacement_forecast_current_target_plan(
         if isinstance(min_target_date, date)
         else str(min_target_date or _ref_clock.date().isoformat())
     )
+    required_openmeteo_cycle_iso: str | None = None
+    if isinstance(required_openmeteo_source_cycle_time, datetime):
+        required_openmeteo_cycle_iso = (
+            required_openmeteo_source_cycle_time.astimezone(timezone.utc).isoformat()
+        )
+    elif required_openmeteo_source_cycle_time is not None:
+        required_openmeteo_cycle_iso = str(required_openmeteo_source_cycle_time)
     if not db_path.exists():
         return ReplacementForecastCurrentTargetPlan(
             status="BLOCKED",
@@ -722,6 +815,8 @@ def build_replacement_forecast_current_target_plan(
                     data_version=openmeteo_expected.data_version,
                     city=city,
                     target_date=target_date,
+                    city_timezone=timezone_by_city.get(city),
+                    required_source_cycle_time=required_openmeteo_cycle_iso,
                 )
             elif not require_raw_artifacts:
                 openmeteo_count = 1

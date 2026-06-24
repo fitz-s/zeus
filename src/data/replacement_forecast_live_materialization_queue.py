@@ -31,6 +31,7 @@ from src.data.replacement_forecast_seed_discovery import (
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 240.0
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,23 @@ class ReplacementForecastLiveMaterializationQueueReport:
         }
 
 
+def _materialization_subprocess_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS must be numeric"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS must be > 0"
+        )
+    return value
+
+
 def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
@@ -82,6 +100,7 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_materialization_subprocess_timeout_seconds(),
     )
 
 
@@ -761,7 +780,40 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             "--init-schema",
             "--commit",
         )
-        completed = runner(command)
+        timed_out = False
+        timeout_seconds: float | None = None
+        try:
+            completed = runner(command)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            try:
+                timeout_seconds = float(exc.timeout) if exc.timeout is not None else None
+            except (TypeError, ValueError):
+                timeout_seconds = None
+            effective_timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS
+            )
+            completed = subprocess.CompletedProcess(
+                args=list(command),
+                returncode=124,
+                stdout=(exc.stdout.decode() if isinstance(exc.stdout, bytes) else exc.stdout) or "",
+                stderr=json.dumps(
+                    {
+                        "status": "ERROR",
+                        "error_type": "TimeoutExpired",
+                        "error": (
+                            "replacement materialization subprocess exceeded "
+                            f"{effective_timeout:.1f}s"
+                        ),
+                        "reason_codes": [
+                            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+                        ],
+                    }
+                )
+                + "\n",
+            )
         _surface_subprocess_warnings(input_json.name, completed)
         payload = {
             "command": list(command),
@@ -769,6 +821,11 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             "stdout": completed.stdout,
             "stderr": completed.stderr,
         }
+        if timed_out:
+            payload["timeout_seconds"] = timeout_seconds
+            payload["reason_codes"] = [
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+            ]
         if completed.returncode == 0:
             moved = _move_request(input_json, processed_path)
             _write_sidecar(moved, payload)

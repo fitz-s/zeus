@@ -52,6 +52,14 @@ it did not grade. The table itself is built OFFLINE from settled OOF predictions
 settlement truth everything else grades on); this module only READS it and applies the Wilson
 lower bound + the trade/abstain rule. It NEVER fits per-city offsets, NEVER moves μ, and NEVER
 constructs a parallel q.
+
+SPARSITY BACKOFF: the 0.05 q_lcb buckets are deliberately fine. Rare high-confidence YES
+modal buckets can be empty even when the same side/lead/modal claim has adequate OOF evidence
+in a coarser right-tail bucket. An active artifact therefore first tries the exact cell, then
+coarsens by merging buckets with q_lcb >= a lower floor inside the SAME
+metric/lead/side/bin_position/precision cell family until N_MIN is reached. This is a
+one-sided conservative lower bound on the same claim family; it never borrows the opposite
+side, a different bin position, or a city-specific correction.
 """
 from __future__ import annotations
 
@@ -397,7 +405,9 @@ class GuardVerdict:
       caller forces a non-positive edge so the candidate is rejected — never traded.
     * ``cell_key`` / ``L_g`` / ``n_g`` / ``bucket_floor`` — the guard provenance (step 7).
     * ``basis`` — "INERT" when the artifact was absent (pass-through) so the receipt records
-      that the guard did not deflate; "OOF_WILSON_95" when an OOF cell was applied;
+      that the guard did not deflate; "OOF_WILSON_95" when an exact OOF cell was applied;
+      "OOF_WILSON_95_POOLED_TAIL" when a sparse exact bucket was licensed by the same-family
+      coarsened right-tail cell;
       "OOF_WILSON_95_MISSING_CELL" when an active artifact lacked the side-aware cell.
     """
 
@@ -409,6 +419,70 @@ class GuardVerdict:
     n_g: int
     bucket_floor: float
     basis: str
+
+
+def _coarsened_tail_cell(
+    table: Mapping[str, tuple[int, float]],
+    *,
+    metric: str,
+    lead_days: float,
+    side: str,
+    bin_position: str,
+    bucket_idx: int,
+    precision_class: str,
+) -> tuple[int, int, float, float] | None:
+    """Pool same-family q_lcb buckets into a conservative right-tail cell.
+
+    Returns ``(floor_bucket_idx, n, hit_rate, L_g)`` for the first coarsened cell
+    whose N reaches N_MIN, or None when even the full tail is too thin. The pool
+    is same metric, lead bucket, side, bin position, and precision class; only
+    the q_lcb bucket is coarsened downward.
+    """
+
+    clean_side = "NO" if str(side).upper() == "NO" else "YES"
+    clean_precision = _clean_precision_class(precision_class)
+    prefix = (
+        f"{str(metric).lower()}|{lead_bucket(lead_days)}|"
+        f"{clean_side}|{bin_position}|"
+    )
+    suffix = f"|{clean_precision}"
+    parsed: list[tuple[int, int, int]] = []
+    for key, (n_raw, hit_rate_raw) in table.items():
+        text = str(key)
+        if not text.startswith(prefix) or not text.endswith(suffix):
+            continue
+        parts = text.split("|")
+        if len(parts) != 6 or not parts[4].startswith("qb"):
+            continue
+        try:
+            idx = int(parts[4][2:])
+            n = int(n_raw)
+            hit_rate = float(hit_rate_raw)
+        except (TypeError, ValueError):
+            continue
+        if n <= 0 or not math.isfinite(hit_rate):
+            continue
+        hits = int(round(max(0.0, min(1.0, hit_rate)) * n))
+        parsed.append((idx, n, hits))
+    if not parsed:
+        return None
+    max_idx = max(idx for idx, _n, _hits in parsed)
+    for floor_idx in range(int(bucket_idx), -1, -1):
+        n_total = 0
+        hits_total = 0
+        for idx, n, hits in parsed:
+            if floor_idx <= idx <= max_idx:
+                n_total += n
+                hits_total += hits
+        if n_total >= N_MIN:
+            hit_rate = hits_total / n_total
+            return (
+                floor_idx,
+                n_total,
+                hit_rate,
+                wilson_lower_bound_95(hits_total, n_total),
+            )
+    return None
 
 
 def apply_guard(
@@ -440,8 +514,10 @@ def apply_guard(
          price + cost). The bucket floor is diagnostic provenance, not a second binary
          veto: a known cell may prove the served band overclaimed while still proving a
          positive, tradeable lower bound.
-      5. ACTIVE missing-cell path — artifact exists but the side-aware cell is absent:
-         abstain. Unknown active cells are not authority for live money.
+      5. ACTIVE sparse-cell path — exact cell missing/thin: coarsen only the q_lcb bucket
+         into a same-family right-tail cell until N_MIN is reached, then serve its Wilson
+         lower bound. If even that coarser cell is absent/thin, abstain. Unknown active
+         claim families are not authority for live money.
 
     The guard NEVER moves μ and NEVER fits a per-city offset; it only serves a lower bound the
     realized frequency supports (or abstains). Artifact read failures are active fail-closed when
@@ -477,7 +553,29 @@ def apply_guard(
                 bucket_floor=bucket_floor,
                 basis="INERT",
             )
-        # Active artifact, absent side-aware cell: the artifact did not grade this claim.
+        pooled = _coarsened_tail_cell(
+            table,
+            metric=metric,
+            lead_days=lead_days,
+            side=side,
+            bin_position=bin_position,
+            bucket_idx=bucket_idx,
+            precision_class=clean_precision,
+        )
+        if pooled is not None:
+            floor_idx, n_tail, hit_rate_tail, L_tail = pooled
+            q_safe = min(float(band_q_lcb), float(L_tail))
+            return GuardVerdict(
+                q_safe=q_safe,
+                trade=True,
+                abstained=False,
+                cell_key=f"{key}->tail_qb{floor_idx}+",
+                L_g=float(L_tail),
+                n_g=int(n_tail),
+                bucket_floor=QLCB_BUCKET_EDGES[floor_idx],
+                basis="OOF_WILSON_95_POOLED_TAIL",
+            )
+        # Active artifact, absent side-aware family: the artifact did not grade this claim.
         return GuardVerdict(
             q_safe=0.0,
             trade=False,
@@ -505,8 +603,31 @@ def apply_guard(
             bucket_floor=bucket_floor,
             basis="OOF_WILSON_95",
         )
-    # Thin cell -> abstain. q_safe = 0 deflates the edge so the candidate cannot trade
-    # (publish the point prob, do not trade this bin). A deep known cell never abstains
+    pooled = _coarsened_tail_cell(
+        table,
+        metric=metric,
+        lead_days=lead_days,
+        side=side,
+        bin_position=bin_position,
+        bucket_idx=bucket_idx,
+        precision_class=clean_precision,
+    )
+    if pooled is not None:
+        floor_idx, n_tail, hit_rate_tail, L_tail = pooled
+        q_safe = min(float(band_q_lcb), float(L_tail))
+        return GuardVerdict(
+            q_safe=q_safe,
+            trade=True,
+            abstained=False,
+            cell_key=f"{key}->tail_qb{floor_idx}+",
+            L_g=float(L_tail),
+            n_g=int(n_tail),
+            bucket_floor=QLCB_BUCKET_EDGES[floor_idx],
+            basis="OOF_WILSON_95_POOLED_TAIL",
+        )
+
+    # Thin claim family -> abstain. q_safe = 0 deflates the edge so the candidate cannot trade
+    # (publish the point prob, do not trade this bin). A deep known or pooled cell never abstains
     # merely because L_g is below the bucket floor; it continuously deflates to L_g and
     # lets the route price decide whether any edge remains.
     return GuardVerdict(

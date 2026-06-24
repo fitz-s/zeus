@@ -245,22 +245,26 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
             "retrying next tick — a guessed run is never requested",
         }
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
-    cycle_is_current = downloaded_cycle is not None and downloaded_cycle >= available_cycle
 
-    plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-    if plan.ready and cycle_is_current:
+    plan = build_replacement_forecast_current_target_plan(
+        Path(str(forecast_db)),
+        required_openmeteo_source_cycle_time=available_cycle,
+    )
+    cycle_targets_have_current_manifests = plan.missing_openmeteo_manifest_count <= 0
+    cycle_targets_are_materialized = plan.ready
+    if cycle_targets_are_materialized:
         return {
             "status": "CURRENT_TARGETS_ALREADY_COVERED",
             "coverage": plan.as_dict(),
             "available_cycle": available_cycle.isoformat(),
-            "downloaded_cycle": downloaded_cycle.isoformat(),
+            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
-    if plan.missing_openmeteo_manifest_count <= 0 and cycle_is_current:
+    if cycle_targets_have_current_manifests:
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": plan.as_dict(),
             "available_cycle": available_cycle.isoformat(),
-            "downloaded_cycle": downloaded_cycle.isoformat(),
+            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
     cycle = available_cycle
     return download_current_target_openmeteo_inputs(
@@ -275,7 +279,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
         # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
         # needed for ALL current targets — coverage ("a posterior exists") must not filter
         # the target list, or covered targets can never re-materialize on the fresh cycle.
-        include_covered=not cycle_is_current,
+        include_covered=not cycle_targets_have_current_manifests,
     )
 
 

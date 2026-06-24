@@ -249,6 +249,139 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert [row["city"] for row in download_plan["openmeteo_download_targets"]] == ["Madrid"]
 
 
+def test_current_target_plan_can_require_openmeteo_manifest_cycle(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+        required_openmeteo_source_cycle_time="2026-06-07T06:00:00+00:00",
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+    paris = next(row for row in plan.rows if row.city == "Paris")
+
+    assert london.openmeteo_manifest_count == 0
+    assert london.missing_openmeteo_manifest is True
+    assert london.can_seed is False
+    assert paris.openmeteo_manifest_count == 0
+    assert paris.covered is False
+    assert plan.missing_openmeteo_manifest_count >= 2
+
+
+def test_current_target_plan_rejects_openmeteo_manifest_without_target_day_samples(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    payload = tmp_path / "london_partial_payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "hourly": {
+                    "time": ["2026-06-08T00:00", "2026-06-08T01:00"],
+                    "temperature_2m": [12.0, 13.0],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    precision = tmp_path / "precision.json"
+    precision.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                        "openmeteo_endpoint": "single_runs_api",
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "forecast_hours": 120,
+                        "source_run_id": "openmeteo-current-London",
+                        "openmeteo_payload_json": str(payload),
+                        "precision_metadata_json": str(precision),
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.openmeteo_manifest_count == 0
+    assert london.missing_openmeteo_manifest is True
+    assert london.can_seed is False
+
+
+def test_current_target_plan_counts_openmeteo_manifest_with_target_day_samples(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    payload = tmp_path / "london_covering_payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "hourly": {
+                    "time": ["2026-06-09T00:00", "2026-06-09T12:00"],
+                    "temperature_2m": [14.0, 18.0],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    precision = tmp_path / "precision.json"
+    precision.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                        "openmeteo_endpoint": "single_runs_api",
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "forecast_hours": 120,
+                        "source_run_id": "openmeteo-current-London",
+                        "openmeteo_payload_json": str(payload),
+                        "precision_metadata_json": str(precision),
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.openmeteo_manifest_count == 1
+    assert london.can_seed is True
+
+
 def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_baseline(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)

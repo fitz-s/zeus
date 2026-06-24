@@ -1567,6 +1567,14 @@ class TestExecutor:
                 return _final_submit_result(self.bound_envelope, order_id="sell-1")
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
 
         result = execute_exit_order(
             create_exit_order_intent(
@@ -1590,6 +1598,58 @@ class TestExecutor:
             "side": "SELL",
             "order_type": "GTC",
         }
+
+    def test_execute_exit_order_coerces_fok_exit_to_fak_ioc(self, monkeypatch):
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                    envelope_order_type=self.bound_envelope.order_type,
+                )
+                return _final_submit_result(self.bound_envelope, order_id="sell-fak-1")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda conn, snapshot_id: "FOK",
+        )
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-exit-fok-to-fak",
+                token_id="yes-token",
+                shares=12.349,
+                current_price=0.50,
+                best_bid=0.49,
+                **_snapshot_kwargs("yes-token"),
+            ),
+            conn=_TEST_CONN,
+        )
+
+        assert result.status == "pending"
+        assert captured["side"] == "SELL"
+        assert captured["order_type"] == "FAK"
+        assert captured["envelope_order_type"] == "FAK"
 
     def test_exit_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):
         class DummyClient:
