@@ -20,7 +20,11 @@ def _toxic_calibrator_artifact():
     bucket_idx, _ = sc.raw_prob_bucket(0.875)
     key = f"NO|L1|nonmodal|pb{bucket_idx}"
     return {
-        "_meta": {"posterior_version": sc.DEFAULT_POSTERIOR_VERSION, "min_n": 30},
+        "_meta": {
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["NO"],
+        },
         "cells": {key: {"n": 104, "hit_rate": 0.679}},
     }
 

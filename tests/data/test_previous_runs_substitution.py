@@ -272,6 +272,77 @@ def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -
     assert len(request_written) == 1
 
 
+def test_queue_skips_seed_older_than_current_family_posterior(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE forecast_posteriors (
+                source_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                source_cycle_time TEXT,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                queue_mod.SOURCE_ID,
+                "Beijing",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                "2026-06-11T20:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kw: False)
+    built: list[str] = []
+
+    def _fake_builder(seed, *, base_dir):
+        built.append(str(seed.get("city")))
+        return types.SimpleNamespace(
+            ok=True, status="READY", reason_codes=("OK",), request={"stub": True}
+        )
+
+    monkeypatch.setattr(
+        queue_mod, "build_replacement_forecast_materialization_request", _fake_builder
+    )
+
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    seed = {**_minimal_seed(upgrade=False), "source_cycle_time": "2026-06-11T06:00:00+00:00"}
+    (seed_dir / "old-cycle.json").write_text(json.dumps(seed), encoding="utf-8")
+
+    processed, failed, _reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=forecast_db,
+        limit=10,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert built == []
+    assert not (request_dir / "old-cycle.json").exists()
+    sidecar = next((tmp_path / "seed_processed").glob("*.receipt.json"))
+    receipt = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert receipt["status"] == "SKIPPED_SOURCE_CYCLE_REGRESSION"
+    assert receipt["reason_codes"] == ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"]
+
+
 def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 

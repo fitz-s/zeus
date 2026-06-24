@@ -270,13 +270,12 @@ def _manifest_allows_city(manifest: RawForecastArtifactManifest, *, city: str) -
 
 def _manifest_allows_target_date(manifest: RawForecastArtifactManifest, *, target_date: str) -> bool:
     metadata = manifest.product_metadata
+    dates = metadata.get("target_dates")
+    if isinstance(dates, list) and dates:
+        return target_date in {str(item).strip() for item in dates}
     explicit = metadata.get("target_date")
     if explicit is not None and str(explicit).strip():
         if str(explicit).strip() == target_date:
-            return True
-    dates = metadata.get("target_dates")
-    if isinstance(dates, list) and dates:
-        if target_date in {str(item).strip() for item in dates}:
             return True
     return _manifest_horizon_allows_target_date(metadata, target_date=target_date)
 

@@ -354,6 +354,74 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         conn.close()
 
 
+def _parse_utc_iso(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _seed_source_cycle_regresses_current_posterior(
+    *,
+    forecast_db: Path | str | None,
+    seed: dict[str, object],
+) -> bool:
+    """True when this seed is older than the family's latest materialized posterior.
+
+    The materializer's monotone consumed-cycle guard remains the final authority.
+    This queue-side check only prevents a seed that is already known to be
+    unconstructable from spending a subprocess slot every cycle.
+    """
+
+    if forecast_db is None:
+        return False
+    request_cycle = _parse_utc_iso(seed.get("source_cycle_time"))
+    if request_cycle is None:
+        return False
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return False
+    from src.state.db import _connect
+
+    try:
+        conn = _connect(db_path, write_class="live")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            row = conn.execute(
+                """
+                SELECT source_cycle_time
+                FROM forecast_posteriors
+                WHERE source_id = ?
+                  AND city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                (
+                    SOURCE_ID,
+                    str(seed.get("city")),
+                    str(seed.get("target_date")),
+                    str(seed.get("temperature_metric")),
+                ),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
+    current_cycle = _parse_utc_iso(current_raw)
+    return current_cycle is not None and request_cycle < current_cycle
+
+
 def _write_request(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
@@ -556,6 +624,20 @@ def _prepare_seed_requests(
                     {
                         "status": "SKIPPED_ALREADY_COVERED",
                         "reason_codes": ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                continue
+            if _seed_source_cycle_regresses_current_posterior(
+                forecast_db=forecast_db, seed=seed
+            ):
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"],
                         "request_written": False,
                     },
                 )

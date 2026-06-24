@@ -203,7 +203,7 @@ def test_seed_discovery_writes_seed_from_db_target_and_raw_manifests(tmp_path: P
     assert seed["precision_metadata_json"].endswith("raw/precision_metadata.json")
 
 
-def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) -> None:
+def test_legacy_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) -> None:
     """A multi-day single-runs payload must not be treated as a one-day manifest.
 
     Live evidence 2026-06-20: raw_model_forecasts had 18Z rows for day+1 held
@@ -228,7 +228,6 @@ def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) 
             "openmeteo_endpoint": "single_runs_api",
             "city": "Paris",
             "target_date": "2026-06-19",
-            "target_dates": ["2026-06-19"],
             "forecast_hours": 120,
         },
     )
@@ -236,6 +235,35 @@ def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) 
     assert _manifest_allows_target_date(manifest, target_date="2026-06-19")
     assert _manifest_allows_target_date(manifest, target_date="2026-06-21")
     assert not _manifest_allows_target_date(manifest, target_date="2026-06-26")
+
+
+def test_exact_target_dates_do_not_horizon_admit_wrong_daily_payload(tmp_path: Path) -> None:
+    """New live manifests are target-day scoped and must not bind the wrong payload."""
+
+    artifact = _write_file(tmp_path / "openmeteo_Paris_2026-06-19_high.json", {"hourly": {}})
+    manifest = RawForecastArtifactManifest.from_file(
+        artifact,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-19T18:00:00+00:00",
+        source_available_at="2026-06-19T23:30:00+00:00",
+        captured_at="2026-06-19T23:31:00+00:00",
+        request_url="https://example.invalid/openmeteo",
+        request_params={"run": "2026-06-19T18:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "Paris",
+            "target_date": "2026-06-19",
+            "target_dates": ["2026-06-19"],
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(artifact),
+        },
+    )
+
+    assert _manifest_allows_target_date(manifest, target_date="2026-06-19")
+    assert not _manifest_allows_target_date(manifest, target_date="2026-06-20")
 
 
 def test_latest_manifest_rejects_horizon_admitted_payload_without_target_day_samples(tmp_path: Path) -> None:
