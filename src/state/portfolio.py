@@ -156,13 +156,6 @@ class ExitContext:
     chain_is_fresh: Optional[bool] = None
     divergence_score: float = 0.0
     market_velocity_1h: float = 0.0
-    # 2026-06-24 (Shanghai 25C "wrong exit"): True when the held cell is low-reliability
-    # (coarse_global — no fine nest). divergence_score = max(0, market - belief) only ever fires in
-    # the market-favors-us direction; for a cold-biased coarse cell that divergence reflects forecast
-    # under-confidence, NOT a tradeable exit signal, so MODEL_DIVERGENCE_PANIC must not harvest/cut on
-    # it. Symmetric to the entry-side q_lcb reliability guard (which abstains the same cells). Genuine
-    # adverse moves still exit via FLASH_CRASH / SETTLEMENT / day0 absorbing hard-fact (all untouched).
-    divergence_reliability_suppressed: bool = False
 
     # T6.4-phase2 (2026-04-24): portfolio context for correlation-crowding
     # cost computation in HoldValue.compute_with_exit_costs. Threaded by
@@ -1140,49 +1133,16 @@ class Position:
                 trigger="WHALE_TOXICITY",
             )
 
-        # 2026-06-24 (Shanghai 25C "wrong exit"): a divergence (market > belief) in a low-reliability
-        # coarse_global cell is forecast cold-bias, not a real signal — refuse to PANIC-harvest/cut.
-        # Stamp the reason so the monitor shows WHY the position is held, then fall through to HOLD.
-        # Genuine adverse moves still exit via FLASH_CRASH (below), SETTLEMENT, and day0 hard-fact.
-        if (
-            exit_context.divergence_reliability_suppressed
-            and exit_context.divergence_score >= divergence_soft_threshold()
-        ):
-            applied.append("model_divergence_panic_suppressed:coarse_global_low_reliability")
-
-        if (
-            exit_context.divergence_score >= divergence_hard_threshold()
-            and not exit_context.divergence_reliability_suppressed
-        ):
-            applied.append("divergence_hard_trigger")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True,
-                f"MODEL_DIVERGENCE_PANIC (score={exit_context.divergence_score:.2f})",
-                "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="MODEL_DIVERGENCE_PANIC",
-            )
-
-        if (
-            exit_context.divergence_score >= divergence_soft_threshold()
-            and exit_context.market_velocity_1h <= divergence_velocity_confirm()
-            and not exit_context.divergence_reliability_suppressed
-        ):
-            applied.append("divergence_soft_trigger")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True,
-                (
-                    "MODEL_DIVERGENCE_PANIC "
-                    f"(score={exit_context.divergence_score:.2f}, velocity={exit_context.market_velocity_1h:.2f}/hr)"
-                ),
-                "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="MODEL_DIVERGENCE_PANIC",
-            )
+        # MODEL_DIVERGENCE_PANIC removed 2026-06-24 (Shanghai 25C "wrong exit"; frontier consult
+        # REQ-20260624-105149 HIGH-confidence verdict). divergence_score = max(0, p_market - p_belief)
+        # is positive ONLY when the market values the HELD side ABOVE the model — which for a held binary
+        # is harmless overpayment or a cold model, NEVER adverse. The two panic branches turned that gap
+        # into an immediate market-order liquidation here, PREEMPTING the purpose-built CI-separation
+        # reversal gate + HoldValue economics below (the machinery that exits only on a CONFIRMED reversal,
+        # never a bare price move) — and dumped near-certain winners (Shanghai NO @0.96, belief 0.655).
+        # Removed outright (gate collapse, not a conditional gate). Real deterioration still exits via
+        # day0 absorbing hard-fact, SETTLEMENT_IMMINENT, WHALE_TOXICITY, the velocity-evidenced
+        # FLASH_CRASH_PANIC below, CI_SEPARATED_REVERSAL, and the direction-specific HoldValue economics.
 
         # BUG#127 (守護 SEV1): FLASH_CRASH_PANIC is evidence-gated, not a bare
         # price-delta trigger. Maintain the consecutive-cycle persistence counter

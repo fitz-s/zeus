@@ -689,7 +689,7 @@ def build_monitor_refreshed_canonical_write(
         "command_id": None,
         "caused_by": "monitor_refresh",
         "idempotency_key": f"{trade_id}:{slug}",
-        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "venue_status": _nullable(projection.get("order_status")),
         "source_module": source_module,
         "env": _position_env(position),
         "payload_json": payload,

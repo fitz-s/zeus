@@ -3483,24 +3483,6 @@ def _build_exit_context(
         # Shift edge-space band → belief space by adding the held-side price back.
         _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
 
-    # 2026-06-24 (Shanghai 25C "wrong exit"): suppress MODEL_DIVERGENCE_PANIC for low-reliability
-    # (coarse_global, no fine nest) cells. precision_class is a pure point-in-polygon coverage
-    # property; precision_class_for_city itself fail-safes unknown cities to coarse_global (treat
-    # unsure as unreliable → suppress, symmetric to the entry-side q_lcb guard's abstain). The outer
-    # guard fails soft to NOT suppressing only on a hard classification crash, never blocking an exit.
-    _divergence_reliability_suppressed = False
-    try:
-        from src.decision.qlcb_reliability_guard import (
-            PRECISION_CLASS_COARSE,
-            precision_class_for_city,
-        )
-
-        _divergence_reliability_suppressed = (
-            precision_class_for_city(getattr(pos, "city", None)) == PRECISION_CLASS_COARSE
-        )
-    except Exception:  # noqa: BLE001 - reliability gate must fail soft; never block the exit path
-        _divergence_reliability_suppressed = False
-
     return ExitContext(
         fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
         fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
@@ -3516,7 +3498,6 @@ def _build_exit_context(
         chain_is_fresh=pos.chain_state == "synced",
         divergence_score=float(getattr(edge_ctx, "divergence_score", 0.0) or 0.0),
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
-        divergence_reliability_suppressed=_divergence_reliability_suppressed,
         portfolio_positions=portfolio_positions,
         bankroll=bankroll,
         entry_posterior=_entry_posterior,

@@ -2435,7 +2435,10 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
 
 def test_day0_monitor_projection_clears_stale_backoff_order_status():
     from src.contracts.semantic_types import ExitState
-    from src.engine.lifecycle_events import build_position_current_projection
+    from src.engine.lifecycle_events import (
+        build_monitor_refreshed_canonical_write,
+        build_position_current_projection,
+    )
     from src.state.portfolio import Position
 
     held = Position(
@@ -2463,6 +2466,14 @@ def test_day0_monitor_projection_clears_stale_backoff_order_status():
         exit_reason="",
     )
     assert build_position_current_projection(held)["order_status"] == "filled"
+    events, projection = build_monitor_refreshed_canonical_write(
+        held,
+        sequence_no=1,
+        phase_after="day0_window",
+        source_module="test",
+    )
+    assert projection["order_status"] == "filled"
+    assert events[0]["venue_status"] == "filled"
 
     pending_exit = Position(
         trade_id="pos-pending-exit-real-backoff",
