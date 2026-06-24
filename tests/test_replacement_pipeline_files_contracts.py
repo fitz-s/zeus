@@ -10,7 +10,7 @@ relationship that the 2026-06-10 queue-starvation incident broke:
   validator. If a producer's dict-assembly site drifts away from what the
   consumer expects, one of these fails immediately — the divergence can no
   longer be silent-until-a-downstream-KeyError.
-* VIOLATION: the exact new-listing-scout intent stub
+* VIOLATION: the exact condition-id-only payload
   ``{source, condition_id, enqueued_at, reason}`` is REJECTED by the
   MATERIALIZATION_REQUEST validator with a message naming every missing field.
   That is the precise shape that crashed the materializer subprocess on every
@@ -30,10 +30,8 @@ from src.contracts.replacement_pipeline_files import (
     ContractViolation,
     MATERIALIZATION_REQUEST_SCHEMA_VERSION,
     MATERIALIZATION_SEED_SCHEMA_VERSION,
-    SCOUT_INTENT_SCHEMA_VERSION,
     validate_materialization_request,
     validate_materialization_seed,
-    validate_scout_intent,
 )
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
@@ -169,16 +167,6 @@ def test_seed_payload_round_trips_through_seed_validator(tmp_path) -> None:
     assert validated.schema_version == MATERIALIZATION_SEED_SCHEMA_VERSION
 
 
-def test_scout_intent_round_trips_through_intent_validator() -> None:
-    """INTENT round-trip: the scout's stub validates as a SCOUT_INTENT."""
-    intent = validate_scout_intent(_scout_stub())
-    assert intent.source == "new_listing_scout"
-    assert intent.reason == "NEW_LISTING_FAST_LANE"
-    assert intent.schema_version == SCOUT_INTENT_SCHEMA_VERSION
-    # to_dict round-trips back through the validator unchanged.
-    assert validate_scout_intent(intent.to_dict()).condition_id == intent.condition_id
-
-
 # ===========================================================================
 # VIOLATION: the scout stub is rejected as a REQUEST with named missing fields
 # ===========================================================================
@@ -204,6 +192,12 @@ def test_scout_stub_rejected_as_request_naming_missing_fields() -> None:
 def test_scout_stub_also_rejected_as_seed() -> None:
     with pytest.raises(ContractViolation):
         validate_materialization_seed(_scout_stub())
+
+
+def test_live_main_does_not_write_condition_only_materialization_stubs() -> None:
+    main_text = Path("src/main.py").read_text(encoding="utf-8")
+    assert "validate_scout_intent" not in main_text
+    assert "scout_intents" not in main_text
 
 
 def test_request_without_aifs_input_is_accepted(tmp_path) -> None:
@@ -260,13 +254,3 @@ def test_non_object_payload_rejected() -> None:
         validate_materialization_request([1, 2, 3])  # type: ignore[arg-type]
     with pytest.raises(ContractViolation):
         validate_materialization_seed("not-a-dict")  # type: ignore[arg-type]
-    with pytest.raises(ContractViolation):
-        validate_scout_intent(42)  # type: ignore[arg-type]
-
-
-def test_empty_required_field_treated_as_missing() -> None:
-    intent = _scout_stub()
-    intent["condition_id"] = "   "
-    with pytest.raises(ContractViolation) as excinfo:
-        validate_scout_intent(intent)
-    assert "condition_id" in str(excinfo.value)

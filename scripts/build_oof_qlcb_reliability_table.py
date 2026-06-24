@@ -71,6 +71,11 @@ from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.forecast.center import raw_second_moment_weights, weighted_huber_location
 from src.forecast.model_selection import select_models
 from src.decision.qlcb_reliability_guard import (  # the LIVE guard cell scheme
+    EXPECTED_BAND_SEMANTIC_VERSION,
+    EXPECTED_CENTER_METHOD_VERSION,
+    EXPECTED_CORPUS_AUTHORITY,
+    EXPECTED_GUARD_SEMANTIC_VERSION,
+    EXPECTED_SCHEMA_VERSION,
     cell_key,
     lead_bucket,
     precision_class_for_coord,
@@ -84,6 +89,12 @@ DB_PATH = os.environ.get("QLCB_OOF_DB_PATH", os.path.join(REPO, "state", "zeus-f
 OUT_PATH = os.environ.get(
     "QLCB_OOF_OUT_PATH", os.path.join(REPO, "state", "qlcb_oof_reliability.json")
 )
+_DEFAULT_CORPUS_AUTHORITY = (
+    "tmp_previous_runs_not_live_authority"
+    if os.path.abspath(FORECASTS_PATH).startswith("/tmp/")
+    else EXPECTED_CORPUS_AUTHORITY
+)
+CORPUS_AUTHORITY = os.environ.get("QLCB_OOF_CORPUS_AUTHORITY", _DEFAULT_CORPUS_AUTHORITY)
 
 # Band reproduction constants — byte-identical to src/probability/joint_q_band.py.
 N_DRAWS = 4000
@@ -407,7 +418,11 @@ def main() -> int:
                  for k, (n, h) in cells.items() if n > 0}
     artifact = {
         "meta": {
-            "schema_version": 3,
+            "schema_version": EXPECTED_SCHEMA_VERSION,
+            "guard_semantic_version": EXPECTED_GUARD_SEMANTIC_VERSION,
+            "center_method_version": EXPECTED_CENTER_METHOD_VERSION,
+            "band_semantic_version": EXPECTED_BAND_SEMANTIC_VERSION,
+            "corpus_authority": CORPUS_AUTHORITY,
             "built_at": "2026-06-24",
             "n_predictions": int(ctr["n_predictions"]),
             "n_cells": len(out_cells),
@@ -428,8 +443,8 @@ def main() -> int:
             "coarse-only-nest (cold-biased) cells accrue their OWN realized hit-rate instead of "
             "being propped up by fine-nest cities' calibration.",
             "side_semantics": "YES hit = settled in bin; NO hit = settled outside bin, with NO q_lcb computed as alpha-quantile of 1-q_bin draws",
-            "source": "/tmp/multilead_forecasts.json (land-coord previous-runs corpus) + "
-            "state/zeus-forecasts.db (immutable RO); strictly-prior rolling-origin training",
+            "source": f"{FORECASTS_PATH} + state/zeus-forecasts.db (immutable RO); "
+            "strictly-prior rolling-origin training",
             "n_skipped_no_settle": int(ctr["skipped_no_settle"]),
             "n_skipped_thin": int(ctr["skipped_thin"]),
         },

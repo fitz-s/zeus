@@ -731,7 +731,13 @@ def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
 # (moved verbatim from src/main.py). src.main's BOOT recovery imports THIS.
 # ---------------------------------------------------------------------------
 
-def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
+def _edli_durable_fill_bridge_scan(
+    conn,
+    *,
+    now=None,
+    limit: int = 500,
+    already_bridged_repair_limit: int = 50,
+) -> int:
     """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
 
     THE authoritative bridge trigger (replaces the transient
@@ -823,6 +829,7 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
 
     bridged = 0
     new_fills_seen = 0
+    already_bridged_repairs_seen = 0
     for row in candidate_rows:
         aggregate_id = str(_row_get(row, "aggregate_id"))
         position_id = edli_bridge_position_id(aggregate_id)
@@ -844,21 +851,23 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
         ).fetchone()
         if existing is not None:
             existing_position_id = str(_row_get(existing, "position_id"))
-            try:
-                sync_venue_command_position_link_for_edli_fill(
-                    conn,
-                    aggregate_id,
-                    position_id=existing_position_id,
-                    now=now,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "EDLI durable fill-bridge: command position-link sync failed "
-                    "for already-bridged aggregate=%s position_id=%s: %s",
-                    aggregate_id,
-                    existing_position_id,
-                    exc,
-                )
+            if already_bridged_repairs_seen < max(0, already_bridged_repair_limit):
+                already_bridged_repairs_seen += 1
+                try:
+                    sync_venue_command_position_link_for_edli_fill(
+                        conn,
+                        aggregate_id,
+                        position_id=existing_position_id,
+                        now=now,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "EDLI durable fill-bridge: command position-link sync failed "
+                        "for already-bridged aggregate=%s position_id=%s: %s",
+                        aggregate_id,
+                        existing_position_id,
+                        exc,
+                    )
             # Already bridged (wide or legacy id) — idempotent skip.
             continue
 

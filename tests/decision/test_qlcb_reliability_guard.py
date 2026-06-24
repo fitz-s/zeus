@@ -22,6 +22,7 @@ Reverting the guard to "serve band.q_lcb unconditionally" makes the abstain case
 """
 from __future__ import annotations
 
+import json
 import math
 
 from src.decision import qlcb_reliability_guard as guard_mod
@@ -227,4 +228,60 @@ def test_present_malformed_artifact_is_active_fail_closed(tmp_path, monkeypatch)
     status = guard_mod.reliability_artifact_status()
     assert status["active"] is True
     assert status["status"] == "ACTIVE_INVALID"
+    guard_mod.reset_reliability_cache()
+
+
+def test_shape_valid_artifact_without_live_semantic_meta_is_stale(tmp_path, monkeypatch):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "source": "/tmp/multilead_forecasts.json previous-runs corpus",
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    status = guard_mod.reliability_artifact_status()
+    v = apply_guard(band_q_lcb=0.08, metric="high", lead_days=1.0, bin_position="modal")
+
+    assert status["status"] == "STALE_SEMANTICS"
+    assert status["cell_count"] == 0
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    guard_mod.reset_reliability_cache()
+
+
+def test_file_artifact_with_live_semantic_meta_is_active_valid(tmp_path, monkeypatch):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
+                    "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
+                    "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+                    "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    status = guard_mod.reliability_artifact_status()
+
+    assert status["status"] == "ACTIVE_VALID"
+    assert status["cell_count"] == 1
     guard_mod.reset_reliability_cache()

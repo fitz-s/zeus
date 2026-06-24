@@ -16,6 +16,16 @@ from scripts import check_live_restart_preflight as preflight
 from src.decision import qlcb_reliability_guard as guard_mod
 
 
+def _qlcb_meta() -> dict[str, object]:
+    return {
+        "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+        "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
+        "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
+        "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+        "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
+    }
+
+
 def _init_trade_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -156,6 +166,7 @@ def _patch_paths(monkeypatch, tmp_path):
     qlcb_artifact.write_text(
         json.dumps(
             {
+                "meta": _qlcb_meta(),
                 "cells": {
                     "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
                     "high|L1|NO|nonmodal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
@@ -398,6 +409,48 @@ def test_preflight_blocks_present_invalid_qlcb_artifact(monkeypatch, tmp_path):
     qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
     assert qlcb["ok"] is False
     assert qlcb["evidence"]["status"] == "ACTIVE_INVALID"
+
+
+def test_preflight_blocks_shape_valid_stale_qlcb_artifact(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    (state_dir / "qlcb_oof_reliability.json").write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "source": "/tmp/multilead_forecasts.json previous-runs corpus",
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                },
+            }
+        )
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
+    assert qlcb["ok"] is False
+    assert qlcb["evidence"]["status"] == "STALE_SEMANTICS"
 
 
 def _init_sidecar_surfaces(conn, *, now: datetime):

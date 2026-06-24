@@ -112,20 +112,15 @@ selects a trade carries the selected candidate; a decision that selects nothing 
 ``candidates`` tuple so the no-trade is auditable. The ``receipt_hash`` anchors the exact
 (predictive, omega, q, band, family_book, coherence, candidates, selected) tuple.
 
-DIRECTION LAW (spec lines 947-951; MODAL-ONLY-YES restored 2026-06-23, operator mandate):
-``YES_i`` is legal ONLY when ``i`` IS the forecast bin (buying the forecast/modal bin — the
-predicted bin, ±0.5 of the served center); ``NO_i`` is legal only when its bin is NOT the
-forecast bin. The forecast bin is the μ*-containing settlement bin of the family. The
-2026-06-15 relaxation (YES on any bin with point_q ≥ 0.05) was justified by settlement grading
-that found the modal bin OVER-dispersed (pred/real 1.28×, 1.82× at 72h) — but that
-over-dispersion was an ARTIFACT of the served σ being too flat (the stale σ-scale fit k=1.0
-that the 2026-06-23 σ-scale path + F-family fixes corrected; post-sharpening modal d=0 ratio is
-1.20/1.09 — calibrated). With the premise removed and on the operator's explicit standing rule
-"buy_yes only on its own predicted bin, ±0.5 max" (highest authority), YES is modal-only again:
-a YES on a non-modal bin buys the forecast's unreliable tail, not its skilled center. The
-empirical OOF reliability license that can admit a ``direction_law_ok=False`` candidate is now
-NO-only (the favorite-longshot NO harvest), so a non-modal YES can never be licensed onto a
-tail. A NO on the modal bin remains unconstructable.
+DIRECTION LAW (spec lines 947-951):
+``YES_i`` is structurally direction-law-clean when ``i`` IS the forecast bin (buying the
+forecast/modal bin); ``NO_i`` is structurally direction-law-clean when its bin is NOT the
+forecast bin. The forecast bin is the μ*-containing settlement bin of the family. This flag is a
+receipt proof, not the whole selector: a side-aware empirical OOF reliability verdict may license
+an otherwise non-directional Arrow claim onto the family optimizer when the candidate's own
+q_safe, edge, ΔU, and coherence evidence all survive. That license is symmetric across YES and
+NO; the old asymmetric bypass recreated an all-NO live bias and prevented family-level best
+expression selection.
 
 GREENFIELD / WAVE-5 WIRING. The spec ``decide(case, family, snapshots, portfolio)``
 references ``fresh_model_reader``, ``day0_reader``, ``predictive_builder``,
@@ -501,22 +496,16 @@ def forecast_settlement_bin_id(
 def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
     """Whether ``route`` is direction-law-legal against the forecast bin (spec 947-951).
 
-    * ``YES_i`` is legal ONLY when ``i`` IS the forecast bin — buying the forecast (modal)
-      bin, the ONE bin the predictive distribution most favors. This is the operator's
-      standing rule (2026-06-23): "buy_yes only on its own predicted bin, ±0.5 max." A YES on
-      any non-modal bin bets on the forecast's UNRELIABLE tail mass, not on its skilled center.
+    * ``YES_i`` is structurally clean when ``i`` IS the forecast bin — buying the forecast
+      bin, the ONE bin the predictive distribution most favors. A non-forecast YES is not
+      direction-law-clean, but it may still be admitted later by the side-aware OOF reliability
+      license when its own empirical, edge, ΔU, and coherence evidence survives.
     * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
       wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
 
-    MODAL-ONLY-YES REVERT (2026-06-23): this restores the pre-2026-06-15 modal-only YES rule.
-    The 2026-06-15 relaxation admitted non-modal YES whenever its point-q reached a "calibrated
-    floor" (0.05), justified by settlement grading that found the modal bin OVER-dispersed
-    (pred/real 1.28×, 1.82× at 72h). That over-dispersion was an ARTIFACT of the served σ being
-    too flat — the stale σ-scale fit (k=1.0) that the 2026-06-23 σ-scale path + F-family fixes
-    corrected (C k=0.671, F k=0.7322; the σ-fit's post-sharpening modal d=0 realized/expected
-    ratio is 1.20 / 1.09 — calibrated, no longer over-dispersed). With the premise gone and on
-    the operator's explicit mandate (highest authority), YES is modal-only again. ``point_q`` is
-    no longer consulted: legality is purely the (side, bin) vs the forecast bin.
+    This function stays purely structural: ``point_q`` and empirical reliability are not read
+    here. The selector combines this receipt flag with the side-aware OOF license; doing that in
+    one place prevents a hard-coded all-NO bias while preserving auditable direction-law status.
     """
     if route.side == "YES":
         return route.bin_id == forecast_bin
@@ -1289,18 +1278,13 @@ class FamilyDecisionEngine:
 
         # Direction law is structural, but the q_lcb reliability guard is the empirical
         # settlement evidence that can license an otherwise non-directional Arrow claim.
-        # MODAL-ONLY-YES (2026-06-23, operator mandate "buy_yes only on its predicted bin ±0.5"):
-        # the empirical bypass is NO-ONLY. A buy_yes is admissible ONLY when it IS the forecast
-        # (modal) bin — i.e. only via ``direction_law_ok``; it can NEVER be licensed onto a
-        # non-modal bin by an OOF verdict. The favorite-longshot NO harvest keeps its OOF license
-        # (a guarded NO complement off the forecast bin). Betting YES on a non-modal bin is buying
-        # the forecast's UNRELIABLE tail mass; the σ-scale sharpening (C k=0.671, F k=0.7322)
-        # restored the modal bin's mass, removing the over-dispersion that justified admitting
-        # non-modal YES on 2026-06-15. A positive edge from an INERT/missing guard is never enough.
+        # The license is side-aware and symmetric: YES and NO both need their own active,
+        # non-abstaining OOF verdict plus positive edge and positive ΔU. Bare positive edge from
+        # an INERT/missing guard is never enough. This lets the family optimizer choose the best
+        # executable expression instead of hard-biasing the survivor set toward NO.
         def _direction_admitted(d):
             return d.direction_law_ok or (
-                d.route.side == "NO"
-                and d.economics.edge_lcb > 0.0
+                d.economics.edge_lcb > 0.0
                 and d.economics.optimal_delta_u > 0.0
                 and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
                 and not d.q_lcb_guard_abstained

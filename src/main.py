@@ -3967,56 +3967,11 @@ def _new_listing_scout_cycle() -> None:
         except Exception as exc:
             logger.warning("new_listing_scout: persist new events failed (non-fatal): %r", exc)
 
-        # (b) POSTERIOR FAST-LANE: stage a scout INTENT for each new family.
-        #
-        # CONTRACT FIX (2026-06-10): scout intents are condition_id-only stubs
-        # {source, condition_id, enqueued_at, reason}. They are NOT fully-resolved
-        # materialization request payloads (which require city, temperature_metric,
-        # target_date and source_cycle_time). Writing stubs directly into
-        # the materializer requests/ dir crashed the subprocess (KeyError) on every cycle
-        # and starved ALL legitimate posterior production (772 stubs / 4 posteriors/h on
-        # 2026-06-10 — see /tmp/materializer_collapse_report.md). Stage intents in the
-        # non-queue scout_intents/ directory instead.
-        #
-        # CONSUMED-BY TODO: the seed→request builder pipeline
-        # (src.data.replacement_forecast_seed_discovery.discover_replacement_forecast_materialization_seeds
-        # / build_replacement_forecast_current_target_plan) does NOT yet read scout_intents/.
-        # Until that consumption side is wired (resolve condition_id → city+metric+target_date
-        # via executable_market_snapshots/topology, include as a scope hint in the next seed
-        # build, then delete the consumed intent), this directory is WRITE-ONLY staging and
-        # the fast-lane latency benefit degrades gracefully to the normal 00Z/12Z wave cadence.
-        try:
-            from src.data.replacement_forecast_production import (
-                _replacement_forecast_live_materialization_queue_config,
-            )
-            from src.data.replacement_forecast_live_materialization_queue import _write_request
-            from src.contracts.replacement_pipeline_files import validate_scout_intent
-            from pathlib import Path
-
-            queue_cfg = _replacement_forecast_live_materialization_queue_config()
-            request_dir = queue_cfg.get("request_dir")
-            if request_dir is not None:
-                # scout_intents/ is a sibling staging dir of requests/ — never the queue's input.
-                intents_dir = Path(str(request_dir)).parent / "scout_intents"
-                intents_dir.mkdir(parents=True, exist_ok=True)
-                for cid in sorted(new_cids):
-                    intent_path = intents_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-                    # BOUNDARY CONTRACT (2026-06-10): validate the intent stub against the
-                    # SCOUT_INTENT schema before writing. This is the producer half of the
-                    # contract that prevents the 2026-06-10 starvation category: the scout
-                    # can only emit a well-formed intent, and the intent shape is explicitly
-                    # distinct from a materialization REQUEST (the REQUEST validator rejects
-                    # exactly this shape). Authority basis: pipeline-contract project.
-                    intent = validate_scout_intent({
-                        "source": "new_listing_scout",
-                        "condition_id": cid,
-                        "enqueued_at": datetime.now(timezone.utc).isoformat(),
-                        "reason": "NEW_LISTING_FAST_LANE",
-                    })
-                    _write_request(intent_path, intent.to_dict())
-                    logger.info("new_listing_scout: staged intent for %s → scout_intents/%s", cid, intent_path.name)
-        except Exception as exc:
-            logger.warning("new_listing_scout: intent staging failed (non-fatal): %r", exc)
+        logger.info(
+            "new_listing_scout: persisted discovery for %d new condition_id(s); "
+            "forecast-live materialization remains owned by canonical market_events and seed discovery",
+            len(new_cids),
+        )
 
         # (c) WARMER PRIORITY: mark new condition_ids for head-of-rotation in next warm cycle
         _NEW_FAMILY_CONDITION_IDS.update(new_cids)

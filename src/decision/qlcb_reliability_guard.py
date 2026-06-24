@@ -108,6 +108,14 @@ _WILSON_Z_95: float = 1.6448536269514722
 # The OOF reliability artifact path (gitignored generated file; INERT when absent).
 _QLCB_OOF_RELIABILITY_PATH: str = "state/qlcb_oof_reliability.json"
 
+# A shape-valid artifact is not automatically live authority. These fields bind the table to
+# the exact qkernel/raw-diagonal probability semantics and to a durable live-approved OOF corpus.
+EXPECTED_SCHEMA_VERSION: int = 3
+EXPECTED_GUARD_SEMANTIC_VERSION: str = "qlcb_oof_reliability_guard_v4"
+EXPECTED_CENTER_METHOD_VERSION: str = "raw_diagonal_second_moment_v2"
+EXPECTED_BAND_SEMANTIC_VERSION: str = "parameter_posterior_simplex_v1"
+EXPECTED_CORPUS_AUTHORITY: str = "canonical_live_oof_replay_v1"
+
 # The precision-class values (the coverage STRATIFIER, not a per-city de-bias). A city is
 # ``fine_nest`` iff its settlement coordinate falls inside ANY sub-9km regional nest's domain
 # polygon (the fusion would select a fine regional model for it); else ``coarse_global``.
@@ -332,6 +340,15 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
             artifact_status = "ACTIVE_INVALID"
             with open(path, "r", encoding="utf-8") as fh:
                 artifact = json.load(fh)
+            meta = artifact.get("meta") if isinstance(artifact, dict) else None
+            if not _artifact_meta_is_live_compatible(meta):
+                artifact_status = "STALE_SEMANTICS"
+                out = {}
+                _RELIABILITY_CACHE = out
+                _RELIABILITY_LOADED = True
+                _RELIABILITY_ARTIFACT_ACTIVE = artifact_active
+                _RELIABILITY_ARTIFACT_STATUS = artifact_status
+                return out
             cells = artifact.get("cells") if isinstance(artifact, dict) else None
             if isinstance(cells, dict):
                 for key, val in cells.items():
@@ -366,6 +383,22 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
     return out
 
 
+def _artifact_meta_is_live_compatible(meta: object) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    try:
+        schema_version = int(meta.get("schema_version", -1))
+    except (TypeError, ValueError):
+        schema_version = -1
+    return (
+        schema_version == EXPECTED_SCHEMA_VERSION
+        and str(meta.get("guard_semantic_version", "")) == EXPECTED_GUARD_SEMANTIC_VERSION
+        and str(meta.get("center_method_version", "")) == EXPECTED_CENTER_METHOD_VERSION
+        and str(meta.get("band_semantic_version", "")) == EXPECTED_BAND_SEMANTIC_VERSION
+        and str(meta.get("corpus_authority", "")) == EXPECTED_CORPUS_AUTHORITY
+    )
+
+
 def reset_reliability_cache() -> None:
     """Reset the one-shot artifact cache (tests inject a table then reset between cases)."""
     global _RELIABILITY_CACHE, _RELIABILITY_LOADED
@@ -386,6 +419,11 @@ def reliability_artifact_status() -> dict[str, object]:
         "status": _RELIABILITY_ARTIFACT_STATUS,
         "active": _RELIABILITY_ARTIFACT_ACTIVE,
         "cell_count": len(_RELIABILITY_CACHE or {}),
+        "expected_schema_version": EXPECTED_SCHEMA_VERSION,
+        "expected_guard_semantic_version": EXPECTED_GUARD_SEMANTIC_VERSION,
+        "expected_center_method_version": EXPECTED_CENTER_METHOD_VERSION,
+        "expected_band_semantic_version": EXPECTED_BAND_SEMANTIC_VERSION,
+        "expected_corpus_authority": EXPECTED_CORPUS_AUTHORITY,
     }
 
 
