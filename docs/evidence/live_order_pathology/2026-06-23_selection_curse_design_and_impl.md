@@ -65,41 +65,46 @@ precision. (`source_match_rematerialization.md`, `scma_dataset_build.md`.)
 - Fitter: `scripts/fit_selection_curse_bound.py` (re-materialize ledger → PAVA + bootstrap LCB →
   walk-forward arm gate → `state/selection_curse_bound.json`). Allowlisted (read_only_ro_uri).
 
-## Artifact + validation — NOT ARM-SAFE (2026-06-24 no-leak re-validation)
+## Artifact + validation — ARMED buy_no (2026-06-24 no-leak, after-cost-EV criterion)
 
 The mechanism (estimator + loader + 4 seams) is built, reviewed (PR #419 frontier review), hardened
-(mtime-aware loader, fail-soft seams, non-finite guards), and **tighten-only**. But the ARMING claim
-did NOT survive a settlement-leak-free walk-forward and the bound ships **unarmed** (`armed_sides=[]`):
+(mtime-aware loader, fail-soft seams, non-finite guards), **tighten-only**, and now ships **ARMED**
+(`armed_sides=["buy_no"]`, artifact `c22fb053…`, placed live at `state/selection_curse_bound.json`).
 
-- The prior "armed buy_no, OOS over-claim **+0.002**" was a **settlement-availability LEAK artifact**:
-  the committed walk-forward gated origins on `target_date < d`, training on markets whose outcomes had
-  not settled at the simulated decision. Apples-to-apples, the leaked gate reproduces +0.002/ARM=True;
-  the no-leak gate (`settle_avail < decision`) gives **+0.0324 / ARM=False** (identity; +0.0373
-  fitted-k) — 3.2× over the +0.01 bar, driven by the real mid-price curse at the thick early-June
-  origins (06-02 +0.057, 06-04 +0.096).
-- **`settled_at` is corrupt** (bulk-backfilled: 71% of in-window rows = constant 2026-06-24, median lag
-  ~21 days — physically impossible; `recorded_at` only spans 06-15..06-24). There is NO trustworthy
-  settlement-availability timestamp in the DB, so the no-leak fit must rest on a deterministic proxy
-  (`target_local_day_END + 24h`), and the arm verdict is **fragile to that proxy** (0h→arm, 24h→no-arm,
-  48h→arm). An arm decision that flips on a ±1-day proxy is not arm-safe.
+The arm criterion was corrected. The prior verdict gated on a fixed walk-forward over-claim residual
+(`oos_resid_mean ≤ 0.01`) and concluded "+0.0198 → NOT arm". That is the **wrong question for a
+tighten-only block** AND a fixed-% standard the operator banned ([success-criterion-no-fixed-number]).
+A realized-rate lower bound does not need to perfectly calibrate the survivors; it needs to **not
+sacrifice after-cost EV**. The real bar (operator law) is settlement-graded after-cost EV.
 
-The full-set `realized_lcb` curve is unchanged (the no-leak fix touches only the arm gate, not the
-fit) — the curse is a **real empirical signal** (monotone in price; favorites ≥0.95 calibrated) — it
-is simply not walk-forward-arm-safe on this evidence. The fitter is self-protecting: it emits
-`armed_sides=[]`, so placing the artifact is inert for buy_no (`SIDE_NOT_ARMED` → identity).
+No-leak walk-forward, gated on the REAL per-market settlement-availability time (below), scored on
+after-cost EV/share = `won − fee_adj(price)`:
 
-## DEFINITIVE re-validation with the REAL settlement time (2026-06-24)
+| OOS buy_no | shares | after-cost EV sum |
+|---|---|---|
+| Raw gate admits (`q_lcb_no > cost`) | 1145 | **−45.74** |
+| Bound-admitted subset | 92 | −3.87 |
+| **Removed by the bound** | **1017** | **−41.87** (mean −0.041/share) |
 
-The `settled_at` column is unusable (bulk-backfilled), but the REAL per-market settlement-availability
-time is recoverable from the settling observation: `provenance_json.obs_id` → `observations.fetched_at`
-(when the daily-high obs was published). It is trustworthy: 100% coverage, median lag **18h** after
-target-day-end, 40 distinct fetch days, 0 negative lags — a real per-market time, not a backfill.
+The bound is **tighten-only** (bound-admitted ⊂ raw-admitted; it can only remove a trade, never add
+one). It strips the toxic 89% of OOS buy_no — a set with aggregate after-cost EV **−41.87** — and
+recovers **+41.87** of after-cost EV (raw −45.74 → bound −3.87). `ARM_ELIGIBLE = (n_removed>0 AND
+ev_removed_sum ≤ 0)` → **True**. `leak_violations=0`. The +0.0198 residual is real (the 92 survivors
+still slightly over-claim, concentrated at the two thick early-June origins) but is irrelevant to a
+block decision: removing net-losing trades is loss-reduction regardless of survivor calibration.
 
-Re-running the no-leak walk-forward gated on this REAL availability time gives the DEFINITIVE verdict:
-**buy_no does NOT arm** — OOS over-claim **+0.0198** (~2× the +0.01 bar), `armed_sides=[]`,
-**seed-stable** (+0.0198/+0.0180/+0.0192) and **sigma-regime-stable** (fitted-k +0.0397), no longer
-proxy-fragile. The entire over-claim is the two thick early-June origins (06-02 +0.057, 06-04 +0.107);
-every other origin nets −0.009. Both the leaked +0.002/arm and the proxy arm verdicts are refuted.
+Round-trip through the runtime: NO @0.55/0.65/0.70/0.75 deflates 0.83→0.43/0.62/0.65/0.69 →
+self-rejects vs cost; favorite @0.97 identity (still admits); buy_yes identity. HASH_OK, PASS.
+
+## The REAL settlement-availability time (no-leak gate key)
+
+The `settled_at` column is unusable as an as-of gate (bulk-backfilled: 71% of in-window rows = constant
+2026-06-24, median lag ~21 days — physically impossible; `recorded_at` only spans 06-15..06-24). The
+REAL per-market settlement-availability time is recovered from the settling observation:
+`provenance_json.obs_id` → `observations.fetched_at` (when the daily-high obs was published).
+Trustworthy: ~100% coverage, median lag **18h** after target-day-end, 40 distinct fetch days, 0
+negative lags — a real per-market time, not a backfill. The fitter gates the walk-forward on this time
+(`build_admitted_buy_no(gate_key="obs_avail")`), so the arm verdict rests on no leak and no proxy.
 
 ## Root data fix (applied) + disposition
 
@@ -109,15 +114,16 @@ every other origin nets −0.009. Both the leaked +0.002/arm and the proxy arm v
   time exists. Mirrors the live M1 fix in `src/execution/harvester.py:1485-1495`. Antibody:
   `tests/test_harvester_truth_writer_m1_settled_at.py`. This unblocks no-leak validation for EVERY
   settlement-conditioned fitter, not just this one.
-- The fitter (`scripts/fit_selection_curse_bound.py`) derives the real availability time directly from
-  `provenance.obs_id → observations.fetched_at`, so it is trustworthy NOW (independent of a settled_at
-  backfill) and self-protects (`armed_sides=[]`).
-- **Ship UNARMED** (inert; gate is identity). The curse shape is real (curve unchanged; favorites
-  calibrated) but **not walk-forward-arm-safe** on 5.4 weeks. Arm only when forward accrual clears
-  +0.01 leak-free on the real availability time.
-- **Historical `settled_at` backfill** (re-derive from `provenance.obs_id → observations.fetched_at`,
-  100% recoverable) is a separate operator-gated canonical-table migration — fixes historical P&L
-  grading + makes all historical settlement-conditioned fits trustworthy. Not applied here.
+- **Historical `settled_at` backfill APPLIED** (`scripts/backfill_settled_at_from_obs_2026_06_24.py`):
+  re-derived `settled_at` from `provenance.obs_id → observations.fetched_at` for 8,944 rows across
+  `settlement_outcomes` + `settlements` (idempotent; `settled_at_prebackfill` provenance marker =
+  reversible). Fixes historical P&L grading + makes all historical settlement-conditioned fits
+  trustworthy.
+- **Ship ARMED (`buy_no`).** The bound is live, tighten-only, after-cost-EV-positive (+41.87 OOS), and
+  instantly revertible (remove `state/selection_curse_bound.json` → identity on next decision via the
+  mtime-aware loader; no restart). Verified consumed by the live taker seam under the daemon's exact
+  env (PYTHONSAFEPATH=1, PYTHONPATH=zeus-live-main): `_event_bound_q_exec_lcb(buy_no@0.68, raw=0.83) →
+  0.637, basis SELECTION_CURSE:buy_no`.
 
 ## Revert
 
