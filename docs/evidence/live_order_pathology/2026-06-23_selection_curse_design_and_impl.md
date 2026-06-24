@@ -88,14 +88,36 @@ fit) — the curse is a **real empirical signal** (monotone in price; favorites 
 is simply not walk-forward-arm-safe on this evidence. The fitter is self-protecting: it emits
 `armed_sides=[]`, so placing the artifact is inert for buy_no (`SIDE_NOT_ARMED` → identity).
 
-## Disposition: ship UNARMED + the real blocker is a data fix
+## DEFINITIVE re-validation with the REAL settlement time (2026-06-24)
 
-- Merge the **inert** mechanism (reviewed, hardened, tighten-only); it changes nothing live (gate is
-  identity for an unarmed side / absent artifact).
-- **To ever arm:** fix the `settled_at` ingestion (a real settlement-availability timestamp), accrue
-  forward settlement, then re-run the no-leak fitter; arm only if it clears +0.01 without resting on a
-  proxy knife-edge. Shadow-log forward meanwhile.
-- The shape (curse grows as NO cheapens; favorites calibrated) is the durable finding to revisit.
+The `settled_at` column is unusable (bulk-backfilled), but the REAL per-market settlement-availability
+time is recoverable from the settling observation: `provenance_json.obs_id` → `observations.fetched_at`
+(when the daily-high obs was published). It is trustworthy: 100% coverage, median lag **18h** after
+target-day-end, 40 distinct fetch days, 0 negative lags — a real per-market time, not a backfill.
+
+Re-running the no-leak walk-forward gated on this REAL availability time gives the DEFINITIVE verdict:
+**buy_no does NOT arm** — OOS over-claim **+0.0198** (~2× the +0.01 bar), `armed_sides=[]`,
+**seed-stable** (+0.0198/+0.0180/+0.0192) and **sigma-regime-stable** (fitted-k +0.0397), no longer
+proxy-fragile. The entire over-claim is the two thick early-June origins (06-02 +0.057, 06-04 +0.107);
+every other origin nets −0.009. Both the leaked +0.002/arm and the proxy arm verdicts are refuted.
+
+## Root data fix (applied) + disposition
+
+- **Root cause fixed:** `src/ingest/harvester_truth_writer.py` stamped `settled_at = datetime.now()`
+  (the reconstruction batch time) — now derives `settled_at = obs_row["fetched_at"]` (the real
+  availability time) with `recorded_at` the separate write time, and forces QUARANTINE when no fetch
+  time exists. Mirrors the live M1 fix in `src/execution/harvester.py:1485-1495`. Antibody:
+  `tests/test_harvester_truth_writer_m1_settled_at.py`. This unblocks no-leak validation for EVERY
+  settlement-conditioned fitter, not just this one.
+- The fitter (`scripts/fit_selection_curse_bound.py`) derives the real availability time directly from
+  `provenance.obs_id → observations.fetched_at`, so it is trustworthy NOW (independent of a settled_at
+  backfill) and self-protects (`armed_sides=[]`).
+- **Ship UNARMED** (inert; gate is identity). The curse shape is real (curve unchanged; favorites
+  calibrated) but **not walk-forward-arm-safe** on 5.4 weeks. Arm only when forward accrual clears
+  +0.01 leak-free on the real availability time.
+- **Historical `settled_at` backfill** (re-derive from `provenance.obs_id → observations.fetched_at`,
+  100% recoverable) is a separate operator-gated canonical-table migration — fixes historical P&L
+  grading + makes all historical settlement-conditioned fits trustworthy. Not applied here.
 
 ## Revert
 

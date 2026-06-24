@@ -357,9 +357,19 @@ def rematerialize_priced_ledger(fcst_db, trades_db, scale_mode="identity", limit
     c.row_factory = sqlite3.Row
     t = sqlite3.connect(f"file:{trades_db}?mode=ro", uri=True)
 
+    # REALTIME REVISION: also recover the REAL per-market settlement-availability time. The settling
+    # daily-high OBSERVATION row (joined via provenance_json.obs_id) carries `high_fetch_utc` /
+    # `fetched_at` = when that observation was actually fetched/published. That is the moment the
+    # market's outcome first became KNOWABLE. It is per-market-varying, 9-21h after local-day-end
+    # (next-morning publish), audited trustworthy (98.0% within 0-48h, 0 negative lags, 40 distinct
+    # fetch days vs settled_at's single 71% backfill constant). We carry it as obs_avail_iso.
     markets = c.execute(
-        """SELECT DISTINCT so.city, so.target_date, so.winning_bin, so.settlement_value, so.settled_at
+        """SELECT DISTINCT so.city, so.target_date, so.winning_bin, so.settlement_value, so.settled_at,
+                  COALESCE(o.high_fetch_utc, o.fetched_at, o.fetch_utc) AS obs_avail_iso,
+                  json_extract(so.provenance_json,'$.obs_source') AS obs_source
            FROM settlement_outcomes so
+           LEFT JOIN observations o
+             ON o.id = CAST(json_extract(so.provenance_json,'$.obs_id') AS INTEGER)
            WHERE so.temperature_metric='high' AND so.authority='VERIFIED'
              AND so.winning_bin IS NOT NULL
              AND so.target_date BETWEEN ? AND ?
@@ -397,7 +407,9 @@ def rematerialize_priced_ledger(fcst_db, trades_db, scale_mode="identity", limit
         try:
             decision = _localday_start_utc(tz, target_date) - timedelta(minutes=1)
             decision_iso = decision.isoformat()
-            settle_avail_iso = _settle_avail_utc(tz, target_date).isoformat()
+            # Pass the CURRENT module-global lag explicitly (the default-arg binding froze it at
+            # def-time, so a --settle-lag-h override was silently ignored in the prior fitter).
+            settle_avail_iso = _settle_avail_utc(tz, target_date, lag_h=SETTLE_LAG_H).isoformat()
             cycle_iso = _pick_freshest_cycle(c, city, target_date, decision)
             if cycle_iso is None:
                 stats["NO_CAUSAL_CYCLE"] += 1
@@ -465,6 +477,7 @@ def rematerialize_priced_ledger(fcst_db, trades_db, scale_mode="identity", limit
             rows_out.append({
                 "city": city, "target_date": target_date, "month": target_date[:7], "lead_bucket": lead,
                 "settled_at": mk["settled_at"], "settle_avail_iso": settle_avail_iso,
+                "obs_avail_iso": mk["obs_avail_iso"], "obs_source": mk["obs_source"],
                 "settlement_unit": su,
                 "bin_label": lbl, "condition_id": cid,
                 "q_yes": qy, "q_lcb_yes": qly, "q_ucb_yes": quy,
@@ -556,6 +569,57 @@ def audit_settled_at(ledger_rows, verbose=True):
     return verdict
 
 
+def audit_obs_avail(ledger_rows):
+    """Audit the REAL obs-availability time (observations fetch time mapped via provenance.obs_id).
+
+    Trustworthy iff: per-row varying (no dominant backfill constant), plausible next-day-publish lag
+    vs target local-day-END (most rows 0-48h, per-market), and no negative lags (fetch before day-end
+    would be physically impossible for a settling daily high). This is the DEFINITIVE gate key.
+    """
+    led = pd.DataFrame(ledger_rows)
+    mk = led.drop_duplicates(subset=["city", "target_date"]).copy()
+    n_mk = len(mk)
+    have = mk["obs_avail_iso"].notna().sum() if "obs_avail_iso" in mk else 0
+    lags_h, neg = [], 0
+    fdays = {}
+    for _, r in mk.iterrows():
+        ts = r.get("obs_avail_iso")
+        if ts is None or (isinstance(ts, float) and np.isnan(ts)):
+            continue
+        fdays[str(ts)[:10]] = fdays.get(str(ts)[:10], 0) + 1
+        cfg = cities_by_name.get(r["city"])
+        tz = str(getattr(cfg, "timezone", "UTC")) if cfg else "UTC"
+        try:
+            end = _localday_start_utc(tz, r["target_date"]) + timedelta(days=1)
+            lag = (_dt(str(ts)) - end).total_seconds() / 3600.0
+            lags_h.append(lag)
+            if lag < 0:
+                neg += 1
+        except Exception:
+            pass
+    lags_h.sort()
+    a = np.array(lags_h) if lags_h else np.array([np.nan])
+    clean = int(((a >= 0) & (a <= 48)).sum())
+    top_frac = (max(fdays.values()) / have) if (fdays and have) else 1.0
+    verdict = {
+        "n_markets": int(n_mk),
+        "have_obs_avail": int(have),
+        "coverage_frac": round(float(have) / n_mk, 4) if n_mk else 0.0,
+        "distinct_fetch_days": int(len(fdays)),
+        "top_fetch_day_frac": round(float(top_frac), 4),
+        "lag_h_median": round(float(np.nanmedian(a)), 1),
+        "lag_h_p05": round(float(np.nanpercentile(a, 5)), 1),
+        "lag_h_p95": round(float(np.nanpercentile(a, 95)), 1),
+        "lag_h_max": round(float(np.nanmax(a)), 1),
+        "n_negative_lag": int(neg),
+        "clean_0_48h_frac": round(clean / len(lags_h), 4) if lags_h else 0.0,
+        "trustworthy": bool(
+            (have / n_mk if n_mk else 0) >= 0.95 and top_frac < 0.50 and neg == 0
+            and 0 < float(np.nanmedian(a)) < 96.0),
+    }
+    return verdict
+
+
 # =================================================================================================== #
 # Step 1b — reconstruct the ADMITTED buy_no slice (carries decision_iso + settle_avail_iso).
 # =================================================================================================== #
@@ -563,13 +627,20 @@ def fee_adj(ask: float, fee_rate: float) -> float:
     return ask + fee_rate * ask * (1.0 - ask)
 
 
-def build_admitted_buy_no(ledger_rows, settled_at_usable: bool, fee_rate: float = SCHEDULE_FEE) -> pd.DataFrame:
+def build_admitted_buy_no(ledger_rows, gate_key: str = "obs_avail",
+                          fee_rate: float = SCHEDULE_FEE) -> pd.DataFrame:
     """Reconstruct the counterfactual ADMITTED buy_no slice.
 
     Columns: date, city, mday, price, cost, won, claim, qlcb_no, plus the leak-gate keys as epoch
     nanoseconds (decision_ns, settle_avail_ns) — integers compare cleanly regardless of pandas datetime
-    resolution. settle_avail is the real DB settled_at when usable, else the deterministic proxy
-    (target local-day-end + SETTLE_LAG_H).
+    resolution.
+
+    gate_key selects the settlement-availability time used as the no-leak WF gate:
+      - "obs_avail" : REAL per-market settling-observation fetch time (provenance.obs_id ->
+                      observations.high_fetch_utc/fetched_at). DEFINITIVE — this is when the outcome
+                      first became knowable. Used by the realtime re-validation.
+      - "proxy"     : deterministic target_local_day_END + SETTLE_LAG_H (the prior fallback proxy).
+      - "settled_at": the raw DB settled_at column (UNUSABLE — bulk-backfill; kept for parity only).
     """
     led = pd.DataFrame(ledger_rows)
     m = led["no_ask"].notna() & led["q_ucb_yes"].notna() & (led["no_ask"] > 0)
@@ -586,9 +657,16 @@ def build_admitted_buy_no(ledger_rows, settled_at_usable: bool, fee_rate: float 
         return pd.to_datetime(series, utc=True).astype("datetime64[ns, UTC]").astype("int64").values
 
     decision_ns = _to_ns(adm["decision_iso"])
-    if settled_at_usable:
+    if gate_key == "obs_avail":
+        if adm["obs_avail_iso"].isna().any():
+            n_missing = int(adm["obs_avail_iso"].isna().sum())
+            raise ValueError(
+                f"obs_avail gate requested but {n_missing} admitted rows lack a real obs fetch time; "
+                f"the obs-availability recovery is incomplete — do NOT silently fall back.")
+        settle_avail_ns = _to_ns(adm["obs_avail_iso"])
+    elif gate_key == "settled_at":
         settle_avail_ns = _to_ns(adm["settled_at"])
-    else:
+    else:  # "proxy"
         settle_avail_ns = _to_ns(adm["settle_avail_iso"])
 
     out = pd.DataFrame({
@@ -923,8 +1001,12 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="(debug) cap markets re-materialized.")
     ap.add_argument("--settle-lag-h", type=float, default=None,
                     help="Settlement-availability proxy lag (hours after target local-day-END) used as "
-                         "the no-leak WF gate key when settled_at is unusable. Default 24h (next-day "
-                         "publish). The arm verdict is SENSITIVE to this; report it explicitly.")
+                         "the no-leak WF gate key in PROXY mode. Default 24h (next-day publish).")
+    ap.add_argument("--gate-key", type=str, default="obs_avail",
+                    choices=["obs_avail", "proxy", "settled_at"],
+                    help="No-leak WF settlement-availability gate key. obs_avail (DEFAULT, DEFINITIVE) = "
+                         "real per-market settling-observation fetch time; proxy = dayend+SETTLE_LAG_H; "
+                         "settled_at = raw bulk-backfilled column (parity only).")
     a = ap.parse_args()
     built_at = a.built_at
     if a.settle_lag_h is not None:
@@ -949,19 +1031,27 @@ def main():
     led_rows, led_stats, timing = rematerialize_priced_ledger(
         fcst_db, trades_db, scale_mode=a.scale, limit=a.limit)
 
-    # --- Step 1a: settled_at usability audit -> choose the WF gate key.
+    # --- Step 1a: settled_at usability audit (kept — documents WHY we don't use the raw column).
     sa_verdict = audit_settled_at(led_rows)
-    settled_at_usable = bool(sa_verdict["usable"])
 
-    # --- Step 1b: admitted buy_no slice (carries decision_dt + settle_avail_dt).
-    adm = build_admitted_buy_no(led_rows, settled_at_usable, SCHEDULE_FEE)
+    # --- Step 1a': obs-availability audit (the REAL settlement-availability time). Lag vs day-end.
+    obs_verdict = audit_obs_avail(led_rows)
+    print("[1a'] obs-availability (provenance.obs_id -> observations.fetched) AUDIT:")
+    print("      " + json.dumps(obs_verdict))
+
+    # --- Step 1b: admitted buy_no slice. Gate key is obs_avail (DEFINITIVE) by default.
+    gate_key = a.gate_key
+    adm = build_admitted_buy_no(led_rows, gate_key=gate_key, fee_rate=SCHEDULE_FEE)
     n_train = len(adm)
     n_mdays = adm["mday"].nunique()
     raw_realized = float(adm["won"].mean())
     raw_claim = float(adm["claim"].mean())
     print(f"[1] admitted buy_no: n={n_train}  market-days={n_mdays}  "
           f"realized={raw_realized:.3f}  claim={raw_claim:.3f}  gap={raw_claim - raw_realized:+.3f}")
-    print(f"    WF gate key = {'REAL settled_at' if settled_at_usable else 'PROXY settle_avail (dayend+%.0fh)' % SETTLE_LAG_H}")
+    _gk_desc = {"obs_avail": "REAL obs fetch time (DEFINITIVE)",
+                "proxy": "PROXY dayend+%.0fh" % SETTLE_LAG_H,
+                "settled_at": "raw settled_at (backfill)"}[gate_key]
+    print(f"    WF gate key = {_gk_desc}")
 
     # --- Step 2: cluster-weighted isotonic point + cluster-bootstrap lower band.
     point, lcb = fit_isotonic_band(adm, grid, boot_n=BOOT_N, low_pctile=BOOT_LOW_PCTILE, seed=SEED)
@@ -1016,7 +1106,7 @@ def main():
     if a.sensitivity:
         f_rows, _, _ = rematerialize_priced_ledger(
             fcst_db, trades_db, scale_mode="fitted", limit=a.limit, verbose=False)
-        admf = build_admitted_buy_no(f_rows, settled_at_usable, SCHEDULE_FEE)
+        admf = build_admitted_buy_no(f_rows, gate_key=gate_key, fee_rate=SCHEDULE_FEE)
         if len(admf) >= 60 and admf["mday"].nunique() >= 5:
             pf, lf = fit_isotonic_band(admf, grid, boot_n=BOOT_N, low_pctile=BOOT_LOW_PCTILE, seed=SEED)
             _, sumf = walk_forward_arm_gate_noleak(admf, grid, boot_n=WF_BOOT_N)
@@ -1029,7 +1119,7 @@ def main():
             print("[SENS] fitted-sigma k:", json.dumps(sens))
 
     return {"artifact": artifact, "wf_rows": wf_rows, "wf_summary": wf_summary, "roundtrip": rt,
-            "settled_at_verdict": sa_verdict, "settled_at_usable": settled_at_usable,
+            "settled_at_verdict": sa_verdict, "obs_avail_verdict": obs_verdict, "gate_key": gate_key,
             "n_train": n_train, "n_mdays": n_mdays, "raw_realized": raw_realized, "raw_claim": raw_claim,
             "point": point.tolist(), "lcb": lcb.tolist(), "grid": grid.tolist(),
             "fitted_at_samples": fitted_at(grid, lcb, (0.55, 0.70, 0.85, 0.95)),

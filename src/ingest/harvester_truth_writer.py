@@ -435,7 +435,16 @@ def _write_settlement_truth(
         city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)
-    settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # M1 timing-semantics (2026-06-24): settled_at is the SETTLEMENT-AVAILABILITY time — the settling
+    # observation's fetch time (when the daily-high outcome first became knowable), NEVER the batch
+    # wall-clock. recorded_at is the SEPARATE now() write/reconstruction time. This mirrors the live
+    # fix in src/execution/harvester.py:1485-1495 (M1), which this reconstruction writer never
+    # received — so the bulk-reconstructed window carried a ~21-day-lagged backfill constant in
+    # settled_at that silently leaked every no-leak settlement walk-forward (PR #419 review finding).
+    # settled_at is NULL when no observation exists → the row is forced QUARANTINED below (no genuine
+    # settlement time → not gradable), exactly as the live harvester does.
+    recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    settled_at = obs_row.get("fetched_at") if obs_row is not None else None
 
     authority = "QUARANTINED"
     settlement_value: Optional[float] = None
@@ -547,6 +556,13 @@ def _write_settlement_truth(
                     else:
                         reason = "harvester_live_obs_outside_bin"
 
+    # M1 guard (mirrors execution/harvester.py): a row with no genuine settlement-availability time
+    # (no observation fetch time) cannot be graded — force QUARANTINED even if value-contained.
+    if authority == "VERIFIED" and settled_at is None:
+        authority = "QUARANTINED"
+        winning_bin = None
+        reason = "harvester_truth_no_settlement_time"
+
     provenance = {
         "writer": "harvester_truth_writer_dr33",
         "writer_script": "src/ingest/harvester_truth_writer.py",
@@ -566,7 +582,7 @@ def _write_settlement_truth(
         "physical_quantity": metric_identity.physical_quantity,
         "observation_field": metric_identity.observation_field,
         "data_version": data_version,
-        "reconstructed_at": settled_at,
+        "reconstructed_at": recorded_at,
         "audit_ref": "docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5",
     }
     if reason is not None:
@@ -595,10 +611,13 @@ def _write_settlement_truth(
                 data_version, json.dumps(provenance, sort_keys=True, default=str),
             ),
         )
-        # Route to era-aware writer (PR 1). dispatch_era_basis selects the
-        # correct EraAuthorityBasis from settled_at date.
+        # Route to era-aware writer (PR 1). dispatch_era_basis selects the correct
+        # EraAuthorityBasis from the settlement date — the REAL obs-availability date now
+        # (a May market reconstructed in June grades under May's era, not the batch date).
+        # When settled_at is NULL (quarantined no-settle row, not gradable) fall back to the
+        # write date so the dispatch never sees None; the row is non-admittable anyway.
         from datetime import date as _date
-        _settled_date = _date.fromisoformat(str(settled_at)[:10])
+        _settled_date = _date.fromisoformat(str(settled_at or recorded_at)[:10])
         _era_result = dispatch_era_basis(_settled_date)
         _settlement_dict = {
             "city": city.name,
@@ -611,7 +630,7 @@ def _write_settlement_truth(
             "settled_at": settled_at,
             "authority": authority,
             "provenance": provenance,
-            "recorded_at": settled_at,
+            "recorded_at": recorded_at,
             "settlement_unit": city.settlement_unit,
         }
         if _era_result.is_admittable():
