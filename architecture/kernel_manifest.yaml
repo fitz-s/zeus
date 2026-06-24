@@ -1,26 +1,56 @@
-schema_version: 1
+schema_version: 2
 project: zeus
+metadata:
+  updated: '2026-06-23'
+  owner: docs authority isolation rebuild
+  purpose: >
+    Kernel semantic atom and principal-authority registry. This manifest names the
+    frozen money-path atoms and active authority stack. It must not route agents
+    to packet evidence, consults, dated reports, rebuild notes, or runtime snapshots.
 
 principal_authority:
-  architecture_spec: docs/authority/zeus_current_architecture.md
-  change_control_constitution: docs/authority/zeus_change_control_constitution.md
-  operator_brief: .claude/CLAUDE.md
+  architecture_law: docs/authority/zeus_current_architecture.md
+  delivery_law: docs/authority/zeus_current_delivery.md
+  archival_law: docs/authority/ARCHIVAL_RULES.md
+  deep_governance_constitution: docs/authority/zeus_change_control_constitution.md
+  canonical_reference: docs/reference/zeus_prediction_market_quant_reference.md
+  docs_registry: architecture/docs_registry.yaml
   historical_references:
     - architecture/history_lore.yaml
+    - docs/archive_registry.md
+  forbidden_as_authority:
+    - docs/evidence/**
+    - docs/reports/**
+    - docs/archive/**
+    - docs/rebuild/**
+    - docs/operations/task_*/**
+    - docs/operations/current/**
 
 semantic_atoms:
   unit:
     frozen: true
     allowed: [F, C]
     rationale: Temperature semantics must never silently collapse to bare floats with implicit unit assumptions.
+  metric:
+    frozen: true
+    allowed: [high, low]
+    rationale: HIGH and LOW are distinct settlement/calibration/replay identities, not display labels.
+  native_side:
+    frozen: true
+    allowed: [YES, NO]
+    rationale: Polymarket YES/NO tokens have native quote/depth/payoff semantics; NO is not a casual complement shortcut.
   direction:
     frozen: true
     allowed: [buy_yes, buy_no, unknown]
-    rationale: Direction is lifecycle-bearing state, not display metadata.
+    rationale: Direction is lifecycle-bearing and side-bearing state, not display metadata.
   probability_space:
     frozen: true
-    allowed: [yes_side, no_side, held_side, native_side]
-    rationale: Probability-space semantics must be explicit across module boundaries.
+    allowed: [yes_side, no_side, held_side, native_side, payoff_space]
+    rationale: Probability-space semantics must be explicit across q, payoff, sizing, and execution boundaries.
+  q_band:
+    frozen: true
+    allowed: [q, q_lcb, q_ucb, q_exec_lcb]
+    rationale: Conservative bounds must name their random variable and may not invert point estimates.
   strategy_key:
     frozen: true
     allowed:
@@ -28,7 +58,7 @@ semantic_atoms:
       - shoulder_sell
       - center_buy
       - opening_inertia
-    rationale: Sole governance key for risk, allocation, and performance policy.
+    rationale: Sole governance key for risk, allocation, and performance policy unless a future governed migration expands it.
   phase:
     frozen: true
     allowed:
@@ -41,7 +71,8 @@ semantic_atoms:
       - voided
       - quarantined
       - admin_closed
-    rationale: Authoritative lifecycle grammar.
+      - unknown
+    rationale: Authoritative lifecycle grammar; unknown is a recovery/sentinel state where code declares it, not a normal phase.
   truth_surface_kind:
     frozen: true
     allowed:
@@ -50,6 +81,8 @@ semantic_atoms:
       - derived_export
       - ingress_command
       - experimental
+      - current_fact_pointer
+      - historical_evidence
   event_type:
     frozen: true
     allowed:
@@ -58,6 +91,7 @@ semantic_atoms:
       - ENTRY_ORDER_FILLED
       - ENTRY_ORDER_VOIDED
       - ENTRY_ORDER_REJECTED
+      - DAY0_WINDOW_ENTERED
       - CHAIN_SYNCED
       - CHAIN_SIZE_CORRECTED
       - CHAIN_QUARANTINED
@@ -76,11 +110,21 @@ truth_surfaces:
     events_table: position_events
     projection_table: position_current
     authority_kind: canonical_event_plus_projection
+    db_owner_manifest: architecture/db_table_ownership.yaml
   derived:
     - state/positions.json
     - state/status_summary.json
   ingress_only:
     - state/control_plane.json
+  current_fact_pointers:
+    - docs/operations/current_state.md
+    - docs/operations/current_data_state.md
+    - docs/operations/current_source_validity.md
+  historical_evidence_only:
+    - docs/evidence/**
+    - docs/reports/**
+    - docs/archive/**
+    - docs/rebuild/**
   deprecated_shadow_surfaces:
     - state/strategy_tracker.json
 
@@ -93,9 +137,17 @@ write_authority:
   canonical_policy_emitters:
     - src.riskguard.riskguard
     - src.riskguard.policy
+    - src.risk_allocator.governor
   canonical_policy_consumers:
     - src.engine.evaluator
     - src.engine.cycle_runner
+    - src.engine.event_reactor_adapter
+    - src.execution.executor
+  venue_command_owner:
+    - src.state.venue_command_repo
+  qkernel_decision_owner:
+    - src.engine.qkernel_spine_bridge
+    - src.decision.family_decision_engine
 
 machine_gate_inputs:
   manifests:
@@ -103,7 +155,13 @@ machine_gate_inputs:
     - architecture/invariants.yaml
     - architecture/zones.yaml
     - architecture/negative_constraints.yaml
-    - architecture/maturity_model.yaml
+    - architecture/db_table_ownership.yaml
+    - architecture/docs_registry.yaml
+    - architecture/reference_replacement.yaml
+    - architecture/module_manifest.yaml
+    - architecture/money_path_objects.yaml
+    - architecture/runtime_modes.yaml
+    - architecture/runtime_posture.yaml
   schema:
     - architecture/2026_04_02_architecture_kernel.sql
   ast_rules:
@@ -113,6 +171,9 @@ machine_gate_inputs:
     - scripts/check_module_boundaries.py
     - scripts/check_work_packets.py
     - scripts/replay_parity.py
+    - scripts/topology_doctor.py
   tests:
     - tests/test_cross_module_invariants.py
     - tests/test_architecture_contracts.py
+    - tests/test_no_bare_float_seams.py
+    - tests/integration/test_qkernel_spine_routing.py
