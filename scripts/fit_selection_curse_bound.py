@@ -783,7 +783,15 @@ def walk_forward_arm_gate_noleak(adm: pd.DataFrame, grid: np.ndarray, boot_n: in
       - origin_cut  = the EARLIEST decision instant in the test block.
       - train       = ALL rows whose settle_avail_dt < origin_cut (outcome already KNOWN at decision).
     The bound is fit on train, then applied to test; a NO row is bound-admitted iff
-    min(raw_qlcb_no, realized_lcb(price)) > price+cost. Over-claim residual = mean(realized_lcb - won).
+    min(raw_qlcb_no, realized_lcb(price)) > price+cost (OUT_OF_SUPPORT price -> identity -> stays).
+
+    ARM CRITERION — settlement-graded after-cost EV, NOT a fixed over-claim %. The bound is
+    TIGHTEN-ONLY: bounded-admitted is a SUBSET of the gate's raw admission, so the bound can only
+    REMOVE trades, never add one. Per admitted NO share at as-of price p with fee-adjusted cost c that
+    realizes won in {0,1}, after-cost EV/share = won - c. Arm iff the bound removes a NON-EMPTY set of
+    OOS trades whose aggregate realized after-cost EV is <= 0 — it strips net-losing buy_no and does
+    not sacrifice profit (operator law: positive after-cost EV is the bar; a fixed residual % is not a
+    valid standard). Calibration over-claim (realized_lcb - won) is still reported for context.
 
     NO-LEAK INVARIANT (asserted): max(train.settle_avail_ns) < origin_cut == min(test.decision_ns).
     No training row's outcome settled at/after the simulated decision instant of any test row.
@@ -797,9 +805,14 @@ def walk_forward_arm_gate_noleak(adm: pd.DataFrame, grid: np.ndarray, boot_n: in
     agg_won_sum = 0.0
     agg_resid_sum = 0.0
     origins_with_admits = 0
-    origins_not_overclaiming = 0
     leak_violations = 0
     origins_evaluated = 0
+    # --- after-cost EV accounting (the arm criterion) -------------------------------------------- #
+    ev_raw_sum = 0.0       # sum of (won - cost) over the gate's RAW (unbounded) OOS admits
+    ev_bounded_sum = 0.0   # sum of (won - cost) over the BOUND-admitted OOS subset
+    ev_removed_sum = 0.0   # sum of (won - cost) over rows the bound REMOVED (raw-admit, bound-reject)
+    n_raw = 0
+    n_removed = 0
 
     for i, day in enumerate(days):
         test = adm[adm["dec_day"] == day]
@@ -825,61 +838,82 @@ def walk_forward_arm_gate_noleak(adm: pd.DataFrame, grid: np.ndarray, boot_n: in
         if train["mday"].nunique() < 5 or len(train) < 60:
             rows.append({"origin": day, "train_n": int(len(train)),
                          "train_mdays": int(train["mday"].nunique()), "test_n": int(len(test)),
-                         "bound_admitted": None, "oos_resid_mean": None,
+                         "bound_admitted": None, "oos_resid_mean": None, "ev_removed": None,
                          "admit_lcb_mean": None, "admit_won_mean": None, "note": "INSUFFICIENT_TRAIN"})
             continue
         origins_evaluated += 1
         _, lcb = fit_isotonic_band(train, grid, boot_n=boot_n, seed=SEED + i)
         f = _bound_lcb_fn(grid, lcb)
         admit_lcb, admit_won = [], []
+        o_ev_removed = 0.0
+        o_n_removed = 0
         for _, r in test.iterrows():
-            v = f(float(r["price"]))
-            if v is None:
+            price = float(r["price"])
+            cost = float(r["cost"])
+            won = float(r["won"])
+            if not (float(r["qlcb_no"]) > cost):  # the gate's RAW (unbounded) admission
                 continue
-            corrected = min(float(r["qlcb_no"]), v)
-            if corrected > float(r["cost"]):
-                admit_lcb.append(v)
-                admit_won.append(float(r["won"]))
+            ev_share = won - cost
+            n_raw += 1
+            ev_raw_sum += ev_share
+            v = f(price)
+            # OUT_OF_SUPPORT (v is None) -> runtime returns identity -> the row STAYS admitted.
+            corrected = float(r["qlcb_no"]) if v is None else min(float(r["qlcb_no"]), v)
+            if corrected > cost:
+                ev_bounded_sum += ev_share
+                if v is not None:
+                    admit_lcb.append(v)
+                    admit_won.append(won)
+            else:
+                ev_removed_sum += ev_share
+                o_ev_removed += ev_share
+                o_n_removed += 1
+                n_removed += 1
         n_adm = len(admit_lcb)
-        if n_adm == 0:
-            rows.append({"origin": day, "train_n": int(len(train)),
-                         "train_mdays": int(train["mday"].nunique()), "test_n": int(len(test)),
-                         "bound_admitted": 0, "oos_resid_mean": None,
-                         "admit_lcb_mean": None, "admit_won_mean": None, "note": ""})
-            continue
-        lcb_arr = np.array(admit_lcb)
-        won_arr = np.array(admit_won)
-        resid_sum = float(np.sum(lcb_arr - won_arr))
-        resid_mean = float(np.mean(lcb_arr - won_arr))
-        agg_resid_sum += resid_sum
-        agg_admit += n_adm
-        agg_lcb_sum += float(lcb_arr.sum())
-        agg_won_sum += float(won_arr.sum())
-        origins_with_admits += 1
-        if resid_mean <= 0.01:
-            origins_not_overclaiming += 1
+        if n_adm:
+            lcb_arr = np.array(admit_lcb)
+            won_arr = np.array(admit_won)
+            agg_resid_sum += float(np.sum(lcb_arr - won_arr))
+            agg_admit += n_adm
+            agg_lcb_sum += float(lcb_arr.sum())
+            agg_won_sum += float(won_arr.sum())
+            origins_with_admits += 1
+            resid_mean = float(np.mean(lcb_arr - won_arr))
+            lm = round(float(lcb_arr.mean()), 4)
+            wm = round(float(won_arr.mean()), 4)
+        else:
+            resid_mean, lm, wm = None, None, None
         rows.append({"origin": day, "train_n": int(len(train)),
                      "train_mdays": int(train["mday"].nunique()), "test_n": int(len(test)),
-                     "bound_admitted": int(n_adm), "oos_resid_mean": round(resid_mean, 4),
-                     "admit_lcb_mean": round(float(lcb_arr.mean()), 4),
-                     "admit_won_mean": round(float(won_arr.mean()), 4), "note": ""})
+                     "bound_admitted": int(n_adm),
+                     "oos_resid_mean": (round(resid_mean, 4) if resid_mean is not None else None),
+                     "ev_removed": round(o_ev_removed, 4), "n_removed": o_n_removed,
+                     "admit_lcb_mean": lm, "admit_won_mean": wm, "note": ""})
 
     overall_resid_mean = (agg_lcb_sum - agg_won_sum) / agg_admit if agg_admit else None
+    ev_raw_mean = (ev_raw_sum / n_raw) if n_raw else None
+    ev_bounded_mean = (ev_bounded_sum / agg_admit) if agg_admit else None
+    ev_removed_mean = (ev_removed_sum / n_removed) if n_removed else None
     summary = {
         "origins_evaluated": origins_evaluated,
         "origins_with_admits": origins_with_admits,
-        "origins_not_overclaiming": origins_not_overclaiming,
         "total_bound_admitted_oos": agg_admit,
-        "oos_resid_sum_total": round(agg_resid_sum, 4),
+        "total_raw_admitted_oos": n_raw,
+        "n_removed_oos": n_removed,
         "oos_resid_mean_total": (round(overall_resid_mean, 4) if overall_resid_mean is not None else None),
+        # after-cost EV (the arm evidence): raw gate vs bound, and the EV of what the bound stripped.
+        "ev_raw_after_cost_sum": round(ev_raw_sum, 4),
+        "ev_bounded_after_cost_sum": round(ev_bounded_sum, 4),
+        "ev_removed_after_cost_sum": round(ev_removed_sum, 4),
+        "ev_raw_after_cost_mean": (round(ev_raw_mean, 5) if ev_raw_mean is not None else None),
+        "ev_bounded_after_cost_mean": (round(ev_bounded_mean, 5) if ev_bounded_mean is not None else None),
+        "ev_removed_after_cost_mean": (round(ev_removed_mean, 5) if ev_removed_mean is not None else None),
+        "ev_improvement_after_cost": round(ev_bounded_sum - ev_raw_sum, 4),  # = -ev_removed_sum
         "leak_violations": leak_violations,
         "settle_lag_h": SETTLE_LAG_H,
-        "arm_eligible": bool(
-            agg_admit > 0
-            and overall_resid_mean is not None and overall_resid_mean <= 0.01
-            and origins_with_admits > 0
-            and origins_not_overclaiming >= (origins_with_admits + 1) // 2
-        ),
+        # ARM iff the tighten-only block strips a non-empty OOS set whose aggregate realized after-cost
+        # EV is <= 0 — it removes net-losing buy_no and never sacrifices profit. No fixed-% gate.
+        "arm_eligible": bool(n_removed > 0 and ev_removed_sum <= 1e-9),
     }
     return rows, summary
 
@@ -1072,11 +1106,15 @@ def main():
         ba = "-" if r["bound_admitted"] is None else str(r["bound_admitted"])
         print(f"    {r['origin']:12s} {r['train_n']:5d} {r['train_mdays']:5d} {r['test_n']:4d} "
               f"{ba:>5s} {lm:>8s} {wm:>8s} {rm:>10s}  {r.get('note','')}")
-    print(f"    OOS TOTAL: admitted={wf_summary['total_bound_admitted_oos']}  "
-          f"resid_sum={wf_summary['oos_resid_sum_total']:+.4f}  "
+    print(f"    OOS TOTAL: raw_admit={wf_summary['total_raw_admitted_oos']} -> "
+          f"bound_admit={wf_summary['total_bound_admitted_oos']} (removed={wf_summary['n_removed_oos']})  "
           f"resid_mean={wf_summary['oos_resid_mean_total']}  "
-          f"origins_safe={wf_summary['origins_not_overclaiming']}/{wf_summary['origins_with_admits']}  "
-          f"leak_violations={wf_summary['leak_violations']}  "
+          f"leak_violations={wf_summary['leak_violations']}")
+    print(f"    AFTER-COST EV (the arm evidence): raw_sum={wf_summary['ev_raw_after_cost_sum']:+.4f} -> "
+          f"bound_sum={wf_summary['ev_bounded_after_cost_sum']:+.4f}  "
+          f"removed_sum={wf_summary['ev_removed_after_cost_sum']:+.4f} "
+          f"(mean={wf_summary['ev_removed_after_cost_mean']})  "
+          f"improvement={wf_summary['ev_improvement_after_cost']:+.4f}  "
           f"ARM_ELIGIBLE={wf_summary['arm_eligible']}")
 
     armed_sides = ["buy_no"] if wf_summary["arm_eligible"] else []
