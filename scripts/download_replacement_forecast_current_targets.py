@@ -261,8 +261,8 @@ def _resolve_anchor_payload(
       * rung 1: HTTP 400 (run-not-yet-served), 429, and 5xx degrade to rung 2; auth/client
         defects re-raise.
       * rung 2: meta REFUSAL (ValueError: provider declares an older run; never weakened),
-        transport errors, provider rate limits, retry exhaustion, and 5xx degrade to rung 3.
-        Other 4xx responses on meta are client-side defects and re-raise.
+        transport errors, provider rate limits, quota cooldown, retry exhaustion, and 5xx
+        degrade to rung 3. Other 4xx responses on meta are client-side defects and re-raise.
       * rung 3: serves only cross-check-whitelisted cities for the bucket-declared wanted run
         with every needed timestep present; otherwise BucketTransportNotAdmissible.
     """
@@ -275,6 +275,9 @@ def _resolve_anchor_payload(
         return (
             "429" in text
             or "too many requests" in text
+            or "quota exhausted" in text
+            or "temporarily blocked" in text
+            or "cooldown" in text
             or "exhausted retries" in text
             or "rate limit" in text
         )
