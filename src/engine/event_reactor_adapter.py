@@ -14521,10 +14521,17 @@ def _market_analysis_from_event_snapshot(
         # distributions, not remaining-day pools. The absorbing mask below still
         # applies, and the day0 bootstrap sampler draws from the SAME members.
         _day0_rd_members = None
-        if family.event_type == "DAY0_EXTREME_UPDATED" and _day0_remaining_day_q_enabled():
+        _day0_rd_required = (
+            family.event_type == "DAY0_EXTREME_UPDATED" and _day0_remaining_day_q_enabled()
+        )
+        if _day0_rd_required:
             _day0_rd_members = _day0_remaining_day_members(
                 payload=payload, family=family, unit=unit, decision_time=decision_time
             )
+            if _day0_rd_members is None:
+                payload["_edli_day0_q_mode"] = "remaining_day_unavailable"
+                payload["_edli_day0_q_block_reason"] = "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+                raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
         if _day0_rd_members is not None:
             members = _day0_rd_members
             _bias_corrected = False
@@ -16287,9 +16294,10 @@ def _day0_remaining_day_q_enabled() -> bool:
 
     Unlike the conservative-only guards (boundary suppression, anomaly pause,
     bootstrap LCB), this CHANGES the day0 point q in both directions (it can
-    RAISE q for the bin containing the running extreme post-peak). It must be
-    operator-flipped only after non-live telemetry receipts comparing
-    _edli_day0_q_mode=remaining_day vs the legacy full-day-masked q look sane.
+    RAISE q for the bin containing the running extreme post-peak). When this is
+    enabled, missing/unavailable remaining-day vectors are a live input fault:
+    the Day0 q path blocks instead of falling back to the legacy full-day-masked
+    distribution.
     """
     try:
         return bool(settings["edli"].get("day0_remaining_day_q_enabled", False))
@@ -16305,8 +16313,9 @@ def _day0_remaining_day_members(
     decision_time: "datetime | None",
 ) -> "np.ndarray | None":
     """Pooled per-model remaining-day extremes in the NATIVE unit, clamped to
-    the absorbing physical law. None (-> legacy full-day path) when no fresh
-    persisted high-res vectors exist for this family.
+    the absorbing physical law. None means no fresh persisted high-res vectors
+    exist for this family; callers that require remaining-day mode must block
+    rather than fall back to an incompatible full-day distribution.
 
     Source: day0_hourly_vectors lane (degC storage; converted here at the
     consumption seam). Clamp: HIGH max(value, running max); LOW min(value,
@@ -16345,11 +16354,11 @@ def _day0_remaining_day_members(
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
         return values
-    except Exception as exc:  # noqa: BLE001 — degrade LOUDLY to the full-day path
+    except Exception as exc:  # noqa: BLE001 — report unavailable vectors at the seam
         import logging as _logging
 
         _logging.getLogger("zeus.day0_remaining_day").warning(
-            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s — full-day fallback",
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s",
             getattr(family, "city", "?"), getattr(family, "target_date", "?"),
             type(exc).__name__, exc,
         )

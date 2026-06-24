@@ -291,6 +291,18 @@ def _drive(family, proofs, payload, *, decision_time=DECISION_TIME, extra_exposu
     )
 
 
+def _fully_licensed_reliability_cells(guard_mod, *, hit_rate: float = 0.95) -> dict[str, tuple[int, float]]:
+    """Active-valid OOF guard table covering both live precision classes."""
+    cells: dict[str, tuple[int, float]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for pos in ("modal", "nonmodal"):
+                for precision in ("fine_nest", "coarse_global"):
+                    for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                        cells[f"high|{lead}|{side}|{pos}|qb{qb}|{precision}"] = (1000, hit_rate)
+    return cells
+
+
 # ===========================================================================
 # BLOCKER 1 — live==replay forecast-case (source-cycle, emos_season, 24h bucket).
 # ===========================================================================
@@ -495,12 +507,7 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
 
     _install_sigma_floor_artifact(monkeypatch, tmp_path)
 
-    reliability_cells: dict[str, tuple[int, float]] = {}
-    for lead in ("L1", "L2_3", "L4P"):
-        for side in ("YES", "NO"):
-            for pos in ("modal", "nonmodal"):
-                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
-                    reliability_cells[f"high|{lead}|{side}|{pos}|qb{qb}"] = (1000, 0.95)
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
@@ -546,12 +553,7 @@ def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypa
 
     _install_sigma_floor_artifact(monkeypatch, tmp_path)
 
-    reliability_cells: dict[str, tuple[int, float]] = {}
-    for lead in ("L1", "L2_3", "L4P"):
-        for side in ("YES", "NO"):
-            for pos in ("modal", "nonmodal"):
-                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
-                    reliability_cells[f"high|{lead}|{side}|{pos}|qb{qb}"] = (1000, 0.95)
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
@@ -595,12 +597,7 @@ def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypa
     """
     from src.decision import qlcb_reliability_guard as guard_mod
 
-    reliability_cells: dict[str, tuple[int, float]] = {}
-    for lead in ("L1", "L2_3", "L4P"):
-        for side in ("YES", "NO"):
-            for pos in ("modal", "nonmodal"):
-                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
-                    reliability_cells[f"high|{lead}|{side}|{pos}|qb{qb}"] = (1000, 0.95)
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)

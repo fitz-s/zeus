@@ -72,14 +72,19 @@ def fetch(
                     else DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
                 )
                 quota_tracker.note_rate_limited(int(wait))
+                if fast_fail_429:
+                    logger.warning(
+                        "Open-Meteo 429 on attempt %d%s — fast-fail to fallback ladder; no client sleep",
+                        attempt + 1,
+                        f" [{endpoint_label}]" if endpoint_label else "",
+                    )
+                    resp.raise_for_status()
                 logger.warning(
                     "Open-Meteo 429 on attempt %d%s — waiting %.0fs",
                     attempt + 1,
                     f" [{endpoint_label}]" if endpoint_label else "",
                     wait,
                 )
-                if fast_fail_429:
-                    resp.raise_for_status()
                 time.sleep(wait)
                 continue
 

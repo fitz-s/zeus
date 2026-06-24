@@ -13503,7 +13503,7 @@ def test_openmeteo_quota_cooldown_blocks_after_429():
     assert tracker.can_call() is False
 
 
-def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch):
+def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch, caplog):
     class _Resp:
         status_code = 429
         headers: dict[str, str] = {}
@@ -13518,7 +13518,7 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch)
     monkeypatch.setattr(openmeteo_client.httpx, "get", lambda *a, **k: _Resp())
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda seconds: slept.append(float(seconds)))
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with caplog.at_level("WARNING", logger="src.data.openmeteo_client"), pytest.raises(httpx.HTTPStatusError):
         openmeteo_client.fetch(
             "https://x",
             {},
@@ -13528,6 +13528,9 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch)
         )
 
     assert slept == []
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "fast-fail to fallback ladder; no client sleep" in messages
+    assert "waiting" not in messages
 
 
 def test_fetch_ensemble_caches_identical_request(monkeypatch):

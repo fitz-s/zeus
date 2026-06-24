@@ -10,16 +10,16 @@
 Contracts:
   R9.  PERSISTENCE: hourly vectors round-trip (degC storage law), idempotent
        on (model, city, date, captured_at), retention prunes old rows, stale
-       vectors (> max_age) are NOT served to the q path (fail-closed to the
-       legacy full-day path).
+       vectors (> max_age) are NOT served to the q path. When remaining-day
+       mode is required by live Day0, unavailable vectors block the q seam.
   R10. REMAINING-DAY SELECTION: only hours of the local target day AT/AFTER
        now contribute; a model whose remaining window is empty contributes
        nothing.
   R11. POST-PEAK REPRICING: with all remaining-hours temps at/below the
        running max, the pooled members clamp to the floor — the floor bin
-       gets ~all q mass and bins above get ~none (the exact category the
-       full-day-masked q got wrong). Flag default OFF; flag OFF leaves the
-       legacy path untouched.
+      gets ~all q mass and bins above get ~none (the exact category the
+      full-day-masked q got wrong). Flag default OFF; flag OFF leaves the
+      legacy path untouched; flag ON must not fall back to it.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from src.contracts.execution_price import ExecutionPrice as EP
 from src.data.day0_hourly_vectors import (
     Day0HourlyVector,
     parse_openmeteo_hourly_payload,
@@ -37,6 +38,7 @@ from src.data.day0_hourly_vectors import (
     read_freshest_day0_hourly_vectors,
     remaining_day_extremes_c,
 )
+from src.types.market import Bin
 
 UTC = timezone.utc
 
@@ -144,7 +146,7 @@ class TestPersistence:
 
     def test_stale_vectors_are_not_served(self):
         """R9 freshness gate: a 5h-old run must NOT masquerade as the current
-        remaining-day distribution (fail-closed to the legacy path)."""
+        remaining-day distribution."""
         conn = _conn()
         v = _vector(captured_at=datetime(2026, 6, 10, 4, 0, tzinfo=UTC))
         persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test", now=PRUNE_NOW)
@@ -210,7 +212,8 @@ class TestRemainingDayMembers:
     def test_flag_default_off(self, monkeypatch):
         """The CODE default for the remaining-day q flag is OFF: when the
         `edli.day0_remaining_day_q_enabled` key is absent, the resolver returns
-        False (fail-closed to the legacy full-day path).
+        False. Flag-OFF compatibility is the only place the legacy full-day path
+        may still run; flag-ON unavailable vectors must block the live Day0 q seam.
 
         Test updated 2026-06-15: the original read the LIVE config value, which
         the operator has since flipped ON (config/settings.json, commit b2c052f8
@@ -294,7 +297,7 @@ class TestRemainingDayMembers:
         assert members is not None
         assert members[0] == pytest.approx(25.0 * 9 / 5 + 32)
 
-    def test_no_vectors_returns_none_full_day_fallback(self, monkeypatch):
+    def test_no_vectors_returns_none_for_required_caller_to_block(self, monkeypatch):
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
             lambda **kw: [],
@@ -305,6 +308,75 @@ class TestRemainingDayMembers:
             payload={"metric": "high", "rounded_value": 25.0}, family=self._family(),
             unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         ) is None
+
+    def test_live_remaining_day_unavailable_blocks_before_legacy_fallback(self, monkeypatch):
+        """When live Day0 remaining-day mode is enabled, missing vectors are an
+        input fault. The q seam must not continue into bias/Platt full-day q."""
+        import src.engine.event_reactor_adapter as era
+
+        bins = [Bin(25, 25, "C", "25°C"), Bin(26, None, "C", "26°C or higher")]
+        candidates = [
+            SimpleNamespace(
+                condition_id=f"cond-{i}",
+                bin=b,
+                yes_token_id=f"yes-{i}",
+                no_token_id=f"no-{i}",
+            )
+            for i, b in enumerate(bins)
+        ]
+        family = SimpleNamespace(
+            city="Paris",
+            metric="high",
+            target_date="2026-06-10",
+            event_type="DAY0_EXTREME_UPDATED",
+            bins=bins,
+            candidates=candidates,
+            yes_token_ids=[f"yes-{i}" for i in range(len(bins))],
+            no_token_ids=[f"no-{i}" for i in range(len(bins))],
+            family_id="day0-test-fam",
+        )
+        native_costs = {
+            (f"cond-{i}", side): (
+                None,
+                EP(price, "ask", fee_deducted=True, currency="probability_units"),
+                price,
+                None,
+                None,
+            )
+            for i in range(len(bins))
+            for side, price in (("buy_yes", 0.25), ("buy_no", 0.75))
+        }
+        payload = {"metric": "high", "rounded_value": 25.0}
+        snapshot = {
+            "settlement_unit": "C",
+            "temperature_metric": "high",
+            "members_json": "[24.0, 25.0, 26.0, 27.0]",
+            "members_precision": 1.0,
+            "source_id": "test",
+            "issue_time": "2026-06-10T00:00:00+00:00",
+            "dataset_id": "test_v1",
+            "data_version": "test_v1",
+        }
+
+        monkeypatch.setattr(era, "_day0_remaining_day_q_enabled", lambda: True)
+        monkeypatch.setattr(era, "_day0_remaining_day_members", lambda **kw: None)
+
+        def _legacy_fallback_called(*args, **kwargs):
+            raise AssertionError("legacy Day0 full-day fallback was called")
+
+        monkeypatch.setattr(era, "_maybe_apply_edli_bias_correction", _legacy_fallback_called)
+
+        with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
+            era._market_analysis_from_event_snapshot(
+                calibration_conn=sqlite3.connect(":memory:"),
+                snapshot=snapshot,
+                family=family,
+                native_costs=native_costs,
+                payload=payload,
+                decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            )
+        assert payload["_edli_day0_q_mode"] == "remaining_day_unavailable"
+        assert payload["_edli_day0_q_block_reason"] == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
 
 
 # ===========================================================================
