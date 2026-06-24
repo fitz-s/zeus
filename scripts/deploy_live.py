@@ -10,10 +10,10 @@
 #   into live money.
 """deploy_live — make live daemon restarts safe (deploy/dev split).
 
-The Zeus daemons run from the LIVE main checkout at /Users/leofitz/zeus.
-Restarting a daemon boots whatever is on disk THERE — so a kickstart while
+The Zeus daemon launchd plists define the checkout that live code boots from.
+Restarting a daemon boots whatever is on disk there — so a kickstart while
 that tree has uncommitted or unpushed runtime code ships half-finished work
-into live money. This tool gates the restart.
+into live money. This tool gates the restart against that same checkout.
 
 COMMANDS
     deploy_live.py status
@@ -50,11 +50,34 @@ from __future__ import annotations
 
 import argparse
 import os
+import plistlib
 import subprocess
 import sys
+from pathlib import Path
 
-# The LIVE checkout the daemons boot from (NOT this worktree).
-LIVE_REPO = "/Users/leofitz/zeus"
+LIVE_TRADING_PLIST = (
+    Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
+)
+
+
+def _resolve_live_repo() -> str:
+    """Return the checkout that launchd will execute for live trading."""
+
+    explicit = os.environ.get("ZEUS_LIVE_REPO")
+    if explicit:
+        return str(Path(explicit).expanduser().resolve())
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST.read_bytes())
+    except Exception:
+        return "/Users/leofitz/zeus"
+    working_dir = payload.get("WorkingDirectory")
+    if isinstance(working_dir, str) and working_dir.strip():
+        return str(Path(working_dir).expanduser().resolve())
+    return "/Users/leofitz/zeus"
+
+
+# The LIVE checkout the daemon boots from. Tests may still monkeypatch this.
+LIVE_REPO = _resolve_live_repo()
 
 # launchd GUI domain for the operator user (gui/<uid>); ZEUS_GUI_DOMAIN overrides.
 GUI_DOMAIN = os.environ.get("ZEUS_GUI_DOMAIN") or f"gui/{os.getuid()}"

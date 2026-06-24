@@ -326,6 +326,20 @@ def test_deploy_live_knows_sidecar_labels():
     assert "deploy/launchd/" in dl.RUNTIME_PATHSPECS
 
 
+def test_deploy_live_resolves_repo_from_live_trading_plist(tmp_path, monkeypatch):
+    dl = _load("deploy_live_plist_repo", "deploy_live.py")
+    import plistlib
+
+    live_repo = tmp_path / "live-main"
+    live_repo.mkdir()
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_bytes(plistlib.dumps({"WorkingDirectory": str(live_repo)}))
+    monkeypatch.delenv("ZEUS_LIVE_REPO", raising=False)
+    monkeypatch.setattr(dl, "LIVE_TRADING_PLIST", plist)
+
+    assert dl._resolve_live_repo() == str(live_repo.resolve())
+
+
 def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
     """The clean-tree gate refuses a dirty/unpushed checkout and respects --allow-dirty."""
     dl = _load("deploy_live_smoke2", "deploy_live.py")
