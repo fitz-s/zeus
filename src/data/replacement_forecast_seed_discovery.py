@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
@@ -203,6 +203,7 @@ def _latest_manifest(
     city: str,
     target_date: str,
     city_timezone: str | None = None,
+    cycle_admissible: Callable[[RawForecastArtifactManifest], bool] | None = None,
 ) -> RawForecastArtifactManifest | None:
     candidates = [
         manifest
@@ -211,6 +212,7 @@ def _latest_manifest(
         and _manifest_allows_city(manifest, city=city)
         and _manifest_allows_target_date(manifest, target_date=target_date)
         and _manifest_materialization_inputs_valid(manifest)
+        and (cycle_admissible is None or cycle_admissible(manifest))
     ]
     if not candidates:
         return None
@@ -314,6 +316,58 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
 
 def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _fusion_current_values_schema_ready(conn: sqlite3.Connection) -> bool:
+    if "raw_model_forecasts" not in _table_names(conn):
+        return False
+    required = {
+        "raw_model_forecast_id",
+        "model",
+        "forecast_value_c",
+        "lead_days",
+        "city",
+        "metric",
+        "target_date",
+        "source_cycle_time",
+        "endpoint",
+    }
+    return required.issubset(_columns(conn, "raw_model_forecasts"))
+
+
+def _manifest_cycle_has_fusion_current_values(
+    conn: sqlite3.Connection,
+    manifest: RawForecastArtifactManifest,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+) -> bool | None:
+    """Return whether this manifest cycle can actually be fused by the live materializer.
+
+    Seed discovery must not select a newer Open-Meteo anchor cycle unless the
+    same cycle has persisted current model values for the Bayesian precision
+    fusion path. Otherwise discovery creates a live seed that the materializer
+    can only reject with REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET. A
+    missing test/legacy schema is neutral so stripped fixtures keep exercising
+    manifest discovery rather than fusion readiness.
+    """
+
+    if not _fusion_current_values_schema_ready(conn):
+        return None
+    from src.data.replacement_current_value_serving import read_current_instrument_values  # noqa: PLC0415
+
+    try:
+        served = read_current_instrument_values(
+            conn,
+            city=city,
+            metric=metric,
+            target_date=target_date,
+            source_cycle_time_iso=manifest.source_cycle_time.astimezone(UTC).isoformat(),
+        )
+    except Exception:
+        return False
+    return bool(served)
 
 
 def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
@@ -449,6 +503,7 @@ def discover_replacement_forecast_materialization_seeds(
 
             _city_cfg = cities_by_name.get(city)
             _city_tz = str(getattr(_city_cfg, "timezone", "") or "") or None
+            fusion_schema_ready = _fusion_current_values_schema_ready(conn)
             openmeteo = _latest_manifest(
                 manifests,
                 source_id=expected["openmeteo_ifs9_anchor"].source_id,
@@ -456,10 +511,34 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
                 city_timezone=_city_tz,
+                cycle_admissible=(
+                    lambda manifest, _city=city, _target_date=target_date, _metric=metric: bool(
+                        _manifest_cycle_has_fusion_current_values(
+                            conn,
+                            manifest,
+                            city=_city,
+                            target_date=_target_date,
+                            metric=_metric,
+                        )
+                    )
+                )
+                if fusion_schema_ready
+                else None,
             )
             if openmeteo is None:
                 failed.append(target_key)
-                reasons.append("REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING")
+                fallback_manifest = _latest_manifest(
+                    manifests,
+                    source_id=expected["openmeteo_ifs9_anchor"].source_id,
+                    data_version=expected["openmeteo_ifs9_anchor"].data_version,
+                    city=city,
+                    target_date=target_date,
+                    city_timezone=_city_tz,
+                )
+                if fusion_schema_ready and fallback_manifest is not None:
+                    reasons.append("REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING")
+                else:
+                    reasons.append("REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING")
                 continue
             openmeteo_payload = _manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
             precision_metadata = _manifest_path_value(openmeteo, "precision_metadata_json")

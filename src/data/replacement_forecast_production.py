@@ -519,6 +519,54 @@ def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written:
         logger.debug("BAYES_PRECISION_FUSION extras fixpoint record failed (non-fatal)", exc_info=True)
 
 
+def _record_bayes_precision_fusion_capture_health(
+    cfg: dict[str, object],
+    report: dict[str, object],
+) -> None:
+    """Write component health for the BPF capture sub-lane.
+
+    The parent replacement download job can succeed while the BPF capture lane
+    did not actually obtain current-cycle raw-model rows. That is not an OK
+    money-path state: materialization cannot produce a fresh fused posterior
+    without those rows. Keep this separate component fail-closed for preflight.
+    """
+
+    from src.observability.scheduler_health import _write_scheduler_health  # noqa: PLC0415
+
+    status = str(report.get("status") or "")
+    if status == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS":
+        return
+    if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+        cycle_raw = report.get("cycle")
+        try:
+            cycle = datetime.fromisoformat(str(cycle_raw).replace("Z", "+00:00"))
+        except Exception:
+            cycle = None
+        if cycle is not None:
+            _record_extras_fixpoint(
+                cfg,
+                cycle,
+                written=int(report.get("written_row_count", 0) or 0),
+            )
+        unavailable = report.get("global_models_unavailable")
+        if unavailable:
+            _write_scheduler_health(
+                _EXTRAS_FIXPOINT_HEALTH_JOB,
+                failed=True,
+                reason=str(unavailable),
+            )
+            return
+        _write_scheduler_health(_EXTRAS_FIXPOINT_HEALTH_JOB, failed=False)
+        return
+    if status:
+        reason = str(report.get("error") or report.get("detail") or status)
+        _write_scheduler_health(
+            _EXTRAS_FIXPOINT_HEALTH_JOB,
+            failed=True,
+            reason=reason,
+        )
+
+
 def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = None) -> bool:
     """Coverage-aware probe: does ``cycle`` (default: probe-resolved) still need its BPF extras?
 
@@ -956,23 +1004,12 @@ def _replacement_forecast_download_cycle() -> None:
         "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
     }:
         logger.info("BAYES_PRECISION_FUSION extra-model diagnostic capture report: %s", bayes_precision_fusion_capture_report)
-    # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails or is
-    # fail-soft skipped, the parent download job still shows OK in scheduler
-    # health (only the parent download wrapper is tracked by the @_scheduler_job wrapper).
-    # Write a distinct component entry so logs/scheduler_jobs_health.json shows
-    # the degradation and an operator/alert can detect multi-day extras outages.
+    # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails, probe-skips,
+    # or downloads with missing global instruments, the parent download job still
+    # shows OK. Write a distinct component entry so preflight can fail on the
+    # actual fusion-capture state.
     if bayes_precision_fusion_capture_report is not None:
-        _bayes_precision_fusion_status = bayes_precision_fusion_capture_report.get("status", "")
-        _bayes_precision_fusion_failed = _bayes_precision_fusion_status == "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
-        if _bayes_precision_fusion_failed or bayes_precision_fusion_capture_report.get("global_models_unavailable"):
-            from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415
-            _failure_reason = bayes_precision_fusion_capture_report.get("error") or str(
-                bayes_precision_fusion_capture_report.get("global_models_unavailable", "")
-            )
-            _wsh("bayes_precision_fusion_capture", failed=True, reason=_failure_reason)
-        elif _bayes_precision_fusion_status not in {"BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS", ""}:
-            from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415, F811
-            _wsh("bayes_precision_fusion_capture", failed=False)
+        _record_bayes_precision_fusion_capture_health(cfg, bayes_precision_fusion_capture_report)
 
 
 @_scheduler_job("replacement_forecast_live_materialize")
@@ -999,7 +1036,18 @@ def _replacement_forecast_live_materialize_cycle() -> None:
         seed_limit=int(cfg["seed_limit"]),
         limit=int(cfg["limit"]),
     )
-    if report.failed_count:
-        logger.warning("replacement forecast live materialization queue failures: %s", report.as_dict())
-    elif report.processed_count:
-        logger.info("replacement forecast live materialization queue processed: %s", report.as_dict())
+    report_payload = report.as_dict()
+    seed_discovery = report_payload.get("seed_discovery_report")
+    seed_discovery_active = (
+        isinstance(seed_discovery, dict)
+        and (
+            int(seed_discovery.get("discovered_count") or 0) > 0
+            or int(seed_discovery.get("failed_count") or 0) > 0
+        )
+    )
+    if report.failed_count or report.seed_failed_count or (
+        isinstance(seed_discovery, dict) and int(seed_discovery.get("failed_count") or 0) > 0
+    ):
+        logger.warning("replacement forecast live materialization queue failures: %s", report_payload)
+    elif report.processed_count or report.seed_processed_count or seed_discovery_active:
+        logger.info("replacement forecast live materialization queue processed: %s", report_payload)

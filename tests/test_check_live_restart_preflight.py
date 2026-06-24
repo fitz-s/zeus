@@ -153,8 +153,8 @@ def _patch_paths(monkeypatch, tmp_path):
         json.dumps(
             {
                 "cells": {
-                    "high|L1|YES|modal|qb1": {"n": 100, "hit_rate": 0.80},
-                    "high|L1|NO|nonmodal|qb1": {"n": 100, "hit_rate": 0.80},
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                    "high|L1|NO|nonmodal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
                 }
             }
         )
@@ -874,6 +874,81 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
 
 
+def test_active_position_day0_monitor_projection_covers_stale_forecast_belief(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    label = "Will the highest temperature in Houston be 98°F on June 24?"
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'active-day0-pos', 'active', 'Houston', '2026-06-24', 'high',
+            ?, 'buy_no', 9.0, 9.0, 'filled', NULL, 0, NULL,
+            0.9999, 1, 0.998, 1, ?
+        )
+        """,
+        (label, datetime.now(timezone.utc).isoformat()),
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'active-day0-pos', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "applied_validations": [
+                        "belief_source=day0_observation_remaining_window",
+                        "day0_observation_remaining_window",
+                    ]
+                }
+            ),
+        ),
+    )
+    stale = datetime.now(timezone.utc) - timedelta(hours=72)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Houston', '2026-06-24', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            stale.isoformat(),
+            stale.isoformat(),
+            json.dumps({label: 0.15}),
+        ),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.row_factory = sqlite3.Row
+    rows = trade.execute("SELECT * FROM position_current").fetchall()
+    trade.close()
+    forecasts.close()
+
+    result = preflight._belief_check(rows)
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    covered = result.evidence["covered"][0]
+    assert covered["position_id"] == "active-day0-pos"
+    assert covered["freshness_basis"] == "active_day0_monitor_projection"
+    assert covered["monitor_projection"]["source"] == "day0_monitor_observation_authority"
+
+
 def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
     monkeypatch, tmp_path
 ):
@@ -901,7 +976,7 @@ def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
             last_monitor_market_price_is_fresh, updated_at,
             condition_id, token_id, no_token_id
         ) VALUES (
-            'karachi-pos', 'day0_window', 'Karachi', '2026-06-19', 'high',
+            'karachi-pos', 'active', 'Karachi', '2026-06-19', 'high',
             ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
             0.84, 1, 0.72, 1, '2026-06-18T23:00:00+00:00',
             'cond-karachi', 'tok-karachi-yes', 'tok-karachi-no'
@@ -988,7 +1063,7 @@ def test_preflight_blocks_missing_belief_repairable_but_not_materialized(
             last_monitor_market_price_is_fresh, updated_at,
             condition_id, token_id, no_token_id
         ) VALUES (
-            'sh-pos', 'day0_window', 'Shanghai', '2026-06-19', 'high',
+            'sh-pos', 'active', 'Shanghai', '2026-06-19', 'high',
             ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
             0.84, 0, 0.72, 1, '2026-06-19T01:00:00+00:00',
             'cond-sh', 'tok-sh-yes', 'tok-sh-no'

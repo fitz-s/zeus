@@ -36,6 +36,9 @@ def _write_manifest(
     product_id: str,
     data_version: str,
     metadata: dict[str, object],
+    source_cycle_time: str = "2026-06-06T00:00:00+00:00",
+    source_available_at: str = "2026-06-06T02:30:00+00:00",
+    captured_at: str = "2026-06-06T03:00:00+00:00",
 ) -> Path:
     artifact = _write_file(raw_dir / f"{name}.json", {"name": name})
     manifest = RawForecastArtifactManifest.from_file(
@@ -43,9 +46,9 @@ def _write_manifest(
         source_id=source_id,
         product_id=product_id,
         data_version=data_version,
-        source_cycle_time="2026-06-06T00:00:00+00:00",
-        source_available_at="2026-06-06T02:30:00+00:00",
-        captured_at="2026-06-06T03:00:00+00:00",
+        source_cycle_time=source_cycle_time,
+        source_available_at=source_available_at,
+        captured_at=captured_at,
         request_url=f"https://example.invalid/{name}",
         request_params={"name": name},
         product_metadata={"source_run_id": f"{name}-run", **metadata},
@@ -239,6 +242,90 @@ def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_man
     assert seed["openmeteo_payload_json"].endswith("raw/20260607T000000Z/openmeteo.json")
     assert seed["openmeteo_manifest_json"].endswith("raw/20260607T000000Z/openmeteo.manifest.json")
     assert seed["precision_metadata_json"].endswith("raw/20260607T000000Z/precision_metadata.json")
+
+
+def test_seed_discovery_selects_latest_fusion_materializable_cycle(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_file(raw_dir / "precision_metadata.json", {"city": "NYC"})
+    _write_manifest(
+        raw_dir,
+        name="openmeteo-06z",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-06T06:00:00+00:00",
+        source_available_at="2026-06-06T08:30:00+00:00",
+        captured_at="2026-06-06T09:00:00+00:00",
+        metadata={
+            "openmeteo_payload_json": "openmeteo-06z.json",
+            "precision_metadata_json": "precision_metadata.json",
+            "city": "NYC",
+            "target_date": "2026-06-08",
+        },
+    )
+    _write_manifest(
+        raw_dir,
+        name="openmeteo-12z",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-06T12:00:00+00:00",
+        source_available_at="2026-06-06T12:30:00+00:00",
+        captured_at="2026-06-06T12:45:00+00:00",
+        metadata={
+            "openmeteo_payload_json": "openmeteo-12z.json",
+            "precision_metadata_json": "precision_metadata.json",
+            "city": "NYC",
+            "target_date": "2026-06-08",
+        },
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE raw_model_forecasts (
+                raw_model_forecast_id INTEGER PRIMARY KEY,
+                model TEXT NOT NULL,
+                city TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source_cycle_time TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                forecast_value_c REAL NOT NULL,
+                lead_days INTEGER,
+                captured_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                raw_model_forecast_id, model, city, metric, target_date, source_cycle_time,
+                endpoint, forecast_value_c, lead_days, captured_at
+            ) VALUES (
+                1, 'ifs9', 'NYC', 'high', '2026-06-08', '2026-06-06T06:00:00+00:00',
+                'single_runs', 27.0, 2, '2026-06-06T08:00:00+00:00'
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T13:00:00+00:00",
+    )
+
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["openmeteo_source_run_id"] == "openmeteo-06z-run"
+    assert seed["openmeteo_manifest_json"].endswith("openmeteo-06z.manifest.json")
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:

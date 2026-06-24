@@ -4379,6 +4379,63 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     assert "model_divergence_panic_inapplicable:day0_absorbing_hard_fact" in pos.applied_validations
 
 
+def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
+    """Active same-day positions must not wait for phase transition before hard-fact overlay."""
+    from src.engine import monitor_refresh
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    pos = _make_position(
+        state="holding",
+        city="Tokyo",
+        cluster="East Asia",
+        target_date="2026-06-18",
+        bin_label="21°C on June 18?",
+        direction="buy_no",
+        temperature_metric="low",
+        unit="C",
+        entry_method="ens_member_counting",
+        selected_method="",
+        applied_validations=[],
+        entry_price=0.58,
+        p_posterior=0.720612963366361,
+        token_id="tok_yes_tokyo_low_21",
+        no_token_id="tok_no_tokyo_low_21",
+    )
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            assert token_id == "tok_no_tokyo_low_21"
+            return 0.99, 1.00, 100.0, 100.0
+
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda *, position, city, now=None, world_conn=None: HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="running low extreme 20 killed bin [21.0,21.0]",
+            metric="low",
+            rounded_extreme=20.0,
+            source="metar_fast_lane",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.position_belief.load_replacement_belief",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("replacement posterior must not be read before active same-day hard fact")
+        ),
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    assert str(pos.state.value if hasattr(pos.state, "value") else pos.state) == "holding"
+    assert pos.selected_method == monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert pos.last_monitor_prob_is_fresh is True
+    assert pos.last_monitor_prob == pytest.approx(1.0)
+    assert edge_ctx.p_posterior == pytest.approx(1.0)
+    assert monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT in pos.applied_validations
+    assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
+
+
 def test_day0_high_morning_observation_is_not_exit_authority():
     """A local-day running HIGH near midnight is not the day's final high authority."""
     from src.engine import monitor_refresh

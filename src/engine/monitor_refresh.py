@@ -3010,8 +3010,6 @@ def _day0_absorbing_hard_fact_overlay(
 ) -> tuple[float, Position, bool] | None:
     """Return exact monitor belief when a qualified Day0 hard fact is absorbing."""
 
-    if _position_state_value(pos) != "day0_window":
-        return None
     if not _is_position_target_local_day(pos, city, target_d):
         return None
     metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()

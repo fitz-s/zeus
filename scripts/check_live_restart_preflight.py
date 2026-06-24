@@ -1243,18 +1243,21 @@ def _latest_monitor_projection_evidence(
     """
 
     now = datetime.now(timezone.utc)
-    with _connect_live_ro() as conn:
-        row = conn.execute(
-            """
-            SELECT occurred_at, payload_json
-              FROM position_events
-             WHERE position_id = ?
-               AND event_type = 'MONITOR_REFRESHED'
-             ORDER BY datetime(occurred_at) DESC, sequence_no DESC
-             LIMIT 1
-            """,
-            (position_id,),
-        ).fetchone()
+    try:
+        with _connect_live_ro() as conn:
+            row = conn.execute(
+                """
+                SELECT occurred_at, payload_json
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'MONITOR_REFRESHED'
+                 ORDER BY datetime(occurred_at) DESC, sequence_no DESC
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
     if row is None:
         return None
     occurred_at = str(row["occurred_at"] or "")
@@ -1365,6 +1368,21 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
                 )
                 continue
             risky.append({**item, "risk": "day0_monitor_observation_belief_missing_or_stale"})
+            continue
+
+        active_day0_monitor_evidence = _latest_monitor_projection_evidence(
+            str(row["position_id"] or ""),
+            day0_required=True,
+        )
+        if active_day0_monitor_evidence is not None:
+            covered.append(
+                {
+                    **item,
+                    "fresh": True,
+                    "freshness_basis": "active_day0_monitor_projection",
+                    "monitor_projection": active_day0_monitor_evidence,
+                }
+            )
             continue
 
         belief = load_replacement_belief(
