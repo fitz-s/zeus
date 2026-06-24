@@ -32,14 +32,16 @@ read-only by ``src/decision/selection_curse_bound_loader.py``.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional
 
 # Basis tags travel on the decision/order receipt so settlement can audit which rule bound (or none).
 BOUND_ABSENT = "BOUND_ABSENT"
 SIDE_NOT_ARMED = "SIDE_NOT_ARMED"
 OUT_OF_SUPPORT = "OUT_OF_SUPPORT"
 BUY_YES_IDENTITY = "BUY_YES_IDENTITY"
+INVALID_INPUT = "INVALID_INPUT"
 
 
 @dataclass(frozen=True)
@@ -104,14 +106,30 @@ def corrected_side_q_lcb(
     an absent/unarmed bound, or a price outside training support all return ``raw_q_lcb`` unchanged
     with the corresponding basis tag (never raises, never fabricates).
     """
+    # Non-finite / non-numeric inputs -> identity (never raise into the live gate, never deflate on
+    # a garbage price). raw_q_lcb must be finite to compare; price must be finite to interpolate.
+    try:
+        raw = float(raw_q_lcb)
+        px = float(price)
+    except (TypeError, ValueError):
+        return _safe_float(raw_q_lcb), INVALID_INPUT
+    if not (math.isfinite(raw) and math.isfinite(px)):
+        return (raw if math.isfinite(raw) else _safe_float(raw_q_lcb)), INVALID_INPUT
     s = str(side or "").strip().lower()
     if s == "buy_yes":
-        return float(raw_q_lcb), BUY_YES_IDENTITY
+        return raw, BUY_YES_IDENTITY
     if bound is None:
-        return float(raw_q_lcb), BOUND_ABSENT
+        return raw, BOUND_ABSENT
     if s not in bound.armed_sides:
-        return float(raw_q_lcb), SIDE_NOT_ARMED
-    lcb = _interp_lcb(bound, float(price))
+        return raw, SIDE_NOT_ARMED
+    lcb = _interp_lcb(bound, px)
     if lcb is None:
-        return float(raw_q_lcb), OUT_OF_SUPPORT
-    return min(float(raw_q_lcb), float(lcb)), f"SELECTION_CURSE:{s}"
+        return raw, OUT_OF_SUPPORT
+    return min(raw, float(lcb)), f"SELECTION_CURSE:{s}"
+
+
+def _safe_float(x: object) -> float:
+    try:
+        return float(x)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")

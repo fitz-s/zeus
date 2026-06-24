@@ -382,6 +382,9 @@ def selection_calibrated_admission_q_lcb(
         # curse site — the gate admits mid-price buy_no whose realized rate (~0.69) is well below its
         # claim (~0.83)). min() with the prior path: both only TIGHTEN. Absent/unarmed/out-of-support
         # -> raw (identity). See src/decision/selection_curse_bound.py + the counterfactual evidence.
+        # PRICE BASIS: the bound is keyed on the RAW own-side ask. own_side_cost here is the candidate
+        # execution_price (the raw native ask — distinct from the fee-adjusted c_cost_95pct), matching
+        # the fitter's no_ask x-axis. The taker seams likewise pass the raw fresh ask. One basis.
         if own_side_cost is not None and math.isfinite(float(own_side_cost)):
             from src.decision.selection_curse_bound import corrected_side_q_lcb
             from src.decision.selection_curse_bound_loader import load_bound

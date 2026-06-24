@@ -65,23 +65,40 @@ precision. (`source_match_rematerialization.md`, `scma_dataset_build.md`.)
 - Fitter: `scripts/fit_selection_curse_bound.py` (re-materialize ledger → PAVA + bootstrap LCB →
   walk-forward arm gate → `state/selection_curse_bound.json`). Allowlisted (read_only_ro_uri).
 
-## Artifact + validation
+## Artifact + validation — NOT ARM-SAFE (2026-06-24 no-leak re-validation)
 
-`state/selection_curse_bound.json`: armed `buy_no` only; 11 price knots 0.50→1.00; realized_lcb
-0.55→0.437, 0.70→0.647, 0.85→0.900, ≥0.90→1.0 (monotone). Walk-forward OOS over-claim **+0.002**.
-End-to-end: buy_no @0.60/0.70/0.80 self-rejects (corrected < cost); ≥0.85 favorites admit; buy_yes
-identity. Inert until present: absent artifact → identity, so deploying the code is a no behavior
-swing until the artifact is placed.
+The mechanism (estimator + loader + 4 seams) is built, reviewed (PR #419 frontier review), hardened
+(mtime-aware loader, fail-soft seams, non-finite guards), and **tighten-only**. But the ARMING claim
+did NOT survive a settlement-leak-free walk-forward and the bound ships **unarmed** (`armed_sides=[]`):
 
-## Caveats (bound, not deny — arm with forward-monitoring)
+- The prior "armed buy_no, OOS over-claim **+0.002**" was a **settlement-availability LEAK artifact**:
+  the committed walk-forward gated origins on `target_date < d`, training on markets whose outcomes had
+  not settled at the simulated decision. Apples-to-apples, the leaked gate reproduces +0.002/ARM=True;
+  the no-leak gate (`settle_avail < decision`) gives **+0.0324 / ARM=False** (identity; +0.0373
+  fitted-k) — 3.2× over the +0.01 bar, driven by the real mid-price curse at the thick early-June
+  origins (06-02 +0.057, 06-04 +0.096).
+- **`settled_at` is corrupt** (bulk-backfilled: 71% of in-window rows = constant 2026-06-24, median lag
+  ~21 days — physically impossible; `recorded_at` only spans 06-15..06-24). There is NO trustworthy
+  settlement-availability timestamp in the DB, so the no-leak fit must rest on a deterministic proxy
+  (`target_local_day_END + 24h`), and the arm verdict is **fragile to that proxy** (0h→arm, 24h→no-arm,
+  48h→arm). An arm decision that flips on a ±1-day proxy is not arm-safe.
 
-1. **Single season:** the priced window (executable_market_snapshots) starts 2026-05-15 → 5.4 weeks,
-   2 calendar months. Within-window walk-forward generalizes (±0.01); cross-season is unproven.
-   Re-run the fitter as the price archive extends; monitor forward before trusting cross-season.
-2. **33 market-days** drive the 1,254 admissions (cluster-weighted; effective N ≈ tens of
-   market-days). Fit at price/side level only — a per-(city,price) cell would re-hit the thin wall.
+The full-set `realized_lcb` curve is unchanged (the no-leak fix touches only the arm gate, not the
+fit) — the curse is a **real empirical signal** (monotone in price; favorites ≥0.95 calibrated) — it
+is simply not walk-forward-arm-safe on this evidence. The fitter is self-protecting: it emits
+`armed_sides=[]`, so placing the artifact is inert for buy_no (`SIDE_NOT_ARMED` → identity).
+
+## Disposition: ship UNARMED + the real blocker is a data fix
+
+- Merge the **inert** mechanism (reviewed, hardened, tighten-only); it changes nothing live (gate is
+  identity for an unarmed side / absent artifact).
+- **To ever arm:** fix the `settled_at` ingestion (a real settlement-availability timestamp), accrue
+  forward settlement, then re-run the no-leak fitter; arm only if it clears +0.01 without resting on a
+  proxy knife-edge. Shadow-log forward meanwhile.
+- The shape (curse grows as NO cheapens; favorites calibrated) is the durable finding to revisit.
 
 ## Revert
 
-Remove `state/selection_curse_bound.json` (→ identity, instant) or re-checkout the touched files +
-restart. The correction only ever tightens, so reverting can only re-admit (never blocks more).
+The mechanism is inert when `armed_sides` is empty / artifact absent. Remove
+`state/selection_curse_bound.json` → identity on the next decision (mtime-aware loader, no restart),
+or re-checkout the touched files. Tighten-only → reverting can only re-admit, never block more.

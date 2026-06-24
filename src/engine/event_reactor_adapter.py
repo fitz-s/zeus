@@ -5079,15 +5079,25 @@ def _event_bound_q_exec_lcb(
     fresh re-eval (_fresh_rest_then_cross_mode), and the taker quality proof gate
     (_build_event_bound_taker_quality_proof). The basis travels on the receipt for settlement audit.
     """
-    from src.decision.selection_curse_bound import corrected_side_q_lcb
-    from src.decision.selection_curse_bound_loader import load_bound
+    # FAIL-SOFT: any error in the correction (load, parse, interp) must degrade to the raw bound and
+    # never break the live gate. corrected_side_q_lcb already returns identity for non-finite price /
+    # buy_yes / absent / unarmed / out-of-support; this wrapper additionally catches import/IO faults.
+    try:
+        from src.decision.selection_curse_bound import corrected_side_q_lcb
+        from src.decision.selection_curse_bound_loader import load_bound
 
-    side = str(direction or "").strip().lower()
-    if not side or price is None:
-        return float(q_decision_lcb), "BOUND_INPUTS_MISSING"
-    return corrected_side_q_lcb(
-        load_bound(), side=side, price=float(price), raw_q_lcb=float(q_decision_lcb)
-    )
+        side = str(direction or "").strip().lower()
+        if not side or price is None:
+            return float(q_decision_lcb), "BOUND_INPUTS_MISSING"
+        return corrected_side_q_lcb(
+            load_bound(), side=side, price=price, raw_q_lcb=q_decision_lcb
+        )
+    except Exception as exc:  # noqa: BLE001 — never break admission for the correction.
+        logger.warning("selection-curse correction failed, using raw q_lcb: %s", exc)
+        try:
+            return float(q_decision_lcb), "BOUND_ERROR"
+        except (TypeError, ValueError):
+            return 0.0, "BOUND_ERROR"
 
 
 def _build_event_bound_taker_quality_proof(

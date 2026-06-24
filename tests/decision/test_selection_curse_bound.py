@@ -87,3 +87,19 @@ def test_interpolates_monotonically_between_knots():
     # price 0.75 sits between knots 0.70(0.66) and 0.80(0.78) -> linear interp ~0.72.
     q, _ = corrected_side_q_lcb(_bound(), side="buy_no", price=0.75, raw_q_lcb=0.99)
     assert 0.66 < q < 0.78
+
+
+@pytest.mark.parametrize("bad_price", [None, float("nan"), float("inf"), float("-inf"), "x"])
+def test_nonfinite_or_nonnumeric_price_is_identity(bad_price):
+    # A garbage price must NEVER deflate or raise into the live gate -> identity with INVALID_INPUT.
+    q, basis = corrected_side_q_lcb(_bound(), side="buy_no", price=bad_price, raw_q_lcb=0.83)
+    assert q == 0.83
+    assert basis == "INVALID_INPUT"
+
+
+@pytest.mark.parametrize("bad_raw", [None, float("nan"), "x"])
+def test_nonfinite_raw_q_lcb_is_identity(bad_raw):
+    q, basis = corrected_side_q_lcb(_bound(), side="buy_no", price=0.70, raw_q_lcb=bad_raw)
+    assert basis == "INVALID_INPUT"
+    # returns the raw input coerced (nan if uncoercible) — never a fabricated deflation
+    assert math.isnan(q) or q == bad_raw

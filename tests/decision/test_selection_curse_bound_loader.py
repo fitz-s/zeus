@@ -65,3 +65,21 @@ def test_load_missing_field_is_none(tmp_path):
     p = tmp_path / "missing.json"
     _write(p, bad)
     assert load_bound(str(p)) is None
+
+
+def test_hot_place_then_remove_round_trips_same_process(tmp_path):
+    # mtime-aware rollback: arming (place) and disarming (remove) take effect on the NEXT call in the
+    # SAME process, no restart — matching the documented "remove file -> identity" rollback.
+    from src.decision.selection_curse_bound_loader import reset_cache
+
+    reset_cache()
+    p = tmp_path / "selection_curse_bound.json"
+    # absent -> None (cached as absent)
+    assert load_bound(str(p)) is None
+    # place -> armed on next call (cache invalidated by mtime change)
+    _write(p, _GOOD)
+    b = load_bound(str(p))
+    assert b is not None and b.armed_sides == frozenset({"buy_no"})
+    # remove -> identity (None) again on next call
+    p.unlink()
+    assert load_bound(str(p)) is None
