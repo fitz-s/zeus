@@ -4009,7 +4009,7 @@ def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates()
         env="live",
     )
     pos.last_monitor_at = "2026-06-24T14:55:00+00:00"
-    pos.last_monitor_prob = 0.67194
+    pos.last_monitor_prob = 0.60
     pos.last_monitor_prob_is_fresh = True
     pos.last_monitor_market_price = 0.70108
     pos.last_monitor_market_price_is_fresh = True
@@ -4060,8 +4060,63 @@ def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates()
     assert payload["exit_decision_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
     assert payload["exit_decision_trigger"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
     assert family["decision"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert family["belief_reversed_below_entry"] is True
     assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
     assert family["family_direct_sell_advantage_usd"] > family["family_direct_sell_advantage_threshold_usd"]
+
+
+def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
+    """A high bid over a conservative belief is not by itself an exit signal."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-direct-sell-winner-hold",
+        city="Paris",
+        target_date="2026-06-20",
+        temperature_metric="low",
+        bin_label="19C",
+        direction="buy_no",
+        shares=5.1,
+        entry_price=0.75,
+        p_posterior=0.80,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-24T14:55:00+00:00"
+    pos.last_monitor_prob = 0.82
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.998
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.998
+    pos.last_monitor_best_ask = 0.999
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = ["replacement_posterior"]
+
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=list(pos.applied_validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_OVERLAP_HOLD"
+    assert summary["family_redecision_overlay_evaluated"] == 1
+    family = pos._monitor_family_redecision
+    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
+    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
+    assert "family_direct_sell_dominates_hold_exit" not in pos.applied_validations
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):

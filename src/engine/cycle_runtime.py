@@ -3000,9 +3000,21 @@ def _apply_family_monitor_overlay(
             )
             return False, "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
 
-    if (not should_exit) and sell_advantage > sell_advantage_threshold:
+    # A high bid over a conservative belief is not a reversal by itself. Promote
+    # hold->sell here only when the held-side belief has fallen below entry.
+    _entry_belief = getattr(pos, "p_posterior", None)
+    _cur_belief = getattr(pos, "last_monitor_prob", None)
+    _belief_reversed_below_entry = (
+        _entry_belief is not None
+        and _cur_belief is not None
+        and math.isfinite(float(_entry_belief))
+        and math.isfinite(float(_cur_belief))
+        and float(_cur_belief) < float(_entry_belief)
+    )
+    if (not should_exit) and sell_advantage > sell_advantage_threshold and _belief_reversed_below_entry:
         payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
         payload["promoted_exit_reason"] = exit_reason
+        payload["belief_reversed_below_entry"] = True
         setattr(pos, "_monitor_family_redecision", payload)
         validations = list(getattr(pos, "applied_validations", []) or [])
         validations.append("family_direct_sell_dominates_hold_exit")
