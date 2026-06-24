@@ -2903,6 +2903,7 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
+        _commit_before_exit_venue_io(conn, stage="pending_exit_status_poll")
         status, status_payload = _check_order_fill(clob, exit_order_id)
         if conn is not None:
             if status:
@@ -3060,6 +3061,7 @@ def check_pending_exits(
                     stats["unchanged"] += 1
             else:
                 token_id = _asset_id_for_position(pos)
+                _commit_before_exit_venue_io(conn, stage="pending_exit_reprice")
                 if _cancel_stale_pending_exit_for_reprice(
                     conn=conn,
                     position=pos,

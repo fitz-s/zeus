@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
+from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
@@ -23,6 +24,11 @@ from src.state.db import _connect
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+# Coverage authority anchor: seed discovery consumes
+# build_replacement_forecast_current_target_plan(), whose candidate rows are
+# filtered by tradeable_grade_coverage_sql. Keep this explicit import so this
+# third coverage site cannot drift from the plan/queue helper silently.
+_TRADEABLE_GRADE_COVERAGE_AUTHORITY = tradeable_grade_coverage_sql
 
 
 @dataclass(frozen=True)

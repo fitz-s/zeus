@@ -158,6 +158,93 @@ def test_bayes_precision_fusion_capture_lane_skips_with_receipt_when_probes_unre
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"
 
 
+def test_bayes_precision_fusion_uses_downloaded_artifact_cycle_when_probe_unresolved(
+    monkeypatch, tmp_path
+) -> None:
+    """Probe unresolved is not allowed to hide a DB-confirmed anchor cycle."""
+    import sqlite3
+
+    import src.config as cfg
+    import src.data.bayes_precision_fusion_download as dl_mod
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+    from src.data.replacement_forecast_current_target_plan import (
+        ReplacementForecastCurrentTargetPlan,
+        ReplacementForecastCurrentTargetPlanRow,
+    )
+
+    cycle = datetime(2026, 6, 24, 12, tzinfo=UTC)
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        "CREATE TABLE raw_forecast_artifacts (source_id TEXT, source_cycle_time TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?)",
+        ("openmeteo_ecmwf_ifs_9km", cycle.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setitem(
+        cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True
+    )
+    monkeypatch.setattr(
+        production, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: None
+    )
+    row = ReplacementForecastCurrentTargetPlanRow(
+        city="Amsterdam",
+        target_date="2026-06-25",
+        temperature_metric="high",
+        market_bin_count=1,
+        posterior_count=0,
+        readiness_count=0,
+        openmeteo_manifest_count=1,
+    )
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: ReplacementForecastCurrentTargetPlan(
+            status="CURRENT_TARGETS_MISSING_COVERAGE",
+            reason_codes=(),
+            target_count=1,
+            covered_count=0,
+            missing_coverage_count=1,
+            can_seed_count=1,
+            missing_openmeteo_manifest_count=0,
+            day0_observed_extreme_required_count=0,
+            rows=(row,),
+        ),
+    )
+    calls: list[dict] = []
+
+    def _fake_download(*, forecast_db, cycle, targets, release_lag_hours):
+        calls.append(
+            {
+                "forecast_db": forecast_db,
+                "cycle": cycle,
+                "targets": tuple(targets),
+                "release_lag_hours": release_lag_hours,
+            }
+        )
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 1,
+        }
+
+    monkeypatch.setattr(dl_mod, "download_bayes_precision_fusion_extra_raw_inputs", _fake_download)
+
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        {"forecast_db": forecast_db, "download_release_lag_hours": 14.0}
+    )
+
+    assert report is not None
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    assert calls[0]["cycle"] == cycle
+    assert calls[0]["targets"][0].city == "Amsterdam"
+
+
 def test_anchor_probe_mirrors_the_bucket_rung(monkeypatch) -> None:
     """Probe-set ⊇ downloader-ladder relationship: when single-runs 400s and the meta
     endpoint is down (the exact 2026-06-11 morning state), a bucket manifest declaring

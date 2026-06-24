@@ -741,6 +741,65 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert json.loads(event["payload_json"])["semantic_event"] == "PARTIAL_FILL_OBSERVED"
 
 
+def test_pending_exit_status_poll_releases_db_transaction_before_venue_io(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-pending-exit-lock-boundary",
+        market_id="mkt-pending-exit-lock-boundary",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-pending-exit-lock-boundary",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-pending-exit-lock-boundary",
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-pending-exit-lock-boundary",
+        position_id=position.trade_id,
+        size=20.0,
+        price=0.44,
+        venue_order_id="ord-pending-exit-lock-boundary",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET price = price WHERE command_id = ?",
+        ("cmd-pending-exit-lock-boundary",),
+    )
+    assert conn.in_transaction
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-pending-exit-lock-boundary"
+            assert conn.in_transaction is False
+            return {"status": "LIVE"}
+
+        def get_orderbook(self, token_id):
+            assert token_id == YES_TOKEN
+            assert conn.in_transaction is False
+            return {"bids": [{"price": "0.44", "size": "10"}], "asks": []}
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+
+
 def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position

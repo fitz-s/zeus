@@ -232,6 +232,9 @@ NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
 # q_lcb empirical reliability guard (FINAL no-shadow execution flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
+NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE = (
+    "SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE"
+)
 
 
 class FamilyDecisionError(ValueError):
@@ -353,6 +356,33 @@ class CandidateDecision:
     q_lcb_guard_cell_key: str = ""
 
 
+@dataclass(frozen=True)
+class PortfolioCandidateDecision:
+    """Non-executable portfolio comparator over already-scored direct routes.
+
+    This is not an execution route. It records whether a multi-leg family portfolio
+    would dominate the selected single direct route, so the engine can refuse the
+    inferior executable leg instead of pretending the current one-leg executor can
+    submit an aggregate position.
+    """
+
+    portfolio_type: str
+    reference_bin_id: str
+    leg_candidate_ids: tuple[str, ...]
+    leg_route_ids: tuple[str, ...]
+    payoff_vector_hash: str
+    point_ev: float
+    edge_lcb: float
+    q_dot_payoff: float
+    cost_sum: float
+    edge_lcb_density: float
+    point_ev_density: float
+    selected_candidate_id: str
+    selected_edge_lcb_density: float
+    selected_point_ev_density: float
+    dominates_selected: bool
+
+
 # ===========================================================================
 # FamilyDecision (spec lines 858-871) — EXACT field names, frozen.
 # ===========================================================================
@@ -404,6 +434,7 @@ class FamilyDecision:
     # scalar telemetry without re-deriving them). Excluded from the spec contract.
     candidate_decisions: tuple[CandidateDecision, ...] = ()
     market_implied_q: Optional[MarketImpliedQ] = None
+    portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = ()
 
 
 # ===========================================================================
@@ -776,6 +807,18 @@ class FamilyDecisionEngine:
         #   direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
         # The scalar robust_trade_score is NOT one of the conditions.
         selected_decision, no_trade_reason = self._select(scored)
+        portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = ()
+        if selected_decision is not None:
+            portfolio_comparisons = self._portfolio_comparisons(
+                selected_decision=selected_decision,
+                scored=scored,
+                joint_q=joint_q,
+                band=band,
+                forecast_bin=forecast_bin,
+            )
+            if any(c.dominates_selected for c in portfolio_comparisons):
+                selected_decision = None
+                no_trade_reason = NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE
 
         candidates_economics = tuple(d.economics for d in scored)
         selected_economics = (
@@ -792,6 +835,7 @@ class FamilyDecisionEngine:
             candidates=candidates_economics,
             selected=selected_economics,
             no_trade_reason=no_trade_reason,
+            portfolio_comparisons=portfolio_comparisons,
         )
 
         return FamilyDecision(
@@ -809,6 +853,7 @@ class FamilyDecisionEngine:
             receipt_hash=receipt_hash,
             candidate_decisions=scored,
             market_implied_q=market_implied,
+            portfolio_comparisons=portfolio_comparisons,
         )
 
     # ----------------------------------------------------------- enumeration
@@ -967,6 +1012,102 @@ class FamilyDecisionEngine:
             q_dot_payoff=q_dot,
             cost=route.route_cost.avg_cost,
             route_id=route.route_cost.route_id,
+        )
+
+    # ------------------------------------------------ portfolio comparison
+    def _portfolio_comparisons(
+        self,
+        *,
+        selected_decision: CandidateDecision,
+        scored: Sequence[CandidateDecision],
+        joint_q: JointQ,
+        band: JointQBand,
+        forecast_bin: str,
+    ) -> tuple[PortfolioCandidateDecision, ...]:
+        """Compare non-executable family portfolios against the selected direct leg.
+
+        The current live executor can submit one native leg. A Shanghai-style family can
+        still present a capital-efficiency question that lives above a single leg: the
+        two adjacent NO legs around the modal bin can approximate a center YES but with
+        very different cost/payoff geometry. Until portfolio execution has parent/child
+        command semantics, the correct live action when such a portfolio is superior is
+        not to submit a weaker direct leg. This comparator therefore produces evidence
+        and a typed no-trade only; it never creates an executable route.
+        """
+        if selected_decision.route.side != "YES" or selected_decision.route.bin_id != forecast_bin:
+            return ()
+
+        bin_ids = [b.bin_id for b in joint_q.omega.bins]
+        try:
+            idx = bin_ids.index(forecast_bin)
+        except ValueError:
+            return ()
+        if idx <= 0 or idx >= len(bin_ids) - 1:
+            return ()
+        left_id = bin_ids[idx - 1]
+        right_id = bin_ids[idx + 1]
+        by_key = {(d.route.side, d.route.bin_id): d for d in scored}
+        legs = (by_key.get(("NO", left_id)), by_key.get(("NO", right_id)))
+        if any(leg is None for leg in legs):
+            return ()
+        left, right = legs  # type: ignore[misc]
+        if (
+            not left.route.route_cost.executable
+            or not right.route.route_cost.executable
+            or not left.coherence_allows
+            or not right.coherence_allows
+            or left.economics.edge_lcb <= 0.0
+            or right.economics.edge_lcb <= 0.0
+        ):
+            return ()
+
+        payoff = np.asarray(left.route.payoff_vector, dtype=float) + np.asarray(
+            right.route.payoff_vector, dtype=float
+        )
+        cost_sum = float(left.economics.cost.value) + float(right.economics.cost.value)
+        if not (np.isfinite(cost_sum) and cost_sum > 0.0):
+            return ()
+        q_dot = float(np.asarray(joint_q.q, dtype=float) @ payoff)
+        point_ev = q_dot - cost_sum
+        edge_lcb = float(np.quantile(np.asarray(band.samples, dtype=float) @ payoff - cost_sum, band.alpha))
+        selected_cost = float(selected_decision.economics.cost.value)
+        if not (np.isfinite(selected_cost) and selected_cost > 0.0):
+            return ()
+        edge_density = edge_lcb / cost_sum
+        point_density = point_ev / cost_sum
+        selected_edge_density = selected_decision.economics.edge_lcb / selected_cost
+        selected_point_density = selected_decision.economics.point_ev / selected_cost
+        dominates = (
+            edge_lcb > 0.0
+            and point_ev > 0.0
+            and edge_density > selected_edge_density
+            and point_density > selected_point_density
+        )
+        h = hashlib.sha256()
+        h.update(b"ADJACENT_NO_PAIR")
+        h.update(forecast_bin.encode("utf-8"))
+        for leg in (left, right):
+            h.update(leg.economics.candidate_id.encode("utf-8"))
+            h.update(leg.economics.route_id.encode("utf-8"))
+            h.update(np.ascontiguousarray(np.round(leg.route.payoff_vector, 12)).tobytes())
+        return (
+            PortfolioCandidateDecision(
+                portfolio_type="ADJACENT_NO_PAIR",
+                reference_bin_id=forecast_bin,
+                leg_candidate_ids=(left.economics.candidate_id, right.economics.candidate_id),
+                leg_route_ids=(left.economics.route_id, right.economics.route_id),
+                payoff_vector_hash=h.hexdigest(),
+                point_ev=point_ev,
+                edge_lcb=edge_lcb,
+                q_dot_payoff=q_dot,
+                cost_sum=cost_sum,
+                edge_lcb_density=edge_density,
+                point_ev_density=point_density,
+                selected_candidate_id=selected_decision.economics.candidate_id,
+                selected_edge_lcb_density=selected_edge_density,
+                selected_point_ev_density=selected_point_density,
+                dominates_selected=dominates,
+            ),
         )
 
     # ------------------------------------------------ q_lcb reliability guard
@@ -1292,6 +1433,7 @@ class FamilyDecisionEngine:
             candidates=(),
             selected=None,
             no_trade_reason=reason,
+            portfolio_comparisons=(),
         )
         return FamilyDecision(
             decision_id=decision_id,
@@ -1328,6 +1470,7 @@ class FamilyDecisionEngine:
         candidates: tuple[CandidateEconomics, ...],
         selected: Optional[CandidateEconomics],
         no_trade_reason: Optional[str],
+        portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = (),
     ) -> str:
         """Deterministic hash over the whole decision tuple (the receipt anchor; spec 871).
 
@@ -1362,6 +1505,15 @@ class FamilyDecisionEngine:
             ).encode("utf-8")
         )
         h.update(f"NO_TRADE={no_trade_reason!r}".encode("utf-8"))
+        for c in portfolio_comparisons:
+            h.update(
+                (
+                    f"|PORTFOLIO|{c.portfolio_type}|{c.reference_bin_id}|"
+                    f"{c.leg_candidate_ids!r}|{c.leg_route_ids!r}|"
+                    f"{c.payoff_vector_hash}|{c.edge_lcb!r}|{c.cost_sum!r}|"
+                    f"{int(c.dominates_selected)}"
+                ).encode("utf-8")
+            )
         return h.hexdigest()
 
 

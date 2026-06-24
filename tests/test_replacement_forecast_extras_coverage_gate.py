@@ -358,6 +358,23 @@ def test_unresolved_extras_probe_marks_capture_health_failed(_cfg_with_db, _redi
     assert capture["last_failure_reason"] == "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"
 
 
+def test_retryable_transport_extras_marks_capture_health_failed(_cfg_with_db, _redirect_health):
+    cfg, _ = _cfg_with_db
+
+    prod._record_bayes_precision_fusion_capture_health(
+        cfg,
+        {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "transport_errors": ["single_runs:Paris:2026-06-25:Open-Meteo quota exhausted"],
+        },
+    )
+
+    health = json.loads(_redirect_health.read_text())
+    capture = health["bayes_precision_fusion_capture"]
+    assert capture["status"] == "FAILED"
+    assert capture["last_failure_reason"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+
+
 def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _redirect_health):
     cfg, db = _cfg_with_db
     for c in _NEAR_DAY_CITIES:

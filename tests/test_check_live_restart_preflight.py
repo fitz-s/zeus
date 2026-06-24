@@ -1669,6 +1669,46 @@ def test_preflight_blocks_armed_live_when_reactor_mode_live_no_submit(monkeypatc
     assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
 
 
+def test_preflight_blocks_missing_live_execution_mode_instead_of_legacy_default(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    preflight.SETTINGS_PATH.write_text(
+        json.dumps(
+            {
+                "edli": {
+                    "real_order_submit_enabled": True,
+                    "reactor_mode": "live",
+                },
+                "feature_flags": {"qkernel_spine_enabled": True},
+            }
+        )
+    )
+
+    result = preflight.evaluate()
+
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is False
+    assert submit["evidence"]["edli.live_execution_mode"] == "missing"
+    assert submit["evidence"]["known_execution_mode"] is False
+    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
+
+
 def test_preflight_submit_authority_passes_when_reactor_mode_live_and_real_submit_enabled(
     monkeypatch, tmp_path
 ):

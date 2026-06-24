@@ -269,6 +269,18 @@ class TestLoadReplacementBelief:
         assert belief is not None
         assert belief.fresh is False
 
+    def test_default_monitor_freshness_matches_restart_preflight_three_hours(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=4)).isoformat(),
+            q={BIN: 0.242},
+        )
+        belief = _load(forecasts_db)
+        assert belief is not None
+        assert DEFAULT_MAX_AGE_HOURS == pytest.approx(3.0)
+        assert belief.fresh is False
+
     def test_source_cycle_clock_controls_live_schema_freshness(self, forecasts_db):
         """Live posteriors stay lawful by the shared source-cycle horizon, not
         the old 9h computed_at monitor clock."""

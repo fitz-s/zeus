@@ -389,6 +389,8 @@ SingleRunsFetchFn = Callable[..., float | None]
 # A previous-runs (fixed-lead) fetch: the fixed-lead local-day extremum (degC), or None.
 PreviousRunsFetchFn = Callable[..., float | None]
 
+_BATCH_TRANSPORT_ERROR_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_ERROR__"
+
 
 @dataclass(frozen=True)
 class BayesPrecisionFusionDownloadTarget:
@@ -529,7 +531,7 @@ def _default_live_fetch_batched(
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
         _LOG.warning("BAYES_PRECISION_FUSION batched single_runs fetch failed (fail-soft): %s", exc)
-        return {}
+        return {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
 
 
 def _parse_batched_single_runs_payload(
@@ -623,7 +625,7 @@ def _default_previous_runs_fetch_batched(
         return _parse_batched_previous_runs_payload(payload, models, hourly_var)
     except Exception as exc:
         _LOG.warning("BAYES_PRECISION_FUSION batched previous_runs fetch failed (fail-soft): %s", exc)
-        return {}
+        return {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
 
 
 def _parse_batched_previous_runs_payload(
@@ -954,6 +956,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     total_written = 0
     dropped: list[str] = []
     domain_excluded: list[str] = []
+    transport_errors: list[str] = []
 
     # ROW-LEVEL SKIP (2026-06-09, K-root instance #5 resolution): preload the logical keys
     # already persisted for THIS cycle so a re-run only fetches what is MISSING. This replaces
@@ -1125,6 +1128,11 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     target_local_date=target_local_date,
                     forecast_hours=forecast_hours,
                 )
+                single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
+                if single_transport_error is not None:
+                    transport_errors.append(
+                        f"single_runs:{city}:{target_date}:{single_transport_error[0]}"
+                    )
                 for model in single_models:
                     hilo = sv_map.get(model)
                     if hilo is None:
@@ -1175,6 +1183,11 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     target_date=target_date,
                     lead_days=int(ref.lead_days),
                 )
+                previous_transport_error = pv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
+                if previous_transport_error is not None:
+                    transport_errors.append(
+                        f"previous_runs:{city}:{target_date}:{previous_transport_error[0]}"
+                    )
                 for model in prev_models:
                     hilo = pv_map.get(model)
                     if hilo is None:
@@ -1241,8 +1254,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             sorted(global_single_unavailable),
         )
 
+    status = (
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        if transport_errors and not single_success_models
+        else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
     return {
-        "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+        "status": status,
         "cycle": cycle_iso,
         "forecast_db": str(forecast_db),
         "target_count": len(target_list),
@@ -1251,6 +1269,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "pruned_row_count": pruned,
         "dropped": tuple(dropped),
         "domain_excluded": tuple(sorted(set(domain_excluded))),
+        "transport_errors": tuple(transport_errors),
         # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
         "global_models_expected": len(global_models_expected),
         "global_models_dropped_scoped": sorted(global_single_dropped_scoped),

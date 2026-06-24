@@ -2553,6 +2553,12 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # Continuous redecision coordination: another live action already owns this
+    # family, or the old leg is still exiting. The cure is state advancement from
+    # that existing action, not burning the family forever.
+    "SHIFT_BIN_CONCURRENT_FAMILY_LEASE",
+    "FILL_UP_CONCURRENT_FAMILY_LEASE",
+    "SHIFT_BIN_EXIT_OLD_LEG_PENDING",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -2621,6 +2627,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # continuous redecision.
     "unsupported live candidate event type",
     "unsupported EDLI event type for inference",
+    # Continuous redecision evaluated successfully but found no action worth
+    # submitting for this event. Future price/belief movement arrives as a new
+    # redecision event; requeueing this one only clogs the lane.
+    "FILL_UP_NO_SUBMIT",
+    "SHIFT_BIN_NO_SUBMIT",
 })
 
 

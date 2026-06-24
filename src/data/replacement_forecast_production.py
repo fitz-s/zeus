@@ -317,6 +317,15 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         # extras must not follow that anchor-only cycle and then fail every target.
         cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
         if cycle is None:
+            # The single-runs probe can be unavailable while the anchor lane has
+            # already durably captured a current-target cycle through another
+            # Open-Meteo rung. That DB row is live evidence, not a wall-clock
+            # guess. Use it so the BPF lane attempts to heal the exact cycle the
+            # materializer is reading; transport/quota failures are then surfaced
+            # by the downloader as retryable health instead of hiding behind a
+            # probe skip.
+            cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
+        if cycle is None:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
         # CYCLE-CURRENCY (2026-06-09, K-root instance #5 — same structural decision as the

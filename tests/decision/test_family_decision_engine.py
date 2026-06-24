@@ -62,6 +62,7 @@ from src.decision.family_decision_engine import (
     NO_TRADE_NO_DIRECTION_LAW,
     NO_TRADE_NO_POSITIVE_EDGE,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
+    NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE,
     CandidateDecision,
     FamilyDecision,
     FamilyDecisionEngine,
@@ -94,7 +95,8 @@ from src.probability.event_resolution import (
 )
 from src.probability.instruments import Instrument
 from src.probability.joint_q import build_joint_q
-from src.probability.joint_q_band import build_joint_q_band
+from src.probability.joint_q import JointQ
+from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import (
     OutcomeBin,
     OutcomeSpace,
@@ -585,6 +587,31 @@ def _hand_decision(
     )
 
 
+def _hand_joint_q_and_band(space: OutcomeSpace, q_by_bin: Mapping[str, float]) -> tuple[JointQ, JointQBand]:
+    q = np.asarray([float(q_by_bin.get(b.bin_id, 0.0)) for b in space.bins], dtype=float)
+    q = q / q.sum()
+    joint = JointQ(
+        omega=space,
+        q=q,
+        q_by_bin_id={b.bin_id: float(v) for b, v in zip(space.bins, q)},
+        predictive_distribution_id="hand-pd",
+        q_source="SETTLEMENT_STATION_NORMAL_V1",
+        q_sum=float(q.sum()),
+        identity_hash="hand-joint-q",
+    )
+    samples = np.repeat(q.reshape(1, -1), 8, axis=0)
+    band = JointQBand(
+        joint_q=joint,
+        samples=samples,
+        q_lcb=q,
+        q_ucb=q,
+        alpha=0.05,
+        basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        sample_hash="hand-band",
+    )
+    return joint, band
+
+
 # ===========================================================================
 # SPEC RED-on-revert #1: filter chain order + utility-density selection (not the scalar).
 # ===========================================================================
@@ -844,6 +871,107 @@ def test_select_rejects_unknown_selection_objective():
             predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
             selection_objective="scalar_score",  # type: ignore[arg-type]
         )
+
+
+def test_adjacent_no_pair_comparator_does_not_block_capital_efficient_center_yes(monkeypatch):
+    """Shanghai correction: compare adjacent NO pair, but do not blindly prefer it."""
+    case = _case()
+    space = _outcome_space(case)
+    joint_q, band = _hand_joint_q_and_band(
+        space,
+        {"b24": 0.10, "b25": 0.80, "b26": 0.10},
+    )
+    selected = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.80 - 0.27,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("5"),
+    )
+    no24 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.90 - 0.79,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.11,
+    )
+    no26 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b26", cost=0.80),
+        edge_lcb=0.90 - 0.80,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    comparisons = engine._portfolio_comparisons(
+        selected_decision=selected,
+        scored=(selected, no24, no26),
+        joint_q=joint_q,
+        band=band,
+        forecast_bin="b25",
+    )
+
+    assert len(comparisons) == 1
+    assert comparisons[0].portfolio_type == "ADJACENT_NO_PAIR"
+    assert comparisons[0].dominates_selected is False
+
+
+def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(monkeypatch):
+    """If a non-executable portfolio is superior, the engine has evidence to refuse a weaker leg."""
+    case = _case()
+    space = _outcome_space(case)
+    joint_q, band = _hand_joint_q_and_band(
+        space,
+        {"b24": 0.10, "b25": 0.80, "b26": 0.10},
+    )
+    selected = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.79),
+        edge_lcb=0.80 - 0.79,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.01,
+        optimal_stake_usd=Decimal("20"),
+    )
+    no24 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.30),
+        edge_lcb=0.90 - 0.30,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.60,
+    )
+    no26 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b26", cost=0.30),
+        edge_lcb=0.90 - 0.30,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.60,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    comparisons = engine._portfolio_comparisons(
+        selected_decision=selected,
+        scored=(selected, no24, no26),
+        joint_q=joint_q,
+        band=band,
+        forecast_bin="b25",
+    )
+
+    assert len(comparisons) == 1
+    comparison = comparisons[0]
+    assert comparison.dominates_selected is True
+    assert comparison.edge_lcb_density > comparison.selected_edge_lcb_density
+    assert comparison.point_ev_density > comparison.selected_point_ev_density
+    assert comparison.leg_candidate_ids == (no24.economics.candidate_id, no26.economics.candidate_id)
 
 
 # ===========================================================================

@@ -51,7 +51,7 @@ from src.data.replacement_forecast_readiness import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_AGE_HOURS = 9.0
+DEFAULT_MAX_AGE_HOURS = 3.0
 BELIEF_SOURCE_TABLE = "forecast_posteriors"
 SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
 

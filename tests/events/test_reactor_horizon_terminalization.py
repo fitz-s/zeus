@@ -412,6 +412,7 @@ def test_known_terminal_reason_stays_terminal_no_log(caplog):
             )
             is False
         )
+        assert _is_transient_money_path_reason("FILL_UP_NO_SUBMIT:BELIEF_NOT_STRENGTHENED") is False
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
 
 
@@ -427,6 +428,13 @@ def test_known_transient_reason_classifies_without_log(caplog):
             )
             is True
         )
+        assert (
+            _is_transient_money_path_reason(
+                "SHIFT_BIN_NO_SUBMIT:SHIFT_BIN_CONCURRENT_FAMILY_LEASE"
+            )
+            is True
+        )
+        assert _is_transient_money_path_reason("SHIFT_BIN_EXIT_OLD_LEG_PENDING") is True
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
 
 

@@ -880,7 +880,10 @@ def _posterior_summary() -> CheckResult:
     if latest_dt is not None:
         age_hours = (now - latest_dt).total_seconds() / 3600.0
     non_live = sum(int(row["rows"]) for row in runtime_rows if row["runtime_layer"] != "live")
-    ok = non_live == 0 and age_hours is not None and 0.0 <= age_hours <= 3.0
+    from src.engine.position_belief import monitor_belief_max_age_hours
+
+    max_age_hours = monitor_belief_max_age_hours()
+    ok = non_live == 0 and age_hours is not None and 0.0 <= age_hours <= max_age_hours
     return CheckResult(
         "live_posterior_freshness",
         ok,
@@ -890,7 +893,7 @@ def _posterior_summary() -> CheckResult:
             "latest_live_computed_at": latest["computed_at"] if latest else None,
             "latest_live_age_hours": age_hours,
             "non_live_rows": non_live,
-            "fresh_age_limit_hours": 3.0,
+            "fresh_age_limit_hours": max_age_hours,
         },
     )
 
@@ -1470,10 +1473,11 @@ def evaluate() -> dict[str, Any]:
     quote_rows = _open_positions_requiring_executable_quote(rows)
     edli_cfg = cfg.get("edli") or {}
     reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
-    live_execution_mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
+    live_execution_mode = str(edli_cfg.get("live_execution_mode") or "missing")
     armed_live = live_execution_mode == "edli_live"
+    known_execution_mode = live_execution_mode in {"edli_live", "maker", "disabled"}
     real_submit_effective = real_submit and reactor_mode == "live"
-    submit_ok = (not armed_live) or real_submit_effective
+    submit_ok = known_execution_mode and ((not armed_live) or real_submit_effective)
     checks = [
         CheckResult(
             "live_trading_process_absent",
@@ -1486,11 +1490,15 @@ def evaluate() -> dict[str, Any]:
             submit_ok,
             "real order submit is enabled for armed live restart"
             if submit_ok
-            else "armed live restart but real order submit is not actually enabled (real_order_submit_enabled False or reactor_mode != live)",
+            else (
+                "live_execution_mode must be explicit (edli_live/maker/disabled), and "
+                "armed live restart requires real_order_submit_enabled with reactor_mode=live"
+            ),
             {
                 "edli.real_order_submit_enabled": real_submit,
                 "edli.reactor_mode": reactor_mode,
                 "edli.live_execution_mode": live_execution_mode,
+                "known_execution_mode": known_execution_mode,
                 "armed_live": armed_live,
                 "real_submit_effective": real_submit_effective,
             },

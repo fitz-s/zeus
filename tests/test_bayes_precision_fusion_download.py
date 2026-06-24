@@ -455,6 +455,36 @@ def test_scoped_global_drop_does_not_fail_cycle_when_model_succeeds_elsewhere(tm
     assert "icon_global" not in report["global_models_unavailable"]
 
 
+def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tmp_path, monkeypatch) -> None:
+    """A process-local Open-Meteo quota/cooldown failure must not flatten to a successful empty pass."""
+    import src.data.bayes_precision_fusion_download as dl
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+
+    def _single_batch_fail(**_kwargs):
+        return {
+            dl._BATCH_TRANSPORT_ERROR_KEY: (
+                "Open-Meteo quota exhausted (2 calls today)",
+                None,
+            )
+        }
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch_fail)
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", lambda **_kwargs: {})
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_targets(),
+    )
+
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["written_row_count"] == 0
+    assert report["transport_errors"]
+    assert "Open-Meteo quota exhausted" in report["transport_errors"][0]
+
+
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:
     """FIX 1 mapping: the DEFAULT previous-runs fetch for the anchor must send the OM
     ECMWF previous-runs model id (ecmwf_ifs025) to the OM API, even though the stored
