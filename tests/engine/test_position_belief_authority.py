@@ -78,6 +78,17 @@ def forecasts_db(tmp_path):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
     conn.commit()
     conn.close()
     return str(path)
@@ -123,6 +134,30 @@ def _insert_raw(db_path, *, source_cycle_time, city="Karachi",
             coverage_status,
             captured_at,
             source_available_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_raw_artifact(db_path, *, source_cycle_time, city="Karachi",
+                         target_date="2026-06-12", metric="high",
+                         captured_at=None, source_available_at=None):
+    conn = sqlite3.connect(db_path)
+    metadata = {
+        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+    }
+    conn.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?,?,?,?,?)",
+        (
+            "openmeteo_ecmwf_ifs_9km",
+            source_cycle_time,
+            captured_at,
+            source_available_at,
+            json.dumps(metadata),
         ),
     )
     conn.commit()
@@ -325,6 +360,54 @@ class TestLoadReplacementBelief:
         assert "latest_raw_cycle_time=" in validation
         assert "raw_cycle_lag_h=6.00" in validation
         assert validation.endswith(";stale")
+
+    def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
+        """Anchor artifacts are upstream live inputs; monitor freshness cannot
+        stay green just because BAYES_PRECISION_FUSION raw rows have not caught
+        up to the same cycle yet."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        _insert_raw_artifact(
+            forecasts_db,
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            captured_at=(NOW - timedelta(hours=5, minutes=30)).isoformat(),
+            source_available_at=(NOW - timedelta(hours=5, minutes=45)).isoformat(),
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is False
+        assert belief.freshness_basis == "source_cycle_time_raw_forecast_artifacts_lag"
+        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
+        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+
+    def test_raw_artifact_cycle_is_family_scoped(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        _insert_raw_artifact(
+            forecasts_db,
+            city="Lahore",
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            captured_at=(NOW - timedelta(hours=5, minutes=30)).isoformat(),
+            source_available_at=(NOW - timedelta(hours=5, minutes=45)).isoformat(),
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
 
     def test_source_cycle_clock_still_fails_closed_after_bound(self, forecasts_db):
         _insert(

@@ -175,6 +175,96 @@ def _latest_raw_single_runs_cycle(
     return _parse_computed_at(raw_value)
 
 
+def _latest_raw_artifact_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    now: datetime,
+) -> datetime | None:
+    """Latest captured current-target raw artifact cycle for the same family."""
+
+    columns = _table_columns(conn, "raw_forecast_artifacts")
+    required = {
+        "source_cycle_time",
+        "captured_at",
+        "source_available_at",
+        "artifact_metadata_json",
+    }
+    if not required.issubset(columns):
+        return None
+    predicates = [
+        "json_extract(artifact_metadata_json, '$.city') = ?",
+        "json_extract(artifact_metadata_json, '$.target_date') = ?",
+        "json_extract(artifact_metadata_json, '$.metric') = ?",
+        "datetime(captured_at) <= datetime(?)",
+        "datetime(source_available_at) <= datetime(?)",
+    ]
+    params: list[object] = [
+        city,
+        target_date,
+        temperature_metric,
+        now.isoformat(),
+        now.isoformat(),
+    ]
+    if "source_id" in columns:
+        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
+    try:
+        row = conn.execute(
+            f"""
+            SELECT source_cycle_time
+            FROM raw_forecast_artifacts
+            WHERE {' AND '.join(predicates)}
+              AND datetime(source_cycle_time) <= datetime(?)
+            GROUP BY source_cycle_time
+            ORDER BY datetime(source_cycle_time) DESC
+            LIMIT 1
+            """,
+            tuple([*params, now.isoformat()]),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        raw_value = row["source_cycle_time"]
+    except (TypeError, IndexError):
+        raw_value = row[0]
+    return _parse_computed_at(raw_value)
+
+
+def _latest_live_input_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    now: datetime,
+) -> tuple[datetime | None, str | None]:
+    raw_model_cycle = _latest_raw_single_runs_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        now=now,
+    )
+    raw_artifact_cycle = _latest_raw_artifact_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        now=now,
+    )
+    if raw_model_cycle is None:
+        if raw_artifact_cycle is None:
+            return None, None
+        return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
+    if raw_artifact_cycle is None or raw_model_cycle >= raw_artifact_cycle:
+        return raw_model_cycle, "source_cycle_time_raw_model_forecasts_lag"
+    return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
+
+
 def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | None:
     """Exact key match first; whitespace/case-normalized fallback. Fail-closed."""
     if bin_label in q:
@@ -226,6 +316,7 @@ def load_replacement_belief(
         db_path = str(ZEUS_FORECASTS_DB_PATH)
     now_dt = now or datetime.now(timezone.utc)
     latest_raw_cycle_time: datetime | None = None
+    latest_raw_cycle_basis: str | None = None
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as exc:
@@ -272,7 +363,7 @@ def load_replacement_belief(
             tuple([*authority_params[:3], LIVE_RUNTIME_LAYER, *authority_params[3:]]),
         ).fetchone()
         if row is not None:
-            latest_raw_cycle_time = _latest_raw_single_runs_cycle(
+            latest_raw_cycle_time, latest_raw_cycle_basis = _latest_live_input_cycle(
                 conn,
                 city=city,
                 target_date=target_date,
@@ -335,7 +426,7 @@ def load_replacement_belief(
             latest_raw_cycle_time - source_cycle_time
         ).total_seconds() / 3600.0
         fresh = False
-        freshness_basis = "source_cycle_time_raw_model_forecasts_lag"
+        freshness_basis = latest_raw_cycle_basis or "source_cycle_time_live_input_lag"
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
     return ReplacementBelief(
         held_side_prob=held,
