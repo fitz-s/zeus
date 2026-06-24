@@ -17,7 +17,7 @@ If a historical file contains surviving law, promote the law into active authori
 | Directory | Class | Purpose | Default-read? |
 |---|---|---|---|
 | `authority/` | durable authority law | current architecture, delivery, governance, archival law | only routed active files |
-| `reference/` | canonical durable reference | domain/math/strategy/settlement/execution/risk/data/failure/module books | by task route |
+| `reference/` | canonical durable reference | domain/math/source/strategy/settlement/execution/risk/data/failure/module books | by task route |
 | `reference/modules/` | module reference | dense module books | only routed modules |
 | `operations/` | current pointers + active work homes | current-state/data/source pointers and active packages | pointer files only by default |
 | `runbooks/` | procedure | operator workflows | only for operation task |
@@ -58,6 +58,7 @@ Do not recursively read `operations/current/**`, `operations/task_*`, `evidence/
 | `reference/zeus_prediction_market_quant_reference.md` | complete current deploy money-path reference |
 | `reference/zeus_domain_model.md` | family/bin/native-side/domain model |
 | `reference/zeus_math_spec.md` | q/q_lcb/payoff/utility math |
+| `reference/zeus_forecast_source_and_regional_model_reference.md` | forecast source/product identity, regional model inclusion, residual discipline |
 | `reference/zeus_strategy_spec.md` | direction law, admission, selection |
 | `reference/zeus_market_settlement_reference.md` | market/source/settlement/bin topology |
 | `reference/zeus_execution_lifecycle_reference.md` | execution, command, lifecycle, exit, settlement |
