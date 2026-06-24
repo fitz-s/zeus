@@ -11,7 +11,6 @@ from typing import Mapping
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
-from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
     latest_baseline_coverage_for_replacement_seed,
@@ -297,96 +296,6 @@ def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
         "computed_at",
     }
     return required.issubset(_columns(conn, "source_run_coverage"))
-
-
-def _coverage_skip_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
-    if not {"forecast_posteriors", "readiness_state"}.issubset(tables):
-        return False
-    posterior_columns = _columns(conn, "forecast_posteriors")
-    readiness_columns = _columns(conn, "readiness_state")
-    return (
-        "dependency_source_run_ids_json" in posterior_columns
-        and "dependency_json" in readiness_columns
-    )
-
-
-def _candidate_targets(
-    conn: sqlite3.Connection,
-    *,
-    limit: int,
-    min_target_date: str,
-) -> tuple[Mapping[str, object], ...]:
-    tables = _table_names(conn)
-    skip_covered_sql = ""
-    if _coverage_skip_schema_ready(conn, tables):
-        # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision;
-        # basis-predicate fix 2026-06-12): only a CERTIFIED-bootstrap-bounded posterior counts as
-        # coverage. The old proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor path began
-        # carrying non-certified q_lcb instead of NULL — a CAPTURE_MISSING row would then mask
-        # its own fusion repair (the mask-and-starve category).
-        # Now keyed on the certified bootstrap basis. Single authority: cycle_policy. Same clause as
-        # the queue antibody and the plan builder.
-        _tradeable = tradeable_grade_coverage_sql(
-            posterior_columns=_columns(conn, "forecast_posteriors"), alias="p."
-        )
-        skip_covered_sql = f"""
-          AND (
-              NOT EXISTS (
-                  SELECT 1
-                  FROM forecast_posteriors p
-                  WHERE p.source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
-                    AND p.city = c.city
-                    AND p.target_date = c.target_local_date
-                    AND p.temperature_metric = c.temperature_metric
-                    AND p.training_allowed = 0
-                    AND p.runtime_layer = 'live'
-                    {_tradeable}
-                    AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
-              )
-              OR NOT EXISTS (
-                  SELECT 1
-                  FROM readiness_state r
-                  WHERE r.strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
-                    AND json_extract(r.provenance_json, '$.city') = c.city
-                    AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
-                    AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
-                    -- An EXPIRED readiness row must NOT count as coverage, else a city is
-                    -- "covered" forever after its first posterior and never re-seeds once
-                    -- its 3h TTL lapses (the stale-after-first-cycle bug). Only a row whose
-                    -- expires_at is still in the future counts as live coverage.
-                    AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
-                    AND EXISTS (
-                        SELECT 1
-                        FROM json_each(r.dependency_json, '$.dependencies')
-                        WHERE json_extract(value, '$.role') = 'baseline_b0'
-                          AND json_extract(value, '$.source_run_id') = c.source_run_id
-                    )
-              )
-          )
-        """
-    rows = conn.execute(
-        f"""
-        SELECT c.city, c.target_local_date AS target_date, c.temperature_metric, max(c.computed_at) AS computed_at
-        FROM source_run_coverage c
-        WHERE c.source_id = 'ecmwf_open_data'
-          AND c.target_local_date >= ?
-          AND EXISTS (
-              SELECT 1
-              FROM market_events m
-              WHERE m.city = c.city
-                AND m.target_date = c.target_local_date
-                AND m.temperature_metric = c.temperature_metric
-                AND m.token_id IS NOT NULL
-                AND m.range_label IS NOT NULL
-          )
-          {skip_covered_sql}
-        GROUP BY c.city, c.target_local_date, c.temperature_metric
-        ORDER BY c.target_local_date DESC, c.city, c.temperature_metric
-        LIMIT ?
-        """,
-        (min_target_date, int(limit)),
-    ).fetchall()
-    return tuple(dict(row) for row in rows)
 
 
 def _seed_name(target: Mapping[str, object], *, computed_at: datetime) -> str:

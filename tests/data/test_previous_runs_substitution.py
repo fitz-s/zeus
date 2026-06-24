@@ -271,6 +271,72 @@ def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -
     assert len(request_written) == 1
 
 
+def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE forecast_posteriors (
+                source_id TEXT,
+                runtime_layer TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                training_allowed INTEGER,
+                dependency_source_run_ids_json TEXT
+            );
+            CREATE TABLE readiness_state (
+                strategy_key TEXT,
+                status TEXT,
+                provenance_json TEXT,
+                dependency_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors VALUES (?, 'live', 'Beijing', '2026-06-12', 'high', 0, ?)
+            """,
+            (
+                queue_mod.SOURCE_ID,
+                json.dumps({"baseline_b0": "b0-run", "openmeteo_ifs9_anchor": "old-om-run"}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO readiness_state VALUES (?, 'READY', ?, ?)
+            """,
+            (
+                queue_mod.STRATEGY_KEY,
+                json.dumps({"city": "Beijing", "target_date": "2026-06-12", "temperature_metric": "high"}),
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {"role": "baseline_b0", "source_run_id": "b0-run"},
+                            {"role": "openmeteo_ifs9_anchor", "source_run_id": "old-om-run"},
+                        ]
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fresh_anchor_seed = {**_minimal_seed(upgrade=False), "openmeteo_source_run_id": "new-om-run"}
+    stale_anchor_seed = {**_minimal_seed(upgrade=False), "openmeteo_source_run_id": "old-om-run"}
+
+    assert queue_mod._seed_already_covered(
+        forecast_db=forecast_db, seed=fresh_anchor_seed
+    ) is False
+    assert queue_mod._seed_already_covered(
+        forecast_db=forecast_db, seed=stale_anchor_seed
+    ) is True
+
+
 def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     tmp_path, monkeypatch
 ) -> None:

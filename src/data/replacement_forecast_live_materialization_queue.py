@@ -260,6 +260,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         target_date = str(seed["target_date"])
         metric = str(seed["temperature_metric"])
         baseline_source_run_id = str(seed["baseline_source_run_id"])
+        openmeteo_source_run_id = str(seed["openmeteo_source_run_id"])
         posterior_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
         }
@@ -268,19 +269,22 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         # degraded posterior must not count as "done forever" and block its own repair.
         # Single authority: cycle_policy.tradeable_grade_coverage_sql.
         tradeable_grade_clause = tradeable_grade_coverage_sql(posterior_columns=posterior_columns)
+        runtime_layer_clause = "AND runtime_layer = 'live'" if "runtime_layer" in posterior_columns else ""
         posterior = conn.execute(
             f"""
             SELECT 1
             FROM forecast_posteriors
             WHERE source_id = ?
+              {runtime_layer_clause}
               AND city = ?
               AND target_date = ?
               AND temperature_metric = ?
               {tradeable_grade_clause}
               AND json_extract(dependency_source_run_ids_json, '$.baseline_b0') = ?
+              AND json_extract(dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?
             LIMIT 1
             """,
-            (SOURCE_ID, city, target_date, metric, baseline_source_run_id),
+            (SOURCE_ID, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
         ).fetchone()
         if posterior is None:
             return False
@@ -316,9 +320,15 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
                   WHERE json_extract(value, '$.role') = 'baseline_b0'
                     AND json_extract(value, '$.source_run_id') = ?
               )
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_each(readiness_state.dependency_json, '$.dependencies')
+                  WHERE json_extract(value, '$.role') = 'openmeteo_ifs9_anchor'
+                    AND json_extract(value, '$.source_run_id') = ?
+              )
             LIMIT 1
             """,
-            (STRATEGY_KEY, city, target_date, metric, baseline_source_run_id),
+            (STRATEGY_KEY, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
         ).fetchone()
         return readiness is not None
     finally:
