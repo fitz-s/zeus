@@ -313,6 +313,51 @@ def test_refresh_order_pairs_yes_no_sides_before_next_city():
     assert third_condition != first_condition
 
 
+def test_refresh_prioritizes_money_path_condition_ids_before_family_siblings():
+    """Confirmation refresh must price the scoped money-path condition first.
+
+    Continuous redecision may refresh a full weather family, but the next action
+    depends on a small scoped set: a held leg, an open rest, or a screened entry.
+    When the batch orderbook path only has budget to recover a prefix, that prefix
+    must be the scoped condition, not arbitrary sibling bins.
+    """
+    markets = [
+        _make_market("Miami", 1, metric="highest", target_date="2026-05-25"),
+        _make_market("Miami", 2, metric="highest", target_date="2026-05-26"),
+        _make_market("Miami", 3, metric="highest", target_date="2026-05-27"),
+    ]
+    priority_condition = markets[2]["condition_ids"][0]
+    captured: list[tuple[str, str]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(
+            (
+                str(decision.tokens.get("market_id") or ""),
+                str(decision.edge.direction),
+            )
+        )
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots = None
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            priority_condition_ids={priority_condition},
+        )
+
+    assert captured[:2] == [
+        (priority_condition, "buy_yes"),
+        (priority_condition, "buy_no"),
+    ]
+
+
 def test_refresh_order_prioritizes_one_sided_fresh_condition_completion():
     """A one-sided fresh condition should be completed before new conditions.
 

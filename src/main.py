@@ -2813,6 +2813,7 @@ def _refresh_pending_family_snapshots(
     now_utc: datetime | None = None,
     extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
     include_pending_families: bool = True,
+    priority_condition_ids: Iterable[str] | None = None,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -2847,6 +2848,11 @@ def _refresh_pending_family_snapshots(
     # venue-close skip is deterministic against fixed-date fixtures.
     now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
+    priority_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     if include_pending_families:
@@ -3630,6 +3636,7 @@ def _refresh_pending_family_snapshots(
                 scan_authority="VERIFIED",
                 max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
                 budget_seconds=snapshot_budget_s,
+                priority_condition_ids=priority_conditions,
             )
         write_conn.commit()
 
@@ -3669,6 +3676,7 @@ def _refresh_pending_family_snapshots(
         "refresh_budget_seconds": refresh_budget_s,
         "snapshot_reserve_seconds": snapshot_reserve_s,
         "snapshot_budget_seconds": snapshot_budget_s,
+        "priority_condition_count": len(priority_conditions),
         **summary,
     }
     logger.info("refresh_pending_family_snapshots: %s", result)
@@ -6147,11 +6155,19 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         confirmed_rest_scope = set(rest_pull_families)
         confirmed_held_scope = set(held_reemit_families)
         confirm_families = set(all_families) | set(held_families)
+        priority_condition_ids = {
+            condition_id
+            for scope in (entry_condition_scope, rest_condition_scope, held_condition_scope)
+            for condition_ids in scope.values()
+            for condition_id in condition_ids
+            if str(condition_id or "").strip()
+        }
         confirm_refresh_summary: dict = {}
         if confirm_families:
             confirm_refresh_summary = _edli_refresh_continuous_money_path_families(
                 confirm_families,
                 now_utc=now,
+                priority_condition_ids=priority_condition_ids,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
             if _edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary):
@@ -6908,6 +6924,7 @@ def _edli_refresh_continuous_money_path_families(
     families: set[tuple[str, str, str]],
     *,
     now_utc: datetime,
+    priority_condition_ids: Iterable[str] | None = None,
 ) -> dict:
     """Refresh only current continuous-money-path families before redecision emit.
 
@@ -6924,6 +6941,11 @@ def _edli_refresh_continuous_money_path_families(
         if str(city or "").strip()
         and str(target_date or "").strip()
         and str(metric or "").strip() in {"high", "low"}
+    }
+    priority_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_condition_ids or ())
+        if str(condition_id or "").strip()
     }
     if not clean_families:
         return {"status": "no_families", "families_requested": 0}
@@ -6966,6 +6988,7 @@ def _edli_refresh_continuous_money_path_families(
                     now_utc=now_utc,
                     extra_priority_families=clean_families,
                     include_pending_families=False,
+                    priority_condition_ids=priority_conditions,
                 )
             finally:
                 try:

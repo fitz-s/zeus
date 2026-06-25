@@ -4268,6 +4268,7 @@ def refresh_executable_market_substrate_snapshots(
     refresh_reason: str | None = None,
     max_outcomes: int | None = None,
     budget_seconds: float | None = None,
+    priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -4286,6 +4287,11 @@ def refresh_executable_market_substrate_snapshots(
 
     captured = captured_at or datetime.now(timezone.utc)
     per_city_limit = _snapshot_max_outcomes_from_env(max_outcomes)
+    priority_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
     attempted = inserted = skipped = failed = 0
     # cap_truncated counts outcomes dropped by per-city cap or budget (true
     # truncation).  skipped counts all filtered-out outcomes (missing cid,
@@ -4390,7 +4396,15 @@ def refresh_executable_market_substrate_snapshots(
     # breadth-first: take slot 0 from each city, then slot 1, etc.
     per_group_sorted: list[list[tuple]] = []
     for group_key in sorted(candidate_groups):
-        group_list = sorted(candidate_groups[group_key], key=lambda item: (item[0], item[1], item[2]))
+        group_list = sorted(
+            candidate_groups[group_key],
+            key=lambda item: (
+                0 if str(item[5] or "").strip() in priority_conditions else 1,
+                item[0],
+                item[1],
+                item[2],
+            ),
+        )
         # per_city_limit == 0 is the UNLIMITED sentinel: capture every family bin.
         if per_city_limit and len(group_list) > per_city_limit:
             cap_truncated += len(group_list) - per_city_limit
@@ -4399,6 +4413,10 @@ def refresh_executable_market_substrate_snapshots(
         per_group_sorted.append(group_list)
     per_group_sorted.sort(
         key=lambda group_list: (
+            0 if (
+                group_list
+                and str(group_list[0][5] or "").strip() in priority_conditions
+            ) else 1,
             group_list[0][0] if group_list else (2, float("inf")),
             _snapshot_refresh_city_key(group_list[0][3]) if group_list else "",
             str(group_list[0][3].get("slug") or "") if group_list else "",
