@@ -847,7 +847,7 @@ class EventStore:
             extreme_row = self.conn.execute(
                 """
                 SELECT {agg}({value_expr})
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
                    AND p.consumer_name = ?
@@ -865,7 +865,7 @@ class EventStore:
             keeper_rows = self.conn.execute(
                 """
                 SELECT e.event_id
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
+                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
                    AND p.consumer_name = ?
