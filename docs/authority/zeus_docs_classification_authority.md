@@ -1,107 +1,102 @@
 # Zeus Docs Classification Authority
 
 Status: active durable authority law  
-Scope: documentation class boundaries, default-read eligibility, authority/reference/current/evidence separation  
-Machine authority: `architecture/docs_registry.yaml`, `architecture/reference_replacement.yaml`  
+Scope: docs planes, default-read eligibility, authority/reference/current/evidence separation, and runtime artifact placement  
+Machine authority: `architecture/docs_registry.yaml`, `architecture/docs_plane_manifest.yaml`, `architecture/reference_replacement.yaml`  
 Freshness model: durable classification law. Individual current facts expire in their own surfaces.
 
 ---
 
-## 1. Core Law
+## 1. Three-Plane Law
 
-Documentation placement does not decide authority. A file is authority only when its class and registry route say it is authority.
+Every tracked or generated cognition artifact must map to exactly one top-level plane:
 
-The active classes are:
-
-| Class | Authority? | Default-read? | Allowed content |
+| Plane | Authority? | Default-read? | Contents |
 |---|---:|---:|---|
-| durable authority law | yes | yes when task class requires | stable architecture/delivery/model-selection/docs-classification law |
-| machine authority manifest | yes | yes when task class requires | YAML/registry/test topology/contracts that machines can validate |
-| canonical reference | no | task-routed only | durable explanation, formulas, examples, rebuild guidance |
-| current fact pointer | no durable authority | only when current facts are required | evidence-backed present state with freshness/expiry |
-| runbook | no | operation-routed only | procedures, commands, triage flow |
-| evidence | no | no | raw receipts, measurements, audits |
-| report | no | no | interpreted history, reviews, closeouts, critic/verifier output |
-| archive | no | no | cold historical material |
-| packet/work diary | no | no except active task scope | plan, work log, packet evidence, closeout material |
-| rebuild/consult history | no | no | implementation notes, raw consults, PR reviews, debate logs |
+| Authority | yes | task-required | durable law and machine-checkable law |
+| Operations | no durable authority | pointer-only/current-task | runtime artifacts, current facts, active work, receipts, live evidence |
+| Persistent special | no | routed only | references, runbooks, reports, evidence, archives, rebuild history, module books |
 
-Reference is not authority. Reference can be excellent, complete, and necessary, but it explains law; it does not create law.
+Detailed labels such as reference, runbook, report, evidence, archive, and module book still exist for indexing, but they roll up to these three planes.
 
 ---
 
-## 2. Authority Files
+## 2. Authority Plane
 
-Active docs authority files are only:
+Authority is only:
 
-- `docs/authority/AGENTS.md`
-- `docs/authority/zeus_current_architecture.md`
-- `docs/authority/zeus_current_delivery.md`
-- `docs/authority/zeus_change_control_constitution.md`
-- `docs/authority/ARCHIVAL_RULES.md`
-- `docs/authority/zeus_forecast_fusion_authority.md`
-- `docs/authority/zeus_docs_classification_authority.md`
+- active files under `docs/authority/**` listed in `docs/authority/AGENTS.md` and `architecture/docs_registry.yaml`;
+- machine authority manifests under `architecture/**`.
 
-A new authority file must be registered in `architecture/docs_registry.yaml`, routed by `docs/authority/AGENTS.md`, and justified by code/manifests/tests/runtime evidence.
+Reference is not authority. A reference can be excellent, complete, and required for cognition, but it explains law; it does not create law.
 
 ---
 
-## 3. Reference Files
+## 3. Operations Plane
 
-Canonical reference files live under `docs/reference/**`. They are not authority even when default-routed for cognition.
+Runtime artifacts belong in operations.
 
-Reference files must not contain:
+Examples:
 
-- live bankroll;
-- process PID;
-- loaded SHA;
-- active position inventory;
+- launchd/process inspection output;
+- live bankroll or collateral snapshot;
+- PID or loaded SHA;
+- current open orders or positions;
 - current rejection counts;
-- active packet diary;
-- current provider health without freshness/expiry;
-- present-tense law not backed by source/manifest/authority.
+- DB row counts, WAL size, lock-holder observations;
+- source health probe output;
+- smoke-test receipts;
+- active packet work logs and current evidence.
 
-When a reference needs a current fact, it must point to an operations current pointer instead of embedding it.
-
----
-
-## 4. Current Fact Pointers
-
-Current facts belong in:
+Allowed durable pointers:
 
 - `docs/operations/current_state.md`
 - `docs/operations/current_data_state.md`
 - `docs/operations/current_source_validity.md`
 
-They must state evidence, checked_at/observed_at, freshness or expiry, refresh owner, and stale behavior.
-
-Current facts do not become durable law by being cited from authority or reference.
+Active package bodies under `docs/operations/current/**` are operations plane but not default boot.
 
 ---
 
-## 5. Evidence And History
+## 4. Persistent Special Plane
 
-These paths are never default authority/reference:
+Persistent special files may be preserved but do not authorize runtime:
 
+- `docs/reference/**`
+- `docs/runbooks/**`
 - `docs/evidence/**`
 - `docs/reports/**`
 - `docs/archive/**`
 - `docs/rebuild/**`
-- closed `docs/operations/task_*`
-- non-current bodies under `docs/operations/current/**`
+- `docs/archive_registry.md`
 
-Historical material remains discoverable through `docs/archive_registry.md`, not through default boot.
+They are search/discovery/explanation/procedure/history surfaces. If a durable rule is extracted from them, promote the rewritten rule to authority and demote the source.
+
+---
+
+## 5. Runtime Artifact Rule
+
+All future runtime outputs produced by agents, scripts, daemons, smoke tests, DB probes, source checks, or live inspection must go to operations or runtime state, never to authority/reference.
+
+Preferred tracked home for human-readable runtime receipts:
+
+```text
+docs/operations/current/evidence/
+docs/operations/current/reports/
+```
+
+If a runtime artifact must be retained after closeout, move it to evidence/report/archive and register it. Do not leave it in default boot.
 
 ---
 
 ## 6. Promotion Rule
 
-To promote historical material:
+To promote material out of operations or persistent special:
 
 1. extract the durable rule;
 2. prove it against current code/manifests/tests/runtime evidence;
-3. rewrite it into an active authority or reference file;
-4. register the route;
-5. demote the source.
+3. rewrite it into active authority or canonical reference;
+4. update registry and routers;
+5. demote or archive the source.
 
-Never promote a raw packet, raw consult, raw report, or dated audit wholesale.
+Never promote a raw packet, raw consult, raw report, current runtime snapshot, or dated audit wholesale.
