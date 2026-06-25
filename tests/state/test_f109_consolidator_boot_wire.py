@@ -156,7 +156,11 @@ def test_consolidator_boot_noop_on_empty(tmp_path):
     from src.state.position_duplicate_consolidator import consolidate
 
     conn = _make_trade_db(tmp_path)
-    report = consolidate(conn)
+    with patch(
+        "src.state.position_duplicate_consolidator._load_chain_shares_by_token",
+        side_effect=AssertionError("healthy boot must not scan chain snapshots"),
+    ):
+        report = consolidate(conn)
     conn.close()
 
     assert report["scanned_tokens"] == 0, (
@@ -164,6 +168,7 @@ def test_consolidator_boot_noop_on_empty(tmp_path):
     )
     assert report["voided_positions"] == []
     assert report["divergent_tokens"] == []
+    assert report["chain_snapshot_used"] is False
 
 
 def test_consolidator_boot_noop_on_single_row(tmp_path):
@@ -175,12 +180,43 @@ def test_consolidator_boot_noop_on_single_row(tmp_path):
     _insert_position(conn, position_id=str(uuid.uuid4()), token_id=token,
                      phase="pending_exit", shares=6.0)
 
-    report = consolidate(conn)
+    with patch(
+        "src.state.position_duplicate_consolidator._load_chain_shares_by_token",
+        side_effect=AssertionError("single-row boot must not scan chain snapshots"),
+    ):
+        report = consolidate(conn)
     conn.close()
 
     assert report["scanned_tokens"] == 0, (
         "single-row token must not be scanned by HAVING COUNT(*) > 1 filter"
     )
+    assert report["chain_snapshot_used"] is False
+
+
+def test_consolidate_token_noop_does_not_scan_chain_snapshot(tmp_path):
+    """Single-token lifecycle consolidation must also skip chain snapshots unless duplicated."""
+    from src.state.position_duplicate_consolidator import consolidate_token
+
+    token = "tok_token_noop_" + uuid.uuid4().hex[:8]
+    conn = _make_trade_db(tmp_path, chain_balances={token: 6.0})
+    _insert_position(
+        conn,
+        position_id=str(uuid.uuid4()),
+        token_id=token,
+        phase="active",
+        shares=6.0,
+    )
+
+    with patch(
+        "src.state.position_duplicate_consolidator._load_chain_shares_by_token",
+        side_effect=AssertionError("single-token noop must not scan chain snapshots"),
+    ):
+        report = consolidate_token(conn, token)
+    conn.close()
+
+    assert report["scanned_tokens"] == 0
+    assert report["voided_positions"] == []
+    assert report["chain_snapshot_used"] is False
 
 
 # ---------------------------------------------------------------------------
