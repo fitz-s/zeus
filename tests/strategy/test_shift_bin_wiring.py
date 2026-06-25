@@ -106,6 +106,25 @@ def test_sibling_different_bin_is_returned():
     assert held.current_live_usd == pytest.approx(4.0)
 
 
+def test_sibling_different_bin_reads_tuple_rows_without_row_factory():
+    """Bare sqlite3 tuple rows must not make held sibling exposure disappear."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(_POSITION_CURRENT_DDL)
+    ensure_table(conn)
+    _insert_held(conn, token_id="tok-A", bin_label="60-61F", cost_basis_usd=4.0)
+
+    held = sbw.read_held_sibling_exposure(
+        conn, city="Tokyo", target_date="2026-06-23", temperature_metric="high",
+        selected_token_id="tok-B", selected_bin_label="62-63F",
+    )
+
+    assert held is not None
+    assert held.position_id == "p-old"
+    assert held.token_id == "tok-A"
+    assert held.bin_label == "60-61F"
+    assert held.current_live_usd == pytest.approx(4.0)
+
+
 def test_buy_no_sibling_returns_no_token_as_sellable_old_leg():
     """SHIFT_BIN must sell the held-side NO token, not the row's YES/condition token."""
     conn = _conn()
@@ -154,6 +173,15 @@ def test_other_family_position_is_not_a_sibling():
 def test_old_leg_residual_reads_live_usd():
     conn = _conn()
     _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0)
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(4.0)
+
+
+def test_old_leg_residual_reads_tuple_rows_without_row_factory():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(_POSITION_CURRENT_DDL)
+    ensure_table(conn)
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0)
+
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(4.0)
 
 

@@ -235,6 +235,43 @@ def test_sweep_reduces_active_scan_volume():
     assert len(returned) == 2
 
 
+def test_expired_sweep_prefilters_target_band_before_batch_limit():
+    """Rows outside the expiry/venue-close target band must not consume LIMIT.
+
+    Before the SQL prefilter, the oldest active but ineligible row could occupy the
+    only batch slot and leave an eligible expired row immediately behind it active.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    active = _fsr_event(
+        "Chicago", "2026-06-07", "snap-active-limit",
+        available_at="2026-06-04T00:00:00+00:00",
+    )
+    expired = _fsr_event(
+        "Chicago", "2026-06-04", "snap-expired-limit",
+        available_at="2026-06-03T00:00:00+00:00",
+    )
+    store.insert_or_ignore(active)
+    store.insert_or_ignore(expired)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-01-01T00:00:00+00:00", active.event_id),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-01-02T00:00:00+00:00", expired.event_id),
+    )
+
+    archived = store.archive_expired_candidates(
+        decision_time=_DECISION_TIME,
+        batch_limit=1,
+    )
+
+    assert archived == 1
+    assert _status_of(conn, expired.event_id) == "expired"
+    assert _status_of(conn, active.event_id) == "pending"
+
+
 def test_sweep_is_idempotent():
     """A second sweep at the same decision time archives nothing new (no double
     work, no churn) — the sweep is idempotent and budget-safe."""

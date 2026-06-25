@@ -2220,6 +2220,8 @@ class TestExitOrderCommandSplit:
         assert capability["action"] == "EXIT"
         assert capability["intent_kind"] == "EXIT"
         assert capability["order_type"] == "FAK"
+        assert capability["venue_order_type"] == "FAK"
+        assert capability["risk_allocator_selected_order_type"] == "FOK"
         assert capability["allowed"] is True
         assert len(capability["capability_id"]) == 32
         assert capability["command_id"] == row["command_id"]

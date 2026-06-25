@@ -703,6 +703,39 @@ def test_fixA_terminal_venue_command_releases_stale_aggregate_lock():
     assert _lock_reason(conn, limit_price=0.70) is None
 
 
+def test_fixA_terminal_venue_command_id_releases_stale_aggregate_lock():
+    """Production command truth may key the row by command_id, not decision_id."""
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            state TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "command-1",
+            "dec-other",
+            "EXPIRED",
+            "2026-06-17T20:22:02+00:00",
+            "2026-06-17T20:33:19+00:00",
+        ),
+    )
+
+    assert _lock_reason(conn, limit_price=0.70) is None
+
+
 def test_fixA_terminal_venue_command_releases_lock_from_trade_db(monkeypatch):
     """Production shape: live-order aggregate is in world DB while venue_commands
     is owned by the trade DB. Terminal venue state must still release the lock."""

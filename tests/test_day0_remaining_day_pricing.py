@@ -469,6 +469,40 @@ class TestRequestHashProvenance:
         assert (n1, n2) == (0, 0)
         assert attempts == {"fetch": 2, "persist": 2}
 
+    def test_empty_fetch_result_does_not_throttle_next_attempt(self, monkeypatch):
+        """Transport/shape soft-failures return empty vectors; they must retry next pass."""
+        import src.data.day0_hourly_vectors as hv
+
+        attempts = {"fetch": 0, "persist": 0}
+
+        def fake_fetch(city, *, models=None, now=None, timeout_s=None):
+            attempts["fetch"] += 1
+            return [], ""
+
+        def fake_persist(vectors, *, target_date, request_hash, **kw):
+            attempts["persist"] += 1
+            return len(vectors)
+
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        n1 = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=decision_time,
+            interval_s=1800.0,
+        )
+        n2 = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=decision_time + timedelta(seconds=1),
+            interval_s=1800.0,
+        )
+
+        assert (n1, n2) == (0, 0)
+        assert attempts == {"fetch": 2, "persist": 0}
+
     def test_no_regional_model_uses_global_ecmwf_fallback(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 

@@ -140,6 +140,15 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     }
 
 
+def _row_get(row: sqlite3.Row | tuple, selected_names: tuple[str, ...], name: str):
+    try:
+        if isinstance(row, sqlite3.Row):
+            return row[name]
+        return row[selected_names.index(name)]
+    except (IndexError, KeyError, ValueError):
+        return None
+
+
 def read_held_same_token_exposure(
     conn: Optional[sqlite3.Connection],
     *,
@@ -183,9 +192,12 @@ def read_held_same_token_exposure(
         return None
     positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
 
+    selected_names = (
+        "position_id", "bin_label", "direction", "p_posterior",
+        "entry_ci_width", "chain_cost_basis_usd", "cost_basis_usd", "size_usd",
+    )
     select_cols = []
-    for name in ("position_id", "bin_label", "direction", "p_posterior",
-                 "entry_ci_width", "chain_cost_basis_usd", "cost_basis_usd", "size_usd"):
+    for name in selected_names:
         select_cols.append(name if name in cols else f"NULL AS {name}")
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
@@ -204,10 +216,7 @@ def read_held_same_token_exposure(
         return None
 
     def _g(name: str):
-        try:
-            return row[name] if isinstance(row, sqlite3.Row) else None
-        except (IndexError, KeyError):
-            return None
+        return _row_get(row, selected_names, name)
 
     p_posterior = _g("p_posterior")
     entry_ci_width = _g("entry_ci_width")
@@ -396,10 +405,12 @@ def presubmit_reread_aborts(
         " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
         if cost_terms else ""
     )
+    selected_names = ["position_id", "token_id", "bin_label"]
     select_cols = ["position_id"]
     select_cols.append("token_id" if "token_id" in cols else "NULL AS token_id")
     select_cols.append("bin_label" if "bin_label" in cols else "NULL AS bin_label")
     if metric_col:
+        selected_names.append("metric")
         select_cols.append(f"{metric_col} AS metric")
     sql = (
         f"SELECT {', '.join(select_cols)} FROM position_current "
@@ -415,12 +426,10 @@ def presubmit_reread_aborts(
         return f"PRESUBMIT_REREAD_POSITION_TRUTH_UNAVAILABLE:{type(exc).__name__}"
 
     metric_norm = _norm_metric(temperature_metric)
+    selected_names_tuple = tuple(selected_names)
     for row in rows:
         def _g(name: str):
-            try:
-                return row[name] if isinstance(row, sqlite3.Row) else None
-            except (IndexError, KeyError):
-                return None
+            return _row_get(row, selected_names_tuple, name)
 
         if metric_col and _norm_metric(_g("metric")) != metric_norm:
             continue

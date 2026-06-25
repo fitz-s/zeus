@@ -6428,15 +6428,29 @@ def _aggregate_terminal_venue_command_releases_lock(
     def _command_state_on_conn(conn: sqlite3.Connection, execution_command_id: str) -> str | None:
         if not _adapter_table_exists(conn, "venue_commands"):
             return None
+        cols = {
+            str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+            for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+        match_terms = []
+        params: list[str] = []
+        if "command_id" in cols:
+            match_terms.append("command_id = ?")
+            params.append(execution_command_id)
+        if "decision_id" in cols:
+            match_terms.append("decision_id = ?")
+            params.append(execution_command_id)
+        if not match_terms:
+            return None
         command = conn.execute(
-            """
+            f"""
             SELECT state
             FROM venue_commands
-            WHERE decision_id = ?
+            WHERE {' OR '.join(match_terms)}
             ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC
             LIMIT 1
             """,
-            (execution_command_id,),
+            tuple(params),
         ).fetchone()
         if command is None:
             return None

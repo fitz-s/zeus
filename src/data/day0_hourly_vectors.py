@@ -19,8 +19,11 @@ hours AFTER now.
 
 Bounded by design
 -----------------
-- Only day0-relevant cities x in-domain regional models (polygon gate reused
-  from src/forecast/model_selection.regional_eligible, lead 0).
+- Day0-relevant cities use in-domain regional hourly models when available
+  (polygon gate reused from src/forecast/model_selection.regional_eligible,
+  lead 0). Cities outside those regional domains use the live replacement-chain
+  global fallback, ECMWF IFS 9km, so Day0 pricing has a real hourly source
+  instead of permanently blocking on regional model absence.
 - Only ~2 forecast days of hours per row; retention prunes rows older than
   DAY0_VECTOR_RETENTION_DAYS (default 3) on every write pass.
 - Refresh throttled to once per DEFAULT_REFRESH_INTERVAL_S per process.
@@ -497,8 +500,11 @@ def maybe_refresh_day0_hourly_vectors(
 ) -> int:
     """Throttled per-city fetch+persist of the freshest high-res hourly curves.
 
-    Only cities with at least one in-domain high-res model are fetched. One
-    open-meteo call per city per interval. Fail-soft per city.
+    Cities with an in-domain regional high-res model use that regional source;
+    other cities use the ECMWF IFS global fallback from
+    ``day0_hourly_models_for_city``. One open-meteo call per city per interval.
+    Fail-soft per city. Empty transport/shape results do not consume the full
+    refresh interval; the key is cleared so the next reactor pass can retry.
     """
     written = 0
     now_monotonic = time.monotonic()
@@ -528,6 +534,8 @@ def maybe_refresh_day0_hourly_vectors(
                 _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
             models = day0_hourly_models_for_city(city)
             if not models:
+                with _REFRESH_LOCK:
+                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
                 continue
             checked += 1
             try:
@@ -547,6 +555,9 @@ def maybe_refresh_day0_hourly_vectors(
                     request_hash=request_hash,
                     lock_blocking=persist_lock_blocking,
                 )
+            else:
+                with _REFRESH_LOCK:
+                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             if isinstance(exc, BlockingIOError):
                 with _REFRESH_LOCK:

@@ -1766,6 +1766,8 @@ def _build_execution_capability(
     components: list[dict],
     freshness_time: str,
     mode: str = "submit",
+    venue_order_type: str | None = None,
+    risk_allocator_selected_order_type: str | None = None,
 ) -> dict:
     normalized_components = [
         component if isinstance(component, dict) else _capability_component("unknown_component")
@@ -1784,6 +1786,10 @@ def _build_execution_capability(
         "executable_snapshot_id": snapshot_id,
         "components": normalized_components,
     }
+    if venue_order_type is not None:
+        proof["venue_order_type"] = str(venue_order_type)
+    if risk_allocator_selected_order_type is not None:
+        proof["risk_allocator_selected_order_type"] = str(risk_allocator_selected_order_type)
     proof["capability_id"] = hashlib.sha256(
         json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:32]
@@ -3544,6 +3550,8 @@ def execute_exit_order(
                         command_id=command_id,
                         intent_kind=IntentKind.EXIT.value,
                         order_type=order_type,
+                        venue_order_type=order_type,
+                        risk_allocator_selected_order_type=selected_order_type,
                         token_id=intent.token_id,
                         snapshot_id=intent.executable_snapshot_id,
                         freshness_time=now_str,

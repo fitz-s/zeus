@@ -118,6 +118,23 @@ def test_held_same_token_reads_entry_q_lcb_and_current_live():
     assert held.current_live_usd == pytest.approx(4.0)
 
 
+def test_held_same_token_reads_tuple_rows_without_row_factory():
+    """Maintenance/recovery callers may pass a bare sqlite3 connection."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(_POSITION_CURRENT_DDL)
+    ensure_table(conn)
+    _insert_held(conn, p_posterior=0.50, entry_ci_width=0.20, cost_basis_usd=4.0)
+
+    held = fuw.read_held_same_token_exposure(conn, token_id="tok-A")
+
+    assert held is not None
+    assert held.position_id == "p1"
+    assert held.bin_label == "60-61F"
+    assert held.direction == "buy_yes"
+    assert held.entry_q_lcb == pytest.approx(0.40)
+    assert held.current_live_usd == pytest.approx(4.0)
+
+
 def test_held_same_token_prefers_chain_cost_basis_when_present():
     conn = _conn()
     conn.execute(

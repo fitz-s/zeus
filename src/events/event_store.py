@@ -456,10 +456,33 @@ class EventStore:
                AND p.processing_status IN ('pending', 'processing')
                AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
                AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+               AND (
+                    (
+                        e.event_type = 'FORECAST_SNAPSHOT_READY'
+                        AND (
+                            json_extract(e.payload_json, '$.target_date') < ?
+                            OR json_extract(e.payload_json, '$.target_date') <= ?
+                        )
+                    )
+                    OR (
+                        e.event_type = 'DAY0_EXTREME_UPDATED'
+                        AND (
+                            json_extract(e.payload_json, '$.target_date') < ?
+                            OR json_extract(e.payload_json, '$.target_date') <= ?
+                        )
+                    )
+               )
              ORDER BY p.updated_at ASC, p.event_id ASC
              LIMIT ?
             """,
-            (self.consumer_name, batch_limit),
+            (
+                self.consumer_name,
+                frontier_floor,
+                venue_close_ceiling,
+                day0_floor,
+                venue_close_ceiling,
+                batch_limit,
+            ),
         ).fetchall()
 
         expired_ids: list[str] = []

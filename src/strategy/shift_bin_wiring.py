@@ -64,6 +64,7 @@ from src.strategy.fill_up_wiring import (
     _FILL_UP_BLOCKING_PHASES as _BLOCKING_PHASES,
     _columns,
     _norm_metric,
+    _row_get,
     _table_exists,
 )
 
@@ -159,9 +160,12 @@ def read_held_sibling_exposure(
         return None
     positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
 
+    selected_names = (
+        "position_id", "token_id", "no_token_id", "bin_label", "direction",
+        "chain_cost_basis_usd", "cost_basis_usd", "size_usd", metric_col,
+    )
     select_cols = []
-    for name in ("position_id", "token_id", "no_token_id", "bin_label", "direction",
-                 "chain_cost_basis_usd", "cost_basis_usd", "size_usd", metric_col):
+    for name in selected_names:
         select_cols.append(name if name in cols else f"NULL AS {name}")
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
@@ -180,10 +184,7 @@ def read_held_sibling_exposure(
     metric_norm = _norm_metric(temperature_metric)
     for row in rows:
         def _g(name: str):
-            try:
-                return row[name] if isinstance(row, sqlite3.Row) else None
-            except (IndexError, KeyError):
-                return None
+            return _row_get(row, selected_names, name)
 
         if _norm_metric(_g(metric_col)) != metric_norm:
             continue
@@ -254,8 +255,8 @@ def read_old_leg_residual_usd(
     if not cost_terms:
         return float("inf")
     positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
-    select_cols = [c if c in cols else f"NULL AS {c}"
-                   for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")]
+    selected_names = ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+    select_cols = [c if c in cols else f"NULL AS {c}" for c in selected_names]
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
         f"SELECT {', '.join(select_cols)} FROM position_current "
@@ -273,10 +274,7 @@ def read_old_leg_residual_usd(
         return 0.0  # no live row for the old token → proven closed
 
     def _g(name: str):
-        try:
-            return row[name] if isinstance(row, sqlite3.Row) else None
-        except (IndexError, KeyError):
-            return None
+        return _row_get(row, selected_names, name)
 
     for value in (_g("chain_cost_basis_usd"), _g("cost_basis_usd"), _g("size_usd")):
         try:
