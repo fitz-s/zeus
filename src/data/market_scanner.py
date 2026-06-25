@@ -4213,7 +4213,25 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
         return None
     bids = depth.get("bids")
     asks = depth.get("asks")
-    if not isinstance(bids, list) or not isinstance(asks, list):
+    if not isinstance(bids, list):
+        bids = []
+    if not isinstance(asks, list):
+        asks = []
+    if not bids or not asks:
+        try:
+            best_bid = row.get("best_bid_before")
+            best_ask = row.get("best_ask_before")
+            if best_bid is not None and not bids:
+                bid_dec = Decimal(str(best_bid))
+                if bid_dec.is_finite() and Decimal("0") < bid_dec < Decimal("1"):
+                    bids = [{"price": str(bid_dec), "size": "1"}]
+            if best_ask is not None and not asks:
+                ask_dec = Decimal(str(best_ask))
+                if ask_dec.is_finite() and Decimal("0") < ask_dec < Decimal("1"):
+                    asks = [{"price": str(ask_dec), "size": "1"}]
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+    if not asks:
         return None
     book: dict[str, Any] = {
         "asset_id": token_id,
