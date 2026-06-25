@@ -251,7 +251,7 @@ class EventStore:
                 AND p.processing_status = 'pending'
               UNION ALL
               SELECT p.event_id, p.attempt_count
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_stale_claim
+              FROM opportunity_event_processing p
               WHERE p.consumer_name = ?
                 AND p.processing_status = 'processing'
                 AND p.claimed_at IS NOT NULL

@@ -639,7 +639,7 @@ def test_fetch_pending_query_uses_processing_status_index():
         (sql, params)
         for sql, params in conn.executed_sql
         if "INDEXED BY idx_opportunity_event_processing_status" in sql
-        and "INDEXED BY idx_opportunity_event_processing_stale_claim" in sql
+        and "p.claimed_at <= ?" in sql
         and "_city_round" in sql
     )
 
