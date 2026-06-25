@@ -42,6 +42,7 @@ from src.state.portfolio import (
     FILL_AUTHORITY_NONE,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     INACTIVE_RUNTIME_STATES,
+    get_open_positions,
 )
 
 logger = logging.getLogger(__name__)
@@ -2858,7 +2859,7 @@ def _family_monitor_positions(portfolio, pos) -> list:
     if key is None or portfolio is None:
         return [pos]
     out: list = []
-    for other in getattr(portfolio, "positions", None) or ():
+    for other in get_open_positions(portfolio):
         if _family_monitor_key(other) != key:
             continue
         phase = _position_state_value(other)
@@ -3777,7 +3778,7 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    for pos in list(portfolio.positions):
+    for pos in list(get_open_positions(portfolio)):
         if pos.state == "pending_tracked":
             continue
         state_value = _position_state_value(pos)
