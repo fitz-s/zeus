@@ -9948,6 +9948,8 @@ def _reconcile_row(
 def reconcile_unresolved_commands(
     conn: Optional[sqlite3.Connection] = None,
     client=None,
+    *,
+    scope: str = "full",
 ) -> dict:
     """Scan unresolved venue_commands and apply reconciliation events.
 
@@ -9959,6 +9961,12 @@ def reconcile_unresolved_commands(
     REVIEW_REQUIRED are skipped (operator-handoff). Rows without a
     venue_order_id and in SUBMITTING get a REVIEW_REQUIRED event since recovery
     cannot distinguish never-placed from ack-lost side effects.
+
+    ``scope="full"`` keeps the historical complete sweep. ``scope="live_tick"``
+    is for the live order daemon's frequent scheduler cadence: it reconciles the
+    critical in-flight command surface, then leaves heavier projection, partial,
+    and maker-fill maintenance for the full sweep / sidecar owner so the trading
+    reactor is not starved by a boot-time recovery storm.
 
     DB connection: if conn is None, opens get_trade_connection_with_world_required()
     internally (with a try/finally to close). CycleRunner passes the per-cycle
@@ -9984,6 +9992,11 @@ def reconcile_unresolved_commands(
         2026-06-11. Reconciliation SEMANTICS are unchanged: each pass body runs
         verbatim against a venue snapshot captured off-lock.
     """
+    if scope not in {"full", "live_tick"}:
+        raise ValueError(f"unsupported command recovery scope: {scope!r}")
+    if conn is not None and scope != "full":
+        raise ValueError("non-full command recovery scopes require conn=None")
+
     if client is None:
         from src.data.polymarket_client import PolymarketClient
         client = PolymarketClient()
@@ -9993,7 +10006,7 @@ def reconcile_unresolved_commands(
 
     if conn is None:
         # Scheduled-job lane: per-pass short connections, no conn across network.
-        _reconcile_passes_short_conn(client, summary, started_at)
+        _reconcile_passes_short_conn(client, summary, started_at, scope=scope)
         logger.info(
             "recovery: scanned=%d advanced=%d stayed=%d errors=%d",
             summary["scanned"], summary["advanced"], summary["stayed"], summary["errors"],
@@ -10233,7 +10246,7 @@ def _accumulate(
     summary["errors"] += pass_summary["errors"]
 
 
-def _collect_recovery_priming_keys(conn: sqlite3.Connection) -> dict:
+def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "full") -> dict:
     """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
 
     Runs only read queries (the per-pass candidate selects + the in-flight scan)
@@ -10266,6 +10279,13 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection) -> dict:
         _harvest(find_unresolved_commands(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
+    if scope == "live_tick":
+        return {
+            "order_ids": order_ids,
+            "idempotency_keys": idem_keys,
+            "condition_ids": condition_ids,
+        }
+
     # Each client-taking pass's candidate query.
     for candidate_fn in (
         _local_orphan_no_fill_candidates,
@@ -10290,7 +10310,7 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection) -> dict:
     }
 
 
-def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None:
+def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scope: str = "full") -> None:
     """Scheduled-job lane: per-pass short connections, no connection across network.
 
     Three structural phases (``src.execution.venue_sync_contract``):
@@ -10387,7 +10407,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
-        priming = _collect_recovery_priming_keys(conn)
+        priming = _collect_recovery_priming_keys(conn, scope=scope)
 
     # -- PHASE 2: NETWORK (no connection in scope) -----------------------------
     assert_no_open_connection("recovery.capture_venue_snapshot")
@@ -10455,6 +10475,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str) -> None
             conn_factory=conn_factory, label="recovery.inflight_scan",
         ),
     )
+
+    if scope == "live_tick":
+        summary["scope"] = "live_tick"
+        summary["deferred_full_sweep"] = True
+        return
 
     _client_pass("local_orphan_no_fill_findings",
                  reconcile_local_orphan_no_fill_findings, "local_orphan_no_fill_findings")

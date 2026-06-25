@@ -28,8 +28,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import sys
-import threading
-import time
 import types
 
 import pytest
@@ -70,16 +68,12 @@ def test_harvester_should_register_predicate_covers_live_boot_recovery_modes():
     assert pred("disabled") is False
 
 
-def test_boot_settlement_redeem_recovery_queues_background_harvester(monkeypatch):
-    """Boot settlement recovery must not block scheduler startup."""
+def test_boot_settlement_redeem_recovery_is_delegated_out_of_order_daemon(monkeypatch):
+    """The order daemon must not run the post-trade harvester at boot."""
     import src.main as main_mod
 
-    started = threading.Event()
-    release = threading.Event()
-
     def _fake_harvester_cycle():
-        started.set()
-        release.wait(timeout=2.0)
+        raise AssertionError("order daemon boot path must not run _harvester_cycle")
 
     monkeypatch.setitem(
         sys.modules,
@@ -94,14 +88,7 @@ def test_boot_settlement_redeem_recovery_queues_background_harvester(monkeypatch
     monkeypatch.setattr(main_mod, "_live_execution_mode", lambda _cfg: "edli_live")
     monkeypatch.setattr(main_mod, "_harvester_should_register", lambda _mode: True)
 
-    t0 = time.monotonic()
     main_mod._edli_boot_settlement_redeem_recovery()
-    elapsed = time.monotonic() - t0
-    try:
-        assert elapsed < 0.2, f"boot recovery blocked scheduler path for {elapsed:.3f}s"
-        assert started.wait(timeout=1.0), "background harvester thread did not start"
-    finally:
-        release.set()
 
 
 def _harvester_add_job_enclosing_gate() -> list[str]:

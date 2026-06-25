@@ -5529,10 +5529,15 @@ def _edli_command_recovery_cycle() -> None:
         return
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
+    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
+        logger.info(
+            "edli_command_recovery deferred: trading reactor/redecision lane active"
+        )
+        return
     from src.execution.command_recovery import reconcile_unresolved_commands
     from src.state.db import get_trade_connection_with_world_required
 
-    summary = reconcile_unresolved_commands()
+    summary = reconcile_unresolved_commands(scope="live_tick")
     if summary.get("scanned"):
         logger.info("edli_command_recovery: %s", summary)
     if _command_recovery_summary_mutated_allocator_inputs(summary):
@@ -8637,21 +8642,13 @@ def _edli_boot_fill_bridge_recovery() -> None:
 
 
 def _edli_boot_settlement_redeem_recovery() -> None:
-    """守護 (2026-06-03): queue stuck settled-but-active recovery during boot.
+    """Acknowledge that settlement recovery is owned outside the order daemon.
 
-    The harvester now runs hourly in EDLI modes, but on restart we should not wait
-    up to an hour to clear positions whose target_date already has a VERIFIED
-    settlement_outcomes row yet still sit phase=active (memory #56, Shanghai
-    cca68b44). Queue one background _harvester_cycle() pass at boot so the scheduler
-    is never blocked by portfolio scans while the recovery still runs promptly.
-
-    Shadow-safe: _harvester_cycle does no on-chain work (the on-chain redeem POST is
-    the separately-gated _redeem_submitter_cycle), and resolve_pnl_for_settled_markets
-    is itself a no-op unless ZEUS_HARVESTER_LIVE_ENABLED=1, so this boot pass cannot
-    settle anything when the operator has the resolver disabled.
-
-    Gate: same modes as the scheduled job (_harvester_should_register). Fully
-    fail-open — any error is logged, never fatal; the hourly scheduled job retries.
+    The P4 post-trade-capital daemon owns ``_harvester_cycle``. Running a boot
+    harvester thread here re-couples a heavy post-trade SQLite/venue workflow to
+    the live trading daemon and can starve the EDLI reactor immediately after a
+    restart. The order daemon keeps only the fill bridge and live decision work;
+    settled-position recovery drains through the dedicated post-trade daemon.
     """
     try:
         edli_cfg = _settings_section("edli", {})
@@ -8660,36 +8657,15 @@ def _edli_boot_settlement_redeem_recovery() -> None:
             return
         if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and not edli_cfg.get("enabled"):
             return
-        def _runner() -> None:
-            try:
-                from src.execution.post_trade_capital import _harvester_cycle
-
-                _harvester_cycle()
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "守護 boot settlement-redeem background recovery failed "
-                    "(non-fatal; hourly harvester retries): %s",
-                    exc,
-                    exc_info=True,
-                )
-
-        thread = threading.Thread(
-            target=_runner,
-            name="boot-settlement-redeem-recovery",
-            daemon=True,
-        )
-        thread.start()
         logger.info(
-            "守護 boot settlement-redeem recovery: queued one background harvester "
-            "pass before entering the trading loop (mode=%s)",
+            "boot settlement-redeem recovery delegated to post-trade-capital "
+            "daemon; order daemon will not run a boot harvester pass (mode=%s)",
             live_execution_mode,
         )
     except Exception as exc:  # noqa: BLE001
-        # Boot recovery is best-effort: the hourly scheduled harvester is the safety
-        # net, so a boot-time hiccup must never block the daemon from starting.
         logger.error(
-            "守護 boot settlement-redeem recovery failed (non-fatal; hourly harvester "
-            "retries): %s",
+            "boot settlement-redeem ownership check failed (non-fatal; "
+            "post-trade-capital daemon owns harvester retries): %s",
             exc,
             exc_info=True,
         )

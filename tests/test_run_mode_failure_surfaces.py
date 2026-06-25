@@ -725,7 +725,9 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda: {"scanned": 1, "advanced": 1},
+        lambda **kwargs: health_calls.append(
+            ("reconcile_scope", False, str(kwargs.get("scope")))
+        ) or {"scanned": 1, "advanced": 1},
     )
     monkeypatch.setattr(
         state_db,
@@ -749,4 +751,32 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
 
     assert refresh_calls == [fake_conn]
     assert fake_conn.closed is True
+    assert ("reconcile_scope", False, "live_tick") in health_calls
     assert ("edli_command_recovery", False, None) in health_calls
+
+
+def test_edli_command_recovery_defers_to_active_redecision(monkeypatch) -> None:
+    """Frequent recovery sweeps must not contend with the live management lane."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_redecision_screen_lock",
+        type("Locked", (), {"locked": lambda self: True})(),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append("reconcile") or {"scanned": 1, "advanced": 1},
+    )
+
+    main_module._edli_command_recovery_cycle()
+
+    assert calls == []

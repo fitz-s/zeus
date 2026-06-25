@@ -183,6 +183,42 @@ def test_no_client_call_while_any_connection_open(monkeypatch, tmp_path):
         )
 
 
+def test_live_tick_scope_defers_heavy_recovery_passes(monkeypatch, tmp_path):
+    """The order-daemon cadence reconciles in-flight commands without full sweep work."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-live-tick")
+    h._advance_to_submitting(seed_conn, command_id="cmd-live-tick", venue_order_id="vord-live-tick")
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-live-tick": {"orderID": "vord-live-tick", "status": "LIVE"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["deferred_full_sweep"] is True
+    assert summary["scanned"] == 1
+    assert "partial_remainders" not in summary
+    assert "recorded_maker_fill_economics" not in summary
+
+
 def test_no_connection_spans_more_than_one_pass(monkeypatch, tmp_path):
     """R2: every connection's open..close window contains at most one sub-pass.
 
