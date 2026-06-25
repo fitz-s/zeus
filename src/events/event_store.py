@@ -240,7 +240,7 @@ class EventStore:
         base_sql = """
             WITH eligible_processing AS (
               SELECT p.event_id, p.attempt_count
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_pending_retry_floor
               WHERE p.consumer_name = ?
                 AND p.processing_status = 'pending'
                 AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
