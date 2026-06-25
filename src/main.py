@@ -7347,8 +7347,16 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     _EDLI_LAST_PRUNE_MONOTONIC = now_mono
     batch_limit = _edli_prune_batch_limit(edli_cfg)
 
+    def _log_prune_step(step: str, started: float, count: int | None = None) -> None:
+        elapsed = time.monotonic() - started
+        if elapsed >= 1.0:
+            count_suffix = "" if count is None else f" count={count}"
+            logger.info("EDLI reactor prune step completed: %s elapsed_s=%.3f%s", step, elapsed, count_suffix)
+
     try:
+        _step_started = time.monotonic()
         _orphan_archived = store.archive_orphan_processing_rows(batch_limit=batch_limit)
+        _log_prune_step("archive_orphan_processing_rows", _step_started, _orphan_archived)
         if _orphan_archived:
             logger.info(
                 "EDLI reactor: archived %d orphan opportunity_event_processing rows "
@@ -7362,13 +7370,15 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_orphan_processing_rows sweep failed "
             "(non-fatal; joined readers still ignore orphan IDs): %r",
             _orphan_sweep_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         _archived = store.archive_expired_candidates(
             decision_time=decision_time.isoformat(),
             batch_limit=batch_limit,
         )
+        _log_prune_step("archive_expired_candidates", _step_started, _archived)
         if _archived:
             logger.info(
                 "EDLI reactor: archived %d expired (target-local-day-ended) "
@@ -7381,10 +7391,12 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
             "fetch_pending read floor still drops strictly-past rows): %r",
             _sweep_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         _ch_archived = store.archive_superseded_channel_events(batch_limit=batch_limit)
+        _log_prune_step("archive_superseded_channel_events", _step_started, _ch_archived)
         if _ch_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded channel events "
@@ -7406,7 +7418,9 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     # starved the tradeable FORECAST_SNAPSHOT_READY (spine) lane to zero decisions.
     # Past-local-day day0 is handled by archive_expired_candidates (now day0-aware).
     try:
+        _step_started = time.monotonic()
         _d0_archived = store.archive_superseded_day0_events(batch_limit=batch_limit)
+        _log_prune_step("archive_superseded_day0_events", _step_started, _d0_archived)
         if _d0_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded DAY0_EXTREME_UPDATED events "
@@ -7420,9 +7434,10 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         logger.warning(
             "EDLI reactor: archive_superseded_day0_events sweep failed (non-fatal): %r",
             _d0_sweep_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         from src.state.db import get_forecasts_connection_read_only as _get_forecasts_ro
 
         _forecasts_ro = _get_forecasts_ro()
@@ -7434,6 +7449,11 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             )
         finally:
             _forecasts_ro.close()
+        _log_prune_step(
+            "expire_unready_forecast_snapshot_pending",
+            _step_started,
+            _unready_fsr_archived,
+        )
         if _unready_fsr_archived:
             logger.info(
                 "EDLI reactor: expired %d forecast-snapshot pending rows whose latest "
@@ -7445,13 +7465,15 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         logger.warning(
             "EDLI reactor: replacement FSR spine-readiness sweep failed (non-fatal): %r",
             _spine_ready_sweep_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         _no_value_refuted_archived = store.archive_recent_no_value_refuted_events(
             decision_time=decision_time.astimezone(timezone.utc).isoformat(),
             batch_limit=batch_limit,
         )
+        _log_prune_step("archive_recent_no_value_refuted_events", _step_started, _no_value_refuted_archived)
         if _no_value_refuted_archived:
             logger.info(
                 "EDLI reactor: expired %d already-queued FSR/Day0 events refuted by "
@@ -7464,10 +7486,12 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         logger.warning(
             "EDLI reactor: recent no-value refutation sweep failed (non-fatal): %r",
             _no_value_refutation_sweep_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
+        _log_prune_step("ignore_channel_cache_events", _step_started, _ch_ignored)
         if _ch_ignored:
             logger.info(
                 "EDLI reactor: ignored %d channel cache events "
@@ -7482,12 +7506,14 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: ignore_channel_cache_events sweep failed "
             "(non-fatal): %r",
             _ch_ignore_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         _invalid_fsr_archived = store.archive_invalid_forecast_snapshot_events(
             batch_limit=batch_limit,
         )
+        _log_prune_step("archive_invalid_forecast_snapshot_events", _step_started, _invalid_fsr_archived)
         if _invalid_fsr_archived:
             logger.info(
                 "EDLI reactor: archived %d invalid forecast-snapshot/redecision "
@@ -7501,12 +7527,14 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_invalid_forecast_snapshot_events sweep failed "
             "(non-fatal): %r",
             _invalid_fsr_sweep_exc,
-        )
+    )
 
     try:
+        _step_started = time.monotonic()
         _fsr_archived = store.archive_superseded_forecast_snapshot_events(
             batch_limit=batch_limit,
         )
+        _log_prune_step("archive_superseded_forecast_snapshot_events", _step_started, _fsr_archived)
         if _fsr_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded forecast-snapshot redecision "
