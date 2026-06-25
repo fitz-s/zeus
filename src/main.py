@@ -4592,7 +4592,7 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     """G6 boot guard: refuse live launch when a non-allowlisted strategy is enabled.
 
     Composes the production-path enabled set:
-      enabled = {s for s in KNOWN_STRATEGIES if is_strategy_enabled(s)}
+      enabled = {s for s in strategy_profile.live_safe_keys() if is_strategy_enabled(s)}
     where ``is_strategy_enabled`` reads ``_control_state["strategy_gates"]`` —
     which is empty until ``refresh_control_state()`` hydrates it from the
     ``control_overrides`` table. Without that hydration, every strategy looks
@@ -4610,10 +4610,10 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
         is_strategy_enabled,
         refresh_control_state,
     )
-    from src.engine.cycle_runner import KNOWN_STRATEGIES
+    from src.strategy.strategy_profile import live_safe_keys
     if refresh_state:
         refresh_control_state()
-    enabled_strategies = {s for s in KNOWN_STRATEGIES if is_strategy_enabled(s)}
+    enabled_strategies = {s for s in live_safe_keys() if is_strategy_enabled(s)}
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
