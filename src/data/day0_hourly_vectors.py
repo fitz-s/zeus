@@ -294,6 +294,7 @@ def persist_day0_hourly_vectors(
     endpoint: str = OPENMETEO_FORECAST_URL,
     retention_days: float = DAY0_VECTOR_RETENTION_DAYS,
     now: Optional[datetime] = None,
+    lock_blocking: bool = True,
 ) -> int:
     """Persist vectors (idempotent on (model,city,date,captured_at)) + prune.
 
@@ -323,7 +324,11 @@ def persist_day0_hourly_vectors(
         from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection
         from src.state.db_writer_lock import WriteClass, db_writer_lock
 
-        lock_ctx = db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE)
+        lock_ctx = db_writer_lock(
+            ZEUS_FORECASTS_DB_PATH,
+            WriteClass.LIVE,
+            blocking=lock_blocking,
+        )
     else:
         from contextlib import nullcontext
 
@@ -488,6 +493,7 @@ def maybe_refresh_day0_hourly_vectors(
     budget_s: float = DEFAULT_REFRESH_BUDGET_S,
     max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+    persist_lock_blocking: bool = True,
 ) -> int:
     """Throttled per-city fetch+persist of the freshest high-res hourly curves.
 
@@ -535,9 +541,15 @@ def maybe_refresh_day0_hourly_vectors(
                 )
             if vectors and request_hash:
                 written += persist_day0_hourly_vectors(
-                    vectors, target_date=target_date, request_hash=request_hash
+                    vectors,
+                    target_date=target_date,
+                    request_hash=request_hash,
+                    lock_blocking=persist_lock_blocking,
                 )
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
+            if isinstance(exc, BlockingIOError):
+                with _REFRESH_LOCK:
+                    _LAST_REFRESH_MONOTONIC.pop(name, None)
             logger.warning(
                 "DAY0_HOURLY_VECTORS_REFRESH_FAILED city=%s exc=%s: %s",
                 name, type(exc).__name__, exc,

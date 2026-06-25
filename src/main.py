@@ -7457,6 +7457,7 @@ def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
             budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
             max_cities=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")),
             timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
+            persist_lock_blocking=False,
         )
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
