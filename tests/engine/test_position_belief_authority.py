@@ -1076,6 +1076,41 @@ class TestReplacementAuthorityFaultSuppressesLegacy:
             {"city": "Karachi", "target_date": "2026-06-12", "metric": "high"}
         ]
 
+    def test_day0_observation_unavailable_uses_replacement_readthrough_when_possible(
+        self, monkeypatch
+    ):
+        """If local Day0 observation has not arrived yet, monitor should still use
+        the same replacement authority when read-through can recompute it."""
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+        from src.contracts.exceptions import ObservationUnavailableError
+
+        monkeypatch.setattr(pb, "load_replacement_belief", lambda **kw: self._stale_belief())
+        monkeypatch.setattr(
+            mr,
+            "_refresh_day0_observation",
+            lambda **kw: (_ for _ in ()).throw(ObservationUnavailableError("no day0 obs")),
+        )
+        monkeypatch.setattr(mr, "_attempt_held_belief_readthrough", lambda *a, **k: 0.42)
+        reseeds = []
+        monkeypatch.setattr(
+            mr,
+            "_enqueue_single_family_belief_reseed_failsoft",
+            lambda **kw: reseeds.append(kw),
+        )
+
+        pos = self._edli_pos(trade_id="day0-readthrough-1")
+        pos.entry_method = "day0_observation"
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos, conn=None, city=object(), target_d=None
+        )
+
+        assert is_fresh is True
+        assert prob == pytest.approx(0.42)
+        assert refresh_pos.selected_method == SELECTED_METHOD_REPLACEMENT_POSTERIOR
+        assert "day0_observation_unavailable:replacement_belief_readthrough" in refresh_pos.applied_validations
+        assert reseeds == []
+
     def test_fresh_day0_window_position_does_not_reseed(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb

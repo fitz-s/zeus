@@ -3312,6 +3312,57 @@ def _refresh_day0_monitor_probability(
             target_d=target_d,
         )
     except ObservationUnavailableError:
+        metric = resolve_position_metric(pos)[0]
+        from src.engine.position_belief import (
+            SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+            load_replacement_belief,
+            monitor_belief_max_age_hours,
+        )
+
+        try:
+            belief = load_replacement_belief(
+                city=pos.city,
+                target_date=pos.target_date,
+                temperature_metric=metric,
+                bin_label=pos.bin_label,
+                direction=str(getattr(pos.direction, "value", pos.direction)),
+                max_age_hours=monitor_belief_max_age_hours(),
+            )
+        except Exception as exc:  # noqa: BLE001 - fallback must stay fail-soft
+            belief = None
+            logger.debug(
+                "day0 observation unavailable replacement fallback read failed for %s: %s",
+                getattr(pos, "trade_id", "?"),
+                exc,
+            )
+        if belief is not None and belief.fresh:
+            fresh_pos = copy.copy(pos)
+            setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+            _append_monitor_validation(
+                fresh_pos,
+                "day0_observation_unavailable:replacement_posterior_fresh",
+            )
+            _append_monitor_validation(fresh_pos, belief.freshness_validation())
+            _set_monitor_probability_fresh(fresh_pos, True)
+            return float(belief.held_side_prob), fresh_pos, True
+
+        readthrough_prob = _attempt_held_belief_readthrough(
+            pos, city=city, target_d=target_d, metric=metric
+        )
+        if readthrough_prob is not None:
+            fresh_pos = copy.copy(pos)
+            setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+            _append_monitor_validation(
+                fresh_pos,
+                "day0_observation_unavailable:replacement_belief_readthrough",
+            )
+            _append_monitor_validation(
+                fresh_pos,
+                "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
+            )
+            _set_monitor_probability_fresh(fresh_pos, True)
+            return float(readthrough_prob), fresh_pos, True
+
         _set_monitor_probability_fresh(refresh_pos, False)
         _append_monitor_validation(
             refresh_pos,
@@ -3320,7 +3371,7 @@ def _refresh_day0_monitor_probability(
         _enqueue_single_family_belief_reseed_failsoft(
             city=str(pos.city),
             target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
+            metric=metric,
         )
         return pos.p_posterior, refresh_pos, False
 
