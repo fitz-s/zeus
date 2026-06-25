@@ -853,9 +853,10 @@ class TestMutexNoHttpSplit:
 
     def test_main_prefetches_before_mutex_and_emit_is_write_only(self):
         """Source-order pin: the HTTP prefetch (_edli_prefetch_day0_fast_obs,
-        which also hosts the open-meteo hourly-vector refresh) happens BEFORE
-        _emit_mutex.acquire(); the mutex-held emit consumes fast_prefetch and
-        the write-phase function contains no fetch/HTTP entry points."""
+        for live observations only) happens BEFORE _emit_mutex.acquire(); the
+        mutex-held emit consumes fast_prefetch and the write-phase function
+        contains no fetch/HTTP entry points. Open-Meteo hourly-vector refresh is
+        an independent scheduler job and must not pin the reactor prefetch."""
         source = open("src/main.py", encoding="utf-8").read()
         prefetch_at = source.index("_edli_prefetch_day0_fast_obs(decision_time=now)")
         acquire_at = source.index("_emit_mutex.acquire()")
@@ -868,10 +869,14 @@ class TestMutexNoHttpSplit:
         for forbidden in ("emit_events(", "httpx", "maybe_refresh_day0_hourly_vectors", ".prefetch("):
             assert forbidden not in emit_body, f"write phase must not contain {forbidden!r}"
         assert "emit_prefetched(" in emit_body
-        # and the hourly-vector refresh lives in the PREFETCH (pre-mutex) helper
+        # and the hourly-vector refresh lives in an independent scheduler job
         pre_start = source.index("def _edli_prefetch_day0_fast_obs(")
-        pre_end = start
-        assert "maybe_refresh_day0_hourly_vectors" in source[pre_start:pre_end]
+        hourly_start = source.index("def _edli_day0_hourly_refresh_cycle(")
+        pre_end = hourly_start
+        assert "maybe_refresh_day0_hourly_vectors" not in source[pre_start:pre_end]
+        hourly_end = source.index("def _edli_emit_day0_extreme_events(")
+        assert "maybe_refresh_day0_hourly_vectors" in source[hourly_start:hourly_end]
+        assert 'id="edli_day0_hourly_refresh"' in source
 
     def test_publication_clock_missing_denies_live_authority(self):
         """PR#404 P2: receiptTime absent -> available_at falls back to the obs

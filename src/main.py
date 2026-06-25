@@ -7505,24 +7505,42 @@ def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
             "EDLI day0 fast obs prefetch failed (non-fatal, catch-up lanes continue): %r",
             _fast_exc,
         )
+    return prefetch
+
+
+@_scheduler_job("edli_day0_hourly_refresh")
+def _edli_day0_hourly_refresh_cycle() -> None:
+    """Refresh Day0 high-resolution hourly vectors off the trading reactor cadence.
+
+    These vectors improve remaining-day Day0 pricing, but fetching Open-Meteo
+    and writing ``zeus-forecasts.db`` must not pin the live event reactor. The
+    reactor consumes whatever is already fresh; this side job opportunistically
+    refreshes the carrier and yields whenever the trading reactor/redecision
+    lane is active.
+    """
+
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
+        logger.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
+        return
     try:
-        # High-res hourly vector refresh (30-min throttle per city inside the
-        # module; ~17 in-domain cities). open-meteo HTTP + forecasts-DB write —
-        # both forbidden under the world-write mutex, so it lives here.
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
-        maybe_refresh_day0_hourly_vectors(
+        written = maybe_refresh_day0_hourly_vectors(
             _rc(),
-            decision_time=decision_time,
+            decision_time=datetime.now(timezone.utc),
             budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
             max_cities=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")),
             timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
             persist_lock_blocking=False,
         )
+        if written:
+            logger.info("edli_day0_hourly_refresh: vectors_written=%d", written)
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
-    return prefetch
 
 
 def _edli_emit_day0_extreme_events(
@@ -9399,6 +9417,15 @@ def main():
             seconds=60,
             id="edli_bankroll_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            _edli_day0_hourly_refresh_cycle,
+            "interval",
+            seconds=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_JOB_SECONDS", "180")),
+            id="edli_day0_hourly_refresh",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
             max_instances=1,
             coalesce=True,
         )
