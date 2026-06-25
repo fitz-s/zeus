@@ -52,8 +52,10 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 from src.strategy.family_rebalance import (
+    ActiveRebalanceLease,
     ShiftBinDecision,
     acquire_rebalance_lease,
+    active_rebalance_lease_for_family,
     advance_rebalance_lease,
     decide_shift_bin,
 )
@@ -108,6 +110,20 @@ class ShiftBinPlan:
     old_position_id: Optional[str] = None
     old_token_id: Optional[str] = None
     reason: str = ""
+
+
+def active_shift_lease_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family_key: str,
+) -> ActiveRebalanceLease | None:
+    """Return an active SHIFT_BIN lease for this family, if one exists."""
+
+    return active_rebalance_lease_for_family(
+        conn,
+        family_key=family_key,
+        operation="SHIFT_BIN",
+    )
 
 
 def read_held_sibling_exposure(
@@ -408,6 +424,26 @@ def record_exit_submitted(
     advance_rebalance_lease(
         conn, intent_id, status=status, now_iso=now_iso,
         old_exit_command_id=old_exit_command_id,
+        abort_reason=reason,
+    )
+
+
+def record_entry_submitted(
+    conn: sqlite3.Connection,
+    intent_id: Optional[str],
+    *,
+    now_iso: str,
+    reason: Optional[str] = None,
+) -> None:
+    """Record that the old leg is closed and the counter-entry may be submitted."""
+
+    if not intent_id:
+        return
+    advance_rebalance_lease(
+        conn,
+        intent_id,
+        status="ENTRY_SUBMITTED",
+        now_iso=now_iso,
         abort_reason=reason,
     )
 

@@ -134,6 +134,30 @@ def test_lease_acquire_then_second_concurrent_acquire_is_none():
     assert second is None  # family already leased — fail closed
 
 
+def test_stale_planned_fill_up_without_command_releases_before_next_acquire():
+    from src.strategy.family_rebalance import acquire_rebalance_lease
+
+    conn = _lease_conn()
+    family_key = "live|Tokyo|2026-06-23|high"
+    first = acquire_rebalance_lease(
+        conn, family_key=family_key, operation="FILL_UP",
+        now_iso="2026-06-22T06:00:00+00:00", held_position_id="p1",
+    )
+    assert first is not None
+    next_id = acquire_rebalance_lease(
+        conn, family_key=family_key, operation="FILL_UP",
+        now_iso="2026-06-22T06:25:00+00:00", held_position_id="p1",
+    )
+
+    assert next_id is not None
+    old = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id = ?",
+        (first,),
+    ).fetchone()
+    assert old[0] == "ABORTED"
+    assert old[1] == "FILL_UP_PLANNED_STALE_NO_DURABLE_COMMAND_RECOVERED"
+
+
 def test_lease_release_allows_next_acquire():
     from src.strategy.family_rebalance import acquire_rebalance_lease, advance_rebalance_lease
 

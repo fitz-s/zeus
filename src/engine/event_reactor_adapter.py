@@ -2386,6 +2386,7 @@ def event_bound_live_adapter_from_trade_conn(
         # disease: a knob that force-flips the proof's mode to TAKER competes with the single
         # mode authority). The proof's execution_mode_intent (REST-then-cross policy) is the
         # SOLE mode authority; the build chain no longer carries a force-taker override.
+        _live_order_build_phase = "not_started"
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
@@ -2430,6 +2431,7 @@ def event_bound_live_adapter_from_trade_conn(
                             reason=f"FILL_UP_PRESUBMIT_REREAD_ABORT:{_reread_abort}",
                             proof_accepted=False,
                         )
+                _live_order_build_phase = "building_live_order_certificates"
                 command_certificates = _run_live_order_build_savepoint(
                     build_conn,
                     lambda: _build_live_execution_command_certificates(
@@ -2441,6 +2443,7 @@ def event_bound_live_adapter_from_trade_conn(
                         pre_submit_authority_provider=pre_submit_authority_provider,
                     ),
                 )
+                _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
                 certificate_decision_time = command.header.decision_time
@@ -2585,6 +2588,35 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=True,
             )
         except Exception as exc:
+            if _live_order_build_phase == "building_live_order_certificates":
+                try:
+                    _fill_up_lease = no_submit_receipt.fill_up_lease_payload
+                    if _fill_up_lease is not None:
+                        _fill_up_wiring.abort_fill_up_lease(
+                            trade_conn,
+                            _fill_up_lease.get("intent_id"),
+                            now_iso=decision_time.astimezone(UTC).isoformat(),
+                            reason=(
+                                "FILL_UP_PRE_VENUE_BUILD_FAILED:"
+                                f"{type(exc).__name__}:{exc}"
+                            ),
+                        )
+                    _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
+                    if (
+                        _shift_entry_lease is not None
+                        and str(_shift_entry_lease.get("phase") or "") == "ENTER_NEW_BIN"
+                    ):
+                        _shift_bin_wiring.abort_shift_bin_lease(
+                            trade_conn,
+                            _shift_entry_lease.get("intent_id"),
+                            now_iso=decision_time.astimezone(UTC).isoformat(),
+                            reason=(
+                                "SHIFT_BIN_ENTRY_PRE_VENUE_BUILD_FAILED:"
+                                f"{type(exc).__name__}:{exc}"
+                            ),
+                        )
+                except Exception:  # noqa: BLE001 - preserve the original build failure.
+                    pass
             return dataclass_replace(
                 no_submit_receipt,
                 submitted=False,
@@ -4031,6 +4063,143 @@ def _build_event_bound_no_submit_receipt_core(
         # cost-basis hash, receipt kelly_size_usd, actionable cert and USD->shares
         # conversion ALL coherent off the one value (consult: the single chokepoint).
         if _recapture.may_submit and allow_same_family_monitor_owned:
+            _family_key = str(family.family_id or "")
+            _existing_shift_lease = _shift_bin_wiring.active_shift_lease_for_family(
+                trade_conn,
+                family_key=_family_key,
+            )
+            if _existing_shift_lease is not None:
+                _min_order_shares = (
+                    _float_or_default(row.get("min_order_size"), 1.0)
+                    if isinstance(row, Mapping) else 1.0
+                )
+                _price_for_min = float(getattr(execution_price, "value", 0.0) or 0.0)
+                _dust_floor_usd = (
+                    _min_order_shares * _price_for_min
+                    if _price_for_min > 0.0 else _min_order_shares
+                )
+                _old_leg_residual = _shift_bin_wiring.read_old_leg_residual_usd(
+                    trade_conn,
+                    token_id=_existing_shift_lease.held_token_id,
+                )
+                _old_leg_live = float(_old_leg_residual) > float(_dust_floor_usd)
+                if _existing_shift_lease.status in {
+                    "EXIT_SUBMITTED",
+                    "EXIT_UNKNOWN",
+                    "EXIT_PARTIAL",
+                }:
+                    if _old_leg_live:
+                        return _with_shrink(EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason="SHIFT_BIN_EXIT_OLD_LEG_PENDING",
+                            city=family.city,
+                            target_date=family.target_date,
+                            metric=family.metric,
+                            condition_id=str(candidate.condition_id or ""),
+                            token_id=selected_token_id,
+                            executable_snapshot_id=proof.executable_snapshot_id,
+                            family_id=family.family_id,
+                            bin_label=candidate.bin.label,
+                            direction=direction,
+                            q_live=proof.q_posterior,
+                            q_lcb_5pct=proof.q_lcb_5pct,
+                            c_fee_adjusted=execution_price.value,
+                            c_cost_95pct=proof.c_cost_95pct,
+                            p_fill_lcb=proof.p_fill_lcb,
+                            trade_score=trade_score,
+                            native_quote_available=True,
+                            source_status="MATCH",
+                            family_complete=True,
+                            shift_bin_lease_payload={
+                                "phase": "EXIT_OLD_LEG",
+                                "intent_id": _existing_shift_lease.intent_id,
+                                "old_position_id": _existing_shift_lease.held_position_id,
+                                "old_token_id": _existing_shift_lease.held_token_id,
+                                "city": family.city,
+                                "target_date": family.target_date,
+                                "metric": family.metric,
+                            },
+                        ))
+                    if str(selected_token_id or "") == _existing_shift_lease.selected_token_id:
+                        _shift_bin_wiring.record_entry_submitted(
+                            trade_conn,
+                            _existing_shift_lease.intent_id,
+                            now_iso=decision_time.isoformat(),
+                            reason="SHIFT_BIN_OLD_LEG_CLOSED_ENTER_NEW_BIN",
+                        )
+                        if provenance_capture is not None:
+                            provenance_capture["shift_bin_lease"] = {
+                                "phase": "ENTER_NEW_BIN",
+                                "intent_id": _existing_shift_lease.intent_id,
+                                "old_position_id": _existing_shift_lease.held_position_id,
+                                "old_token_id": _existing_shift_lease.held_token_id,
+                                "city": family.city,
+                                "target_date": family.target_date,
+                                "metric": family.metric,
+                            }
+                    else:
+                        _shift_bin_wiring.exit_only_complete(
+                            trade_conn,
+                            _existing_shift_lease.intent_id,
+                            now_iso=decision_time.isoformat(),
+                            reason="SHIFT_BIN_OLD_LEG_CLOSED_FRESH_SELECTION_CHANGED",
+                        )
+                        return _with_shrink(EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason="SHIFT_BIN_EXIT_ONLY_COMPLETE:FRESH_SELECTION_CHANGED",
+                            city=family.city,
+                            target_date=family.target_date,
+                            metric=family.metric,
+                            condition_id=str(candidate.condition_id or ""),
+                            token_id=selected_token_id,
+                            executable_snapshot_id=proof.executable_snapshot_id,
+                            family_id=family.family_id,
+                            bin_label=candidate.bin.label,
+                            direction=direction,
+                            q_live=proof.q_posterior,
+                            q_lcb_5pct=proof.q_lcb_5pct,
+                            c_fee_adjusted=execution_price.value,
+                            c_cost_95pct=proof.c_cost_95pct,
+                            p_fill_lcb=proof.p_fill_lcb,
+                            trade_score=trade_score,
+                            native_quote_available=True,
+                            source_status="MATCH",
+                            family_complete=True,
+                        ))
+                elif _existing_shift_lease.status in {
+                    "ENTRY_SUBMITTED",
+                    "ENTRY_UNKNOWN",
+                    "ENTRY_PARTIAL",
+                    "REVIEW_REQUIRED",
+                }:
+                    return _with_shrink(EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=f"SHIFT_BIN_ENTRY_IN_FLIGHT:{_existing_shift_lease.status}",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=execution_price.value,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=trade_score,
+                        native_quote_available=True,
+                        source_status="MATCH",
+                        family_complete=True,
+                    ))
             _held_same_token = _fill_up_wiring.read_held_same_token_exposure(
                 trade_conn, token_id=str(selected_token_id or "")
             )

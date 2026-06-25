@@ -125,6 +125,43 @@ def test_sibling_different_bin_reads_tuple_rows_without_row_factory():
     assert held.current_live_usd == pytest.approx(4.0)
 
 
+def test_active_shift_lease_for_family_reads_existing_shift_before_fill_up():
+    """A multi-cycle SHIFT_BIN lease must be visible to the reactor before D1 fill-up."""
+    conn = _conn()
+    plan = sbw.plan_shift_bin(
+        conn,
+        is_redecision_event=True,
+        family_key="live|Tokyo|2026-06-23|high",
+        event_id="evt-1",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        selected_direction="buy_yes",
+        held=sbw.HeldSiblingExposure(
+            position_id="p-old",
+            token_id="tok-A",
+            bin_label="60-61F",
+            direction="buy_yes",
+            current_live_usd=4.0,
+        ),
+        old_leg_residual_usd=4.0,
+        has_unowned_pending_or_unknown_entry=False,
+        now_iso="2026-06-22T06:00:00+00:00",
+        old_leg_dust_floor_usd=1.0,
+    )
+    assert plan.kind == "EXIT_OLD_LEG"
+
+    lease = sbw.active_shift_lease_for_family(
+        conn,
+        family_key="live|Tokyo|2026-06-23|high",
+    )
+
+    assert lease is not None
+    assert lease.intent_id == plan.lease_intent_id
+    assert lease.status == "EXIT_SUBMITTED"
+    assert lease.held_token_id == "tok-A"
+    assert lease.selected_token_id == "tok-B"
+
+
 def test_buy_no_sibling_returns_no_token_as_sellable_old_leg():
     """SHIFT_BIN must sell the held-side NO token, not the row's YES/condition token."""
     conn = _conn()
