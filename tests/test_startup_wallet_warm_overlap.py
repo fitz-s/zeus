@@ -169,24 +169,20 @@ def test_warm_exception_does_not_crash_boot_and_submit_stays_fail_closed(monkeyp
 # STRUCTURAL OVERLAP — warm spawn after heartbeat & before schema gate; join
 # immediately before the wallet gate. This is the RED anchor on 38ddec092e.
 # ---------------------------------------------------------------------------
-def test_main_overlaps_wallet_warm_with_db_boot_work():
+def test_main_does_not_start_wallet_warm_before_scheduler():
     source = Path(main_mod.__file__).read_text()
     body = source[source.index("def main():"):]
 
     heartbeat = body.index("_start_venue_heartbeat_loop_if_needed()")
-    warm_spawn = body.index("_start_boot_wallet_warm()")
     schema_gate = body.index("_startup_world_schema_ready_check()")
-    warm_join = body.index("_join_boot_wallet_warm(")
     wallet_gate = body.index("_startup_wallet_check(")
+    scheduler_start = body.index("BlockingScheduler")
 
-    # Heartbeat stays before the wallet RPC (heartbeat-before-boot-http invariant).
-    assert heartbeat < warm_spawn, "warm wallet RPC spawned before venue heartbeat"
-    # Warm spawns BEFORE the DB-bound boot work so they overlap.
-    assert warm_spawn < schema_gate, "warm not spawned before the schema-ready DB gate"
-    # The DB-bound boot work runs between spawn and join (the overlap window).
-    assert schema_gate < warm_join, "schema gate not inside the warm/join overlap window"
-    # Join happens immediately before the deterministic wallet gate.
-    assert warm_join < wallet_gate, "warm thread not joined before the wallet gate"
+    assert heartbeat < schema_gate, "venue heartbeat supervisor must configure before DB boot"
+    assert schema_gate < wallet_gate, "wallet gate should stay after DB boot checks"
+    assert "_start_boot_wallet_warm()" not in body[:scheduler_start], (
+        "main() must not start wallet/CLOB warm before scheduler startup"
+    )
 
 
 def test_startup_data_health_check_uses_existence_probes_for_large_tables(monkeypatch):

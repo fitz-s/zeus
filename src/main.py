@@ -9042,16 +9042,11 @@ def main():
     # leave existing orders without heartbeats while slow checks complete.
     _start_venue_heartbeat_loop_if_needed()
 
-    # Efficiency #3 — boot wallet warm-overlap. The single on-chain wallet RPC
-    # (#1 collapsed two into one) is network-bound (5-30s, ~38/hr blips); the
-    # schema-ready gate / registry assert / f109 consolidator / freshness /
-    # boot-guards below are DB-bound. Warm the wallet on a daemon thread NOW so
-    # those DB steps run CONCURRENTLY with the RPC; we JOIN immediately before
-    # the wallet gate so the gate stays deterministic (warm cache, no race).
-    # MUST stay AFTER the venue heartbeat (heartbeat-before-boot-http invariant)
-    # and BEFORE the DB-bound boot work. A warm-thread failure is swallowed →
-    # cold cache → the wallet gate fail-closes (fail-safe; boot never hangs).
-    _wallet_warm_thread, _wallet_warm_holder = _start_boot_wallet_warm()
+    # Live scheduler must start before any wallet/CLOB SDK warm path. The wallet
+    # warm path imports py-clob/eth/http stacks and can hold the process import
+    # lock while waiting on network or disk I/O. That is acceptable for the
+    # submit lane to fail-closed, but not for monitor/redecision/Day0 startup.
+    _wallet_warm_thread, _wallet_warm_holder = None, _BootWalletWarmHolder()
 
     # §4.2 DB schema-ready gate — fail-closed (Phase 3 enforcement).
     # Must run before the first world DB open/read so missing or uninitialized
@@ -9165,11 +9160,8 @@ def main():
     # _assert_live_safe_strategies_or_exit() (which hydrates _control_state).
     _boot_deployment_freshness_auto_resume()
 
-    # Efficiency #3 — JOIN the boot wallet warm thread NOW (the DB-bound boot
-    # work above ran concurrently with the wallet RPC). After the join the warm
-    # record is deterministic (present, or None if the warm failed/timed out),
-    # so the wallet gate sees a settled value with no race. One capital log,
-    # emitted once the value is known, right before the gate.
+    # Do not block scheduler startup on wallet warm. A missing warm record keeps
+    # new submit/sizing fail-closed while monitor/redecision/settlement continue.
     _join_boot_wallet_warm(_wallet_warm_thread)
     _warm_rec = _wallet_warm_holder.record
     _capital_str = (
