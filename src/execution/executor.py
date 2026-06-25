@@ -2911,8 +2911,11 @@ def _recapture_fresh_entry_snapshot_if_needed(
         raise ValueError("recaptured executable snapshot selected token mismatch")
     if fresh.min_tick_size != final_intent.tick_size:
         raise ValueError("recaptured executable snapshot tick_size mismatch")
-    if fresh.min_order_size != final_intent.min_order_size:
-        raise ValueError("recaptured executable snapshot min_order_size mismatch")
+    if Decimal(str(submitted_shares)) < Decimal(str(fresh.min_order_size)):
+        raise ValueError(
+            "recaptured executable snapshot submitted_shares below fresh min_order_size: "
+            f"submitted_shares={submitted_shares} fresh_min_order_size={fresh.min_order_size}"
+        )
     if fresh.neg_risk != final_intent.neg_risk:
         raise ValueError("recaptured executable snapshot neg_risk mismatch")
     # MODE-CORRECT ECONOMICS VALIDATION (live 2026-06-12 02:16:49Z, Helsinki

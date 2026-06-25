@@ -60,6 +60,12 @@ def _fresh_snapshot(*, top_ask):
     )
 
 
+def _fresh_snapshot_with_min_order_size(*, top_ask, min_order_size):
+    snap = _fresh_snapshot(top_ask=top_ask)
+    snap.min_order_size = min_order_size
+    return snap
+
+
 def _stale_snapshot():
     return SimpleNamespace(
         snapshot_id="snap-stale",
@@ -148,6 +154,46 @@ def test_maker_rest_empty_fresh_ask_is_bid_establishing(_patched_recapture):
         submitted_shares=219.77,
     )
     assert out.executable_snapshot_id == "snap-fresh"
+
+
+def test_same_selected_token_min_order_size_drift_updates_envelope(_patched_recapture):
+    """Venue min-order metadata can drift between elected snapshot and submit.
+    For the same selected token, recapture should only require the submitted
+    shares to satisfy the fresh venue minimum, then carry fresh metadata forward."""
+
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_min_order_size(
+        top_ask=Decimal("0.20"),
+        min_order_size=Decimal("1"),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(),
+        _final_intent(post_only=True, limit=0.14),
+        conn=object(),
+        submitted_shares=5.0,
+    )
+
+    assert out.executable_snapshot_id == "snap-fresh"
+    assert out.executable_snapshot_min_order_size == Decimal("1")
+
+
+def test_recapture_rejects_when_submitted_shares_below_fresh_min_order_size(_patched_recapture):
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_min_order_size(
+        top_ask=Decimal("0.20"),
+        min_order_size=Decimal("10"),
+    )
+
+    with pytest.raises(ValueError, match="below fresh min_order_size"):
+        _recapture_fresh_entry_snapshot_if_needed(
+            _LegacyIntent(),
+            _final_intent(post_only=True, limit=0.14),
+            conn=object(),
+            submitted_shares=5.0,
+        )
 
 
 def test_taker_still_validates_with_depth_sweep(_patched_recapture, monkeypatch):
