@@ -92,6 +92,14 @@ class RejectionReason(str, Enum):
         "NATIVE_ASK_MISSING / bare SELECTED_CANDIDATE_MISSING label lie (2026-06-11) "
         "when the books were actually live two-sided.",
     )
+    EVENT_BOUND_CANDIDATE_REJECTED = (
+        "EVENT_BOUND_CANDIDATE_REJECTED",
+        RejectionCategory.DESIGNED_GATE,
+        "One priced candidate from a family-level all-candidates-rejected decision. "
+        "Carries queryable bin/direction/q/cost fields so continuous redecision and "
+        "portfolio rotation can reason from structured economics instead of parsing "
+        "the family summary text.",
+    )
     QKERNEL_SPINE_NO_TRADE = (
         "QKERNEL_SPINE_NO_TRADE",
         RejectionCategory.HONEST_MARKET,

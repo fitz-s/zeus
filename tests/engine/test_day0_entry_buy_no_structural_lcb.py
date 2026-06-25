@@ -1,5 +1,5 @@
 # Created: 2026-06-17
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-06-25
 # Authority basis: operator Day0 LOW runtime opportunity capture fix; deterministic absorbing
 #   observation facts must enter EDLI probability/proof authority without forecast expected-member gates.
 from __future__ import annotations
@@ -25,7 +25,7 @@ def _family(*candidates):
     return SimpleNamespace(city="Tokyo", candidates=list(candidates))
 
 
-def test_low_day0_dead_yes_bin_zeroes_yes_lcb() -> None:
+def test_low_day0_dead_yes_bin_licenses_structural_buy_no() -> None:
     family = _family(
         _candidate("low20", 20.0, 20.0),
         _candidate("low21", 21.0, 21.0),
@@ -45,7 +45,7 @@ def test_low_day0_dead_yes_bin_zeroes_yes_lcb() -> None:
 
     assert q["low21"] == 0.0
     assert _qlcb_float(lcb[("low21", "buy_yes")]) == 0.0
-    assert _qlcb_float(lcb[("low21", "buy_no")]) == 0.0
+    assert _qlcb_float(lcb[("low21", "buy_no")]) == pytest.approx(1.0)
 
 
 def test_low_day0_current_record_bin_stays_unresolved_for_buy_no() -> None:
@@ -70,7 +70,7 @@ def test_low_day0_current_record_bin_stays_unresolved_for_buy_no() -> None:
     assert _qlcb_float(lcb[("low20", "buy_no")]) == 0.0
 
 
-def test_high_day0_dead_yes_bin_zeroes_yes_lcb() -> None:
+def test_high_day0_dead_yes_bin_licenses_structural_buy_no() -> None:
     family = _family(
         _candidate("high29", 29.0, 29.0),
         _candidate("high30", 30.0, 30.0),
@@ -90,6 +90,5 @@ def test_high_day0_dead_yes_bin_zeroes_yes_lcb() -> None:
 
     assert q["high29"] == 0.0
     assert _qlcb_float(lcb[("high29", "buy_yes")]) == 0.0
-    assert _qlcb_float(lcb[("high29", "buy_no")]) == 0.0
-
+    assert _qlcb_float(lcb[("high29", "buy_no")]) == pytest.approx(1.0)
 

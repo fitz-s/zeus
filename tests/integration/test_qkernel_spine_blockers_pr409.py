@@ -827,8 +827,9 @@ def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
     )
 
 
-def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no"):
+def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no", missing_reason=None):
     """Build a real reactor ``_CandidateProof`` and overlay the given spine economics."""
+    from dataclasses import replace
     from types import SimpleNamespace
 
     row = _row(
@@ -843,6 +844,13 @@ def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no"):
         q_lcb_5pct=q_lcb_5pct,
         bin_obj=Bin(low=20.0, high=20.0, unit="C", label="20C"),
     )
+    if missing_reason is not None:
+        proof = replace(
+            proof,
+            missing_reason=missing_reason,
+            passed_prefilter=False,
+            trade_score=0.0,
+        )
     selected_route = SimpleNamespace(
         side="NO" if direction == "buy_no" else "YES",
         bin_id="b1",
@@ -886,6 +894,31 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
     assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
+
+
+def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
+    """A spine-positive selected proof must not remain a legacy-rejected loser.
+
+    Shanghai-style regressions had qkernel choose the center YES, but the proof
+    still carried a pre-spine direction/capital veto. CandidateEvaluation.admitted
+    requires missing_reason is None, so the opportunity book serialized the live
+    qkernel winner as a rejected loser.
+    """
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.80,
+        q_lcb_5pct=0.65,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH:legacy-pre-spine",
+    )
+
+    assert new_proof.missing_reason is None
+    assert new_proof.passed_prefilter is True
+    assert new_proof.trade_score == pytest.approx(0.05)
+    assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
 def test_overlay_sets_qkernel_band_false_edge_p_value():
@@ -992,7 +1025,7 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
     assert new_proof.q_lcb_5pct <= new_proof.q_posterior
 
 
-def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes():
+def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypatch, tmp_path):
     """The spine must rank executable family legs itself, not inherit legacy vetoes.
 
     Regression: qkernel was called after `_selection_scoped_proofs`, which filtered
@@ -1001,6 +1034,13 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes():
     preserving the all-NO behavior the spine was introduced to replace.
     """
     from dataclasses import replace
+    from src.decision import qlcb_reliability_guard as guard_mod
+
+    _install_sigma_floor_artifact(monkeypatch, tmp_path)
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
 
     family, _bins = _three_bin_family()
     proofs = _proofs_for(

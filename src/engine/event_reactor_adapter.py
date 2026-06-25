@@ -298,6 +298,23 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 # (the spine reads no day0 observation; consult_review_pr409_round2.md §3). The day0
 # boundary guard inside the live adapter references this same constant.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+
+
+def _event_allows_same_family_monitor_owned(event_type: object) -> bool:
+    """Return whether an event may manage an already-held family.
+
+    Ordinary forecast entries must not duplicate held family exposure. Continuous
+    redecision and Day0 hard-fact events are the live management lanes allowed
+    to top up or close-before-open shift an existing family through the
+    family_rebalance_intents lease.
+    """
+
+    return str(event_type or "") in (
+        _EDLI_REDECISION_EVENT_TYPE,
+        "DAY0_EXTREME_UPDATED",
+    )
+
+
 # Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
 #
 # The substrate warm job refreshes executable_market_snapshots on a fair rotating
@@ -2924,7 +2941,9 @@ def _build_event_bound_no_submit_receipt_core(
 
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
-    allow_same_family_monitor_owned = event.event_type == "EDLI_REDECISION_PENDING"
+    allow_same_family_monitor_owned = _event_allows_same_family_monitor_owned(
+        event.event_type
+    )
     if forecast_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="FORECAST_AUTHORITY_CONNECTION_MISSING")
     if topology_conn is None:
@@ -3900,8 +3919,8 @@ def _build_event_bound_no_submit_receipt_core(
             )
         )
         # D1 FILL-UP (2026-06-22 lifecycle consult REQ-20260622-060011): the ONLY
-        # additive money-path branch. For an EDLI_REDECISION_PENDING whose freshly-
-        # selected winning leg is the SAME token as an existing held position, the
+        # additive money-path branch. For a same-family management event whose
+        # freshly-selected winning leg is the SAME token as an existing held position, the
         # family-total ΔU stake (_robust_stake_usd) is NOT what we submit — we top up
         # the EXISTING position by the RESIDUAL to the fresh target
         # (delta = target - current_live - same_token_pending), gated by the committed
@@ -16495,7 +16514,7 @@ def _apply_day0_mask_to_generated_probabilities(
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_no"),
-            0.0,
+            1.0 if mask[index] <= 0.0 else 0.0,
             source="FORECAST_BOOTSTRAP",
         )
     # LCB-TRANSFORM AUDIT IDENTITY (PR#404 P1): the staleness guard changes
@@ -16512,7 +16531,10 @@ def _apply_day0_mask_to_generated_probabilities(
             for candidate in family.candidates
         },
         "no_lcb_by_condition": {
-            str(candidate.condition_id or ""): 0.0 for candidate in family.candidates
+            str(candidate.condition_id or ""): (
+                1.0 if float(mask[index]) <= 0.0 else 0.0
+            )
+            for index, candidate in enumerate(family.candidates)
         },
         "mask": [float(value) for value in mask],
         "staleness_suppressed_conditions": [

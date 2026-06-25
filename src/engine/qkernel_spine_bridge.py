@@ -1391,6 +1391,10 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
+        # qkernel has re-ranked this proof under the settlement/payoff family law.
+        # A legacy scalar admission veto on the pre-spine proof must not survive
+        # into the receipt/opportunity-book admission predicate.
+        "missing_reason": None,
         "p_value": false_edge_rate,
         "passed_prefilter": edge_lcb > 0.0,
     }

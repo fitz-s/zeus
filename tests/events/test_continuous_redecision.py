@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-25
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
@@ -963,6 +963,67 @@ def test_all_candidates_rejected_row_is_family_backoff_not_candidate_backoff():
         len(key) == 5 and key[:3] == ("London", "2026-06-18", "low")
         for key in rejections
     )
+
+
+def test_candidate_rejected_row_is_candidate_backoff_not_family_backoff():
+    conn = _mem_world()
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_shanghai_hash",
+            "Shanghai",
+            "2026-06-25",
+            "high",
+            "Will the highest temperature in Shanghai be 25°C on June 25?",
+            "buy_yes",
+            "TRADE_SCORE",
+            "EVENT_BOUND_CANDIDATE_REJECTED:OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-1:candidate_id=candidate-buy-yes",
+            0.6712,
+            0.9616,
+            0.4327,
+            "2026-06-25T04:19:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    stable_key = (
+        "Shanghai",
+        "2026-06-25",
+        "high",
+        "Will the highest temperature in Shanghai be 25°C on June 25?",
+        "buy_yes",
+    )
+    assert stable_key in rejections
+    assert ("edli_family_shanghai_hash", stable_key[3], "buy_yes") in rejections
+    assert ("family", "Shanghai", "2026-06-25", "high") not in rejections
+    assert rejections[stable_key].execution_price == 0.6712
+    assert rejections[stable_key].q_lcb_5pct == 0.9616
+    assert rejections[stable_key].trade_score == 0.4327
 
 
 def test_certificate_build_failure_without_family_id_is_family_backoff():

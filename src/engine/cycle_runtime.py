@@ -4704,7 +4704,11 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
         rejection_stage = str(_row_get(row, "rejection_stage", "") or "").strip()
         rejection_reason = str(_row_get(row, "rejection_reason", "") or "").strip()
         if rejection_stage not in {"KELLY", "LIVE_CAP", ""} and not (
-            "KELLY" in rejection_reason or "CAP" in rejection_reason or "BUDGET" in rejection_reason
+            "KELLY" in rejection_reason
+            or "CAP" in rejection_reason
+            or "BUDGET" in rejection_reason
+            or "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED" in rejection_reason
+            or "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED" in rejection_reason
         ):
             continue
         q_lcb = _finite_probability_or_none(_row_get(row, "q_lcb_5pct"))

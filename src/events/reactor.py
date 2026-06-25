@@ -2185,6 +2185,54 @@ class OpportunityEventReactor:
                 executable_snapshot_id=executable_snapshot_id,
             )
         )
+        if family_level_all_rejected:
+            for candidate_row in _all_candidates_rejected_candidate_rows(receipt):
+                candidate_reason = str(candidate_row["rejection_reason"])
+                self._regret_ledger.insert_idempotent(
+                    NoTradeRegretEvent(
+                        event_id=event.event_id,
+                        rejection_stage=stage,  # type: ignore[arg-type]
+                        rejection_reason=candidate_reason,
+                        regret_bucket=_regret_bucket_for(candidate_reason),  # type: ignore[arg-type]
+                        envelope_json=envelope_json,
+                        market_slug=payload.get("market_slug"),
+                        condition_id=candidate_row.get("condition_id"),
+                        token_id=candidate_row.get("token_id"),
+                        outcome_label=candidate_row.get("outcome_label"),
+                        decision_time=(
+                            decision_time.astimezone(UTC).isoformat()
+                            if decision_time is not None
+                            else None
+                        ),
+                        city=_receipt_or_payload(receipt, payload, "city"),
+                        target_date=_receipt_or_payload(receipt, payload, "target_date"),
+                        metric=_receipt_or_payload(receipt, payload, "metric"),
+                        observation_time=payload.get("observation_time"),
+                        decision_seq=_optional_int(payload.get("decision_seq")),
+                        family_id=candidate_row.get("family_id")
+                        or _receipt_or_payload(receipt, payload, "family_id"),
+                        bin_label=candidate_row.get("bin_label"),
+                        direction=candidate_row.get("direction"),
+                        q_live=candidate_row.get("q_live"),
+                        q_lcb_5pct=candidate_row.get("q_lcb_5pct"),
+                        c_fee_adjusted=candidate_row.get("c_fee_adjusted"),
+                        c_cost_95pct=candidate_row.get("c_cost_95pct"),
+                        p_fill_lcb=candidate_row.get("p_fill_lcb"),
+                        trade_score=candidate_row.get("trade_score"),
+                        native_quote_available=candidate_row.get("native_quote_available"),
+                        source_status=_receipt_or_payload(receipt, payload, "source_status"),
+                        family_complete=_optional_bool(
+                            _receipt_or_payload(receipt, payload, "family_complete")
+                        ),
+                        hypothetical_order_type=payload.get("hypothetical_order_type"),
+                        hypothetical_fill_status=payload.get("hypothetical_fill_status"),
+                        hypothetical_fill_price=_optional_float(
+                            payload.get("hypothetical_fill_price")
+                        ),
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        executable_snapshot_id=candidate_row.get("executable_snapshot_id"),
+                    )
+                )
 
     def _build_regret_envelope_json(
         self,
@@ -2351,6 +2399,57 @@ def _optional_bool(value: Any) -> bool | None:
     if lowered in {"0", "false", "no"}:
         return False
     return None
+
+
+def _all_candidates_rejected_candidate_rows(
+    receipt: EventSubmissionReceipt | None,
+) -> list[dict[str, Any]]:
+    if receipt is None or not isinstance(receipt.opportunity_book, dict):
+        return []
+    raw_candidates = receipt.opportunity_book.get("candidates")
+    if not isinstance(raw_candidates, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for raw in raw_candidates:
+        if not isinstance(raw, dict):
+            continue
+        execution_price = _optional_float(raw.get("execution_price"))
+        trade_score = _optional_float(raw.get("trade_score"))
+        missing_reason = str(raw.get("missing_reason") or "").strip()
+        candidate_id = str(raw.get("candidate_id") or "").strip()
+        if (
+            execution_price is None
+            or execution_price <= 0.0
+            or trade_score is None
+            or trade_score <= 0.0
+            or not missing_reason
+            or not candidate_id
+        ):
+            continue
+        reason = (
+            "EVENT_BOUND_CANDIDATE_REJECTED:"
+            f"{missing_reason}:candidate_id={candidate_id}"
+        )
+        out.append(
+            {
+                "rejection_reason": reason,
+                "family_id": raw.get("family_id"),
+                "condition_id": raw.get("condition_id"),
+                "token_id": raw.get("token_id"),
+                "outcome_label": raw.get("outcome_label"),
+                "bin_label": raw.get("bin_label"),
+                "direction": raw.get("direction"),
+                "q_live": _optional_float(raw.get("q_posterior")),
+                "q_lcb_5pct": _optional_float(raw.get("q_lcb_5pct")),
+                "c_fee_adjusted": execution_price,
+                "c_cost_95pct": _optional_float(raw.get("c_cost_95pct")) or execution_price,
+                "p_fill_lcb": _optional_float(raw.get("p_fill_lcb")),
+                "trade_score": trade_score,
+                "native_quote_available": _optional_bool(raw.get("native_quote_available")),
+                "executable_snapshot_id": receipt.executable_snapshot_id,
+            }
+        )
+    return out
 
 
 def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, float] | None:

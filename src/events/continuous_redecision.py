@@ -104,6 +104,7 @@ _TERMINAL_NO_VALUE_SQL = """
          OR rejection_reason = 'FDR_REJECTED'
          OR rejection_reason LIKE 'FDR_REJECTED:%'
          OR rejection_reason LIKE 'EVENT_BOUND_ALL_CANDIDATES_REJECTED:%'
+         OR rejection_reason LIKE 'EVENT_BOUND_CANDIDATE_REJECTED:%'
         )
     )
  OR (
