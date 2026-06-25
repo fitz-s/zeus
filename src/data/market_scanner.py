@@ -4030,27 +4030,44 @@ def _prefetch_selected_orderbooks(
         primary_chunk_size,
         _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_RETRY_CHUNK", _BATCH_ORDERBOOK_RETRY_CHUNK),
     )
+    max_retry_chunks = _positive_int_env(
+        "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS",
+        2,
+    )
     singular_getter = getattr(clob, "get_orderbook_snapshot", None)
     singular_fallback_cap = _positive_int_env(
         "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS",
-        24,
+        4,
+    )
+    singular_fallback_failure_cap = _positive_int_env(
+        "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES",
+        2,
     )
     singular_fallback_used = 0
+    singular_fallback_failures = 0
 
     def _singular_fallback(chunk: list[str]) -> dict[str, dict]:
-        nonlocal singular_fallback_used
-        if not callable(singular_getter) or singular_fallback_used >= singular_fallback_cap:
+        nonlocal singular_fallback_failures, singular_fallback_used
+        if (
+            not callable(singular_getter)
+            or singular_fallback_used >= singular_fallback_cap
+            or singular_fallback_failures >= singular_fallback_failure_cap
+        ):
             return {}
         out: dict[str, dict] = {}
         for tok in chunk:
-            if singular_fallback_used >= singular_fallback_cap:
+            if (
+                singular_fallback_used >= singular_fallback_cap
+                or singular_fallback_failures >= singular_fallback_failure_cap
+            ):
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is not None and (deadline - time.monotonic()) < min_prefetch_window:
                 break
             singular_fallback_used += 1
             try:
                 book = singular_getter(tok)
             except Exception as exc:
+                singular_fallback_failures += 1
                 logger.warning("Singular orderbook fallback failed token=%s: %s", tok, exc)
                 continue
             if isinstance(book, dict):
@@ -4071,8 +4088,26 @@ def _prefetch_selected_orderbooks(
                 exc,
             )
             split_books: dict[str, dict] = {}
+            retry_chunks_attempted = 0
             for sub_start in range(0, len(chunk), retry_chunk_size):
+                if retry_chunks_attempted >= max_retry_chunks:
+                    logger.info(
+                        "Batch orderbook prefetch stopped retry split after %d chunks "
+                        "(cap %d); remaining token prices deferred",
+                        retry_chunks_attempted,
+                        max_retry_chunks,
+                    )
+                    break
+                if deadline is not None and (deadline - time.monotonic()) < min_prefetch_window:
+                    logger.info(
+                        "Batch orderbook prefetch stopped retry split after %d chunks "
+                        "(window below %.3fs minimum); remaining token prices deferred",
+                        retry_chunks_attempted,
+                        min_prefetch_window,
+                    )
+                    break
                 sub_chunk = chunk[sub_start : sub_start + retry_chunk_size]
+                retry_chunks_attempted += 1
                 try:
                     sub_books = getter(sub_chunk)
                 except Exception as sub_exc:
