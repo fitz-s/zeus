@@ -151,6 +151,40 @@ def test_live_cap_release_on_pre_command_failure():
     assert ledger.get(reservation.usage_id).reservation_status == "RELEASED"
 
 
+def test_live_cap_released_row_can_rereserve_with_fresh_redecision_terms():
+    ledger = LiveCapLedger(_conn())
+    first = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="live_canary",
+        requested_notional_usd=5.0,
+        final_intent_id="intent-old",
+        execution_command_id="cmd-old",
+    )
+    ledger.release(first.usage_id, "entries_paused")
+
+    second = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW.replace(minute=1),
+        cap_scope="live_canary",
+        requested_notional_usd=4.0,
+        final_intent_id="intent-new",
+        execution_command_id="cmd-new",
+    )
+
+    assert second.usage_id == first.usage_id
+    assert second.reservation_status == "RESERVED"
+    assert second.reserved_notional_usd == 4.0
+    assert second.final_intent_id == "intent-new"
+    assert second.execution_command_id == "cmd-new"
+    assert (
+        ledger.conn.execute(
+            "SELECT COUNT(*) FROM edli_live_cap_usage WHERE event_id = 'event-1'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
 def test_live_cap_consume_after_execution_command():
     ledger = LiveCapLedger(_conn())
     reservation = ledger.reserve(
