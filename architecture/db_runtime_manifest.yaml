@@ -1,0 +1,91 @@
+schema_version: 1
+metadata:
+  created: '2026-06-23'
+  owner: docs authority isolation rebuild
+  authority_status: machine_authority
+  purpose: >
+    Database runtime authority for SQLite topology, WAL behavior, busy-timeout,
+    writer-locking, and lock-contention avoidance. Current DB contents and row
+    counts are operations facts, not durable law.
+  executable_sources:
+    - src/state/db.py
+    - src/state/db_writer_lock.py
+    - architecture/db_table_ownership.yaml
+
+physical_dbs:
+  world:
+    path: state/zeus-world.db
+    connection_factory: src.state.db.get_world_connection
+    role: world and runtime facts that remain world-owned
+    write_class_lock_files: [state/zeus-world.db.writer-lock.live, state/zeus-world.db.writer-lock.bulk]
+  forecasts:
+    path: state/zeus-forecasts.db
+    connection_factory: src.state.db.get_forecasts_connection
+    role: forecast, source-run, readiness, observation, posterior, and settlement-outcome class
+    write_class_lock_files: [state/zeus-forecasts.db.writer-lock.live, state/zeus-forecasts.db.writer-lock.bulk]
+  trades:
+    path: state/zeus_trades.db
+    connection_factory: src.state.db.get_trade_connection
+    role: trade decision, venue command, execution, position, and lifecycle class
+    write_class_lock_files: [state/zeus_trades.db.writer-lock.live, state/zeus_trades.db.writer-lock.bulk]
+  backtest:
+    path: state/zeus_backtest.db
+    role: derived diagnostic output only
+    authority: false
+  risk:
+    path: state/risk_state.db
+    role: riskguard-only state
+    authority_scope: risk_runtime_only
+
+sqlite_pragmas:
+  journal_mode: WAL
+  foreign_keys: ON
+  busy_timeout_ms_env: ZEUS_DB_BUSY_TIMEOUT_MS
+  busy_timeout_default_ms: 30000
+  cache_size_env: ZEUS_DB_CACHE_KB
+  mmap_size_env: ZEUS_DB_MMAP_BYTES
+
+lock_layers:
+  sqlite_busy_timeout:
+    owner: src.state.db._apply_busy_timeout
+    law: Set SQL-level PRAGMA busy_timeout on every connection so a writer waits instead of instant database-is-locked failure.
+  in_process_world_mutex:
+    owner: src.state.db.world_write_lock
+    law: Serialize zeus-world.db write transactions inside one process. Hold only around the DB transaction.
+  no_io_under_world_mutex:
+    owner: src.state.db.assert_no_world_mutex_held_for_io
+    law: The same thread must not perform blocking venue or chain I/O while holding the world write mutex.
+  cross_process_flock:
+    owner: src.state.db_writer_lock.db_writer_lock
+    law: Serialize write intent by physical DB and write class across processes.
+  bulk_chunker:
+    owner: src.state.db_writer_lock.BulkChunker
+    law: Bulk writers must yield at chunk boundaries so live writers can make progress.
+
+write_classes:
+  live:
+    enum: WriteClass.LIVE
+    purpose: live trading and protective hot-path writes
+  bulk:
+    enum: WriteClass.BULK
+    purpose: backfill, replay, migration, and long-running maintenance writes
+
+forbidden_patterns:
+  - independent cross-DB write transactions when an attach/savepoint helper is required
+  - holding world_write_lock across HTTP, CLOB, chain, or other blocking I/O
+  - bulk write loops without BulkChunker or equivalent yield boundary
+  - assuming WAL permits multiple concurrent writers
+  - changing busy_timeout only at sqlite3.connect timeout without SQL-level PRAGMA
+  - writing current DB row counts or lock state into durable authority docs
+
+required_change_surfaces:
+  if_db_topology_changes: [architecture/db_table_ownership.yaml, architecture/db_runtime_manifest.yaml, docs/authority/zeus_database_runtime_authority.md]
+  if_lock_policy_changes: [src/state/db.py, src/state/db_writer_lock.py, architecture/db_runtime_manifest.yaml, docs/authority/zeus_database_runtime_authority.md]
+  if_docs_route_changes: [architecture/docs_registry.yaml, docs/authority/zeus_docs_classification_authority.md]
+
+suggested_tests:
+  - tests/test_db.py
+  - tests/test_dt1_commit_ordering.py
+  - tests/test_dt4_chain_three_state.py
+  - tests/test_cross_module_invariants.py
+  - tests/test_architecture_contracts.py
