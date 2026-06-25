@@ -7855,9 +7855,6 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
-    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
-        logger.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
-        return
     try:
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
@@ -7869,6 +7866,16 @@ def _edli_day0_hourly_refresh_cycle() -> None:
             decision_time=decision_time,
             priority_families=priority_families,
         )
+        trading_lane_active = _edli_reactor_active() or _edli_redecision_screen_lock.locked()
+        if trading_lane_active and priority_city_count <= 0:
+            logger.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
+            return
+        if trading_lane_active:
+            logger.info(
+                "edli_day0_hourly_refresh: priority refresh proceeding while trading lane active "
+                "priority_cities=%d",
+                priority_city_count,
+            )
         configured_max_cities = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3"))
         max_cities = max(configured_max_cities, priority_city_count)
         written = maybe_refresh_day0_hourly_vectors(
