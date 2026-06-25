@@ -1,503 +1,109 @@
-schema_version: 2
+schema_version: 3
 metadata:
   updated: '2026-06-23'
   owner: docs authority isolation rebuild
   purpose: >
-    Machine-readable classification for tracked docs surfaces. It controls whether
-    a doc may be default-read as current authority/reference, treated as a current
-    fact pointer, or isolated as evidence/history.
+    Machine-readable docs classification. Authority, reference, current facts,
+    runbooks, evidence, reports, archive, and rebuild history are separate classes.
 
-allowed_doc_classes: [router, authority, reference, module_reference, operations, runbook, report, artifact, checklist, archive_interface, evidence, archive, rebuild_history, package_input]
-allowed_lifecycle_states: [durable, active, temporary, transitional, historical, closed]
-allowed_coverage_scopes: [exact, descendants]
-required_entry_fields:
-  - path
-  - doc_class
-  - default_read
-  - direct_reference_allowed
-  - current_role
-  - truth_profile
-  - freshness_class
-  - lifecycle_state
-  - coverage_scope
-  - parent_coverage_allowed
-  - contains_volatile_metrics
-  - current_tense_allowed
-  - refresh_source
+class_law:
+  authority:
+    is_authority: true
+    default_read: task_required
+    may_contain_current_runtime_snapshot: false
+  reference:
+    is_authority: false
+    default_read: task_routed
+    may_contain_current_runtime_snapshot: false
+  current_fact_pointer:
+    is_authority: false
+    default_read: current_fact_tasks_only
+    requires_freshness_and_expiry: true
+  runbook:
+    is_authority: false
+    default_read: operation_tasks_only
+  evidence_report_archive_rebuild:
+    is_authority: false
+    default_read: false
+
+active_authority_docs:
+  - docs/authority/AGENTS.md
+  - docs/authority/zeus_current_architecture.md
+  - docs/authority/zeus_current_delivery.md
+  - docs/authority/zeus_forecast_fusion_authority.md
+  - docs/authority/zeus_docs_classification_authority.md
+  - docs/authority/zeus_change_control_constitution.md
+  - docs/authority/ARCHIVAL_RULES.md
+
+machine_authority_manifests:
+  - architecture/docs_registry.yaml
+  - architecture/reference_replacement.yaml
+  - architecture/module_manifest.yaml
+  - architecture/kernel_manifest.yaml
+  - architecture/forecast_fusion_manifest.yaml
+  - architecture/task_boot_profiles.yaml
+  - architecture/db_table_ownership.yaml
+  - architecture/negative_constraints.yaml
+  - architecture/fatal_misreads.yaml
+  - architecture/money_path_objects.yaml
+
+canonical_references:
+  default_broad:
+    - docs/reference/zeus_prediction_market_quant_reference.md
+  focused:
+    - docs/reference/zeus_domain_model.md
+    - docs/reference/zeus_math_spec.md
+    - docs/reference/zeus_forecast_source_and_regional_model_reference.md
+    - docs/reference/zeus_strategy_spec.md
+    - docs/reference/zeus_market_settlement_reference.md
+    - docs/reference/zeus_execution_lifecycle_reference.md
+    - docs/reference/zeus_risk_strategy_reference.md
+    - docs/reference/zeus_data_and_replay_reference.md
+    - docs/reference/zeus_failure_modes_reference.md
+    - docs/reference/modules/AGENTS.md
+
+current_fact_pointers:
+  - docs/operations/current_state.md
+  - docs/operations/current_data_state.md
+  - docs/operations/current_source_validity.md
+
+non_default_history_patterns:
+  - docs/evidence/**
+  - docs/reports/**
+  - docs/archive/**
+  - docs/rebuild/**
+  - docs/operations/task_*/**
+  - docs/operations/current/**
 
 entries:
-  - path: docs/AGENTS.md
-    doc_class: router
-    default_read: true
-    direct_reference_allowed: true
-    current_role: docs root routing and local rules
-    truth_profile: router
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/README.md
-    doc_class: router
-    default_read: true
-    direct_reference_allowed: true
-    current_role: docs mesh index and active default-read set
-    truth_profile: router
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/archive_registry.md
-    doc_class: archive_interface
-    default_read: false
-    direct_reference_allowed: true
-    current_role: visible historical/demotion registry; not default boot
-    truth_profile: archive_index
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: docs_authority_change
-
-  - path: docs/authority/AGENTS.md
-    doc_class: authority
-    default_read: true
-    direct_reference_allowed: true
-    current_role: authority directory router and active authority set
-    truth_profile: authority_router
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/authority/zeus_current_architecture.md
-    doc_class: authority
-    default_read: true
-    direct_reference_allowed: true
-    current_role: current durable architecture law
-    truth_profile: durable_law
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_manifests_tests_deploy
-
-  - path: docs/authority/zeus_current_delivery.md
-    doc_class: authority
-    default_read: true
-    direct_reference_allowed: true
-    current_role: current durable delivery/docs/change-control law
-    truth_profile: durable_law
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_manifests_tests_deploy
-
-  - path: docs/authority/zeus_change_control_constitution.md
-    doc_class: authority
-    default_read: false
-    direct_reference_allowed: true
-    current_role: deep governance constitution; non-default rationale
-    truth_profile: durable_law
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: governance_review
-
-  - path: docs/authority/ARCHIVAL_RULES.md
-    doc_class: authority
-    default_read: true
-    direct_reference_allowed: true
-    current_role: archival and evidence isolation law
-    truth_profile: durable_law
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: docs_authority_change
-
-  - path: docs/reference/AGENTS.md
-    doc_class: reference
-    default_read: true
-    direct_reference_allowed: true
-    current_role: reference router
-    truth_profile: reference_router
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_prediction_market_quant_reference.md
-    doc_class: reference
-    default_read: true
-    direct_reference_allowed: true
-    current_role: canonical full money-path reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_manifests_tests_deploy
-
-  - path: docs/reference/zeus_domain_model.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical domain model
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_math_spec.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical math/q/q_lcb/payoff/utility reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_forecast_source_and_regional_model_reference.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical forecast source/product/regional model reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_strategy_spec.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical strategy/admission/selection reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_market_settlement_reference.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical market/source/settlement/bin reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_execution_lifecycle_reference.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical execution/lifecycle reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_risk_strategy_reference.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical risk/sizing reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_data_and_replay_reference.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical data/replay reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/zeus_failure_modes_reference.md
-    doc_class: reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: canonical failure modes reference
-    truth_profile: canonical_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: code_and_manifest
-
-  - path: docs/reference/modules/AGENTS.md
-    doc_class: module_reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: module reference router
-    truth_profile: module_router
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: module_manifest
-
-  - path: docs/reference/modules/
-    doc_class: module_reference
-    default_read: false
-    direct_reference_allowed: true
-    current_role: dense module books; routed only by scoped task/module manifest
-    truth_profile: module_reference
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: module_manifest
-
-  - path: docs/operations/AGENTS.md
-    doc_class: operations
-    default_read: true
-    direct_reference_allowed: true
-    current_role: operations router and current-pointer rules
-    truth_profile: operations_router
-    freshness_class: stable
-    lifecycle_state: durable
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: docs_authority_change
-
-  - path: docs/operations/current_state.md
-    doc_class: operations
-    default_read: true
-    direct_reference_allowed: true
-    current_role: current operational pointer; expiry-bound
-    truth_profile: current_fact_pointer
-    freshness_class: current_expiring
-    lifecycle_state: active
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: true
-    current_tense_allowed: true
-    refresh_source: operator_runtime_evidence
-
-  - path: docs/operations/current_data_state.md
-    doc_class: operations
-    default_read: true
-    direct_reference_allowed: true
-    current_role: current audited data posture; expiry-bound
-    truth_profile: current_fact_pointer
-    freshness_class: current_expiring
-    lifecycle_state: active
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: true
-    current_tense_allowed: true
-    refresh_source: operator_runtime_evidence
-
-  - path: docs/operations/current_source_validity.md
-    doc_class: operations
-    default_read: true
-    direct_reference_allowed: true
-    current_role: current audited source validity; expiry-bound
-    truth_profile: current_fact_pointer
-    freshness_class: current_expiring
-    lifecycle_state: active
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: true
-    current_tense_allowed: true
-    refresh_source: operator_runtime_evidence
-
-  - path: docs/operations/current/
-    doc_class: operations
-    default_read: false
-    direct_reference_allowed: false
-    current_role: active work package home; not default boot
-    truth_profile: packet_or_work_evidence
-    freshness_class: current_expiring
-    lifecycle_state: active
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: true
-    current_tense_allowed: true
-    refresh_source: current_state_pointer
-
-  - path: docs/operations/task_*/
-    doc_class: package_input
-    default_read: false
-    direct_reference_allowed: false
-    current_role: packet evidence; explicit route only
-    truth_profile: packet_evidence
-    freshness_class: task_scoped
-    lifecycle_state: transitional
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: current_state_pointer
-
-  - path: docs/runbooks/
-    doc_class: runbook
-    default_read: false
-    direct_reference_allowed: true
-    current_role: operator procedures; not architecture law
-    truth_profile: procedure
-    freshness_class: stable_or_task_current
-    lifecycle_state: durable
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: false
-    current_tense_allowed: true
-    refresh_source: operator_procedure_review
-
-  - path: docs/evidence/
-    doc_class: evidence
-    default_read: false
-    direct_reference_allowed: false
-    current_role: evidence receipts and raw diagnostics; never current law
-    truth_profile: evidence_only
-    freshness_class: evidence_dated
-    lifecycle_state: historical
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: explicit_evidence_task
-
-  - path: docs/reports/
-    doc_class: report
-    default_read: false
-    direct_reference_allowed: false
-    current_role: interpreted reports/reviews/history; not current law
-    truth_profile: report_history_only
-    freshness_class: evidence_dated
-    lifecycle_state: historical
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: explicit_report_task
-
-  - path: docs/archive/
-    doc_class: archive
-    default_read: false
-    direct_reference_allowed: false
-    current_role: cold historical archive; not current law
-    truth_profile: archive_history_only
-    freshness_class: archive
-    lifecycle_state: historical
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: archive_registry
-
-  - path: docs/rebuild/
-    doc_class: rebuild_history
-    default_read: false
-    direct_reference_allowed: false
-    current_role: rebuild notes/consult history; not current law
-    truth_profile: rebuild_history_only
-    freshness_class: evidence_dated
-    lifecycle_state: historical
-    coverage_scope: descendants
-    parent_coverage_allowed: true
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: explicit_rebuild_task
-
-  - path: docs/reports/authority_history/replacement_final_form_2026_06_09.demoted.md
-    doc_class: report
-    default_read: false
-    direct_reference_allowed: false
-    current_role: demoted authority history for 2026-06-09 replacement note
-    truth_profile: authority_history_only
-    freshness_class: evidence_dated
-    lifecycle_state: historical
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: archive_registry
-
-  - path: docs/reports/authority_history/regime_unification_2026_06_12.demoted.md
-    doc_class: report
-    default_read: false
-    direct_reference_allowed: false
-    current_role: demoted authority history for 2026-06-12 regime note
-    truth_profile: authority_history_only
-    freshness_class: evidence_dated
-    lifecycle_state: historical
-    coverage_scope: exact
-    parent_coverage_allowed: false
-    contains_volatile_metrics: true
-    current_tense_allowed: false
-    refresh_source: archive_registry
+  - {path: docs/AGENTS.md, doc_class: router, authority: false, default_read: true}
+  - {path: docs/README.md, doc_class: router, authority: false, default_read: true}
+  - {path: docs/archive_registry.md, doc_class: archive_interface, authority: false, default_read: false}
+  - {path: docs/authority/AGENTS.md, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_current_architecture.md, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_current_delivery.md, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_forecast_fusion_authority.md, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_docs_classification_authority.md, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_change_control_constitution.md, doc_class: authority, authority: true, default_read: false}
+  - {path: docs/authority/ARCHIVAL_RULES.md, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/reference/AGENTS.md, doc_class: reference_router, authority: false, default_read: true}
+  - {path: docs/reference/zeus_prediction_market_quant_reference.md, doc_class: reference, authority: false, default_read: true}
+  - {path: docs/reference/zeus_domain_model.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_math_spec.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_forecast_source_and_regional_model_reference.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_strategy_spec.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_market_settlement_reference.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_execution_lifecycle_reference.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_risk_strategy_reference.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_data_and_replay_reference.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_failure_modes_reference.md, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/modules/, doc_class: module_reference, authority: false, default_read: false}
+  - {path: docs/operations/AGENTS.md, doc_class: operations_router, authority: false, default_read: true}
+  - {path: docs/operations/current_state.md, doc_class: current_fact_pointer, authority: false, default_read: true}
+  - {path: docs/operations/current_data_state.md, doc_class: current_fact_pointer, authority: false, default_read: true}
+  - {path: docs/operations/current_source_validity.md, doc_class: current_fact_pointer, authority: false, default_read: true}
+  - {path: docs/runbooks/, doc_class: runbook, authority: false, default_read: false}
+  - {path: docs/evidence/, doc_class: evidence, authority: false, default_read: false}
+  - {path: docs/reports/, doc_class: report, authority: false, default_read: false}
+  - {path: docs/archive/, doc_class: archive, authority: false, default_read: false}
+  - {path: docs/rebuild/, doc_class: rebuild_history, authority: false, default_read: false}
