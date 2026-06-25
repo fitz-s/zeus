@@ -1,0 +1,159 @@
+schema_version: 1
+generated_at: '2026-06-25'
+authority_status: machine_authority_candidate
+purpose: Stable city×metric forecast-fusion profile manifest. Membership is fixed across lead1-3; lead changes availability, source age, weights, and sigma only.
+input_basis:
+  aggregate_file: fusions_all_cities_lead1_3_aggregate_best_20260625T112808Z.csv
+  settlement_rows: 5054
+  comparison_rows: 15162
+  errors: 0
+  selection_kind: three_day_aggregate_best with full-lead coverage preference
+law:
+  no_per_lead_membership: true
+  profile_key: city + metric
+  lead_allowed_to_change: [availability_gate, source_age_penalty, weights, sigma, fallback_activation]
+  lead_forbidden_to_change: [primary source membership]
+  safe_run_rule: source run is usable only after last_run_availability_time + 10 minutes
+  provider_family_rule: do not include duplicate provider family in one primary profile
+  resolution_rule: primary finer sources must be <=10km; >10km source is legacy/coarse exception only when selected by existing settlement-grade data and flagged by source registry
+  fallback_order: [primary_combo_complete, fallback_profile_group_for_same_city_metric, available_subset_if_profile_allows, current_profile, no_live_q]
+profile_groups:
+- metric: high
+  primary_combo: [ecmwf_ifs]
+  status: limited
+  cities: [London]
+  count: 1
+  median_mae_c: 1.1783
+  min_sample_n: 240
+- metric: high
+  primary_combo: [ecmwf_ifs]
+  status: production
+  cities: [Munich, San Francisco, Seoul]
+  count: 3
+  median_mae_c: 1.612
+  min_sample_n: 249
+- metric: high
+  primary_combo: [ecmwf_ifs, icon_eu]
+  status: production
+  cities: [Madrid, Warsaw]
+  count: 2
+  median_mae_c: 0.905
+  min_sample_n: 273
+- metric: high
+  primary_combo: [ecmwf_ifs, icon_global]
+  status: production
+  cities: [Atlanta, Austin, Chengdu, Chicago, Dallas, Denver, Houston, Karachi, Lucknow, Mexico City, Sao Paulo, Tokyo]
+  count: 12
+  median_mae_c: 1.2807
+  min_sample_n: 195
+- metric: high
+  primary_combo: [ecmwf_ifs, icon_global, ukmo_global_deterministic_10km]
+  status: production
+  cities: [Beijing]
+  count: 1
+  median_mae_c: 1.4262
+  min_sample_n: 258
+- metric: high
+  primary_combo: [ecmwf_ifs, ukmo_global_deterministic_10km]
+  status: production
+  cities: [Busan, Milan, Paris, Shanghai]
+  count: 4
+  median_mae_c: 1.2703
+  min_sample_n: 228
+- metric: high
+  primary_combo: [icon_eu]
+  status: production
+  cities: [Ankara, Helsinki, Istanbul]
+  count: 3
+  median_mae_c: 1.1181
+  min_sample_n: 216
+- metric: high
+  primary_combo: [icon_eu, ukmo_global_deterministic_10km]
+  status: production
+  cities: [Moscow, Tel Aviv]
+  count: 2
+  median_mae_c: 0.9709
+  min_sample_n: 204
+- metric: high
+  primary_combo: [icon_global]
+  status: limited
+  cities: [Jakarta, Lagos]
+  count: 2
+  median_mae_c: 1.3639
+  min_sample_n: 105
+- metric: high
+  primary_combo: [icon_global]
+  status: production
+  cities: [Cape Town, Kuala Lumpur, Los Angeles, Miami, NYC, Panama City, Seattle]
+  count: 7
+  median_mae_c: 1.2413
+  min_sample_n: 201
+- metric: high
+  primary_combo: [icon_global, ukmo_global_deterministic_10km]
+  status: production
+  cities: [Buenos Aires, Chongqing, Guangzhou, Qingdao, Singapore, Toronto, Wellington, Wuhan]
+  count: 8
+  median_mae_c: 1.2903
+  min_sample_n: 159
+- metric: high
+  primary_combo: [ukmo_global_deterministic_10km]
+  status: production
+  cities: [Amsterdam, Hong Kong, Jeddah, Manila, Shenzhen, Taipei]
+  count: 6
+  median_mae_c: 1.3743
+  min_sample_n: 195
+- metric: low
+  primary_combo: [ecmwf_ifs]
+  status: limited
+  cities: [London]
+  count: 1
+  median_mae_c: 0.6106
+  min_sample_n: 104
+- metric: low
+  primary_combo: [ecmwf_ifs]
+  status: production
+  cities: [Hong Kong, Paris]
+  count: 2
+  median_mae_c: 0.8914
+  min_sample_n: 90
+- metric: low
+  primary_combo: [ecmwf_ifs, icon_global]
+  status: production
+  cities: [Miami]
+  count: 1
+  median_mae_c: 0.7484
+  min_sample_n: 153
+- metric: low
+  primary_combo: [ecmwf_ifs, ukmo_global_deterministic_10km]
+  status: production
+  cities: [Seoul, Shanghai]
+  count: 2
+  median_mae_c: 0.7647
+  min_sample_n: 150
+- metric: low
+  primary_combo: [icon_global]
+  status: diagnostic_only
+  cities: [Karachi]
+  count: 1
+  median_mae_c: 0.5
+  min_sample_n: 3
+- metric: low
+  primary_combo: [icon_global]
+  status: production
+  cities: [NYC, Tokyo]
+  count: 2
+  median_mae_c: 1.0668
+  min_sample_n: 165
+source_release_defaults:
+  ecmwf_ifs: {update_frequency: 6h, typical_lag: 4-6h, safe_wait: 10m, step: hourly, resolution_km: 9}
+  icon_d2: {update_frequency: 3h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 2}
+  icon_eu: {update_frequency: 3h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 7}
+  icon_global: {update_frequency: 6h, typical_lag: 4-6h, safe_wait: 10m, step: hourly, resolution_km: 11, admission: coarse_exception}
+  ukmo_global_deterministic_10km: {update_frequency: 6h, typical_lag: 4-6h, safe_wait: 10m, step: hourly, resolution_km: 10}
+  gfs_hrrr: {update_frequency: 1h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 3}
+  ncep_nbm_conus: {update_frequency: 1h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 3}
+  nam_conus: {update_frequency: 6h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 3}
+  gem_hrdps_continental: {update_frequency: 6h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 2.5}
+  meteofrance_arome_france_hd: {update_frequency: 3h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 1.5}
+  jma_msm: {update_frequency: 3h, typical_lag: 1-3h, safe_wait: 10m, step: hourly, resolution_km: 5}
+profile_rows_file: zeus_city_metric_stable_fusion_profiles_v2_20260625.csv
