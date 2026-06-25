@@ -4055,6 +4055,12 @@ def _startup_world_db_schema_ready_check() -> str:
         "position_current",
         "trade_decisions",
     })
+    _LIVE_REQUIRED_WORLD_INDEXES = frozenset({
+        "idx_opportunity_events_day0_family",
+        "idx_opportunity_event_processing_pending_retry_floor",
+        "idx_opportunity_event_processing_stale_claim",
+        "idx_opportunity_event_processing_status",
+    })
 
     if not ZEUS_WORLD_DB_PATH.exists():
         raise FileNotFoundError(f"{ZEUS_WORLD_DB_PATH} does not exist")
@@ -4079,6 +4085,19 @@ def _startup_world_db_schema_ready_check() -> str:
         if missing:
             raise RuntimeError(
                 f"world DB missing canonical tables: {sorted(missing)}"
+            )
+        missing_indexes = {
+            index
+            for index in _LIVE_REQUIRED_WORLD_INDEXES
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=? LIMIT 1",
+                (index,),
+            ).fetchone()
+            is None
+        }
+        if missing_indexes:
+            raise RuntimeError(
+                f"world DB missing live-required indexes: {sorted(missing_indexes)}"
             )
         return "ready"
     finally:
@@ -4176,8 +4195,20 @@ def _startup_db_schema_ready_check() -> None:
             _startup_world_db_schema_ready_check()
             logger.info("world DB schema structural check: ready")
         except Exception as exc:
-            logger.warning("world DB schema readiness check failed: %s — retrying", exc)
-            missing.append("world")
+            logger.warning(
+                "world DB schema readiness check failed: %s — running idempotent repair",
+                exc,
+            )
+            try:
+                _startup_world_db_schema_prepare()
+                _startup_world_db_schema_ready_check()
+                logger.info("world DB schema structural check: ready after repair")
+            except Exception as repair_exc:
+                logger.warning(
+                    "world DB schema repair/readiness failed: %s — retrying",
+                    repair_exc,
+                )
+                missing.append("world")
         try:
             _startup_forecasts_schema_ready_check()
             logger.info("forecasts DB schema structural check: ready")

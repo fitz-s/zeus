@@ -6,8 +6,8 @@
 Design §4.2: trading daemon must validate schema readiness at boot:
 - World DB schema currency failure after 5-min retry → SystemExit (FATAL)
 - Forecast DB schema currency failure after 5-min retry → SystemExit (FATAL)
-- Live boot is read-only against canonical DB schemas; explicit deployment
-  tooling owns schema repair/migration.
+- Live boot proves canonical DB schema first; missing live-required hot indexes
+  trigger the idempotent repair helper, then the read-only proof is repeated.
 - Stale legacy JSON sentinels no longer gate live startup after forecast-live split
 """
 
@@ -86,8 +86,22 @@ class TestWorldSchemaReadyCheck:
         fn = self._get_fn()
         fn()
 
-    def test_world_schema_ready_check_uses_canonical_table_presence(self, tmp_path, monkeypatch):
-        """World schema proof comes from canonical table presence in zeus-world.db."""
+    def test_world_schema_ready_check_uses_canonical_table_and_hot_index_presence(self, tmp_path, monkeypatch):
+        """World schema proof comes from canonical table and hot-index presence."""
+        import sqlite3
+
+        import src.state.db as db_module
+        from src.main import _startup_world_db_schema_ready_check
+
+        world_db = tmp_path / "zeus-world.db"
+        with sqlite3.connect(world_db) as conn:
+            db_module.init_schema(conn)
+        monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+
+        assert _startup_world_db_schema_ready_check() == "ready"
+
+    def test_world_schema_ready_check_rejects_missing_hot_indexes(self, tmp_path, monkeypatch):
+        """A table-only world DB is not live-ready when hot decision indexes are absent."""
         import sqlite3
 
         import src.state.db as db_module
@@ -100,7 +114,8 @@ class TestWorldSchemaReadyCheck:
             conn.execute("CREATE TABLE trade_decisions (id INTEGER PRIMARY KEY)")
         monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
 
-        assert _startup_world_db_schema_ready_check() == "ready"
+        with pytest.raises(RuntimeError, match="missing live-required indexes"):
+            _startup_world_db_schema_ready_check()
 
     def test_stale_forecasts_sentinel_ignored_when_forecasts_db_schema_current(self, tmp_path, monkeypatch):
         """Legacy forecasts_schema_ready.json no longer gates live startup."""
@@ -210,8 +225,8 @@ class TestWorldSchemaReadyCheck:
             "conn = get_world_connection()"
         )
 
-    def test_live_boot_uses_read_only_schema_proof_without_prepare(self, monkeypatch):
-        """Live boot must not run schema DDL repair before read-only structural proof."""
+    def test_live_boot_skips_prepare_when_read_only_schema_proof_passes(self, monkeypatch):
+        """Live boot does not run schema DDL repair when read-only proof is already ready."""
         import src.control.freshness_gate as fg_module
         import src.main as main_module
 
@@ -233,6 +248,33 @@ class TestWorldSchemaReadyCheck:
         main_module._startup_db_schema_ready_check()
 
         assert calls == ["read_only_proof"]
+
+    def test_live_boot_repairs_world_schema_then_rechecks(self, monkeypatch):
+        """Missing hot indexes are repaired automatically before live startup proceeds."""
+        import src.control.freshness_gate as fg_module
+        import src.main as main_module
+
+        calls: list[str] = []
+        monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 1)
+
+        def ready_check():
+            calls.append("read_only_proof")
+            if calls.count("read_only_proof") == 1:
+                raise RuntimeError("world DB missing live-required indexes")
+            return "ready"
+
+        monkeypatch.setattr(
+            main_module,
+            "_startup_world_db_schema_prepare",
+            lambda: calls.append("prepare") or "prepared",
+        )
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", ready_check)
+        monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "ready")
+
+        main_module._startup_db_schema_ready_check()
+
+        assert calls == ["read_only_proof", "prepare", "read_only_proof"]
 
     def test_world_schema_prepare_runs_init_schema_unconditionally(self, tmp_path, monkeypatch):
         """init_schema runs unconditionally — no version gating; returns 'prepared'."""
