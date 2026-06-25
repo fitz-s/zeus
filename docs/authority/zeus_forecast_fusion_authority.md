@@ -1,8 +1,8 @@
 # Zeus Forecast Fusion Authority
 
 Status: active durable authority law  
-Scope: forecast fusion source/model-selection authority, provider-family representative law, city fusion profiles, and regional domain gate semantics  
-Machine authority: `architecture/forecast_fusion_manifest.yaml`  
+Scope: forecast fusion source/model-selection authority, provider-family representative law, stable city×metric profiles, release timing, fallback, and regional domain gate semantics  
+Machine authority: `architecture/forecast_fusion_stable_profile_manifest.yaml`, `architecture/forecast_source_acquisition_manifest.yaml`, `architecture/forecast_fusion_manifest.yaml`  
 Executable anchors: `src/forecast/model_selection.py`, `config/model_domain_polygons.yaml`, `src/forecast/bayes_precision_fusion.py`  
 Freshness model: durable selection law. Current model rows, source cycles, provider health, and live completeness are current facts and must be proven from DB/runtime receipts.
 
@@ -12,76 +12,94 @@ Freshness model: durable selection law. Current model rows, source cycles, provi
 
 Forecast fusion model selection is authority-bearing because it defines which forecast products may enter the probability distribution that later becomes q, q_lcb, edge, size, and live-money execution.
 
-The authority order is:
+Authority order:
 
 1. executable source and tests;
-2. `architecture/forecast_fusion_manifest.yaml`;
-3. this authority file;
-4. canonical references such as `docs/reference/zeus_forecast_source_and_regional_model_reference.md`;
-5. dated reports/evidence/history.
+2. `architecture/forecast_fusion_stable_profile_manifest.yaml` for production city×metric membership;
+3. `architecture/forecast_source_acquisition_manifest.yaml` for endpoint/cadence/release semantics;
+4. `architecture/forecast_fusion_manifest.yaml` for older profile/domain context while migration remains active;
+5. this authority file;
+6. canonical references;
+7. dated evidence/history.
 
 No dated experiment, consult, PR review, report, or evidence note may add a live model, resurrect a removed model, or redefine a regional domain. It must first update code, manifest, tests, and this authority law.
 
 ---
 
-## 2. Selection Law
+## 2. Stable Membership Law
 
-Durable law:
+Production source membership is keyed by:
 
-- Every fusion has one anchor prior: `ecmwf_ifs`, when present at runtime.
-- A physical provider family contributes at most one representative.
-- Provider-family priority is machine-declared in `architecture/forecast_fusion_manifest.yaml`.
-- Regional or domain-gated products may enter only when the city coordinate is inside the configured polygon and the lead is within the configured maximum.
-- Missing current rows are runtime current facts. Docs may not invent substitute models.
-- A live fusion row must still prove current capture/readiness/source-cycle validity before trading.
+```text
+city + metric
+```
 
-This means the manifest defines **eligible composition if rows are present**, not a guarantee that the current DB has all rows.
+It is not keyed by:
 
----
+```text
+city + metric + lead
+```
 
-## 3. Provider Families
+Lead may change only:
 
-Machine authority: `architecture/forecast_fusion_manifest.yaml::provider_families`.
+- source availability gate;
+- run age penalty;
+- weights;
+- predictive sigma / q-band width;
+- fallback activation.
 
-Current families:
-
-| Family | Priority order | Meaning |
-|---|---|---|
-| ICON/DWD | `icon_d2`, `icon_eu`, `icon_global` | Most-specific eligible ICON product wins. |
-| NCEP/NOAA | `gfs_hrrr`, `ncep_nbm_conus` | HRRR wins in its domain; NBM is only representative when HRRR is not eligible and NBM is eligible. |
-| UKMO | `ukmo_uk_deterministic_2km`, `ukmo_global_deterministic_10km` | UKV wins in its domain/lead; otherwise UKMO global. |
-| CMC/GEM | `gem_hrdps_continental` | HRDPS is the only current CMC representative. |
-
-Removed/non-member products such as old coarse global variants, JMA, or alias probes cannot re-enter from docs prose.
+Lead must not select a different primary source membership. A lead-specific source set is diagnostic evidence, not production law.
 
 ---
 
-## 4. City Profiles
+## 3. Release Timing Law
 
-Machine authority: `architecture/forecast_fusion_manifest.yaml::city_profile_groups`.
+A model run may enter live fusion only after:
 
-The profile groups cover every city currently configured in `config/cities.json`. A city missing from the manifest is a fail-closed docs/code drift until the manifest and tests are updated.
+```text
+safe_available_at = last_run_availability_time + 10 minutes
+```
 
-Profiles are lead-sensitive. A city in `icon_d2_arome` may use different eligible model composition at lead 0-1 than at lead 2-3 or lead 4+. Agents must read the profile definition, not just the group name.
+The `run` time is the model initialization time, not public availability time. If a source has not reached `safe_available_at` by decision time, it is absent for that decision. Docs may not invent a row or use a future run.
+
+Different source cadences are expected. Faster regional sources may be available before slower global sources; this affects fallback and source-age weighting, not the stable primary membership key.
 
 ---
 
-## 5. Reference Boundary
+## 4. Fallback Law
 
-`docs/reference/zeus_forecast_source_and_regional_model_reference.md` explains the concepts. It is not authority. If that reference and the manifest disagree, fix the reference or code/manifest through a governed change.
+Fallback order:
+
+1. complete stable primary combo;
+2. complete fallback combo for the same city×metric from the stable manifest;
+3. permitted available subset only when the profile policy allows it and provenance records dropped sources;
+4. current profile;
+5. no live q.
+
+Fallback is triggered by runtime availability, freshness, domain, horizon, or source-role failure. Fallback is not a second strategy and does not change durable city×metric membership.
+
+---
+
+## 5. Provider And Resolution Law
+
+- A physical provider family contributes at most one representative to one fusion.
+- Regional or domain-gated products may enter only when the city coordinate is inside the configured polygon and lead/horizon is valid.
+- Primary finer sources must be nominal `<=10km` unless a coarser source has an explicit coarse/station-alignment exception in the manifest and settlement-grade evidence justifies it.
+- Missing current rows are operations facts. Durable docs do not fabricate substitute models.
 
 ---
 
 ## 6. Required Change Protocol
 
-Any change to forecast model composition, regional products, provider-family representative rules, or city assignment must update all relevant surfaces in the same patch:
+Any change to forecast model composition, regional products, provider-family representative rules, source cadence, fallback law, or city assignment must update all relevant surfaces in the same patch:
 
 1. executable code/config;
-2. `architecture/forecast_fusion_manifest.yaml`;
-3. this file if law changed;
-4. `architecture/module_manifest.yaml` if routing changed;
-5. `architecture/docs_registry.yaml` if docs changed;
-6. tests proving model-selection behavior;
-7. reference docs only after law is correct.
+2. `architecture/forecast_fusion_stable_profile_manifest.yaml`;
+3. `architecture/forecast_source_acquisition_manifest.yaml` if acquisition/cadence changed;
+4. this file if law changed;
+5. `architecture/module_manifest.yaml` if routing changed;
+6. `architecture/docs_registry.yaml` if docs changed;
+7. tests proving stable membership, release timing, step alignment, and fallback behavior;
+8. reference docs only after law is correct.
 
 Do not update reference first and let it imply authority.
