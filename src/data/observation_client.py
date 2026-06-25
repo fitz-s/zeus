@@ -134,6 +134,21 @@ WU_API_KEY = os.environ.get("WU_API_KEY") or _WU_PUBLIC_WEB_KEY
 WU_OBS_URL = "https://api.weather.com/v1/geocode/{lat}/{lon}/observations/timeseries.json"
 IEM_BASE = "https://mesonet.agron.iastate.edu/json"
 
+
+def _positive_float_env(name: str, default: float, *, minimum: float = 0.1) -> float:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is invalid; using %.1fs", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+WU_OBS_TIMEOUT_SECONDS = _positive_float_env("ZEUS_WU_OBS_TIMEOUT_SECONDS", 3.0)
+
 # review5.23 P1-1: coverage window-completeness thresholds.
 # First sample must arrive within this many hours of local midnight for the
 # window to be considered full-day.  DST fall-back days have 25 local hours;
@@ -683,7 +698,7 @@ def _fetch_wu_observation(
                 "units": unit,
                 "hours": 23,  # WU timeseries max is 23
             },
-            timeout=15.0,
+            timeout=WU_OBS_TIMEOUT_SECONDS,
         )
 
         if resp.status_code != 200:

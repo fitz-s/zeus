@@ -96,6 +96,23 @@ _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
     }
 )
 _EXIT_STATE_HINT_VALUES = frozenset(state.value for state in ExitState if state.value)
+_TRANSITIONAL_HINT_EVENT_TYPES = frozenset(
+    {
+        "POSITION_OPEN_INTENT",
+        "ENTRY_ORDER_POSTED",
+        "ENTRY_ORDER_FILLED",
+        "DAY0_WINDOW_ENTERED",
+        "ADMIN_VOIDED",
+        "EXIT_RETRY_RELEASED",
+        *_EXIT_LIFECYCLE_EVENT_TYPES,
+    }
+)
+_TRANSITIONAL_HINT_PAYLOAD_KEYS = (
+    "entry_fill_verified",
+    "admin_exit_reason",
+    "day0_entered_at",
+)
+_TRANSITIONAL_HINT_ROWS_PER_POSITION = 40
 
 # T1E: configurable busy-timeout (ms → s). Default 30000ms = 30s per T0_SQLITE_POLICY.md.
 # ZEUS_DB_BUSY_TIMEOUT_MS env var is in milliseconds; sqlite3.connect(timeout=) takes seconds.
@@ -10775,14 +10792,39 @@ def _query_transitional_position_hints(
     columns = _table_columns(conn, "position_events")
     placeholders = ", ".join("?" for _ in trade_ids)
     if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+        event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
+        payload_predicate = " OR ".join("payload_json LIKE ?" for _ in _TRANSITIONAL_HINT_PAYLOAD_KEYS)
+        params = (
+            *trade_ids,
+            *_TRANSITIONAL_HINT_EVENT_TYPES,
+            *(f"%{key}%" for key in _TRANSITIONAL_HINT_PAYLOAD_KEYS),
+            _TRANSITIONAL_HINT_ROWS_PER_POSITION,
+        )
         rows = conn.execute(
             f"""
-            SELECT position_id AS trade_key, event_type, payload_json AS payload, occurred_at
-            FROM position_events
-            WHERE position_id IN ({placeholders})
+            WITH ranked AS (
+                SELECT position_id AS trade_key,
+                       event_type,
+                       payload_json AS payload,
+                       occurred_at,
+                       sequence_no,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY position_id
+                           ORDER BY occurred_at DESC, sequence_no DESC
+                       ) AS rn
+                FROM position_events
+                WHERE position_id IN ({placeholders})
+                  AND (
+                      event_type IN ({event_placeholders})
+                      OR {payload_predicate}
+                  )
+            )
+            SELECT trade_key, event_type, payload, occurred_at
+            FROM ranked
+            WHERE rn <= ?
             ORDER BY occurred_at DESC, sequence_no DESC
             """,
-            trade_ids,
+            params,
         ).fetchall()
     else:
         logger.warning("position_events table missing expected columns"); return {}

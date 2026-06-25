@@ -1220,6 +1220,36 @@ class TestAnomalyFreshnessGates:
         assert pf2.freshness_status == "stale_cache_after_failure"
         assert calls["n"] == 1, "a stale METAR cache must not feed the divergence detector"
 
+    def test_prefetch_bounds_anomaly_checks_before_scanning_all_cities(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        tokyo = _tokyo()
+        tokyo_b = SimpleNamespace(
+            name="Tokyo-B",
+            timezone=tokyo.timezone,
+            settlement_unit=tokyo.settlement_unit,
+            wu_station="RJTT",
+            settlement_source_type=tokyo.settlement_source_type,
+        )
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        calls: list[str] = []
+
+        def check(city, extremes, rpts):
+            calls.append(city.name)
+
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: reports, min_fetch_interval_s=0.0)
+        prefetch = emitter.prefetch(
+            cities=[tokyo, tokyo_b],
+            decision_time=t0 + timedelta(minutes=5),
+            anomaly_check=check,
+            anomaly_check_budget_s=60.0,
+            anomaly_check_max_cities=1,
+        )
+
+        assert prefetch.freshness_status == "fresh_fetch"
+        assert calls == ["Tokyo"]
+
     def test_detector_refuses_conclusion_when_metar_window_lags_wu(self):
         """Operator scenario: METAR outage since 10:00, WU moved at 12:00 —
         comparing a 2h-stale METAR window vs current WU is NOT divergence."""

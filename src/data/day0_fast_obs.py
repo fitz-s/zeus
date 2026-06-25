@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -81,6 +82,40 @@ FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 # matches the historical calibration surface.
 PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 1.0
 PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 12.0
+
+
+def _positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is invalid; using %.1fs", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is invalid; using %d", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+DAY0_ANOMALY_CHECK_BUDGET_S = _positive_float_env(
+    "ZEUS_DAY0_ANOMALY_CHECK_BUDGET_SECONDS",
+    8.0,
+)
+DAY0_ANOMALY_CHECK_MAX_CITIES = _positive_int_env(
+    "ZEUS_DAY0_ANOMALY_CHECK_MAX_CITIES",
+    6,
+)
 
 
 @dataclass(frozen=True)
@@ -903,6 +938,8 @@ class Day0FastObsEmitter:
         cities: list[Any],
         decision_time: datetime,
         anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], Any]] = None,
+        anomaly_check_budget_s: Optional[float] = None,
+        anomaly_check_max_cities: Optional[int] = None,
     ) -> FastObsPrefetch:
         """HTTP phase: resolve eligible cities, fetch METAR (throttled), run the
         (WU-HTTP) anomaly cross-check. NO DB writes — safe to run OUTSIDE the
@@ -941,13 +978,57 @@ class Day0FastObsEmitter:
             )
         if reports and anomaly_check is not None and anomaly_input_ok:
             anomaly_actions = []
+            checks_started = 0
+            budget_s = (
+                DAY0_ANOMALY_CHECK_BUDGET_S
+                if anomaly_check_budget_s is None
+                else max(0.0, anomaly_check_budget_s)
+            )
+            max_checks = (
+                DAY0_ANOMALY_CHECK_MAX_CITIES
+                if anomaly_check_max_cities is None
+                else max(0, anomaly_check_max_cities)
+            )
+            started_monotonic = time.monotonic()
             for city, _source, target_date in eligible:
+                if max_checks <= 0:
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_SKIPPED_BUDGET max_checks=%d budget_s=%.3f",
+                        max_checks,
+                        budget_s,
+                    )
+                    break
+                if checks_started >= max_checks:
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_BUDGET_EXHAUSTED checked=%d eligible=%d "
+                        "elapsed_s=%.3f budget_s=%.3f reason=max_checks",
+                        checks_started,
+                        len(eligible),
+                        time.monotonic() - started_monotonic,
+                        budget_s,
+                    )
+                    break
+                if (
+                    budget_s > 0.0
+                    and checks_started > 0
+                    and (time.monotonic() - started_monotonic) >= budget_s
+                ):
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_BUDGET_EXHAUSTED checked=%d eligible=%d "
+                        "elapsed_s=%.3f budget_s=%.3f reason=elapsed",
+                        checks_started,
+                        len(eligible),
+                        time.monotonic() - started_monotonic,
+                        budget_s,
+                    )
+                    break
                 try:
                     extremes = running_extremes_for_local_day(
                         reports, city=city, target_date=target_date,
                         as_of=decision_time.astimezone(UTC),
                     )
                     if extremes.sample_count:
+                        checks_started += 1
                         action = anomaly_check(city, extremes, reports)
                         if action is not None:
                             anomaly_actions.append(action)
