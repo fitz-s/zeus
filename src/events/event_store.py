@@ -476,27 +476,19 @@ class EventStore:
             """
             SELECT e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
-                   json_extract(e.payload_json, '$.target_date') AS target_date
-            FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
-            JOIN opportunity_event_processing p
-              ON p.event_id = e.event_id
-             AND p.consumer_name = ?
-            WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
-              AND p.processing_status IN ('pending', 'processing')
-              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
-              AND (
-                    (e.event_type = 'FORECAST_SNAPSHOT_READY'
-                       AND (   json_extract(e.payload_json, '$.target_date') < ?
-                            OR json_extract(e.payload_json, '$.target_date') <= ?))
-                 OR (e.event_type = 'DAY0_EXTREME_UPDATED'
-                       AND (   json_extract(e.payload_json, '$.target_date') < ?
-                            OR json_extract(e.payload_json, '$.target_date') <= ?))
-              )
-            ORDER BY json_extract(e.payload_json, '$.target_date') ASC
-            LIMIT ?
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   e.event_type
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
+               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+             ORDER BY p.updated_at ASC, p.event_id ASC
+             LIMIT ?
             """,
-            (self.consumer_name, frontier_floor, venue_close_ceiling,
-             day0_floor, venue_close_ceiling, batch_limit),
+            (self.consumer_name, batch_limit),
         ).fetchall()
 
         expired_ids: list[str] = []
@@ -504,6 +496,15 @@ class EventStore:
             event_id = row[0]
             city = row[1]
             target_date = row[2]
+            event_type = str(row[3] or "")
+            if event_type == "FORECAST_SNAPSHOT_READY":
+                if not (target_date < frontier_floor or target_date <= venue_close_ceiling):
+                    continue
+            elif event_type == "DAY0_EXTREME_UPDATED":
+                if not (target_date < day0_floor or target_date <= venue_close_ceiling):
+                    continue
+            else:
+                continue
             if self._strictly_past_in_tz(city, target_date, decision_time_utc) or \
                self._venue_closed_in_phase(city, target_date, decision_time_utc):
                 expired_ids.append(event_id)
