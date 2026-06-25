@@ -69,7 +69,6 @@ _T_GROUP_RE = re.compile(r"\bT\d{8}\b")
 #: Minimum seconds between live HTTP fetches (the AWC cache updates ~1/min;
 #: the reactor cycle can be faster — do not hammer a free government API).
 DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
-
 #: Maximum cache age (seconds) at which the fast lane may serve the ENTRY gate
 #: (monitor fallback — Option B). Kills are staleness-safe; entries are not.
 #: At 15 min the cache is still fresh enough that the running extreme it
@@ -107,6 +106,11 @@ def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
         return default
     return max(minimum, value)
 
+
+DEFAULT_METAR_FETCH_TIMEOUT_S = _positive_float_env(
+    "ZEUS_DAY0_METAR_FETCH_TIMEOUT_SECONDS",
+    4.0,
+)
 
 DAY0_ANOMALY_CHECK_BUDGET_S = _positive_float_env(
     "ZEUS_DAY0_ANOMALY_CHECK_BUDGET_SECONDS",
@@ -232,7 +236,7 @@ def fetch_metar_reports(
     stations: Iterable[str],
     *,
     hours: float = 36.0,
-    timeout: float = 15.0,
+    timeout: float = DEFAULT_METAR_FETCH_TIMEOUT_S,
     endpoint: str = AVIATIONWEATHER_METAR_ENDPOINT,
 ) -> list[MetarReport]:
     """One batched fetch for all stations. Fail-soft: any error returns []."""

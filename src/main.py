@@ -7446,7 +7446,13 @@ def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
-        maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
+        maybe_refresh_day0_hourly_vectors(
+            _rc(),
+            decision_time=decision_time,
+            budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
+            max_cities=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")),
+            timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
+        )
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
     return prefetch

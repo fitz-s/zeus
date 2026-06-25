@@ -62,6 +62,9 @@ GLOBAL_DAY0_HOURLY_FALLBACK_MODELS: tuple[str, ...] = ("ecmwf_ifs",)
 
 DAY0_VECTOR_RETENTION_DAYS = 3.0
 DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-ish
+DEFAULT_FETCH_TIMEOUT_S = 4.0
+DEFAULT_REFRESH_BUDGET_S = 6.0
+DEFAULT_REFRESH_MAX_CITIES = 3
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -171,6 +174,7 @@ def fetch_day0_hourly_vectors(
     *,
     models: Optional[list[str]] = None,
     now: Optional[datetime] = None,
+    timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
 ) -> tuple[list[Day0HourlyVector], str]:
     """Fetch the freshest hourly temperature curves for in-domain high-res models.
 
@@ -200,6 +204,10 @@ def fetch_day0_hourly_vectors(
             OPENMETEO_FORECAST_URL,
             params,
             endpoint_label=f"day0_hourly_{getattr(city, 'name', '?')}",
+            timeout=max(0.5, float(timeout_s)),
+            max_retries=1,
+            backoff_sec=0.0,
+            fast_fail_429=True,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft lane
         logger.warning(
@@ -477,6 +485,9 @@ def maybe_refresh_day0_hourly_vectors(
     *,
     decision_time: datetime,
     interval_s: float = DEFAULT_REFRESH_INTERVAL_S,
+    budget_s: float = DEFAULT_REFRESH_BUDGET_S,
+    max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
+    timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
 ) -> int:
     """Throttled per-city fetch+persist of the freshest high-res hourly curves.
 
@@ -485,7 +496,18 @@ def maybe_refresh_day0_hourly_vectors(
     """
     written = 0
     now_monotonic = time.monotonic()
+    started_monotonic = now_monotonic
+    checked = 0
     for city in cities:
+        if checked >= max(0, int(max_cities)):
+            break
+        if budget_s > 0.0 and checked > 0 and (time.monotonic() - started_monotonic) >= budget_s:
+            logger.warning(
+                "DAY0_HOURLY_VECTORS_REFRESH_BUDGET_EXHAUSTED checked=%d budget_s=%.3f",
+                checked,
+                budget_s,
+            )
+            break
         name = str(getattr(city, "name", "") or "")
         if not name:
             continue
@@ -498,11 +520,19 @@ def maybe_refresh_day0_hourly_vectors(
             models = day0_hourly_models_for_city(city)
             if not models:
                 continue
+            checked += 1
             tz = ZoneInfo(str(getattr(city, "timezone")))
             target_date = decision_time.astimezone(tz).date().isoformat()
-            vectors, request_hash = fetch_day0_hourly_vectors(
-                city, models=models, now=decision_time
-            )
+            try:
+                vectors, request_hash = fetch_day0_hourly_vectors(
+                    city, models=models, now=decision_time, timeout_s=timeout_s
+                )
+            except TypeError as exc:
+                if "timeout_s" not in str(exc):
+                    raise
+                vectors, request_hash = fetch_day0_hourly_vectors(
+                    city, models=models, now=decision_time
+                )
             if vectors and request_hash:
                 written += persist_day0_hourly_vectors(
                     vectors, target_date=target_date, request_hash=request_hash
