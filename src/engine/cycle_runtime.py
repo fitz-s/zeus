@@ -4006,14 +4006,12 @@ def execute_monitoring_phase(
                         boundary="day0_window_entered",
                     )
 
-            closed_market_info = None
-            if _position_state_value(pos) == "day0_window":
-                closed_market_info = _closed_non_accepting_market_info(
-                    clob,
-                    pos,
-                    conn,
-                    decision_time=deps._utcnow(),
-                )
+            closed_market_info = _closed_non_accepting_market_info(
+                clob,
+                pos,
+                conn,
+                decision_time=deps._utcnow(),
+            )
             # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
             # evidence source.
             #   * source="clob_market_info" → the VENUE itself reports
