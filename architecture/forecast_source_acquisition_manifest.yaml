@@ -1,0 +1,61 @@
+schema_version: 1
+metadata:
+  created: '2026-06-25'
+  owner: docs authority isolation rebuild
+  authority_status: machine_authority
+  purpose: Public forecast-source acquisition manifest for Zeus finer fusion source work. Current availability remains an operations current fact.
+  public_source_basis: Open-Meteo Forecast, Model Updates, Historical Forecast, Single Runs, and Previous Runs documentation.
+
+api_surfaces:
+  live_forecast:
+    endpoint_host: api.open-meteo.com
+    endpoint_path: /v1/forecast
+    role: current live model output; not individual-run structure
+  historical_forecast:
+    endpoint_host: historical-forecast-api.open-meteo.com
+    endpoint_path: /v1/forecast
+    role: continuous archived forecast time-series for training/evaluation
+  single_runs:
+    endpoint_host: single-runs-api.open-meteo.com
+    endpoint_path: /v1/forecast
+    required_extra_param: run
+    role: exact individual UTC model run by initialization time
+    availability_note: ECMWF IFS HRES 9km from 2024-03-14; most other models from 2025-09-01
+  previous_runs:
+    endpoint_host: previous-runs-api.open-meteo.com
+    endpoint_path: /v1/forecast
+    role: fixed lead offsets previous_day0..previous_day7 for skill analysis
+  model_update_metadata:
+    endpoint_class: Open-Meteo model updates metadata API
+    fields: [last_run_initialisation_time, last_run_modification_time, last_run_availability_time, temporal_resolution_seconds, update_interval_seconds]
+    law: wait at least 10 minutes after last_run_availability_time before treating a model update as globally visible
+
+admission_law:
+  resolution_rule: Only nominal <=10km products may enter finer-fusion candidates unless a coarser grid is station-aligned and settlement-graded.
+  independence_rule: At most one representative from the same physical provider family may enter a fusion.
+  validation_rule: Candidate source is not live authority until ingestion, backfill, settlement-graded evaluation, manifest entry, and tests exist.
+
+live_authorized_sources:
+  ecmwf_ifs: {provider: ECMWF, public_model: IFS_HRES_9km, resolution: 9km, update_frequency: every_6_hours, run_frequency: 4x_daily_00_06_12_18_utc, typical_delay: global_models_4_to_6_hours, status: live_authorized_anchor}
+  icon_d2: {provider: DWD, resolution: 2km, update_frequency: every_3_hours, typical_delay: regional_models_1_to_3_hours, status: live_authorized_domain_gated}
+  icon_eu: {provider: DWD, resolution: 7km, update_frequency: every_3_hours, typical_delay: regional_models_1_to_3_hours, status: live_authorized_domain_gated}
+  icon_global: {provider: DWD, resolution: 11km, update_frequency: every_6_hours, admission_basis: legacy_global_rep_pending_finer_replacement, status: live_authorized_legacy_global_rep}
+  meteofrance_arome_france_hd: {provider: MeteoFrance, resolution: 1.5km, update_frequency: every_3_hours, typical_delay: regional_models_1_to_3_hours, status: live_authorized_domain_gated}
+  ukmo_global_deterministic_10km: {provider: UK_Met_Office, resolution: 10km, update_frequency: every_6_hours, status: live_authorized_global_rep}
+  ukmo_uk_deterministic_2km: {provider: UK_Met_Office, resolution: 2km, update_frequency: every_hour, status: live_authorized_domain_gated}
+  gfs_hrrr: {provider: NOAA_NCEP, resolution: 3km, update_frequency: every_hour, status: live_authorized_domain_gated}
+  ncep_nbm_conus: {provider: NOAA_NCEP, resolution: 3km, update_frequency: every_hour, status: live_authorized_domain_gated_fallback_rep}
+  gem_hrdps_continental: {provider: Canadian_Weather_Service, resolution: 2.5km, update_frequency: every_6_hours, status: live_authorized_domain_gated}
+
+public_finer_candidates_not_yet_live:
+  jma_msm: {provider: JMA, resolution: 5km, update_frequency: every_3_hours, city_candidates: [Tokyo], blocker: no_current_zeus_ingest_or_settlement_backtest}
+  kma_ldps: {provider: KMA, resolution: 1.5km, update_frequency: every_6_hours, city_candidates: [Seoul, Busan], blocker: no_current_zeus_ingest_or_settlement_backtest}
+  met_nordic: {provider: MET_Norway, resolution: 1km, update_frequency: every_hour, city_candidates: [Helsinki], blocker: provider_family_and_settlement_backtest_required}
+  knmi_harmonie_netherlands: {provider: KNMI, resolution: 2km, update_frequency: every_hour, city_candidates: [Amsterdam], blocker: no_current_zeus_ingest_or_provider_family_backtest}
+  dmi_harmonie_europe: {provider: DMI, resolution: 2km_or_5_5km, update_frequency: every_3_hours, city_candidates: [Helsinki, Warsaw, Amsterdam], blocker: no_current_zeus_ingest_or_provider_family_backtest}
+  italiameteo_icon_2i: {provider: ItaliaMeteo, resolution: 2km, update_frequency: every_12_hours, city_candidates: [Milan], blocker: no_current_zeus_ingest_or_backtest_against_AROME_ICON}
+  nam_conus: {provider: NOAA_NCEP, resolution: 3km, update_frequency: every_6_hours, city_candidates: [Atlanta, Austin, Chicago, Dallas, Denver, Houston, Los_Angeles, Miami, NYC, San_Francisco, Seattle], blocker: same_NCEP_family_as_HRRR_NBM_must_win_family_contest}
+  kma_gdps: {provider: KMA, resolution: 13km, update_frequency: every_6_hours, city_candidates: [Seoul, Busan], admission_basis: excluded_by_resolution_rule_unless_station_aligned}
+
+change_protocol:
+  to_promote_candidate: [add_fetch_capture_code_path, add_product_identity, add_domain_lead_gate_if_regional, backfill_history, run_settlement_graded_evaluation, update_forecast_fusion_manifest, update_authority_if_law_changes, update_tests_and_registry]
