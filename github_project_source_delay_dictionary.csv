@@ -1,8 +1,0 @@
-source,source_type,release_delay_minutes,notes
-wu_icao_history,observation,peak+4h (city local time),WU daily fetch uses per-city trigger by historical_peak_hour + 4h; sub-hourly endpoint is live-ish historical API
-ogimet_metar,observation,N/A,WRH NOAA timeseries mirrors via Ogimet getmetar chunked by date window
-hko_hourly_accumulator,observation,N/A,HKO CLMMAXT/CLMMINT monthly + realtime weather.php
-meteostat_bulk,observation,lag varies; archive real-time lag not fixed,"Static CDN hourly CSV per WMO station, historical bulk fill"
-ecmwf_open_data,forecast,default 485; short-cycle 285; min partial 400,live max horizon 282 on full cycles
-openmeteo_previous_runs,forecast_shadow,720,"SHADOW_ONLY, reconstructed previous-runs"
-tigge_archive,forecast_backfill,"720, backfill_only",archive delayed + TIGGE MARS/ECDS source

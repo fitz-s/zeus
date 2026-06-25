@@ -973,7 +973,7 @@ max_f  E[ log(1 + Σ_i f_i · R_i(Y)) ]
 ```
 over selected leg combinations of an exclusive-outcome payoff matrix; default `max_legs=1` keeps it behaviourally identical to the Stage A emergency gate. Wave 4 bumps `max_legs` via caller config (shadow first), preserving Stage A as fallback.
 
-**Market prior fusion stays shadow-only.** `MODEL_ONLY_POSTERIOR_MODE` remains the default `posterior_mode` for `MarketAnalysis`. `MarketPriorDistribution` contract (complete normalised distribution + lineage + freshness + liquidity + validation evidence) gates any future blending experiment. KL-divergence inequality `KL(p ‖ (1−β)p + βm) ≥ 0` forbids unverified blending of a calibrated model with an unvalidated market distribution.
+**Market prior fusion is not a corrected posterior path.** `MODEL_ONLY_POSTERIOR_MODE` remains the default `posterior_mode` for `MarketAnalysis`. Corrected posterior construction consumes calibrated model belief only. KL-divergence inequality `KL(p ‖ (1−β)p + βm) ≥ 0` explains why unverified blending of a calibrated model with an unvalidated market distribution is forbidden.
 
 **Acceptance for §15.7 being closed:** all of INV-38, INV-39, INV-40 antibody tests GREEN, `_size_at_execution_price_boundary` constructs no `ExecutionPrice` with `price_type="implied_probability"`, `_bootstrap_bin` samples `c_b` from `EntryQuoteEvidence.cost_uncertainty`, no soft uncertainty enters Kelly via more than one path.
 

@@ -128,7 +128,7 @@ Every cycle reconciles local state against on-chain truth:
 (`src/state/chain_state.py.ChainSnapshotCompleteness`). Treating a missing
 API response as `CHAIN_EMPTY` would void real live positions on degraded
 infra; the void rule applies ONLY to authoritatively empty snapshots.
-See `docs/plans/2026-05-27-chain-local-position-model-refactor.md` (PR C0,
+See `docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md` (PR C0,
 Finding 1) for the timestamp-split that keeps the classifier honest.
 
 ---

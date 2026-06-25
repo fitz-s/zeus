@@ -12,7 +12,7 @@ Authority status: not authority law; audit-bound current fact only
 - AIFS sampled-2t identity verified from .local/replacement_raw/aifs_ens_20260605_00z_step0_pf_member001_2t.meta.json and .local/replacement_raw/aifs_sample_points_from_implemented_materializer.json
 - Settlement source routing document inspected; replacement path does not propose source-route changes
 - Live root pre-existing read files exist under /Users/leofitz/zeus; refit handoff is supplied by simple-switch install plan
-- Replacement shadow schema dry-run verified from .local/replacement_reports/replacement_shadow_schema_dry_run.json: committed=false created=['raw_forecast_artifacts', 'deterministic_forecast_anchors', 'forecast_posteriors', 'replacement_shadow_decisions']
+- Replacement schema dry-run verified from .local/replacement_reports/replacement_schema_dry_run.json: committed=false created=['raw_forecast_artifacts', 'deterministic_forecast_anchors', 'forecast_posteriors']
 - Materialization seed builder verified: market bins and baseline source-run coverage are converted into validated seed JSON
 - Materialization seed discovery verified: live shadow can generate seed JSON from forecast DB targets plus raw manifests
 - Materialization request builder verified: seed JSON is validated before entering the shadow queue

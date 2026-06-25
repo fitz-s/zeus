@@ -48,7 +48,7 @@ must also clear the floor.
 ## Tests
 - `tests/test_presubmit_jit_book_warm_connection.py` (NEW): connect>2.7 ∧ connect+read<outer;
   provider reuses one client across 3 calls (construct-at-most-once). RED→GREEN.
-- `tests/money_path/test_edli_live_canary.py`: updated the stale
+- `tests/money_path/test_edli_live_readiness.py`: updated the stale
   `..._uses_short_http_timeout` (asserted the regression-causing coupled scalar <1.25s under an
   artificially tight outer=2.5) → `..._uses_decoupled_bounded_timeout`. 119 pre-submit tests pass.
 

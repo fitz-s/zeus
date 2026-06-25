@@ -7,7 +7,7 @@
 
 ## What was checked and excluded (the layers)
 1. Daemons: all four alive post-restart (HEAD 2eb3789787), receipts flowing to 23:51+.
-2. Funnel since 23:40Z: 40 DAY0_SCOPE_SHADOW_ONLY, 32 EVENT_BOUND_SELECTED_CANDIDATE_MISSING
+2. Funnel since 23:40Z: 40 RETIRED_DAY0_NO_SUBMIT_MARKER, 32 EVENT_BOUND_SELECTED_CANDIDATE_MISSING
    (21 families, ~all 06-12), 7 empty-NO-ask, 4 TRADE_SCORE_NON_POSITIVE, 2 buy_no-evidence.
 3. Mainstream gate suspicion (stale L1827 comment "fail the mainstream-agreement gate"):
    EXCLUDED — L7695 + code confirm reference-only, "takes NO part in production selection".

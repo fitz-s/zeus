@@ -374,7 +374,7 @@ or a documented neutral constant.
   exclude day0** (`not in _DAY0_LANE_EVENT_TYPES`) so day0 keeps its ensemble path. This means: **if
   mx2t3 ingest is fully stopped, the day0 lane degrades** (no fresh ensemble base). Operator decision
   required: either (i) day0 is already shadow-only on the live scope
-  (`edli_live_scope` in `day0_shadow`/`forecast_plus_day0`, DAY0_SCOPE_SHADOW_ONLY → never submits)
+  (`edli_live_scope` in `retired_day0_no_submit_scope`/`forecast_plus_day0`, RETIRED_DAY0_NO_SUBMIT_MARKER → never submits)
   so its degradation is harmless, OR (ii) day0 needs its own raw_model_forecasts base before mx2t3
   can stop. **Verify the live `edli_live_scope` first** — if day0 is shadow, decoupling is safe to
   ship without a day0 base.

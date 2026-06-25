@@ -148,19 +148,19 @@ alignment at the single dispatch point.
 
 ### 2a. Immutable snapshot of raw_model_forecasts (single cycle, no concurrent mixing)
 
-**Source: `src/data/replacement_forecast_materializer.py` + `scripts/materialize_replacement_forecast_shadow.py`**
+**Source: `src/data/replacement_forecast_materializer.py` + `scripts/materialize_replacement_forecast.py`**
 
 The materializer reads raw_model_forecasts via
 `_read_persisted_current_capture` → `read_current_instrument_values` (lines 1084–1092).  The
 query is keyed on `(city, metric, target_date, source_cycle_time)` — one fixed cycle time.  It
 never range-scans across multiple cycles.
 
-The script caller (`scripts/materialize_replacement_forecast_shadow.py` lines 276–325) wraps the
+The script caller (`scripts/materialize_replacement_forecast.py` lines 276–325) wraps the
 entire operation in a single `BEGIN IMMEDIATE` / `commit`-or-`rollback`:
 
 ```python
 conn.execute("BEGIN IMMEDIATE")
-# ... write manifest rows, call materialize_replacement_forecast_shadow(conn, request) ...
+# ... write manifest rows, call materialize_replacement_forecast(conn, request) ...
 if args.commit:
     conn.commit()
 else:

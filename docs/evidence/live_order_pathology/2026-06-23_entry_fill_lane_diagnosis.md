@@ -1,7 +1,7 @@
 # Entry Fill-Lane Diagnosis — ACKED entries CANCELLED instead of FILLED
 
 - Created: 2026-06-23
-- Authority basis: live-chain evidence (zeus_trades.db venue_commands/venue_order_facts, zeus-world.db edli_live_order_events) + executable source under the K4.0 REST-THEN-CROSS regime (docs/operations/consolidated_systemic_overhaul_2026-06-11.md). Read-only diagnosis; NO fix applied (operator verifies before any change).
+- Authority basis: live-chain evidence (zeus_trades.db venue_commands/venue_order_facts, zeus-world.db edli_live_order_events) + executable source under the K4.0 REST-THEN-CROSS regime (docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md). Read-only diagnosis; NO fix applied (operator verifies before any change).
 - Money-path position: `execution` (entry placement -> fill). Upstream truth (belief/edge) is fresh post-66f28e3b; this defect is purely in the placement/fill lane.
 
 ## 0. Verdict (one line)

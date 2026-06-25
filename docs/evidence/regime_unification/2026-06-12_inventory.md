@@ -49,9 +49,9 @@ Exhaustive enumeration of pattern sites in `src/` and `config/settings.json` map
 
 | Site | Mechanism | Era | Verdict | Notes |
 |------|-----------|-----|---------|-------|
-| `config/settings.json:74-76` | `edli_live_scope` ∈ {forecast_only, day0_shadow, forecast_plus_day0} | edli_per_city | U3-RETIRE | String enum; maps to submit_lane (LIVE/SHADOW). Delete all scope strings, use submit_lane + EventProcessingDisposition instead. Day0 now LIVE (2026-06-12 directive) |
+| `config/settings.json:74-76` | retired `edli_live_scope` staging enum | edli_per_city | U3-RETIRE | String enum; maps to submit_lane. Delete all scope strings, use submit_lane + EventProcessingDisposition instead. Day0 now LIVE (2026-06-12 directive) |
 | `src/main.py:139` | `EDLI_LIVE_SCOPES` frozen set | edli_per_city | U3-RETIRE | Delete; scope routing becomes submit_lane gate |
-| `src/main.py:113-139` | edli_shadow_no_submit, forecast_only, day0_shadow branch names | edli_per_city | U3-RETIRE | Delete; replace with EventProcessingDisposition + submit_lane |
+| `src/main.py:113-139` | retired staging branch names | edli_per_city | U3-RETIRE | Delete; replace with EventProcessingDisposition + submit_lane |
 
 ### II.2 NATIVE_MULTIBIN_*_SHADOW/LIVE branching
 
@@ -65,12 +65,12 @@ Exhaustive enumeration of pattern sites in `src/` and `config/settings.json` map
 |------|-----------|-----|---------|-------|
 | `config/settings.json:288-290` | `openmeteo_ecmwf_ifs9_aifs_soft_anchor_{shadow,veto,trade_authority}_enabled` | full_transport / day0 | U3-RETIRE | Three separate flags for one semantic; collapse to submit_lane (SHADOW vs LIVE) + single authority (IFS9) |
 
-### II.4 day0_shadow / DAY0_SCOPE_SHADOW_ONLY marker (receipts)
+### II.4 retired Day0 no-submit receipt marker
 
 | Site | Mechanism | Era | Verdict | Notes |
 |------|-----------|-----|---------|-------|
-| `src/analysis/day0_shadow_enrichment.py:17-214` | day0 shadow receipt grading against VERIFIED truth | day0-observation | HONEST-KEEP | Honest shadow lane for day0 learning; branding acceptable (fresh=False + reason) |
-| `src/main.py:135-158` | DAY0_SCOPE_SHADOW_ONLY adapter boundary; day0 events PASS on real submit | day0-observation / edli_per_city | U3-RETIRE | Remove shadow-only purgatory gate; day0 now LIVE (2026-06-12). Brand receipts with submit_lane=LIVE instead |
+| retired Day0 no-submit enrichment module | Day0 receipt grading against VERIFIED truth | day0-observation | RETIRED | Deleted with the retired no-submit lane |
+| retired Day0 adapter boundary | Day0 events PASS on real submit | day0-observation / edli_per_city | U3-RETIRE | Removed no-submit purgatory gate; Day0 now LIVE (2026-06-12). Brand receipts with submit_lane=LIVE instead |
 
 ---
 
@@ -253,7 +253,7 @@ Exhaustive enumeration of pattern sites in `src/` and `config/settings.json` map
 
 | Flag | Kind | Verdict | Notes |
 |------|------|---------|-------|
-| `edli_live_scope` = "forecast_plus_day0" vs "forecast_only" vs "day0_shadow" | String enum / regime | U3-RETIRE | Scope strings; replace with submit_lane + EventProcessingDisposition. Day0 now LIVE (2026-06-12) |
+| retired `edli_live_scope` staging enum | String enum / regime | U3-RETIRE | Scope strings; replace with submit_lane + EventProcessingDisposition. Day0 now LIVE (2026-06-12) |
 | `openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled` | Shadow-only gate | U3-RETIRE | Maps to submit_lane=SHADOW; delete vocab, use submit_lane |
 | `openmeteo_ecmwf_ifs9_aifs_soft_anchor_veto_enabled` | Veto gate | U3-RETIRE | Veto stops LIVE submit; use EventProcessingDisposition=TERMINAL_REJECT instead |
 | `edli_arm_gate_emit_enabled` (false) | Advisory emit gate | HONEST-KEEP | Emit arm-gate telemetry for debugging; non-critical |
@@ -283,7 +283,7 @@ Exhaustive enumeration of pattern sites in `src/` and `config/settings.json` map
 | Site | Mechanism | Era | Verdict | Notes |
 |------|-----------|-----|---------|-------|
 | `src/execution/day0_hard_fact_exit.py` | Day0 uses realized obs (METAR/WU) not forecast | day0-observation | HONEST-KEEP | Different domain (nowcast vs forecast); documented boundary. Empirical threshold ≤1.0 is U4-MIGRATE numeric knob |
-| `src/analysis/day0_shadow_enrichment.py` | Shadow receipts graded against VERIFIED truth | day0-observation | HONEST-KEEP | Honest shadow ledger for learning; keep |
+| retired Day0 no-submit enrichment module | Receipts graded against VERIFIED truth | day0-observation | RETIRED | Deleted with the retired no-submit lane |
 | `src/calibration/day0_horizon_calibration.py` | Day0 horizon gates + settlement metric choice | day0-observation | HONEST-KEEP | Domain-specific gate; keep |
 
 ---
@@ -295,7 +295,6 @@ Exhaustive enumeration of pattern sites in `src/` and `config/settings.json` map
 | `src/contracts/settlement_capture_verifier.py:272` | threshold=5 (line count) | venue-infra | Unclear intent | Audit: is this a venue-specific constant or a domain-logic gate? If venue-specific, move to per-venue config. If domain-logic, derive from settlement-receipt cardinality empirics |
 | `src/data/bayes_precision_fusion_capture.py:109` | "Legacy date-less history" fallback to positional stack | replacement-fusion | Unclear scope | Audit: is this an honest degraded mode (fresh=False branded) or a silent fallback into different era? Clarify in code comment |
 | `src/config.py:288-295` | `diurnal_amplitude_{c,f}` fallback if preferred key missing | legacy | Tentative | Unit conversion fallback; audit intent: is this a domain boundary (two valid keys per venue) or a legacy soft-fail? If domain boundary, document as such. If soft-fail, brand with fresh=False |
-| `src/state/decision_chain.py:378-393` | "legacy_decision_log_fallback" reason field | legacy | Unclear | Audit: is this an honest degraded mode or a fallback into a different era? Clarify wording + ensure branding (fresh=False) is applied |
 
 ---
 
@@ -320,4 +319,3 @@ Exhaustive enumeration of pattern sites in `src/` and `config/settings.json` map
 5. **Single-authority consolidation (U1)**: delete full_transport_v1 path, retire legacy ENS fallback, audit all error_model_family reads for fallback loops, promote EMOS to replacement sole authority
 6. **Receipt second-brain merge** (Wave-2 #4): ensure submit_lane + EventProcessingDisposition invariants hold
 7. **edli_per_city_v1 family retirement**: once steps 2-3 zero its consumers
-

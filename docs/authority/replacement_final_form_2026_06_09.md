@@ -103,7 +103,7 @@ fitted-artifact-driven or per-cell-data-driven, never settings numbers
 **Single q authority (U1, `docs/authority/regime_unification_2026-06-12.md`):** the
 legacy baseline LCB cap on the live path is DELETED (commit 479cb34446) — the
 former `min(baseline, replacement)` joins are gone; the baseline is receipt
-diagnostics (`baseline_q_lcb_reference`). The honest no-replacement-data →
+comparison provenance (`comparison_q_lcb_reference`). The honest no-replacement-data →
 baseline fallback for genuinely-baseline strategies remains. The settlement-refuted
 EB bias correction and the bias_treatment_v2 branches are deleted with their code.
 

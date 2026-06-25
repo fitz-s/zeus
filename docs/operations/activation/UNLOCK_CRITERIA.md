@@ -3,7 +3,6 @@
 **Authority**: this document.  Replaces the "operator-paced" framing in `docs/runbooks/live-operation.md` §"Recommended flip order" with **evidence-gated** unlock.
 
 **Scope**: the three activation flags wired in PR #47 Phase C —
-`ZEUS_ENTRY_FORECAST_READINESS_WRITER`,
 `ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`,
 `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS`.
 
@@ -46,7 +45,7 @@ The producer and `tests/test_activation_flag_combinations.py` are companion tool
 
 Symbol: ✅ = required + currently green ; ⏳ = required + operator-runnable today ; 📅 = required + bound to observation period.
 
-### Flag 1 — `ZEUS_ENTRY_FORECAST_READINESS_WRITER` (flip first per runbook)
+### Retired evaluator-side entry-readiness writer flag
 
 | Evidence | Spec |
 |---|---|

@@ -57,7 +57,7 @@ scripts/ci/check_topology_structural_blockers.py  # NEW
 scripts/ci/check_context_pack_overrides.py   # NEW
 scripts/ci/context_pack_gate_router.py       # NEW — reads Context Pack JSON from doctor, selects relationship tests
 scripts/ci/check_workflow_repo_refs.py       # NEW — sole rule: workflow run paths exist
-scripts/ci/check_stdlib_shadowing.py         # NEW — sole rule: prevent PR#306 recurrence
+scripts/ci/check_stdlib_name_collisions.py         # NEW — sole rule: prevent PR#306 recurrence
 scripts/ci/check_source_rationale_delta.py   # NEW — sole rule: new source needs rationale
 scripts/ci/check_db_table_delta.py           # NEW — sole rule: new table needs ownership
 
@@ -167,7 +167,7 @@ scripts/ci/tier0_pairing_gate.py         → fold into structural_blockers (one 
 - `scripts/ci/check_topology_structural_blockers.py`
 - `scripts/ci/check_context_pack_overrides.py`
 - `scripts/ci/check_workflow_repo_refs.py`
-- `scripts/ci/check_stdlib_shadowing.py`
+- `scripts/ci/check_stdlib_name_collisions.py`
 - `scripts/ci/check_source_rationale_delta.py`
 - `scripts/ci/check_db_table_delta.py`
 - `.github/workflows/topology-context-required.yml`
@@ -256,7 +256,7 @@ For each historical PR fixture, `python scripts/topology_doctor.py digest --task
 | PR330 (exec fresh-submit) | `execution_cycle_runtime` | FC-03 | ≥1 stale-snapshot misread | `tests/test_exec_freshness_recapture.py` |
 | PR335 (scheduler registry) | `ingest_scheduler` | FC-04 + FC-05 | ≥1 | `tests/test_writer_jobs_registry_guard.py` |
 | PR312 (forecast bundle) | `executable_forecast_reader` | FC-01 | ≥1 | `tests/test_executable_forecast_bundle_selection.py` |
-| PR306 (stdlib shadow) | `topology_v_next` | FC-09 | n/a | structural_blockers must fire |
+| PR306 (stdlib name collision) | `topology_v_next` | FC-09 | n/a | structural_blockers must fire |
 
 And: no_override hazard list ≤6 entries, each with enforcer script + proving test.
 

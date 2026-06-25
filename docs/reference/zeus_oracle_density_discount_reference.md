@@ -589,9 +589,6 @@ support. A single-parameter linear formula is more defensible.
   `docs/reference/zeus_calibration_weighting_authority.md`
 - Existing oracle penalty code (must be modified per §6):
   `src/strategy/oracle_penalty.py`
-- Bridge (sole writer to `data/oracle_error_rates.json`):
-  `scripts/bridge_oracle_to_calibration.py`
-
 ## §11 Failure modes this design does NOT yet handle (open work)
 
 1. **Regime-shifted city**: a city whose underlying climate changes (e.g.,

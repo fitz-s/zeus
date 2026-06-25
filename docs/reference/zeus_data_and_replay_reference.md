@@ -18,7 +18,7 @@ The canonical K1 split (commit `eba80d2b9d`, 2026-05-11; registry `architecture/
 |----------|---------------------|---------------|------------|
 | **zeus-world.db** | `state/zeus-world.db` (`ZEUS_WORLD_DB_PATH`) | ensemble_snapshots, calibration_pairs, platt_models, model_bias, solar_daily, diurnal_curves, data_coverage, observation_instants | data ingest, harvester, calibration |
 | **zeus-forecasts.db** | `state/zeus-forecasts.db` (`ZEUS_FORECASTS_DB_PATH`) | forecast-class tables moved out of world.db in K1: settlement_outcomes (canonical settlement truth), observations, source_run, readiness_state, source_run_coverage, raw_forecast_artifacts, raw_model_forecasts | forecast ingest, harvester, calibration |
-| **zeus_trades.db** | `state/zeus_trades.db` (active since K1) | position_events, position_current, trade_decisions, chronicle, shadow_signals, risk_actions, strategy_health, selection facts | cycle_runner, executor, harvester, riskguard |
+| **zeus_trades.db** | `state/zeus_trades.db` (active since K1) | position_events, position_current, trade_decisions, chronicle, risk_actions, strategy_health, selection facts | cycle_runner, executor, harvester, riskguard |
 
 Connection helpers (`src/state/db.py` / `src/state/connection_pair.py`):
 - `get_world_connection()` → zeus-world.db
@@ -310,7 +310,7 @@ Replay is diagnostic until it preserves:
 - Point-in-time probability vectors (not reconstructed with hindsight)
 - Causally correct Day0 observation windows
 
-Until these conditions are met, replay status is `diagnostic_non_promotion`.
+Until these conditions are met, replay status is `offline_no_promotion`.
 
 ---
 

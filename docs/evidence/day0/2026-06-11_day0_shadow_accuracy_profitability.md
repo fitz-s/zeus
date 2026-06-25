@@ -6,7 +6,7 @@
      shadow receipts for ACCURACY and PROFITABILITY, settlement-graded; produce a
      promotion-readiness verdict against the settings-note bar (>51% after-cost win-rate
      on ~150-270 settled samples). Never-submit guarantee pinned by
-     tests/engine/test_day0_shadow_receipt_enrichment.py. Settlement semantics law:
+     tests/engine/test_retired_day0_no_submit_scope_receipt_enrichment.py. Settlement semantics law:
      src/contracts/settlement_semantics.py. Fee law: 0.05 × p × (1−p) × shares
      (28/28 reconciled, docs/evidence/reconciliation/2026-06-10_wallet_history_reconcile.md). -->
 <!-- Method: PURE READ-ONLY. Live DBs opened mode=ro only. No daemon/flag/src-live edits.
@@ -56,7 +56,7 @@ Two disjoint, both-empty populations:
 
 ### 1.1 Counts
 
-- **Total day0 receipts** (`rejection_reason='DAY0_SCOPE_SHADOW_ONLY'`): **1785**
+- **Total day0 receipts** (`rejection_reason='RETIRED_DAY0_NO_SUBMIT_MARKER'`): **1785**
 - **rejection_stage**: `EXECUTOR_EXPRESSIBILITY` = 1765 (bare scope-gate); `TRADE_SCORE` = 20 (pipeline actually ran)
 - **created_at range**: 2026-06-10T00:33Z … 2026-06-11T08:24Z
 

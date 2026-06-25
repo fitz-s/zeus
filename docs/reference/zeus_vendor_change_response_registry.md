@@ -136,24 +136,14 @@ canary-style probing.
 
 **Sample-size implication** (per `zeus_oracle_density_discount_reference.md` §5.3): Lagos LOW has ~120 verified pairs; Houston HIGH has ~600,000. Same source change has different impact: Lagos LOW retrain converges faster but starts from a position of insufficient regime absorption; Houston HIGH is statistically robust but a full retrain costs more compute.
 
-### Layer 7 — Bridge
-
-| File:Line | Coupling |
-|---|---|
-| `scripts/bridge_oracle_to_calibration.py:45-46` | imports `expected_source_for_city`, `allowed_sources_for_city` |
-| `scripts/bridge_oracle_to_calibration.py:152-154` | computes `primary_source`, derives `fallback_sources` |
-| `scripts/bridge_oracle_to_calibration.py:161` | gates mismatch counting on `(city, target_date, primary_source)` |
-
-Bridge writes sole-tenant to `data/oracle_error_rates.json`. Any DDD integration must respect this contract.
-
-### Layer 8 — Penalty
+### Layer 7 — Penalty
 
 | File | Coupling |
 |---|---|
 | `src/strategy/oracle_penalty.py` | `_classify_rate` thresholds OK/INCIDENTAL/CAUTION/BLACKLIST; `_load` reads `data/oracle_error_rates.json` |
 | (future) `src/strategy/data_density_discount.py` | DDD per `zeus_oracle_density_discount_reference.md` §6 |
 
-### Layer 9 — Settlement
+### Layer 8 — Settlement
 
 | File | Coupling |
 |---|---|
@@ -161,7 +151,7 @@ Bridge writes sole-tenant to `data/oracle_error_rates.json`. Any DDD integration
 | `src/execution/harvester.py` | Live trade outcome reconciliation |
 | `scripts/rebuild_settlements.py` | Cutover script for settlement table |
 
-### Layer 10 — Snapshot / Forecast
+### Layer 9 — Snapshot / Forecast
 
 | File | Coupling |
 |---|---|
@@ -173,12 +163,11 @@ Bridge writes sole-tenant to `data/oracle_error_rates.json`. Any DDD integration
 
 **Implicit coupling**: TIGGE selects grid cell from `cities.json` `(lat, lon)`. If T1 fires (PM moves station to a different physical location), our forecast is now aimed at the wrong place. Detection currently weak.
 
-### Layer 11 — Test
+### Layer 10 — Test
 
 Test files with hardcoded vendor identity (incomplete; ~25 files):
 
 - `tests/test_tier_resolver.py` — antibody A3 invariants
-- `tests/test_bridge_oracle_to_calibration.py`
 - `tests/test_calibration_bins_canonical.py`
 - `tests/test_canonical_data_versions_namespace.py`
 - `tests/test_data_freshness_gate.py`

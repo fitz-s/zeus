@@ -145,7 +145,7 @@ tests/strategy/live_inference/test_rest_then_cross_policy.py  -> 48 passed
 ```
 Regression (excluding pre-existing base failures, see below):
 ```
-test_executor_command_split + test_live_safety_invariants + test_edli_live_canary
+test_executor_command_split + test_live_safety_invariants + test_edli_live_readiness
 + test_command_recovery + adapter_seam + rest_then_cross_policy + test_dedup_gate_token
 -> 463 passed, 1 xpassed
 test_dedup_gate_token + mode_flip + fetch_pending_escalation_cross_lane

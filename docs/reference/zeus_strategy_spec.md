@@ -41,7 +41,7 @@ Zeus must not classify strategies by names such as `center_buy` or `stale_quote_
 
    for NO buys.
 
-The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `ShoulderStrategyVNext`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, candidate strategy files, `decision_events`, `no_trade_events`, `shadow_experiments`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values or return scaffold no-trade classifications instead of producing theorem-backed decision records.
+The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `ShoulderStrategyVNext`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, candidate strategy files, `decision_events`, `no_trade_events`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values or return scaffold no-trade classifications instead of producing theorem-backed decision records.
 
 The strongest actionable strategy family is **deterministic/vector payoff arbitrage**, especially `neg_risk_basket` and YES/NO parity baskets. The strongest existing live family is **settlement/observation deterministic capture**, especially `settlement_capture` and the proposed production form of `resolution_window_maker`. The strongest forecast family remains **calibrated finite-bin center trading**. The weakest original thesis is **ex-ante `shoulder_sell` as retail-lottery short-tail**; it is refuted in sign by the supplied shoulder proof and must be replaced by a physical impossible-tail capture theorem.
 
@@ -96,7 +96,6 @@ This packet uses the following code/document surfaces as implementation ground t
 - `src/contracts/executable_market_snapshot.py`: executable snapshot fields.
 - `src/contracts/execution_intent.py`: execution order types and depth status vocabulary.
 - `src/strategy/candidates/*.py`: candidate strategy current behavior.
-- `src/backtest/shadow_replay_harness.py`: current replay scaffold status.
 - `docs/reference/zeus_math_spec.md`: rounding, bins, calibration, FDR, Kelly, decision groups.
 - `docs/operations/task_2026-05-21_mainline_completion_authority/**`: mainline completion and promotion pipeline package.
 
@@ -1495,9 +1494,9 @@ keys via `_day0_high_truth_classification_for_edge`:
 `settlement_capture` when the bin is observation-locked, and `day0_nowcast_entry`
 when it is NOT locked (`src/engine/evaluator.py:2216-2219` in `_edge_source_for`;
 `2236-2240` in `_strategy_key_for`; classifier at `evaluator.py:2284`).
-`day0_nowcast_entry` is a registered strategy
-(`architecture/strategy_profile_registry.yaml:143`, `live_status: shadow`,
-`evidence_tier: REPLAY_PASS`) that the directive never names. The interval theorem
+`day0_nowcast_entry` is a registered blocked strategy
+(`architecture/strategy_profile_registry.yaml`, `evidence_tier: REPLAY_PASS`)
+that the directive never names. The interval theorem
 (`I_t ⊆ B_i` vs `I_t ∩ B_i = ∅`) maps onto the *observation-locked* half only; the
 *unlocked* half is forecast-upside (`day0_nowcast_entry`), which is a calibrated
 stochastic edge (§3.3 class), NOT a physical deterministic one (§3.2 class). A

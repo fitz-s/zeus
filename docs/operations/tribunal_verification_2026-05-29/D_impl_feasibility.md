@@ -107,7 +107,7 @@ directly with the fine-bucket live residuals.
 ### Frozen-replay fixture
 
 No frozen-replay fixture mechanism found. `scripts/capture_replay_artifact.py`
-exists in the scripts list but was not inspected. `shadow_replay_harness.py`
+exists in the scripts list but was not inspected.
 exists in `src/backtest/`. Frozen-fixture replay (bit-exact input snapshot) is
 NOT present in the bias/error-model pipeline — the closest analog is the
 `settled_before` anti-leakage cutoff in `load_bucket_residuals`. File:184.
