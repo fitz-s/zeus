@@ -6105,6 +6105,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 open_rests=open_rests,
                 decision_time=received_at,
             )
+            entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
+            rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
         finally:
             try:
                 world_ro.close()
@@ -6127,6 +6129,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 key = by_family.get(rest.family_id)
                 if key is not None and all(key):
                     rest_pull_families.add(key)
+        held_condition_scope = _edli_current_held_position_condition_scope()
         held_families = _edli_current_held_position_family_keys()
         family_keys = _edli_entry_redecision_family_keys(
             raw_entry_family_keys,
@@ -6150,28 +6153,41 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
             if _edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary):
-                fresh_confirmed_families = _edli_families_with_fresh_executable_substrate(
-                    confirm_families,
+                fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                    entry_condition_scope,
                     now_utc=now,
                 )
-                confirmed_entry_scope &= fresh_confirmed_families
-                confirmed_rest_scope &= fresh_confirmed_families
-                confirmed_held_scope &= fresh_confirmed_families
+                fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                    rest_condition_scope,
+                    now_utc=now,
+                )
+                fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                    held_condition_scope,
+                    now_utc=now,
+                )
+                fresh_confirmed_families = fresh_entry_scope | fresh_rest_scope | fresh_held_scope
+                confirmed_entry_scope &= fresh_entry_scope
+                confirmed_rest_scope &= fresh_rest_scope
+                confirmed_held_scope &= fresh_held_scope
                 confirm_families &= fresh_confirmed_families
                 logger.info(
                     "edli_redecision_screen: partial confirmation refresh admitted "
-                    "fresh families=%d/%d entry_scope=%d rest_scope=%d held_scope=%d summary=%r",
+                    "fresh scoped families=%d/%d entry_scope=%d rest_scope=%d held_scope=%d "
+                    "entry_conditions=%d rest_conditions=%d held_conditions=%d summary=%r",
                     len(fresh_confirmed_families),
                     len(set(all_families) | set(held_families)),
                     len(confirmed_entry_scope),
                     len(confirmed_rest_scope),
                     len(confirmed_held_scope),
+                    sum(len(v) for v in entry_condition_scope.values()),
+                    sum(len(v) for v in rest_condition_scope.values()),
+                    sum(len(v) for v in held_condition_scope.values()),
                     confirm_refresh_summary,
                 )
                 if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
                     logger.info(
                         "edli_redecision_screen: confirmation refresh partial but no "
-                        "screened family has complete fresh substrate; skipping emit "
+                        "screened money-path condition has fresh substrate; skipping emit "
                         "this tick rather than queueing stale redecision families=%d",
                         len(set(all_families) | set(held_families)),
                     )
@@ -6229,6 +6245,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     open_rests=open_rests,
                     decision_time=received_at,
                 )
+                entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
+                rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
             finally:
                 try:
                     world_ro.close()
@@ -6249,6 +6267,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     if key is not None and all(key):
                         rest_pull_families.add(key)
             rest_pull_families &= confirmed_rest_scope
+            if rest_pull_families:
+                rest_pull_families &= _edli_families_with_fresh_scoped_executable_substrate(
+                    rest_condition_scope,
+                    now_utc=now,
+                )
             held_families = _edli_current_held_position_family_keys()
             family_keys = _edli_entry_redecision_family_keys(
                 raw_entry_family_keys,
@@ -6256,11 +6279,21 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 decision_time=now,
             )
             family_keys &= confirmed_entry_scope
+            if family_keys:
+                family_keys &= _edli_families_with_fresh_scoped_executable_substrate(
+                    entry_condition_scope,
+                    now_utc=now,
+                )
             held_reemit_families = _edli_reemittable_held_position_family_keys(
                 held_families,
                 decision_time=now,
             )
             held_reemit_families &= confirmed_held_scope
+            if held_reemit_families:
+                held_reemit_families &= _edli_families_with_fresh_scoped_executable_substrate(
+                    _edli_current_held_position_condition_scope(),
+                    now_utc=now,
+                )
             all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
         if not all_families:
@@ -6690,6 +6723,168 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     return out
 
 
+def _edli_family_key_from_belief(belief: Any) -> tuple[str, str, str] | None:
+    key = (
+        str(getattr(belief, "city", "") or "").strip(),
+        str(getattr(belief, "target_date", "") or "").strip(),
+        str(getattr(belief, "metric", "") or "").strip(),
+    )
+    if all(key) and key[2] in {"high", "low"}:
+        return key
+    return None
+
+
+def _edli_redecision_condition_scope(
+    redecisions: Iterable[Any],
+    beliefs: Iterable[Any],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Map screened entry candidates to the exact condition_ids that need fresh books."""
+
+    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for redecision in redecisions or ():
+        belief = by_family_id.get(str(getattr(redecision, "family_id", "") or ""))
+        if belief is None:
+            continue
+        family_key = _edli_family_key_from_belief(belief)
+        if family_key is None:
+            continue
+        label = str(getattr(redecision, "bin_label", "") or "")
+        bin_labels = list(getattr(belief, "bin_labels", None) or ())
+        condition_ids = list(getattr(belief, "condition_ids", None) or ())
+        for idx, candidate_label in enumerate(bin_labels):
+            if str(candidate_label or "") != label or idx >= len(condition_ids):
+                continue
+            condition_id = str(condition_ids[idx] or "").strip()
+            if condition_id:
+                out.setdefault(family_key, set()).add(condition_id)
+    return out
+
+
+def _edli_rest_pull_condition_scope(
+    rest_pulls: Iterable[tuple[Any, Any]],
+    beliefs: Iterable[Any],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Map live maker-rest pulls to the exact condition_ids being cancelled/repriced."""
+
+    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for rest, _decision in rest_pulls or ():
+        belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
+        if belief is None:
+            continue
+        family_key = _edli_family_key_from_belief(belief)
+        if family_key is None:
+            continue
+        condition_id = str(getattr(rest, "condition_id", "") or "").strip()
+        if condition_id:
+            out.setdefault(family_key, set()).add(condition_id)
+    return out
+
+
+def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], set[str]]:
+    """Current held-position condition_ids for scoped redecision freshness admission."""
+
+    from src.state.db import get_trade_connection_read_only
+
+    out: dict[tuple[str, str, str], set[str]] = {}
+    trade_ro = None
+    try:
+        trade_ro = get_trade_connection_read_only()
+        try:
+            cols = {
+                str(row[1])
+                for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
+            }
+        except sqlite3.Error:
+            return {}
+        required = {"city", "target_date", "temperature_metric", "phase", "condition_id"}
+        if not required.issubset(cols):
+            return {}
+        rows = trade_ro.execute(
+            """
+            SELECT city, target_date, temperature_metric, condition_id
+              FROM position_current
+             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+               AND condition_id IS NOT NULL
+               AND TRIM(condition_id) != ''
+            """
+        ).fetchall()
+        for row in rows:
+            family_key = (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+            )
+            condition_id = str(row[3] or "").strip()
+            if all(family_key) and family_key[2] in {"high", "low"} and condition_id:
+                out.setdefault(family_key, set()).add(condition_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "edli_redecision_screen: held-position condition scope read failed; "
+            "held condition freshness not admitted this tick: %r",
+            exc,
+        )
+        return {}
+    finally:
+        if trade_ro is not None:
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return out
+
+
+def _edli_families_with_fresh_scoped_executable_substrate(
+    condition_scope: dict[tuple[str, str, str], set[str]],
+    *,
+    now_utc: datetime,
+) -> set[tuple[str, str, str]]:
+    """Families whose scoped money-path conditions have fresh YES and NO books.
+
+    Continuous redecision is triggered by specific entry candidates, maker rests,
+    and held positions. A PARTIAL refresh should therefore prove the exact
+    conditions that are about to re-enter the money path, not require every
+    topology bin in a large weather family to refresh in the same tick.
+    """
+
+    clean_scope: dict[tuple[str, str, str], set[str]] = {}
+    for family, condition_ids in (condition_scope or {}).items():
+        try:
+            city, target_date, metric = family
+        except (TypeError, ValueError):
+            continue
+        family_key = (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip(),
+        )
+        clean_condition_ids = {
+            str(condition_id or "").strip()
+            for condition_id in condition_ids or set()
+            if str(condition_id or "").strip()
+        }
+        if all(family_key) and family_key[2] in {"high", "low"} and clean_condition_ids:
+            clean_scope.setdefault(family_key, set()).update(clean_condition_ids)
+    if not clean_scope:
+        return set()
+    from src.state.db import get_trade_connection_read_only
+
+    fresh_at_iso = now_utc.isoformat()
+    trade_ro = get_trade_connection_read_only()
+    try:
+        out: set[tuple[str, str, str]] = set()
+        for family, condition_ids in sorted(clean_scope.items()):
+            if all(_condition_buy_sides_fresh(trade_ro, cid, fresh_at_iso) for cid in sorted(condition_ids)):
+                out.add(family)
+        return out
+    finally:
+        try:
+            trade_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _edli_refresh_continuous_money_path_families(
     families: set[tuple[str, str, str]],
     *,
@@ -6826,10 +7021,11 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
 
 def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
     # PARTIAL coverage routes to PER-FAMILY freshness admission — including when SOME
-    # families hit a transient `database is locked`. The per-family filter
-    # (_edli_families_with_fresh_executable_substrate) does an INDEPENDENT fresh read of
-    # every condition's executable substrate, so a lock that left some families stale
-    # cannot admit them; it only excludes them. Forcing a full-tick drop on any lock hit
+    # families hit a transient `database is locked`. The scoped filter
+    # (_edli_families_with_fresh_scoped_executable_substrate) does an INDEPENDENT fresh read of
+    # the money-path conditions' executable substrate, so a lock that left current
+    # rests/candidates/held legs stale cannot admit them; it only excludes them.
+    # Forcing a full-tick drop on any lock hit
     # (the prior `and not _has_sqlite_lock_failures`) discarded EVERY candidate + reprice
     # on the tick — even families with complete fresh substrate — which (with ~757 lock
     # hits/run of WAL contention) was the dominant reason the candidate pipeline emitted

@@ -233,9 +233,9 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "include_pending_families=False" in confirm_src
     assert "extra_priority_families=clean_families" in confirm_src
     assert "_edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary)" in screen_src
-    assert "_edli_families_with_fresh_executable_substrate(" in screen_src
-    assert "confirmed_entry_scope &= fresh_confirmed_families" in screen_src
-    assert "confirmed_rest_scope &= fresh_confirmed_families" in screen_src
+    assert "_edli_families_with_fresh_scoped_executable_substrate(" in screen_src
+    assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
+    assert "confirmed_rest_scope &= fresh_rest_scope" in screen_src
     assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
 
 
@@ -386,6 +386,59 @@ def test_continuous_redecision_partial_refresh_filters_to_fresh_families(monkeyp
     assert {"fresh-a", "fresh-b", "stale-d"}.issubset(set(fresh_conditions))
     assert forecasts.closed
     assert trade.closed
+
+
+def test_continuous_redecision_partial_refresh_filters_to_scoped_conditions(monkeypatch):
+    """PARTIAL confirmation is money-path scoped: a current rest/candidate must
+    not disappear because unrelated sibling bins did not refresh in the same tick."""
+
+    import src.state.db as state_db
+
+    class _Conn:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    trade = _Conn()
+    checked: list[str] = []
+
+    def _fresh(_conn, condition_id, fresh_at_iso):
+        assert _conn is trade
+        assert fresh_at_iso == "2026-06-19T12:00:00+00:00"
+        checked.append(condition_id)
+        return condition_id != "stale-scoped"
+
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade)
+    monkeypatch.setattr(main_module, "_condition_buy_sides_fresh", _fresh)
+
+    admitted = main_module._edli_families_with_fresh_scoped_executable_substrate(
+        {
+            ("Paris", "2026-06-20", "low"): {"fresh-rest"},
+            ("Tokyo", "2026-06-20", "high"): {"fresh-entry", "stale-scoped"},
+        },
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert admitted == {("Paris", "2026-06-20", "low")}
+    assert checked == ["fresh-rest", "fresh-entry", "stale-scoped"]
+    assert trade.closed
+
+
+def test_redecision_condition_scope_uses_screened_bin_condition_id():
+    belief = SimpleNamespace(
+        family_id="fam-1",
+        city="Paris",
+        target_date="2026-06-20",
+        metric="low",
+        bin_labels=["18C", "19C"],
+        condition_ids=["cond-18", "cond-19"],
+    )
+    redecision = SimpleNamespace(family_id="fam-1", bin_label="19C", direction="buy_no")
+
+    scope = main_module._edli_redecision_condition_scope([redecision], [belief])
+
+    assert scope == {("Paris", "2026-06-20", "low"): {"cond-19"}}
 
 
 def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
