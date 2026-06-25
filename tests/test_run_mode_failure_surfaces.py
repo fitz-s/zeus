@@ -469,6 +469,54 @@ def test_business_plane_candidates_without_final_intent_need_no_trade_reasons(tm
     )
 
 
+def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp_path: Path) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    capability = _healthy_execution_capability()
+    capability["entry"] = {
+        "status": "blocked",
+        "global_allow_submit": False,
+        "components": [
+            {
+                "component": "risk_allocator_global",
+                "allowed": False,
+                "reason": "reduce_only_mode_active",
+            }
+        ],
+        "blocked_components": ["risk_allocator_global"],
+    }
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": _now_iso(-30),
+            "control": {
+                "entries_paused": True,
+                "entries_pause_reason": "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix",
+            },
+            "cycle": {
+                "mode": "edli_event_reactor",
+                "completed_at": _now_iso(-30),
+                "candidates": 310,
+                "final_intents_built": 0,
+                "no_trades": 310,
+                "top_no_trade_reasons": {},
+            },
+            "execution_capability": capability,
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    business = result["surfaces"]["business_plane"]
+    assert business["ok"] is True
+    assert business["progress"]["entry_blocked_proof"] is True
+    assert business["progress"]["entry_blocked_reason"] == (
+        "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix"
+    )
+    assert result["surfaces"]["execution_capability"]["ok"] is False
+
+
 def test_business_plane_final_intents_without_submit_attempts_yields_degraded(tmp_path: Path) -> None:
     sd = tmp_path / "state"
     sd.mkdir()

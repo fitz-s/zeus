@@ -231,6 +231,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         _mapping_has_positive_counter(no_trade_reasons)
         or _has_text_value(cycle, "top_no_trade_reason", "dominant_no_trade_reason")
     )
+    entry_blocked_reason = _entry_blocked_reason(status_summary, cycle)
+    entry_blocked_proof = bool(entry_blocked_reason)
     deterministic_rejection_observed = _mapping_has_positive_counter(deterministic_rejections)
     command_recovery = cycle.get("command_recovery")
     chain_sync = cycle.get("chain_sync")
@@ -247,6 +249,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         "venue_ack_observed": venue_acks > 0,
         "no_trades": no_trades,
         "no_trade_reason_proof": no_trade_reason_proof,
+        "entry_blocked_proof": entry_blocked_proof,
+        "entry_blocked_reason": entry_blocked_reason,
         "zero_candidate_has_proof": zero_candidate_has_proof,
         "deterministic_rejection_observed": deterministic_rejection_observed,
         "reconcile_progress_observed": (
@@ -260,7 +264,7 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "issue": "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF",
             "progress": progress,
         }
-    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof:
+    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof and not entry_blocked_proof:
         return {
             "ok": False,
             "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
@@ -279,6 +283,43 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "progress": progress,
         }
     return {"ok": True, "issue": None, "progress": progress}
+
+
+def _entry_blocked_reason(status_summary: dict, cycle: dict) -> str | None:
+    """Return explicit entry-block proof from status/control/cycle read models."""
+
+    control = status_summary.get("control")
+    if isinstance(control, dict) and control.get("entries_paused") is True:
+        return str(control.get("entries_pause_reason") or "entries_paused")
+
+    execution_capability = status_summary.get("execution_capability")
+    if isinstance(execution_capability, dict):
+        entry = execution_capability.get("entry")
+        if isinstance(entry, dict):
+            if entry.get("global_allow_submit") is False:
+                reasons: list[str] = []
+                for component in entry.get("components") or []:
+                    if not isinstance(component, dict) or component.get("allowed") is not False:
+                        continue
+                    component_name = str(component.get("component") or "entry_component")
+                    reason = str(component.get("reason") or "blocked")
+                    reasons.append(f"{component_name}:{reason}")
+                if reasons:
+                    return ";".join(reasons)
+                blocked_components = entry.get("blocked_components")
+                if isinstance(blocked_components, list) and blocked_components:
+                    return "entry_blocked:" + ",".join(str(c) for c in blocked_components)
+                return "entry_global_allow_submit_false"
+
+    allocator = cycle.get("held_monitor_allocator_refresh")
+    if isinstance(allocator, dict):
+        entry = allocator.get("entry")
+        if isinstance(entry, dict) and entry.get("allow_submit") is False:
+            return str(entry.get("reason") or "held_monitor_allocator_entry_blocked")
+    blocked_reason = cycle.get("entries_blocked_reason")
+    if isinstance(blocked_reason, str) and blocked_reason.strip():
+        return blocked_reason.strip()
+    return None
 
 
 def _execution_capability_surface(status_summary: Optional[dict]) -> dict:

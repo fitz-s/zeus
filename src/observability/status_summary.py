@@ -200,6 +200,7 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         }
     _refresh_current_open_entry_orders_for_status(status)
     if minimal_refresh_ok:
+        _refresh_control_status_for_pulse(status)
         _refresh_pulse_infrastructure_status(status, cycle_summary)
         status["timestamp"] = generated_at
         # Freshness-contract bridge: release-gate / EDLI-stage readiness checks
@@ -213,6 +214,31 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     else:
         _preserve_prior_status_freshness_after_pulse_failure(status, prior)
     _atomic_write_status_payload(status)
+
+
+def _refresh_control_status_for_pulse(status: dict) -> None:
+    """Refresh cheap control-plane truth on pulse writes.
+
+    ``write_cycle_pulse`` merges with the previous full status snapshot.  Control
+    overrides are live operator state, so a pulse must not preserve stale
+    entries_paused fields from that prior snapshot.
+    """
+
+    control = status.get("control")
+    if not isinstance(control, dict):
+        control = {}
+        status["control"] = control
+    try:
+        current_strategy_gates = strategy_gates()
+        control["entries_paused"] = is_entries_paused()
+        control["entries_pause_source"] = get_entries_pause_source()
+        control["entries_pause_reason"] = get_entries_pause_reason()
+        control["edge_threshold_multiplier"] = get_edge_threshold_multiplier()
+        control["strategy_gates"] = {k: v.to_dict() for k, v in current_strategy_gates.items()}
+    except Exception as exc:  # noqa: BLE001 - status pulse must remain non-fatal
+        control["status"] = "control_refresh_failed"
+        control["refresh_error_type"] = type(exc).__name__
+        control["refresh_error"] = str(exc)
 
 
 def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: dict) -> None:
