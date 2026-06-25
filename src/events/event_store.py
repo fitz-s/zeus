@@ -1661,7 +1661,7 @@ class EventStore:
         cur = self.conn.execute(
             """
             WITH malformed AS (
-                SELECT DISTINCT json_extract(payload_json, '$.event_id') AS event_id
+                SELECT DISTINCT json_extract(loe.payload_json, '$.event_id') AS event_id
                   FROM edli_live_order_events loe
                   JOIN opportunity_events e
                     ON e.event_id = json_extract(loe.payload_json, '$.event_id')

@@ -3949,7 +3949,7 @@ def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
 # surface.  Keep batching, but use smaller primary chunks and split failed
 # chunks before deferring to the next tick.
 _BATCH_ORDERBOOK_CHUNK = 100
-_BATCH_ORDERBOOK_RETRY_CHUNK = 25
+_BATCH_ORDERBOOK_RETRY_CHUNK = 5
 
 
 def _selected_token_for_direction(outcome: dict, direction: str) -> str:
