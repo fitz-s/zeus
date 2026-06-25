@@ -77,7 +77,11 @@ def _set_busy_timeout_ms(conn: sqlite3.Connection, timeout_ms: int | None) -> No
         return
 
 
-def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
+def _snapshot_capture_busy_timeout_ms(
+    remaining_seconds: float,
+    *,
+    remaining_candidates: int | None = None,
+) -> int:
     """Return the per-row SQLite wait budget for background substrate capture.
 
     Fitz #5 lock-CATEGORY kill (2026-06-08): this is the load-bearing budget that
@@ -115,10 +119,23 @@ def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
     # out, not fail-fasted. Still bounded by the wall-clock per-cycle deadline.
     configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
     floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
+    progress_floor_ms = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "750")
+    )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
     # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
+    if remaining_candidates is not None and remaining_candidates > 1:
+        # Live 2026-06-25: the batch warmer had 46 selected candidates and one
+        # locked insert consumed the 8s per-row ceiling, producing
+        # attempted=1 inserted=0 coverage=NONE. Batch substrate refresh is a
+        # coverage producer, not a single critical recapture; no one condition may
+        # spend the whole capture reserve. Split the remaining wall-clock budget
+        # across the remaining selected candidates while preserving a small
+        # non-zero wait so transient locks can still clear.
+        share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
+        return max(1, min(configured, share_ms))
     capped = min(configured, max(floor_ms, remaining_ms))
     return max(floor_ms, capped)
 
@@ -4211,7 +4228,14 @@ def refresh_executable_market_substrate_snapshots(
         try:
             while True:
                 remaining_seconds = max(0.001, deadline - time.monotonic())
-                _set_busy_timeout_ms(conn, _snapshot_capture_busy_timeout_ms(remaining_seconds))
+                remaining_candidates = max(1, len(selected_candidates) - index)
+                _set_busy_timeout_ms(
+                    conn,
+                    _snapshot_capture_busy_timeout_ms(
+                        remaining_seconds,
+                        remaining_candidates=remaining_candidates,
+                    ),
+                )
                 try:
                     capture_executable_market_snapshot(
                         conn,

@@ -305,6 +305,21 @@ def test_capture_busy_timeout_not_shrunk_below_floor(monkeypatch):
     assert _snapshot_capture_busy_timeout_ms(10.0) >= FLOOR_MS
 
 
+def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(monkeypatch):
+    """Batch substrate refresh must prefer family coverage over one locked row."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+
+    single = _snapshot_capture_busy_timeout_ms(12.0)
+    batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+
+    assert single >= 4000
+    assert 0 < batch < single
+    assert batch >= 750
+
+
 # ---------------------------------------------------------------------------
 # R-INTERVAL: the warm-cycle refresh budget must fit inside the scheduler interval
 # (the OTHER half of the coverage-starvation: even when inserts succeed, a cycle

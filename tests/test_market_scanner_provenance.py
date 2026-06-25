@@ -493,14 +493,14 @@ def test_snapshot_refresh_db_lock_wait_is_bound_to_capture_budget(monkeypatch):
     assert summary["inserted"] == 0
     assert summary["failed"] == 3
     assert summary["failure_samples"][0]["error"] == "database is locked"
-    # Fitz #5 lock-category kill (2026-06-08): the old min(250ms, remaining)
-    # clamp fail-fasted EVERY contended insert (inserted=0 -> coverage NONE ->
-    # armed daemon could not trade). The contract is now a DURABLE FLOOR
-    # (default 4000ms after the live lock-starvation fix) that is still restored
-    # to the caller's original setting afterward.
-    assert all(t == 4000 for t in observed_timeouts), observed_timeouts
-    # Remaining-budget tightening: waits never grow as the cycle burns down.
-    assert observed_timeouts == sorted(observed_timeouts, reverse=True), observed_timeouts
+    # Batch substrate refresh is progress-oriented: one locked condition must not
+    # consume the whole capture reserve. The loop now divides the remaining
+    # capture budget across the remaining candidates instead of spending the
+    # single-capture 4s floor on each row.
+    assert len(observed_timeouts) == 9
+    assert all(0 < t <= 4000 for t in observed_timeouts), observed_timeouts
+    assert any(t < 4000 for t in observed_timeouts), observed_timeouts
+    assert observed_timeouts[0] < 4000, observed_timeouts
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
