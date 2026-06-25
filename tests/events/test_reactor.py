@@ -8,7 +8,7 @@ import json
 import hashlib
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.decision_kernel import claims
@@ -301,6 +301,7 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
         assert result.dead_lettered == 0
         assert result.retried == 1
         assert _status() == "pending"  # retryable, NOT consumed, NO cap
+        dt = dt + timedelta(seconds=61)
 
     present["v"] = True
     result = reactor.process_pending(decision_time=dt)

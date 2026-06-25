@@ -173,6 +173,39 @@ def test_retry_debt_precedes_zero_attempt_redecision_with_same_target():
     assert ids == [retry_debt.event_id, brand_new.event_id]
 
 
+def test_pending_retry_floor_hides_until_not_before_then_reclaims():
+    """Snapshot-blocked rows wait for substrate refresh instead of burning claim budget."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    cooling = _event(
+        "2026-06-06", "snap-cooling",
+        available_at="2026-06-05T00:00:00+00:00",
+        received_at="2026-06-05T00:01:00+00:00",
+    )
+    ready = _event(
+        "2026-06-06", "snap-ready",
+        available_at="2026-06-05T00:00:00+00:00",
+        received_at="2026-06-05T00:02:00+00:00",
+    )
+    store.insert_or_ignore(cooling)
+    store.insert_or_ignore(ready)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET claimed_at = '2026-06-05T12:01:00+00:00',
+               last_error = 'EXECUTABLE_SNAPSHOT_BLOCKED'
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, cooling.event_id),
+    )
+
+    before = store.fetch_pending(decision_time="2026-06-05T12:00:30+00:00", limit=10)
+    assert [e.event_id for e in before] == [ready.event_id]
+
+    after = store.fetch_pending(decision_time="2026-06-05T12:01:01+00:00", limit=10)
+    assert cooling.event_id in [e.event_id for e in after]
+
+
 def test_tier0_escalation_not_hidden_behind_bounded_lower_tier_prefix():
     """Regression for the Python-ranking rewrite: SQL LIMIT must not truncate before tiering.
 

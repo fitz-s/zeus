@@ -243,6 +243,7 @@ class EventStore:
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
               WHERE p.consumer_name = ?
                 AND p.processing_status = 'pending'
+                AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
               UNION ALL
               SELECT p.event_id, p.attempt_count
               FROM opportunity_event_processing p
@@ -326,6 +327,7 @@ class EventStore:
         )
         common_params = (
             self.consumer_name,
+            parsed_decision_time.isoformat(),
             self.consumer_name,
             stale_processing_before,
             parsed_decision_time.isoformat(),
@@ -1597,21 +1599,29 @@ class EventStore:
         ).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
-    def requeue_pending(self, event_id: str) -> None:
+    def requeue_pending(
+        self,
+        event_id: str,
+        *,
+        not_before: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
         """Return an in-flight ('processing') event to 'pending' for retry next cycle.
 
         Used for TRANSIENT, non-terminal blocks (e.g. the executable market snapshot for the
         family has not been captured yet this cycle). Keeps ``attempt_count`` so the caller
-        can bound retries and eventually dead-letter; does NOT consume the event the way
-        ``mark_processed`` does.
+        can observe retry debt; does NOT consume the event the way ``mark_processed`` does.
+        ``not_before`` stores a retry floor in ``claimed_at`` for pending rows so refresh-waiting
+        substrate blocks do not immediately reclaim the next decision slot before their sidecar
+        refresh can complete.
         """
 
         self._require_world_event_tables()
         self.conn.execute(
             "UPDATE opportunity_event_processing "
-            "SET processing_status = 'pending', claimed_at = NULL, updated_at = ? "
+            "SET processing_status = 'pending', claimed_at = ?, last_error = ?, updated_at = ? "
             "WHERE consumer_name = ? AND event_id = ?",
-            (_utc_now(), self.consumer_name, event_id),
+            (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
 
     def _mark_terminal(
@@ -1741,19 +1751,29 @@ def _datetime_desc_key(value: object) -> tuple[int, float]:
     return (0, -parsed.timestamp())
 
 
+def _pending_row_attempt_count(row: sqlite3.Row | tuple) -> int:
+    if isinstance(row, sqlite3.Row):
+        try:
+            raw = row["_p_attempt_count"]
+        except (IndexError, KeyError):
+            raw = None
+    else:
+        raw = row[len(_EVENT_ROW_KEYS)] if len(row) > len(_EVENT_ROW_KEYS) else None
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _rank_pending_rows_python(
-    rows: list[sqlite3.Row] | tuple[sqlite3.Row, ...],
+    rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
     *,
     day0_is_tradeable: bool,
 ) -> list[tuple[OpportunityEvent, int]]:
     records: list[dict] = []
     for row in rows:
         event = _event_from_row(row)
-        full = dict(row)
-        try:
-            attempt_count = int(full.get("_p_attempt_count") or 0)
-        except (TypeError, ValueError):
-            attempt_count = 0
+        attempt_count = _pending_row_attempt_count(row)
         payload = _event_payload_dict(event)
         records.append(
             {

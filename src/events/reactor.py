@@ -46,7 +46,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from src.decision_kernel import claims
@@ -62,6 +62,7 @@ UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
+DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -109,6 +110,25 @@ def _fetch_batch_limit() -> int:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
     return max(1, min(250, limit))
+
+
+def _snapshot_block_retry_delay_seconds() -> float:
+    """Retry floor for executable-snapshot substrate blocks.
+
+    A blocked family is already delegated to the substrate refresher. Reclaiming
+    the same event immediately only spends decision budget before that refresh
+    can land. The delay is short and horizon-bounded; it does not terminalize or
+    suppress the event.
+    """
+
+    raw = os.environ.get("ZEUS_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS")
+    if raw is None:
+        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    return max(5.0, min(300.0, delay))
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
@@ -1526,8 +1546,19 @@ class OpportunityEventReactor:
                 # (after capture completes / book settles / risk clears). Do NOT
                 # consume the event the way mark_processed would. There is NO
                 # attempt cap — the event requeues until a horizon terminal fires.
+                last_reason = self._transient_requeue_reasons.get(event.event_id)
+                retry_not_before = None
+                if last_reason == "EXECUTABLE_SNAPSHOT_BLOCKED":
+                    retry_not_before = (
+                        decision_time.astimezone(UTC)
+                        + timedelta(seconds=_snapshot_block_retry_delay_seconds())
+                    ).isoformat()
                 self._note_transient_requeue(event)
-                self._store.requeue_pending(event.event_id)
+                self._store.requeue_pending(
+                    event.event_id,
+                    not_before=retry_not_before,
+                    last_error=last_reason,
+                )
                 result.retried += 1
             return
         # disposition is None: a pre-submit gate rejected the event (its reject
