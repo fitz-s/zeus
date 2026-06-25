@@ -10,6 +10,7 @@ This directory contains durable authority law only. It is not a place for packet
 |---|---|---|
 | `zeus_current_architecture.md` | active durable architecture law | runtime/money-path work |
 | `zeus_current_delivery.md` | active durable delivery law | docs/governance/router work |
+| `zeus_database_runtime_authority.md` | active durable database runtime law | DB/WAL/lock/topology work |
 | `zeus_forecast_fusion_authority.md` | active durable forecast-fusion law | forecast source/model/fusion work |
 | `zeus_docs_classification_authority.md` | active durable docs-classification law | docs classification/default-read work |
 | `zeus_change_control_constitution.md` | durable deep-governance constitution | non-default governance rationale |
@@ -33,7 +34,8 @@ No other file in this directory is active authority unless this table and `archi
 
 ## Maintenance Rules
 
+- Database runtime law changes must update both `zeus_database_runtime_authority.md` and `architecture/db_runtime_manifest.yaml`.
 - Forecast-fusion law changes must update both `zeus_forecast_fusion_authority.md` and `architecture/forecast_fusion_manifest.yaml`.
-- Docs-classification law changes must update both `zeus_docs_classification_authority.md` and `architecture/docs_registry.yaml`.
+- Docs-classification law changes must update both `zeus_docs_classification_authority.md`, `architecture/docs_plane_manifest.yaml`, and `architecture/docs_registry.yaml`.
 - Demotions out of authority must be recorded in `docs/archive_registry.md`.
 - Do not let runbooks, operations current-state files, evidence, reference docs, reports, or archives authorize architecture.
