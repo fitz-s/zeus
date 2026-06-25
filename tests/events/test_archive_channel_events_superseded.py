@@ -631,19 +631,27 @@ def test_fetch_pending_query_uses_processing_status_index():
 
     conn.executed_sql.clear()
     store.fetch_pending(decision_time=decision_time, limit=90)
-    # Locate fetch_pending's main claim query by its stable signature. The hot
-    # path now keeps SQL to indexed eligibility + bounded overfetch; per-city
-    # round-robin rank is computed in Python so SQLite does not materialize a
-    # ROW_NUMBER/json_extract temp sort over the live working set.
-    fetch_sql, fetch_params = next(
+    # Locate fetch_pending's two active-working-set queries by stable signatures.
+    # The hot path now reads processing rows first, then point-reads events by
+    # event_id; per-city round-robin rank is computed in Python so SQLite does not
+    # materialize a ROW_NUMBER/json_extract temp sort over the live working set.
+    pending_sql, pending_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
         if "INDEXED BY idx_opportunity_event_processing_pending_retry_floor" in sql
         and "p.claimed_at <= ?" in sql
-        and "c._p_attempt_count" in sql
+        and "p.processing_status = 'pending'" in sql
+    )
+    stale_sql, stale_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "INDEXED BY idx_opportunity_event_processing_stale_claim" in sql
+        and "p.processing_status = 'processing'" in sql
     )
 
-    plan_text = _plan_text(conn, fetch_sql, fetch_params)
+    plan_text = _plan_text(conn, pending_sql, pending_params) + "\n" + _plan_text(
+        conn, stale_sql, stale_params
+    )
 
     assert "IDX_OPPORTUNITY_EVENT_PROCESSING_PENDING_RETRY_FLOOR" in plan_text, (
         f"fetch_pending pending branch must use retry-floor index, got: {plan_text!r}"
@@ -654,5 +662,6 @@ def test_fetch_pending_query_uses_processing_status_index():
     assert "SCAN P" not in plan_text, (
         f"fetch_pending must not full-scan opportunity_event_processing, got: {plan_text!r}"
     )
-    assert "ROW_NUMBER" not in fetch_sql.upper()
-    assert "JSON_EXTRACT(C.PAYLOAD_JSON" not in fetch_sql.upper()
+    hot_sql = pending_sql.upper() + "\n" + stale_sql.upper()
+    assert "ROW_NUMBER" not in hot_sql
+    assert "JSON_EXTRACT" not in hot_sql

@@ -71,6 +71,13 @@ def _no_value_refutation_event_types_compatible(
     return bool(active and regret and active == regret)
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
@@ -235,129 +242,93 @@ class EventStore:
         # The original SQL implemented the round-robin with ROW_NUMBER() and sorted
         # by json_extract(payload_json, '$.target_date'). On the live world DB that
         # forced SQLite to build temp B-trees and spend reactor time in jsonExtractFunc.
-        # Keep SQL to indexed eligibility + bounded overfetch, then do the cheap
-        # target/city/tier ranking in Python over the bounded candidate pool.
-        base_sql = """
-            WITH eligible_processing AS (
-              SELECT p.event_id, p.attempt_count
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-              WHERE p.consumer_name = ?
-                AND p.processing_status = 'pending'
-                AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
-              UNION ALL
-              SELECT p.event_id, p.attempt_count
-              FROM opportunity_event_processing p
-              WHERE p.consumer_name = ?
-                AND p.processing_status = 'processing'
-                AND p.claimed_at IS NOT NULL
-                AND p.claimed_at <= ?
-            ),
-            candidates AS (
-              SELECT
-                e.*,
-                p.attempt_count AS _p_attempt_count
-              FROM eligible_processing p
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-              WHERE e.available_at <= ?
-                AND e.received_at <= ?
-                AND (e.expires_at IS NULL OR e.expires_at > ?)
-                AND e.event_type NOT IN (
-                      'BEST_BID_ASK_CHANGED',
-                      'BOOK_SNAPSHOT',
-                      'NEW_MARKET_DISCOVERED'
-                )
-            )
-            SELECT
-              -- Project EXACTLY the opportunity_events columns (in table order) so
-              -- _event_from_row receives only its expected keys — the helper
-              -- column (_p_attempt_count) drives Python ordering but must NOT reach
-              -- OpportunityEvent(**row).
-              c.event_id, c.event_type, c.entity_key, c.source,
-              c.observed_at, c.available_at, c.received_at,
-              c.causal_snapshot_id, c.payload_hash, c.idempotency_key,
-              c.priority, c.expires_at, c.payload_json, c.schema_version,
-              c.created_at,
-              c._p_attempt_count
-            FROM candidates c
-            WHERE {tier_predicate}
-            LIMIT ?
-            """
-        tier_queries: tuple[tuple[str, tuple[object, ...]], ...] = (
-            (
-                "("
-                "c.event_type = 'EDLI_REDECISION_PENDING'"
-                " OR (c.event_type = 'FORECAST_SNAPSHOT_READY' AND c.source LIKE ?)"
-                + (" OR c.event_type = 'DAY0_EXTREME_UPDATED'" if day0_is_tradeable else "")
-                + ")",
-                (f"{ESCALATION_CROSS_SOURCE_PREFIX}%",),
-            ),
-            (
-                "("
-                "c.event_type = 'FORECAST_SNAPSHOT_READY'"
-                " AND c.source NOT LIKE ?"
-                " AND json_extract(c.payload_json, '$.coverage_completeness_status') = 'COMPLETE'"
-                " AND json_extract(c.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'"
-                ")",
-                (f"{ESCALATION_CROSS_SOURCE_PREFIX}%",),
-            ),
-            (
-                "("
-                "c.event_type NOT IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING'"
-                + (", 'DAY0_EXTREME_UPDATED'" if day0_is_tradeable else "")
-                + ")"
-                " OR ("
-                "c.event_type = 'FORECAST_SNAPSHOT_READY'"
-                " AND c.source NOT LIKE ?"
-                " AND ("
-                "json_extract(c.payload_json, '$.coverage_completeness_status') != 'COMPLETE'"
-                " OR json_extract(c.payload_json, '$.coverage_readiness_status') != 'LIVE_ELIGIBLE'"
-                " OR json_extract(c.payload_json, '$.coverage_completeness_status') IS NULL"
-                " OR json_extract(c.payload_json, '$.coverage_readiness_status') IS NULL"
-                ")"
-                ")"
-                ")",
-                (f"{ESCALATION_CROSS_SOURCE_PREFIX}%",),
-            ),
+        # A later bounded-overfetch CTE still let SQLite choose an event-table-first
+        # plan under redecision/day0 predicates. Keep SQL to active processing rows
+        # only, then point-read events by event_id and do tier/city ranking in Python.
+        active_limit = max(limit * 512, limit + 20_000)
+        active_rows: list[tuple[str, int]] = []
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]))
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'pending'
+                   AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+                 ORDER BY p.updated_at ASC
+                 LIMIT ?
+                """,
+                (self.consumer_name, parsed_decision_time.isoformat(), active_limit),
+            ).fetchall()
         )
-        out: list[OpportunityEvent] = []
-        pool_limits = (
-            max(limit * 64, limit + 2_000),
-            max(limit * 256, limit + 10_000),
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]))
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_stale_claim
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'processing'
+                   AND p.claimed_at IS NOT NULL
+                   AND p.claimed_at <= ?
+                 ORDER BY p.claimed_at ASC
+                 LIMIT ?
+                """,
+                (self.consumer_name, stale_processing_before, active_limit),
+            ).fetchall()
         )
-        common_params = (
-            self.consumer_name,
-            parsed_decision_time.isoformat(),
-            self.consumer_name,
-            stale_processing_before,
-            parsed_decision_time.isoformat(),
-            parsed_decision_time.isoformat(),
-            parsed_decision_time.isoformat(),
-        )
-        for tier_predicate, tier_params in tier_queries:
-            tier_admissible: list[OpportunityEvent] = []
-            for pool_limit in pool_limits:
-                rows = self.conn.execute(
-                    base_sql.format(tier_predicate=tier_predicate),
-                    common_params + tier_params + (pool_limit,),
-                ).fetchall()
-                ranked = _rank_pending_rows_python(
-                    rows,
-                    day0_is_tradeable=day0_is_tradeable,
-                )
-                events = [event for event, _attempt_count in ranked]
-                tier_admissible = [e for e in events if self._is_timely(e, parsed_decision_time)]
-                if len(tier_admissible) >= limit - len(out) or len(rows) < pool_limit:
-                    break
-            out.extend(tier_admissible[: max(0, limit - len(out))])
-            if len(out) >= limit:
-                return out[:limit]
-            # If the tier remained at the hard overfetch ceiling, do not claim lower-tier rows
-            # ahead of a not-yet-exhausted higher tier. This preserves fail-closed money priority
-            # under pathological backlogs instead of letting lower tiers jump the queue.
-            if rows and len(rows) >= pool_limits[-1]:
-                return out[:limit]
-        return out[:limit]
+        if not active_rows:
+            return []
+        attempt_by_event: dict[str, int] = {}
+        event_ids: list[str] = []
+        for event_id, attempt_count in active_rows:
+            if not event_id or event_id in attempt_by_event:
+                continue
+            attempt_by_event[event_id] = attempt_count
+            event_ids.append(event_id)
+
+        rows: list[tuple[object, ...]] = []
+        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        for start in range(0, len(event_ids), 250):
+            chunk = event_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            event_rows = self.conn.execute(
+                f"""
+                SELECT {event_cols}
+                  FROM opportunity_events e
+                 WHERE e.available_at <= ?
+                   AND e.received_at <= ?
+                   AND (e.expires_at IS NULL OR e.expires_at > ?)
+                   AND e.event_type NOT IN (
+                         'BEST_BID_ASK_CHANGED',
+                         'BOOK_SNAPSHOT',
+                         'NEW_MARKET_DISCOVERED'
+                   )
+                   AND e.event_id IN ({placeholders})
+                """,
+                (
+                    parsed_decision_time.isoformat(),
+                    parsed_decision_time.isoformat(),
+                    parsed_decision_time.isoformat(),
+                    *chunk,
+                ),
+            ).fetchall()
+            for row in event_rows:
+                if isinstance(row, sqlite3.Row):
+                    event_id = str(row["event_id"] or "")
+                    event_tuple = tuple(row[key] for key in _EVENT_ROW_KEYS)
+                else:
+                    event_id = str(row[0] or "")
+                    event_tuple = tuple(row[: len(_EVENT_ROW_KEYS)])
+                rows.append(event_tuple + (attempt_by_event.get(event_id, 0),))
+
+        ranked = _rank_pending_rows_python(rows, day0_is_tradeable=day0_is_tradeable)
+        events = [event for event, _attempt_count in ranked]
+        timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
+        return timely[:limit]
 
     def archive_expired_candidates(
         self, *, decision_time: str, batch_limit: int = 50_000
