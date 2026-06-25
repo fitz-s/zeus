@@ -783,6 +783,28 @@ def _absorb_same_order_duplicate_bridge_fill(
     position_id = str(existing["position_id"])
     attempted_position_id = str(projection.get("position_id") or "")
     if _same_order_chain_size_authority_must_be_preserved(existing):
+        iso_now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            UPDATE position_current
+               SET p_posterior = ?,
+                   entry_ci_width = ?,
+                   entry_method = ?,
+                   decision_snapshot_id = ?,
+                   fill_authority = COALESCE(?, fill_authority),
+                   updated_at = ?
+             WHERE position_id = ?
+            """,
+            (
+                float(projection.get("p_posterior") or 0.0),
+                float(projection.get("entry_ci_width") or 0.0),
+                str(projection.get("entry_method") or ""),
+                str(projection.get("decision_snapshot_id") or ""),
+                projection.get("fill_authority"),
+                iso_now,
+                position_id,
+            ),
+        )
         return position_id
     if (
         _same_order_absorb_already_recorded(
@@ -794,8 +816,6 @@ def _absorb_same_order_duplicate_bridge_fill(
         and _bridge_numeric_equal(existing["cost_basis_usd"], projection.get("cost_basis_usd"))
     ):
         return position_id
-    from datetime import datetime, timezone
-
     iso_now = datetime.now(timezone.utc).isoformat()
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -838,6 +858,10 @@ def _absorb_same_order_duplicate_bridge_fill(
                cost_basis_usd = ?,
                size_usd = ?,
                entry_price = ?,
+               p_posterior = ?,
+               entry_ci_width = ?,
+               entry_method = ?,
+               decision_snapshot_id = ?,
                fill_authority = COALESCE(?, fill_authority),
                updated_at = ?
          WHERE position_id = ?
@@ -847,6 +871,10 @@ def _absorb_same_order_duplicate_bridge_fill(
             float(projection.get("cost_basis_usd") or 0.0),
             float(projection.get("size_usd") or projection.get("cost_basis_usd") or 0.0),
             float(projection.get("entry_price") or 0.0),
+            float(projection.get("p_posterior") or 0.0),
+            float(projection.get("entry_ci_width") or 0.0),
+            str(projection.get("entry_method") or ""),
+            str(projection.get("decision_snapshot_id") or ""),
             projection.get("fill_authority"),
             iso_now,
             position_id,

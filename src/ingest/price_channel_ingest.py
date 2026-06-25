@@ -777,6 +777,7 @@ def _edli_durable_fill_bridge_scan(
         _market_is_settled,
         _quarantine_aggregate,
         _record_settled_disposition,
+        _venue_command_row_for_execution_command_id,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
         get_fill_bridge_disposition,
@@ -811,6 +812,7 @@ def _edli_durable_fill_bridge_scan(
 
         candidate_rows = conn.execute(sql).fetchall()
         incomplete_open_position_ids: set[str] = set()
+        command_position_by_aggregate: dict[str, str] = {}
         try:
             incomplete_rows = conn.execute(
                 """
@@ -837,6 +839,38 @@ def _edli_durable_fill_bridge_scan(
                 "(non-fatal; normal scan continues): %s",
                 exc,
             )
+        try:
+            command_rows = conn.execute(
+                f"""
+                WITH command_events AS (
+                    SELECT aggregate_id,
+                           json_extract(payload_json, '$.execution_command_id') AS execution_command_id
+                      FROM {table}
+                     WHERE event_type = 'ExecutionCommandCreated'
+                       AND json_extract(payload_json, '$.execution_command_id') IS NOT NULL
+                )
+                SELECT ce.aggregate_id, vc.position_id
+                  FROM command_events ce
+                  JOIN venue_commands vc
+                    ON vc.command_id = ce.execution_command_id
+                    OR vc.decision_id = ce.execution_command_id
+                  JOIN position_current pc
+                    ON pc.position_id = vc.position_id
+                 WHERE vc.position_id IS NOT NULL
+                   AND vc.position_id != ''
+                """
+            ).fetchall()
+            command_position_by_aggregate = {
+                str(_row_get(r, "aggregate_id")): str(_row_get(r, "position_id"))
+                for r in command_rows
+                if _row_get(r, "aggregate_id") and _row_get(r, "position_id")
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EDLI durable fill-bridge scan: command-linked position query failed "
+                "(non-fatal; hash/legacy scan continues): %s",
+                exc,
+            )
         if incomplete_open_position_ids:
             candidate_rows.sort(
                 key=lambda r: (
@@ -844,6 +878,8 @@ def _edli_durable_fill_bridge_scan(
                     if edli_bridge_position_id(str(_row_get(r, "aggregate_id")))
                     in incomplete_open_position_ids
                     or edli_bridge_position_id_legacy(str(_row_get(r, "aggregate_id")))
+                    in incomplete_open_position_ids
+                    or command_position_by_aggregate.get(str(_row_get(r, "aggregate_id")))
                     in incomplete_open_position_ids
                     else 1,
                     str(_row_get(r, "aggregate_id")),
@@ -883,6 +919,36 @@ def _edli_durable_fill_bridge_scan(
             """,
             (position_id, legacy_position_id, position_id),
         ).fetchone()
+        if existing is None:
+            command_position_id = command_position_by_aggregate.get(aggregate_id)
+            if command_position_id:
+                existing = conn.execute(
+                    """
+                    SELECT position_id, p_posterior, entry_method
+                      FROM position_current
+                     WHERE position_id = ?
+                     LIMIT 1
+                    """,
+                    (command_position_id,),
+                ).fetchone()
+            else:
+                events_for_command = _aggregate_event_rows(conn, aggregate_id)
+                command = _latest_payload(events_for_command, "ExecutionCommandCreated") or {}
+                command_row = _venue_command_row_for_execution_command_id(
+                    conn,
+                    str(command.get("execution_command_id") or ""),
+                )
+                command_position_id = str(_row_get(command_row, "position_id") or "")
+                if command_position_id:
+                    existing = conn.execute(
+                        """
+                        SELECT position_id, p_posterior, entry_method
+                          FROM position_current
+                         WHERE position_id = ?
+                         LIMIT 1
+                        """,
+                        (command_position_id,),
+                    ).fetchone()
         if existing is not None:
             existing_position_id = str(_row_get(existing, "position_id"))
             if already_bridged_link_sync_seen < max(0, already_bridged_repair_limit):
