@@ -1280,9 +1280,14 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             sorted(global_single_unavailable),
         )
 
+    # A scoped transport gap after durable progress is not a failed capture cycle.
+    # The downloader is monotone/idempotent per row and the production wrapper's
+    # coverage/fixpoint gate will keep healing residual scopes. Mark the pass
+    # retryable only when transport prevented any progress, or when a quota-style
+    # abort stopped the remaining target fan-out.
     status = (
         "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
-        if transport_errors
+        if transport_errors and (abort_transport or written == 0)
         else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
     return {

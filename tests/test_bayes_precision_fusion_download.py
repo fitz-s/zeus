@@ -512,6 +512,46 @@ def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tm
     assert previous_calls == []
 
 
+def test_scoped_transport_gap_with_progress_is_downloaded_not_failed(tmp_path, monkeypatch) -> None:
+    """One scoped transport gap must not mark the whole BPF lane failed after durable progress.
+
+    Live capture is row-idempotent and coverage-healed. If a pass writes rows for later
+    city/date scopes, the residual scoped gap is handled by the fixpoint/coverage gate instead of
+    poisoning forecast-pipeline health as a total transport failure.
+    """
+    import src.data.bayes_precision_fusion_download as dl
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+    calls = 0
+
+    def _single_batch(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                dl._BATCH_TRANSPORT_ERROR_KEY: (
+                    "Client error '400 Bad Request' for scoped regional model",
+                    None,
+                )
+            }
+        return {model: (20.0, 10.0) for model in kwargs["models"]}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch)
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", lambda **_kwargs: {})
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_two_city_targets(),
+    )
+
+    assert report["transport_errors"]
+    assert report["transport_aborted_remaining_targets"] is False
+    assert report["written_row_count"] > 0
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+
+
 def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(monkeypatch) -> None:
     """A cooldown in another Open-Meteo lane must not suppress the BPF raw-input lane."""
     import src.data.bayes_precision_fusion_download as dl
