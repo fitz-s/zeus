@@ -78,7 +78,6 @@ _edli_redecision_confirm_refresh_lock = threading.Lock()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "market_discovery",
-        "afternoon_snapshot_capture",
         "EDLI mainstream warm",
     }
 )
@@ -164,14 +163,6 @@ def _substrate_refresh_family_key(
         _substrate_refresh_canonical_metric(metric),
     )
 
-
-# New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
-# not yet been seen at the head of the substrate-warmer rotation.  The warmer
-# reads + clears this set and prepends matching families so new markets are warmed
-# immediately rather than waiting for normal round-robin rotation.
-_NEW_FAMILY_CONDITION_IDS: set[str] = set()
-# Condition_ids already known at last scout probe — used for diff.
-_SCOUT_KNOWN_CONDITION_IDS: set[str] = set()
 
 # Wave-2 item 5 (2026-06-12): the canary live mode is COLLAPSED. Canary
 # semantics (min-fill-count + promotion-artifact qualifying lane) were deleted
@@ -2285,60 +2276,6 @@ def _market_events_user_channel_condition_ids(
     return _dedupe_user_channel_condition_ids(fresh_ids)
 
 
-def _auto_derive_user_channel_condition_ids(
-    *,
-    now: datetime | None = None,
-) -> list[str]:
-    """Derive the user-channel WS subscription set.
-
-    Fresh persisted ``market_events`` rows are primary. When those rows are
-    missing at boot, Gamma scanning is enabled by default so the one-shot
-    user-channel starter does not latch to an empty subscription set for the
-    lifetime of the live process. Operators can disable this fallback by setting
-    ``ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0``.
-
-    Total failure still returns [] rather than raising; the daemon then stays in
-    the fail-closed WS posture recorded by the gap guard.
-    """
-    persisted_ids = _market_events_user_channel_condition_ids(now=now)
-    if persisted_ids:
-        return persisted_ids
-    if os.getenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", "1").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
-        logger.warning(
-            "user-channel WS found no fresh market_events condition_ids; "
-            "boot Gamma scan disabled by ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0"
-        )
-        return []
-    try:
-        from src.data.market_scanner import (
-            MarketEventsPersistenceError,
-            extract_executable_condition_ids,
-            find_weather_markets_or_raise,
-        )
-
-        events = find_weather_markets_or_raise(
-            min_hours_to_resolution=0.0,
-            include_slug_pattern=False,
-        )
-        return extract_executable_condition_ids(events)
-    except MarketEventsPersistenceError as exc:
-        logger.warning(
-            "user-channel WS scanner: market_events persistence failure — "
-            "degrading to empty condition_ids: %s", exc,
-        )
-        return []
-    except Exception as exc:
-        logger.warning("user-channel WS scanner failed: %s", exc)
-        return []
-
-
-
-
 @_scheduler_job("venue_heartbeat")
 def _write_venue_heartbeat() -> None:
     """Post the Polymarket venue heartbeat required for live resting orders.
@@ -3008,36 +2945,7 @@ def _refresh_pending_family_snapshots(
     # the freshness-first deterministic order; we only choose a different *start*.
     # No family is dropped — rotation reorders, it does not filter — so a True from
     # the freshness check still captures and no candidate is starved.
-    # FIX 3c — NEW-FAMILY WARMER PRIORITY (operator 2026-06-09):
-    # Newly-discovered condition_ids (set by _new_listing_scout_cycle) jump to HEAD
-    # of the rotation so they are warmed in the NEXT cycle rather than waiting at
-    # the tail of the round-robin.  Translate condition_ids → (city, date, metric)
-    # tuples via the topology DB, then prepend to families before cursor rotation.
-    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
-    new_priority_families: list[tuple[str, str, str]] = []
-    if _NEW_FAMILY_CONDITION_IDS:
-        try:
-            new_cids_snapshot = set(_NEW_FAMILY_CONDITION_IDS)
-            _NEW_FAMILY_CONDITION_IDS.clear()
-            for cid in sorted(new_cids_snapshot):
-                try:
-                    row_q = world_conn.execute(
-                        "SELECT city, target_date, temperature_metric FROM market_events WHERE condition_id = ? LIMIT 1",
-                        (cid,),
-                    ).fetchone()
-                    if row_q is not None:
-                        city_v, td_v, metric_v = (
-                            _canonical_refresh_city_name(row_q[0]),
-                            str(row_q[1] or "").strip(),
-                            _canonical_refresh_metric(row_q[2]),
-                        )
-                        fk = _refresh_family_key(city_v, td_v, metric_v)
-                        if fk not in {_refresh_family_key(*f) for f in families}:
-                            new_priority_families.append((city_v, td_v, metric_v))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    global _SUBSTRATE_REFRESH_CURSOR, _GAMMA_EMPTY_BACKOFF_UNTIL
     ordinary_families = families[len(priority_families):]
     n_ordinary_families = len(ordinary_families)
     start_offset = _SUBSTRATE_REFRESH_CURSOR % max(1, n_ordinary_families)
@@ -3046,7 +2954,7 @@ def _refresh_pending_family_snapshots(
         if ordinary_families
         else []
     )
-    families = priority_families + new_priority_families + rotated_ordinary_families
+    families = priority_families + rotated_ordinary_families
     n_families = len(families)
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
@@ -3771,216 +3679,6 @@ def _refresh_pending_family_snapshots(
 
 
 
-
-
-@_scheduler_job("afternoon_snapshot_capture")
-def _afternoon_snapshot_capture_cycle() -> None:
-    """30-min dedicated capture for same-day SETTLEMENT_DAY markets (hours_to_resolution ≤12).
-
-    Afternoon-capture fix (2026-06-14): the universe-wide market_discovery runs every
-    5 min and the EDLI warm cycle runs every 20s — both target PENDING families and the
-    full weather universe.  Neither explicitly targets the sub-12h same-day window that
-    corresponds to the nowcast decision window (cities whose local-afternoon aligns with
-    the pre-12:00 UTC capture window).  This job fills that gap by:
-
-      1. Running a slug-pattern–only discovery scoped to TODAY (the slug fix above ensures
-         today is always in the target-date list after UTC noon).
-      2. Filtering to markets with hours_to_resolution in (0, 12] — the same-day
-         afternoon window.
-      3. Calling the standard rate-limited refresh_executable_market_substrate_snapshots
-         so orderbook top-bid/ask + depth are recorded at ≥30-min cadence through the
-         settlement window for every active same-day market.
-
-    SAFETY / THROTTLE: reuses the existing CLOB capture path (refresh_executable_market_
-    substrate_snapshots with a conservative 60s wall-clock budget).  max_outcomes=4 per
-    city (the standard cap).  max_instances=1/coalesce prevents stacked CLOB fan-out.
-    The job runs only when there are same-day markets open (hours_to_resolution > 0);
-    if today's markets are already closed (past 12:00 UTC) find_slug_pattern_weather_
-    markets returns [] and the job is a sub-100ms no-op.  NOT a trading or decision
-    path — capture only, no belief/flag/order change.
-    """
-    if _defer_for_held_position_monitor("afternoon_snapshot_capture"):
-        return
-    acquired = _market_substrate_refresh_lock.acquire(blocking=False)
-    if not acquired:
-        logger.info("afternoon_snapshot_capture: skipped — substrate refresh already running")
-        return
-    try:
-        from src.data.market_scanner import (
-            find_slug_pattern_weather_markets,
-            refresh_executable_market_substrate_snapshots,
-        )
-        from src.data.polymarket_client import PolymarketClient
-        from src.state.db import get_trade_connection
-
-        # Slug-pattern–only fetch scoped to same-day markets with ≤12h to resolution.
-        # hours_to_resolution ≤12 catches the SETTLEMENT_DAY window; >0 excludes
-        # already-expired markets (end_at <= now) which Gamma returns empty for.
-        # find_slug_pattern_weather_markets always includes today (slug fix above).
-        now_utc = datetime.now(timezone.utc)
-        events = find_slug_pattern_weather_markets(min_hours_to_resolution=0.0)
-        same_day_events = [
-            e for e in events
-            if isinstance(e, dict)
-            and e.get("hours_to_resolution") is not None
-            and 0 < float(e["hours_to_resolution"]) <= 12.0
-        ]
-        if not same_day_events:
-            logger.debug("afternoon_snapshot_capture: no same-day markets open (hours_to_resolution ≤12), skipping")
-            return
-        conn = get_trade_connection(write_class="live")
-        try:
-            _clob_timeout = max(
-                1.0,
-                float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-            )
-            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                summary = refresh_executable_market_substrate_snapshots(
-                    conn,
-                    markets=same_day_events,
-                    clob=clob,
-                    captured_at=now_utc,
-                    scan_authority="VERIFIED",
-                    refresh_reason="afternoon_snapshot_capture",
-                    # Conservative 60s budget — same-day markets are a subset of the
-                    # universe, so this runs well within the interval (30 min).  The
-                    # standard per-city cap (ZEUS_MARKET_DISCOVERY_SNAPSHOT_MAX_OUTCOMES)
-                    # applies — no unbounded fan-out.
-                    budget_seconds=float(
-                        os.environ.get("ZEUS_AFTERNOON_CAPTURE_BUDGET_SECONDS", "60.0")
-                    ),
-                )
-            conn.commit()
-        finally:
-            conn.close()
-        logger.info(
-            "afternoon_snapshot_capture: same_day_markets=%d executable_snapshots=%s",
-            len(same_day_events),
-            summary,
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
-        logger.error(
-            "afternoon_snapshot_capture: capture raised (non-fatal): %r", exc
-        )
-    finally:
-        try:
-            _market_substrate_refresh_lock.release()
-        except RuntimeError:
-            pass
-
-
-@_scheduler_job("new_listing_scout")
-def _new_listing_scout_cycle() -> None:
-    """Lightweight 60s new-listing scout: detect brand-new Polymarket weather markets.
-
-    Upstream real-time discovery gap (dimension a/b/c, operator 2026-06-09):
-    The standard market_discovery runs every 5 minutes.  A brand-new listing
-    (startDate just past) therefore has a ≤5-min discovery lag and then must
-    wait for the next 00Z/12Z opendata wave (hours) before a forecast_posterior
-    exists.  This scout closes two gaps:
-
-    (a) DISCOVERY CADENCE: probes Gamma `order=startDate&ascending=false&limit=10`
-        every 60s — a head-page diff for NEW condition_ids.  Cost: one HTTP GET
-        per cycle (<100ms); no full universe scan.
-
-    (b) POSTERIOR FAST-LANE: stages a replacement_forecast materialization intent
-        for each new family so the producer can prioritize it rather than waiting
-        for the next scheduled 00Z/12Z opendata wave.
-
-    (c) WARMER PRIORITY: inserts new condition_ids into _NEW_FAMILY_CONDITION_IDS so
-        _refresh_pending_family_snapshots prepends them to the warmer rotation head
-        (they are warmed next cycle, not at tail of the round-robin).
-
-    Fail-open: any exception is caught and logged; the live path is never affected.
-    EDLI-gated: only fires when edli.enabled is True.
-    """
-    global _SCOUT_KNOWN_CONDITION_IDS, _NEW_FAMILY_CONDITION_IDS
-
-    if _defer_for_held_position_monitor("new_listing_scout"):
-        return
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
-
-    try:
-        import httpx
-        from src.data.market_scanner import GAMMA_BASE, _gamma_get
-        from src.state.db import ZEUS_FORECASTS_DB_PATH
-
-        # (a) Probe head page: most recently started events
-        try:
-            resp = _gamma_get(
-                "/events",
-                params={"order": "startDate", "ascending": "false", "limit": "10"},
-                timeout=10.0,
-                retries=2,
-            )
-            if resp.status_code != 200:
-                logger.debug("new_listing_scout: Gamma probe returned %s", resp.status_code)
-                return
-            raw_events = resp.json() if isinstance(resp.json(), list) else []
-        except Exception as exc:
-            logger.debug("new_listing_scout: Gamma probe failed (non-fatal): %r", exc)
-            return
-
-        # Extract condition_ids from all markets across the head-page events
-        probe_condition_ids: set[str] = set()
-        for ev in raw_events:
-            for market in (ev.get("markets") or []):
-                cid = str(market.get("conditionId") or "").strip()
-                if cid:
-                    probe_condition_ids.add(cid)
-
-        if not probe_condition_ids:
-            return
-
-        # Initialise known set from DB on first run (or when empty)
-        if not _SCOUT_KNOWN_CONDITION_IDS:
-            try:
-                import sqlite3
-                conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
-                try:
-                    rows = conn.execute("SELECT condition_id FROM market_events WHERE condition_id IS NOT NULL").fetchall()
-                    _SCOUT_KNOWN_CONDITION_IDS = {str(r[0]) for r in rows if r[0]}
-                finally:
-                    conn.close()
-            except Exception as exc:
-                logger.debug("new_listing_scout: known-set init failed (non-fatal): %r", exc)
-
-        new_cids = probe_condition_ids - _SCOUT_KNOWN_CONDITION_IDS
-        if not new_cids:
-            # Update known set to include any probe IDs we haven't seen
-            _SCOUT_KNOWN_CONDITION_IDS.update(probe_condition_ids)
-            return
-
-        logger.info(
-            "new_listing_scout: %d new condition_id(s) detected on head-page probe: %s",
-            len(new_cids),
-            sorted(new_cids),
-        )
-
-        # Persist new events to market_events via standard discovery path
-        try:
-            from src.data.market_scanner import find_weather_markets_or_raise, _persist_market_events_to_db
-            new_events = find_weather_markets_or_raise(min_hours_to_resolution=0.0, include_slug_pattern=True)
-            _persist_market_events_to_db(new_events, db_path=ZEUS_FORECASTS_DB_PATH)
-        except Exception as exc:
-            logger.warning("new_listing_scout: persist new events failed (non-fatal): %r", exc)
-
-        logger.info(
-            "new_listing_scout: persisted discovery for %d new condition_id(s); "
-            "forecast-live materialization remains owned by canonical market_events and seed discovery",
-            len(new_cids),
-        )
-
-        # (c) WARMER PRIORITY: mark new condition_ids for head-of-rotation in next warm cycle
-        _NEW_FAMILY_CONDITION_IDS.update(new_cids)
-
-        # Update known set
-        _SCOUT_KNOWN_CONDITION_IDS.update(probe_condition_ids)
-
-    except Exception as exc:
-        logger.warning("new_listing_scout: outer guard (non-fatal): %r", exc)
 
 
 def _capture_boot_state() -> dict:
@@ -9584,16 +9282,6 @@ def main():
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 15.0),
             max_instances=1, coalesce=True,
         )
-        # AFTERNOON CAPTURE — legacy_cron mode (2026-06-14): see EDLI registration below.
-        scheduler.add_job(
-            _afternoon_snapshot_capture_cycle,
-            "interval",
-            minutes=30,
-            id="afternoon_snapshot_capture",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 120.0),
-            max_instances=1,
-            coalesce=True,
-        )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
         scheduler.add_job(
             _edli_event_reactor_cycle,
@@ -9678,21 +9366,6 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # NEW-LISTING SCOUT (operator 2026-06-09, dimensions a/b/c): lightweight 60s
-        # head-page probe for brand-new Polymarket weather listings.  Detects new
-        # condition_ids, stages a forecast-materialization fast-lane intent, and marks
-        # families for head-of-rotation in the next substrate warm cycle.
-        # Fail-open: any exception is caught inside the job.  Data-only; no orders.
-        if edli_cfg.get("new_listing_scout_enabled", True):
-            scheduler.add_job(
-                _new_listing_scout_cycle,
-                "interval",
-                seconds=60,
-                id="new_listing_scout",
-                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
-                max_instances=1,
-                coalesce=True,
-            )
         # MAINSTREAM WARM (E2 / operator directive 2026-06-04 #2): dedicated off-mutex
         # warmer for the mainstream-forecast point cache (read_mainstream_point_cached),
         # mirroring _edli_market_substrate_warm_cycle. The reactor proof path now ALWAYS
@@ -9710,22 +9383,6 @@ def main():
             seconds=90,
             id="edli_mainstream_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 70.0),
-            max_instances=1,
-            coalesce=True,
-        )
-        # AFTERNOON CAPTURE (2026-06-14): dedicated 30-min capture for same-day
-        # SETTLEMENT_DAY markets (hours_to_resolution ≤12).  The universe-wide
-        # market_discovery and EDLI warm cycle target PENDING families; neither
-        # explicitly sweeps the sub-12h same-day window.  This job ensures
-        # orderbook snapshots are recorded at ≥30-min cadence through the local-
-        # afternoon / pre-close window for backtesting and microstructure analysis.
-        # Capture-only (no decision/order); fail-soft; max_instances=1/coalesce.
-        scheduler.add_job(
-            _afternoon_snapshot_capture_cycle,
-            "interval",
-            minutes=30,
-            id="afternoon_snapshot_capture",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 120.0),
             max_instances=1,
             coalesce=True,
         )
