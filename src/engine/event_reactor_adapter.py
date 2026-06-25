@@ -146,6 +146,7 @@ side-effect boundary.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -1171,7 +1172,16 @@ def _read_old_leg_exit_inputs(
         else "1=1"
     )
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
-    select_cols = [c if c in cols else f"NULL AS {c}" for c in ("chain_shares", "shares")]
+    selected_columns = (
+        "chain_shares",
+        "shares",
+        "token_id",
+        "no_token_id",
+        "direction",
+        "condition_id",
+    )
+    select_cols = [c if c in cols else f"NULL AS {c}" for c in selected_columns]
+    select_idx = {name: idx for idx, name in enumerate(selected_columns)}
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
         f"SELECT {', '.join(select_cols)} FROM position_current "
@@ -1190,7 +1200,10 @@ def _read_old_leg_exit_inputs(
 
     def _g(name: str):
         try:
-            return row[name] if isinstance(row, sqlite3.Row) else None
+            if isinstance(row, sqlite3.Row):
+                return row[name]
+            idx = select_idx.get(name)
+            return row[idx] if idx is not None else None
         except (IndexError, KeyError):
             return None
 
@@ -1217,8 +1230,18 @@ def _read_old_leg_exit_inputs(
         _identity = _latest_exit_snapshot_identity_seed(conn, token) or {}
     except Exception:  # noqa: BLE001 — missing snapshot helpers → no exit this cycle.
         return None
-    # Best-bid as the conservative sell-touch seed; execute_exit_order re-derives the
-    # tick-aligned limit and gates on the executable snapshot.
+    snap_ctx = dict(snap_ctx)
+    if _identity:
+        snap_ctx["_exit_identity_seed"] = dict(_identity)
+    snap_ctx["_position_yes_token_id"] = str(_g("token_id") or "")
+    snap_ctx["_position_no_token_id"] = str(_g("no_token_id") or "")
+    snap_ctx["_position_direction"] = str(_g("direction") or "")
+    snap_ctx["_position_condition_id"] = str(_g("condition_id") or "")
+
+    # Best-bid as the conservative sell-touch seed. Prefer the fresh executable
+    # snapshot when present; otherwise use the latest stale snapshot only as a
+    # price seed. The executor still requires a fresh snapshot context before it
+    # can submit.
     best_bid: float | None = None
     current_price = 0.0
     try:
@@ -1227,6 +1250,32 @@ def _read_old_leg_exit_inputs(
         snap = get_snapshot(conn, snap_id) if snap_id else None
     except Exception:  # noqa: BLE001
         snap = None
+    if snap is None:
+        try:
+            saved_factory = conn.row_factory
+            conn.row_factory = sqlite3.Row
+            stale_row = conn.execute(
+                """
+                SELECT snapshot_id, orderbook_top_bid
+                  FROM executable_market_snapshots
+                 WHERE selected_outcome_token_id = ?
+                 ORDER BY captured_at DESC, snapshot_id DESC
+                 LIMIT 1
+                """,
+                (token,),
+            ).fetchone()
+        except sqlite3.Error:
+            stale_row = None
+        finally:
+            with contextlib.suppress(Exception):
+                conn.row_factory = saved_factory
+        if stale_row is not None:
+            try:
+                v = stale_row["orderbook_top_bid"]
+                if v is not None and float(v) > 0.0:
+                    best_bid = float(v)
+            except (TypeError, ValueError, IndexError, KeyError):
+                best_bid = None
     if snap is not None:
         # The executable snapshot dataclass exposes the touch as ``orderbook_top_bid``
         # (the SAME attribute the existing exit lane reads — see the witness/exit
@@ -1309,6 +1358,57 @@ def _submit_shift_bin_old_leg_exit(
         # EXIT_SUBMITTED (blocking) so the next redecision cycle re-evaluates.
         return
     shares, current_price, best_bid, snap_ctx = inputs
+    if not str(snap_ctx.get("executable_snapshot_id") or "").strip():
+        identity = snap_ctx.get("_exit_identity_seed")
+        if isinstance(identity, Mapping):
+            try:
+                from types import SimpleNamespace
+                from src.data.polymarket_client import PolymarketClient
+                from src.execution.exit_lifecycle import _latest_or_capture_exit_snapshot_context
+
+                position_stub = SimpleNamespace(
+                    trade_id=old_position_id,
+                    market_id=str(
+                        identity.get("market_id")
+                        or identity.get("condition_id")
+                        or snap_ctx.get("_position_condition_id")
+                        or ""
+                    ),
+                    condition_id=str(
+                        identity.get("condition_id")
+                        or snap_ctx.get("_position_condition_id")
+                        or ""
+                    ),
+                    token_id=str(
+                        identity.get("token_id")
+                        or snap_ctx.get("_position_yes_token_id")
+                        or ""
+                    ),
+                    no_token_id=str(
+                        identity.get("no_token_id")
+                        or snap_ctx.get("_position_no_token_id")
+                        or ""
+                    ),
+                    direction=str(snap_ctx.get("_position_direction") or ""),
+                )
+                with PolymarketClient(public_http_timeout=15) as clob:
+                    fresh_ctx = _latest_or_capture_exit_snapshot_context(
+                        conn,
+                        clob,
+                        position_stub,
+                        old_token_id,
+                        now=decision_time,
+                    )
+                if fresh_ctx:
+                    snap_ctx.update(fresh_ctx)
+            except Exception as exc:  # noqa: BLE001
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "SHIFT_BIN old-leg fresh exit snapshot capture failed: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
     try:
         from src.execution.exit_lifecycle import place_sell_order
         result = place_sell_order(
@@ -3482,7 +3582,11 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             source_status="MATCH",
             family_complete=True,
-            opportunity_book=opportunity_book.to_receipt_dict() if opportunity_book is not None else None,
+            opportunity_book=(
+                _json_finite(opportunity_book.to_receipt_dict())
+                if opportunity_book is not None
+                else None
+            ),
             **_missing_mav_fields,  # type: ignore[arg-type]
         )
     candidate = proof.candidate
@@ -3528,7 +3632,11 @@ def _build_event_bound_no_submit_receipt_core(
             native_quote_available=False,
             source_status="MATCH",
             family_complete=True,
-            opportunity_book=opportunity_book.to_receipt_dict() if opportunity_book is not None else None,
+            opportunity_book=(
+                _json_finite(opportunity_book.to_receipt_dict())
+                if opportunity_book is not None
+                else None
+            ),
         )
     untradeable_limit_reason = _candidate_limit_price_untradeable_reason(proof)
     if untradeable_limit_reason is not None:
@@ -3832,14 +3940,18 @@ def _build_event_bound_no_submit_receipt_core(
             fdr_family_id=fdr.fdr_family_id,
             fdr_hypothesis_count=fdr.attempted_hypotheses,
             q_source=proof.q_source,
-            qkernel_execution_economics=proof.qkernel_execution_economics,
+            qkernel_execution_economics=_json_finite(proof.qkernel_execution_economics),
             selection_authority_applied=proof.selection_authority_applied,
             q_lcb_calibration_source=proof.q_lcb_calibration_source,
             same_bin_yes_posterior=proof.same_bin_yes_posterior,
             settlement_coverage_status=proof.settlement_coverage_status,
             posterior_id=proof.posterior_id,
             probability_authority=proof.probability_authority,
-            opportunity_book=opportunity_book.to_receipt_dict() if opportunity_book is not None else None,
+            opportunity_book=(
+                _json_finite(opportunity_book.to_receipt_dict())
+                if opportunity_book is not None
+                else None
+            ),
             execution_mode_intent=proof.execution_mode_intent,
             maker_limit_price=proof.maker_limit_price,
             rest_then_cross_policy=proof.rest_then_cross_policy,
@@ -4615,7 +4727,7 @@ def _build_event_bound_no_submit_receipt_core(
             # the qkernel cert's bin_id, so the taker-quality proof can match the cert
             # to this selected leg across the two candidate_id namespaces.
             "candidate_bin_id": _candidate_bin_id(proof),
-            "qkernel_execution_economics": proof.qkernel_execution_economics,
+            "qkernel_execution_economics": _json_finite(proof.qkernel_execution_economics),
             # H2_E2E: typed posterior link carried to the receipt (None on canonical).
             "posterior_id": proof.posterior_id,
             "probability_authority": proof.probability_authority,
@@ -4681,7 +4793,7 @@ def _build_event_bound_no_submit_receipt_core(
             _order_rests_at_admitted_price
         )
     if opportunity_book is not None:
-        raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
+        raw_receipt["opportunity_book"] = _json_finite(opportunity_book.to_receipt_dict())
     if replacement_forecast_receipt_tag is not None:
         raw_receipt["replacement_forecast"] = replacement_forecast_receipt_tag
     # Mainstream-agreement gate fields (#135). Added when the verdict is available on the
@@ -4794,6 +4906,24 @@ _CANDIDATE_BOOK_FIELDS: tuple[str, ...] = (
 _CANDIDATE_BOOK_STR_CAP = 200
 
 
+def _json_finite(value: Any) -> Any:
+    """Return a JSON-safe copy with non-finite floats removed.
+
+    Certificate hashing correctly uses ``allow_nan=False``. Diagnostic payloads
+    must not smuggle Python ``inf``/``nan`` into that boundary.
+    """
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {str(k): _json_finite(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_json_finite(v) for v in value]
+    if isinstance(value, list):
+        return [_json_finite(v) for v in value]
+    return value
+
+
 def _candidate_book_for_envelope(opportunity_book_dict: Any) -> list[dict[str, Any]] | None:
     """Compact per-candidate fate projection from the receipt's opportunity_book dict.
 
@@ -4826,7 +4956,7 @@ def _candidate_book_for_envelope(opportunity_book_dict: Any) -> list[dict[str, A
         if not isinstance(candidate, Mapping):
             continue
         entry: dict[str, Any] = {
-            field: _cap(candidate.get(field)) for field in _CANDIDATE_BOOK_FIELDS
+            field: _json_finite(_cap(candidate.get(field))) for field in _CANDIDATE_BOOK_FIELDS
         }
         entry["is_selected_fallback"] = bool(
             selected_id is not None and candidate.get("candidate_id") == selected_id
@@ -5078,7 +5208,9 @@ def build_event_bound_no_submit_receipt(
         if candidate_book is not None:
             envelope["candidate_book"] = candidate_book
         if receipt.qkernel_execution_economics is not None:
-            envelope["qkernel_execution_economics"] = receipt.qkernel_execution_economics
+            envelope["qkernel_execution_economics"] = _json_finite(
+                receipt.qkernel_execution_economics
+            )
         return dataclass_replace(receipt, envelope_json=envelope_to_json(envelope))
     except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
         return receipt
@@ -6436,8 +6568,8 @@ def _actionable_payload_from_receipt(
         # B3 identity key: the reactor bin_id hash so the taker-quality proof matches the
         # qkernel cert to THIS selected leg across the two candidate_id namespaces.
         "candidate_bin_id": receipt.candidate_bin_id,
-        "qkernel_execution_economics": receipt.qkernel_execution_economics,
-        "opportunity_book": receipt.opportunity_book,
+        "qkernel_execution_economics": _json_finite(receipt.qkernel_execution_economics),
+        "opportunity_book": _json_finite(receipt.opportunity_book),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -6512,7 +6644,7 @@ def _live_decision_audit_payload(
         "unit": receipt.unit,
         "strategy_key": receipt.strategy_key,
         "q_source": receipt.q_source,
-        "qkernel_execution_economics": receipt.qkernel_execution_economics,
+        "qkernel_execution_economics": _json_finite(receipt.qkernel_execution_economics),
         # H2_E2E: make the live-order aggregate self-contained — the fill->posterior
         # link is reconstructable from the aggregate payload without JSON_EXTRACT on
         # the receipt blob. None on canonical orders.
@@ -6528,7 +6660,7 @@ def _live_decision_audit_payload(
         "kelly_size_usd": receipt.kelly_size_usd,
         "kelly_decision_id": receipt.kelly_decision_id,
         "risk_decision_id": receipt.risk_decision_id,
-        "opportunity_book": receipt.opportunity_book,
+        "opportunity_book": _json_finite(receipt.opportunity_book),
         "selected_candidate_id": selected_candidate_id,
         "actual_receipt_selected_candidate_id": actual_candidate_id,
         "selected_condition_id": (
@@ -9788,7 +9920,7 @@ def _candidate_evaluation_from_proof(
         taker_forbidden_reason=proof.taker_forbidden_reason,
         maker_fill_probability=proof.maker_fill_probability,
         maker_fill_probability_source=proof.maker_fill_probability_source,
-        qkernel_execution_economics=proof.qkernel_execution_economics,
+        qkernel_execution_economics=_json_finite(proof.qkernel_execution_economics),
     )
 
 
@@ -10196,7 +10328,7 @@ def _opportunity_book_from_proofs(
     if selection_authority is not None:
         cache_summary["selection_authority"] = selection_authority
     if selected_qkernel_execution_economics is not None:
-        cache_summary["selected_qkernel_execution_economics"] = (
+        cache_summary["selected_qkernel_execution_economics"] = _json_finite(
             selected_qkernel_execution_economics
         )
     return build_family_opportunity_book(
