@@ -565,15 +565,25 @@ def persist_presubmit_jit_snapshot(
     (§4 Stage 1 fail-soft): the persist is observability / Stage-2 substrate, not a gate.
 
     §5.2 SQLite discipline: the JIT /book fetch [NET] has ALREADY happened by the
-    time this is called (the witness is built from it); this only opens the
-    short-lived zeus_trades write + commit. The trade WAL lock is never held across
-    the network fetch. The write targets zeus_trades (executable_market_snapshots),
-    NOT zeus-world — the #95 world-mutex law is untouched.
+    time this is called (the witness is built from it). The write targets zeus_trades
+    (executable_market_snapshots), NOT zeus-world — the #95 world-mutex law is
+    untouched. When called from an active live-submit transaction/savepoint, this
+    provenance write is skipped instead of joining the money-path lock window; submit
+    authority is carried by the in-memory witness and the elected snapshot already
+    recorded on the receipt.
     """
 
     if not enabled:
         return None
     if trade_conn is None or elected_snapshot is None:
+        return None
+    if bool(getattr(trade_conn, "in_transaction", False)):
+        import logging as _logging
+
+        _logging.getLogger(__name__).info(
+            "K1 Stage 1 presubmit snapshot persist skipped inside active "
+            "submit transaction (non-blocking)"
+        )
         return None
     try:
         row = build_presubmit_snapshot_row(

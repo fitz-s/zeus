@@ -226,6 +226,32 @@ def test_persist_writes_one_row_when_enabled() -> None:
     assert persisted.orderbook_top_bid == Decimal("0.58")
 
 
+def test_persist_skips_inside_active_submit_transaction() -> None:
+    conn = _trade_conn()
+    elected = _elected_snapshot()
+    insert_snapshot(conn, elected)
+    conn.commit()
+
+    before = conn.execute(f"SELECT COUNT(*) FROM {SNAPSHOT_TABLE}").fetchone()[0]
+    conn.execute("SAVEPOINT live_order_build")
+    try:
+        snapshot_id = persist_presubmit_jit_snapshot(
+            conn,
+            elected,
+            witness=_witness(),
+            decision_time=_FETCH_INSTANT,
+            enabled=True,
+        )
+        during = conn.execute(f"SELECT COUNT(*) FROM {SNAPSHOT_TABLE}").fetchone()[0]
+    finally:
+        conn.execute("RELEASE SAVEPOINT live_order_build")
+    after = conn.execute(f"SELECT COUNT(*) FROM {SNAPSHOT_TABLE}").fetchone()[0]
+
+    assert snapshot_id is None
+    assert during == before
+    assert after == before
+
+
 def test_persist_off_is_byte_identical() -> None:
     """Flag OFF (default) -> zero new rows, no behavior change."""
 
