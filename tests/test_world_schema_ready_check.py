@@ -39,6 +39,7 @@ class TestWorldSchemaReadyCheck:
         monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
         monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 2)
         monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
+        monkeypatch.setattr(main_module, "_startup_world_db_hot_index_prepare", lambda: "3")
         monkeypatch.setattr(
             main_module,
             "_startup_world_db_schema_ready_check",
@@ -240,6 +241,11 @@ class TestWorldSchemaReadyCheck:
         )
         monkeypatch.setattr(
             main_module,
+            "_startup_world_db_hot_index_prepare",
+            lambda: calls.append("hot_index_prepare") or "prepared",
+        )
+        monkeypatch.setattr(
+            main_module,
             "_startup_world_db_schema_ready_check",
             lambda: calls.append("read_only_proof") or "18",
         )
@@ -266,15 +272,15 @@ class TestWorldSchemaReadyCheck:
 
         monkeypatch.setattr(
             main_module,
-            "_startup_world_db_schema_prepare",
-            lambda: calls.append("prepare") or "prepared",
+            "_startup_world_db_hot_index_prepare",
+            lambda: calls.append("hot_index_prepare") or "prepared",
         )
         monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", ready_check)
         monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "ready")
 
         main_module._startup_db_schema_ready_check()
 
-        assert calls == ["read_only_proof", "prepare", "read_only_proof"]
+        assert calls == ["read_only_proof", "hot_index_prepare", "read_only_proof"]
 
     def test_world_schema_prepare_runs_init_schema_unconditionally(self, tmp_path, monkeypatch):
         """init_schema runs unconditionally — no version gating; returns 'prepared'."""

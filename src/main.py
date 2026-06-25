@@ -4129,6 +4129,42 @@ def _startup_world_db_schema_prepare() -> str:
         conn.close()
 
 
+def _startup_world_db_hot_index_prepare() -> str:
+    """Create only live-required world hot indexes during boot repair.
+
+    Full ``init_schema`` is still available as the explicit operator repair
+    helper above. Live boot only needs the hot indexes that executable fetch,
+    retry-floor, and Day0 supersession paths require to avoid starting in a
+    known-broken slow/error state.
+    """
+    import src.state.db as db_module
+    from src.state.schema.opportunity_event_processing_schema import (
+        CREATE_PENDING_RETRY_FLOOR_INDEX_SQL,
+        CREATE_STALE_CLAIM_INDEX_SQL,
+        CREATE_STATUS_INDEX_SQL,
+    )
+    from src.state.schema.opportunity_events_schema import CREATE_DAY0_FAMILY_INDEX_SQL
+
+    path = db_module.ZEUS_WORLD_DB_PATH
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist")
+
+    conn = db_module.get_world_connection(write_class="live")
+    try:
+        for sql in (
+            CREATE_STATUS_INDEX_SQL,
+            CREATE_PENDING_RETRY_FLOOR_INDEX_SQL,
+            CREATE_STALE_CLAIM_INDEX_SQL,
+            CREATE_DAY0_FAMILY_INDEX_SQL,
+        ):
+            conn.execute(sql)
+            conn.commit()
+        logger.info("world DB hot-index repair complete")
+        return "prepared"
+    finally:
+        conn.close()
+
+
 def _startup_forecasts_schema_ready_check() -> str:
     """Read-only forecasts DB structural schema check for forecast-live split authority.
 
@@ -4196,11 +4232,11 @@ def _startup_db_schema_ready_check() -> None:
             logger.info("world DB schema structural check: ready")
         except Exception as exc:
             logger.warning(
-                "world DB schema readiness check failed: %s — running idempotent repair",
+                "world DB schema readiness check failed: %s — running hot-index repair",
                 exc,
             )
             try:
-                _startup_world_db_schema_prepare()
+                _startup_world_db_hot_index_prepare()
                 _startup_world_db_schema_ready_check()
                 logger.info("world DB schema structural check: ready after repair")
             except Exception as repair_exc:
