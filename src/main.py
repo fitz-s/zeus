@@ -5608,9 +5608,10 @@ def _edli_command_recovery_cycle() -> None:
 
     if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
         logger.info(
-            "edli_command_recovery running live_tick despite active trading lane; "
-            "side-effect recovery is a live-safety owner"
+            "edli_command_recovery deferred: active trading lane owns the trade DB "
+            "write window this tick"
         )
+        return
     summary = reconcile_unresolved_commands(scope="live_tick")
     if summary.get("scanned"):
         logger.info("edli_command_recovery: %s", summary)
