@@ -34,12 +34,16 @@ WHY IT LIVES HERE (and NOT in src.main) — system_decomposition_plan §4.2/§9:
 
 THE DURABLE FILL BRIDGE IS THE PERSISTED TRUTH (system_decomposition_plan §8 Step 3):
   ``_edli_durable_fill_bridge_scan`` re-derives the bridge work set from the persisted
-  ``edli_live_order_events`` on EVERY cycle, so NO fill is lost across the conceptual
-  cutover from "WS thread in src.main" to "WS thread in P3". The order-runtime BOOT
-  recovery (``_edli_boot_fill_bridge_recovery``, which STAYS in src.main) imports THIS
-  same scan helper so a restart on either side heals any orphaned confirmed fill. The
-  scan is the single canonical copy — src.main imports it from here (mirroring the P4
-  pattern ``from src.execution.post_trade_capital import _harvester_cycle``).
+  ``edli_live_order_events`` on EVERY cycle for fills that still have no
+  ``position_current`` row, so NO confirmed fill is lost across the conceptual cutover
+  from "WS thread in src.main" to "WS thread in P3". Already-materialised historical
+  projection repair is an explicit maintenance action, not part of the per-minute live
+  hot path, because it can rewrite old rows and contend with fresh book/substrate writes.
+  The order-runtime BOOT recovery (``_edli_boot_fill_bridge_recovery``, which STAYS in
+  src.main) imports THIS same scan helper so a restart on either side heals any orphaned
+  confirmed fill. The scan is the single canonical copy — src.main imports it from here
+  (mirroring the P4 pattern ``from src.execution.post_trade_capital import
+  _harvester_cycle``).
 
 NO-BACK-COUPLING (system_decomposition_plan §7 I2): P3's trigger is the WS stream + its
   own 1-min reconcile clock. The reactor reads the durable fill bridge; it never signals
@@ -730,7 +734,7 @@ def _edli_durable_fill_bridge_scan(
     *,
     now=None,
     limit: int = 500,
-    already_bridged_repair_limit: int = 50,
+    already_bridged_repair_limit: int = 0,
 ) -> int:
     """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
 
@@ -756,6 +760,11 @@ def _edli_durable_fill_bridge_scan(
     already-bridged fill is a no-op for events and a safe UPDATE for the
     projection. The absence filter below ALSO skips already-bridged aggregates so
     a healthy daemon does no redundant work.
+
+    Already-bridged repair is opt-in via ``already_bridged_repair_limit``. The
+    per-minute live cycle must stay focused on fresh/orphaned fills; repeatedly
+    repairing historical projections can hold the trade DB writer and starve the
+    substrate/redecision snapshot path.
 
     INV-37 / transaction ownership: reads ``edli_live_order_events`` and writes
     ``position_current`` / ``position_events`` ON THE SAME connection ``conn``
