@@ -7044,50 +7044,74 @@ def _edli_expire_unadmitted_redecision_pending(
         pending_admission_cutoff = ""
 
     try:
-        rows = world_conn.execute(
-            """
-            SELECT e.event_id,
-                   json_extract(e.payload_json, '$.city') AS city,
-                   json_extract(e.payload_json, '$.target_date') AS target_date,
-                   json_extract(e.payload_json, '$.metric') AS metric
-              FROM opportunity_event_processing p
-              JOIN opportunity_events e ON e.event_id = p.event_id
-             WHERE p.consumer_name = 'edli_reactor_v1'
-               AND (
+        candidate_ids: list[str] = []
+        if pending_admission_cutoff:
+            candidate_ids.extend(
+                str(row[0])
+                for row in world_conn.execute(
+                    """
+                    SELECT p.event_id
+                     FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_status
+                     WHERE p.consumer_name = 'edli_reactor_v1'
+                       AND p.processing_status = 'pending'
+                     ORDER BY p.updated_at ASC
+                     LIMIT 5000
+                    """,
+                ).fetchall()
+            )
+        if stale_processing_cutoff:
+            candidate_ids.extend(
+                str(row[0])
+                for row in world_conn.execute(
+                    """
+                    SELECT p.event_id
+                      FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                     WHERE p.consumer_name = 'edli_reactor_v1'
+                       AND p.processing_status = 'processing'
+                       AND p.claimed_at IS NOT NULL
+                       AND p.claimed_at <= ?
+                     ORDER BY p.claimed_at ASC
+                     LIMIT 5000
+                    """,
+                    (stale_processing_cutoff,),
+                ).fetchall()
+            )
+        candidate_ids = list(dict.fromkeys(event_id for event_id in candidate_ids if event_id))
+        rows = []
+        for start in range(0, len(candidate_ids), 250):
+            chunk = candidate_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(
+                world_conn.execute(
+                    f"""
+                    SELECT e.event_id, e.payload_json
+                      FROM opportunity_events e
+                     WHERE e.event_type = ?
+                       AND e.created_at <= ?
+                       AND e.received_at <= ?
+                       AND e.event_id IN ({placeholders})
+                    """,
                     (
-                        p.processing_status = 'pending'
-                        AND ? != ''
-                        AND e.created_at <= ?
-                        AND e.received_at <= ?
-                    )
-                 OR (
-                    p.processing_status = 'processing'
-                    AND p.claimed_at IS NOT NULL
-                    AND ? != ''
-                    AND p.claimed_at <= ?
-                 )
-               )
-               AND e.event_type = ?
-            """,
-            (
-                pending_admission_cutoff,
-                pending_admission_cutoff,
-                pending_admission_cutoff,
-                stale_processing_cutoff,
-                stale_processing_cutoff,
-                _REDECISION_EVENT_TYPE,
-            ),
-        ).fetchall()
+                        _REDECISION_EVENT_TYPE,
+                        pending_admission_cutoff,
+                        pending_admission_cutoff,
+                        *chunk,
+                    ),
+                ).fetchall()
+            )
     except Exception:  # noqa: BLE001
         return 0
     expire_ids: list[str] = []
     for row in rows:
         try:
             event_id = str(row[0] or "")
+            payload = json.loads(str(row[1] or "{}"))
             family = (
-                str(row[1] or "").strip(),
-                str(row[2] or "").strip(),
-                str(row[3] or "").strip(),
+                str(payload.get("city") or "").strip(),
+                str(payload.get("target_date") or "").strip(),
+                str(payload.get("metric") or "").strip(),
             )
         except Exception:  # noqa: BLE001
             continue
