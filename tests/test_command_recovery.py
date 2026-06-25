@@ -7486,6 +7486,86 @@ def _seed_edli_reconciled_absence(
     )
 
 
+def _seed_edli_stalled_attempt_with_reserved_cap(
+    conn,
+    *,
+    aggregate_id="agg-ack-stalled",
+    event_id="edli-event-ack-stalled",
+    final_intent_id="edli-intent-ack-stalled",
+    execution_command_id="edli-exec-ack-stalled",
+    token_id="tok-ack-stalled",
+    usage_id="cap-ack-stalled",
+):
+    plan_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "token_id": token_id,
+        "condition_id": "condition-ack-stalled",
+        "direction": "buy_yes",
+    }
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload=plan_payload,
+        occurred_at="2026-04-26T00:00:00Z",
+    )
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload=plan_payload,
+        occurred_at="2026-04-26T00:00:01Z",
+    )
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="VenueSubmitAttempted",
+        payload=plan_payload,
+        occurred_at="2026-04-26T00:00:02Z",
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        )
+        SELECT ?, ?, ?, 'VENUE_SUBMIT_ATTEMPTED',
+               3, 'VenueSubmitAttempted', event_hash,
+               0, NULL, '2026-04-26T00:00:02Z', 1
+        FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_sequence = 3
+        """,
+        (aggregate_id, event_id, final_intent_id, aggregate_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (?, ?, '2026-04-26T00:00:00Z', 'tiny_live_canary',
+                  5.0, 1, 5.0, 1, 'RESERVED', ?, ?, '2026-04-26T00:00:00Z', 1)
+        """,
+        (usage_id, event_id, final_intent_id, execution_command_id),
+    )
+    return {
+        "aggregate_id": aggregate_id,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "token_id": token_id,
+        "usage_id": usage_id,
+    }
+
+
 def _seed_unknown_side_effect_with_decision(conn, *, command_id, decision_id, token_id):
     """Seed a SUBMIT_UNKNOWN_SIDE_EFFECT row (no venue_order_id) with a decision_id."""
     _insert(
@@ -7674,6 +7754,67 @@ class TestEdliAbsenceVenueCommandSync:
 
         assert summary["venue_command_absence_sync"]["advanced"] == 0
         assert _get_state(conn, "cmd-token-mismatch") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+
+    def test_acked_command_sync_consumes_stalled_edli_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        seeded = _seed_edli_stalled_attempt_with_reserved_cap(conn)
+        _insert(
+            conn,
+            command_id="cmd-acked-edli-stall",
+            decision_id=seeded["execution_command_id"],
+            token_id=seeded["token_id"],
+            side="BUY",
+            price=0.01,
+            size=569.08,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-acked-edli-stall",
+            venue_order_id="0xackedvenueorder",
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_acknowledged_venue_command_sync"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        cap = conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()
+        assert cap["reservation_status"] == "CONSUMED"
+        projection = conn.execute(
+            """
+            SELECT current_state, last_event_type, venue_order_id, pending_reconcile
+            FROM edli_live_order_projection
+            WHERE aggregate_id = ?
+            """,
+            (seeded["aggregate_id"],),
+        ).fetchone()
+        assert dict(projection) == {
+            "current_state": "CAP_TRANSITIONED",
+            "last_event_type": "CapTransitioned",
+            "venue_order_id": "0xackedvenueorder",
+            "pending_reconcile": 0,
+        }
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                FROM edli_live_order_events
+                WHERE aggregate_id = ?
+                ORDER BY event_sequence
+                """,
+                (seeded["aggregate_id"],),
+            ).fetchall()
+        ]
+        assert event_types[-2:] == ["VenueSubmitAcknowledged", "CapTransitioned"]
 
 
 # ---------------------------------------------------------------------------

@@ -8565,6 +8565,194 @@ def _reconcile_venue_command_absence_sync(conn: sqlite3.Connection) -> dict:
     return summary
 
 
+def reconcile_edli_acknowledged_venue_command_sync(conn: sqlite3.Connection) -> dict:
+    """Mirror ACKED venue_commands back into the EDLI live-order ledger.
+
+    A submit can succeed in the trade-side command journal while the world-side
+    EDLI aggregate only records ``VenueSubmitAttempted``. The order is real, so
+    releasing the cap would be wrong; recovery appends the missing
+    ``VenueSubmitAcknowledged`` and ``CapTransitioned(CONSUMED)`` events and
+    marks the existing cap reservation CONSUMED.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    if not events_ref or not projection_ref or not cap_usage_ref or not _table_exists(conn, "venue_commands"):
+        return summary
+    rows = conn.execute(
+        f"""
+        SELECT proj.aggregate_id,
+               proj.event_id,
+               proj.final_intent_id,
+               plan.payload_json AS plan_payload_json,
+               attempted.payload_json AS attempted_payload_json,
+               usage.usage_id,
+               usage.execution_command_id,
+               cmd.command_id,
+               cmd.decision_id,
+               cmd.token_id,
+               cmd.state,
+               cmd.venue_order_id,
+               cmd.updated_at AS command_updated_at
+        FROM {projection_ref} proj
+        JOIN {events_ref} plan
+          ON plan.aggregate_id = proj.aggregate_id
+         AND plan.event_type = 'SubmitPlanBuilt'
+        JOIN {events_ref} attempted
+          ON attempted.aggregate_id = proj.aggregate_id
+         AND attempted.event_type = 'VenueSubmitAttempted'
+        JOIN {cap_usage_ref} usage
+          ON usage.event_id = proj.event_id
+         AND usage.final_intent_id = proj.final_intent_id
+         AND usage.reservation_status = 'RESERVED'
+        JOIN venue_commands cmd
+          ON cmd.decision_id = usage.execution_command_id
+        WHERE proj.current_state = 'VENUE_SUBMIT_ATTEMPTED'
+          AND proj.last_event_type = 'VenueSubmitAttempted'
+          AND COALESCE(proj.venue_order_id, '') = ''
+          AND cmd.intent_kind = 'ENTRY'
+          AND cmd.state IN ('ACKED', 'POST_ACKED')
+          AND COALESCE(cmd.venue_order_id, '') != ''
+          AND NOT EXISTS (
+              SELECT 1 FROM {events_ref} ack
+              WHERE ack.aggregate_id = proj.aggregate_id
+                AND ack.event_type = 'VenueSubmitAcknowledged'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM {events_ref} cap
+              WHERE cap.aggregate_id = proj.aggregate_id
+                AND cap.event_type = 'CapTransitioned'
+          )
+        ORDER BY attempted.occurred_at, proj.aggregate_id
+        """
+    ).fetchall()
+    summary["scanned"] = len(rows)
+    occurred_at = _now_iso()
+    for row in rows:
+        record = _dict_row(row)
+        aggregate_id = str(record.get("aggregate_id") or "")
+        command_id = str(record.get("command_id") or "")
+        venue_order_id = str(record.get("venue_order_id") or "").strip()
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id) or "unknown"
+        sp_name = f"sp_edli_ack_sync_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            plan_payload = _json_dict(record.get("plan_payload_json"))
+            attempted_payload = _json_dict(record.get("attempted_payload_json"))
+            event_id = str(record.get("event_id") or plan_payload.get("event_id") or "")
+            final_intent_id = str(record.get("final_intent_id") or plan_payload.get("final_intent_id") or "")
+            execution_command_id = str(record.get("execution_command_id") or "")
+            command_decision_id = str(record.get("decision_id") or "")
+            plan_token = str(plan_payload.get("token_id") or "")
+            command_token = str(record.get("token_id") or "")
+            attempted_command_id = str(attempted_payload.get("execution_command_id") or "")
+            if (
+                not aggregate_id
+                or not event_id
+                or not final_intent_id
+                or not execution_command_id
+                or execution_command_id != command_decision_id
+                or attempted_command_id != execution_command_id
+                or not plan_token
+                or plan_token != command_token
+                or not venue_order_id
+            ):
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                summary["stayed"] += 1
+                continue
+
+            receipt_hash = stable_hash(
+                {
+                    "source": "command_recovery_edli_ack_sync",
+                    "command_id": command_id,
+                    "execution_command_id": execution_command_id,
+                    "venue_order_id": venue_order_id,
+                    "command_updated_at": str(record.get("command_updated_at") or ""),
+                }
+            )
+            ack_event = _append_edli_event_qualified(
+                conn,
+                events_ref=events_ref,
+                aggregate_id=aggregate_id,
+                event_type="VenueSubmitAcknowledged",
+                payload={
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "final_intent_id": final_intent_id,
+                    "execution_command_id": execution_command_id,
+                    "execution_receipt_hash": receipt_hash,
+                    "venue_order_id": venue_order_id,
+                    "venue_ack_received": True,
+                    "raw_response_hash": "",
+                    "recovery_reason": "TRADE_COMMAND_ACKED_WORLD_LEDGER_STALLED",
+                    "command_id": command_id,
+                    "source_proof": {
+                        "source_function": "command_recovery.reconcile_edli_acknowledged_venue_command_sync",
+                        "trade_command_state": str(record.get("state") or ""),
+                        "trade_command_venue_order_id": venue_order_id,
+                    },
+                },
+                occurred_at=occurred_at,
+                source_authority="existing_executor",
+            )
+            updated = conn.execute(
+                f"""
+                UPDATE {cap_usage_ref}
+                SET reservation_status = 'CONSUMED',
+                    final_intent_id = ?,
+                    execution_command_id = ?
+                WHERE usage_id = ?
+                  AND reservation_status = 'RESERVED'
+                """,
+                (final_intent_id, execution_command_id, str(record.get("usage_id") or "")),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("EDLI ACK sync failed to consume reserved cap")
+            _append_edli_event_qualified(
+                conn,
+                events_ref=events_ref,
+                aggregate_id=aggregate_id,
+                event_type="CapTransitioned",
+                payload={
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "final_intent_id": final_intent_id,
+                    "execution_command_id": execution_command_id,
+                    "execution_receipt_hash": receipt_hash,
+                    "to_status": "CONSUMED",
+                    "projection_status": "CONSUMED",
+                    "transition_reason": "TRADE_COMMAND_ACKED_WORLD_LEDGER_STALLED",
+                    "acknowledged_event_hash": ack_event["event_hash"],
+                    "venue_order_id": venue_order_id,
+                    "command_id": command_id,
+                },
+                occurred_at=occurred_at,
+                source_authority="live_cap_ledger",
+            )
+            _rebuild_edli_projection_qualified(
+                conn,
+                events_ref=events_ref,
+                projection_ref=projection_ref,
+                aggregate_id=aggregate_id,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+            logger.warning(
+                "recovery: EDLI ACK sync consumed cap for aggregate=%s command=%s venue_order_id=%s",
+                aggregate_id,
+                command_id,
+                venue_order_id,
+            )
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error("recovery: EDLI ACK sync failed for command %s: %s", command_id, exc)
+            summary["errors"] += 1
+    return summary
+
+
 def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> dict:
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     events_ref = _edli_live_order_events_ref(conn)
@@ -10186,6 +10374,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_absence_sync_summary["stayed"]
         summary["errors"] += edli_absence_sync_summary["errors"]
 
+        edli_ack_sync_summary = reconcile_edli_acknowledged_venue_command_sync(conn)
+        summary["edli_acknowledged_venue_command_sync"] = edli_ack_sync_summary
+        summary["advanced"] += edli_ack_sync_summary["advanced"]
+        summary["stayed"] += edli_ack_sync_summary["stayed"]
+        summary["errors"] += edli_ack_sync_summary["errors"]
+
         live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn, client=client)
         summary["live_entry_projection_repair"] = live_entry_repair_summary
         summary["advanced"] += live_entry_repair_summary["advanced"]
@@ -10531,6 +10725,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")
         _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
+        _db_pass("edli_acknowledged_venue_command_sync",
+                 reconcile_edli_acknowledged_venue_command_sync,
+                 "edli_acknowledged_venue_command_sync")
         summary["scope"] = "live_tick"
         summary["deferred_full_sweep"] = True
         return
@@ -10555,6 +10752,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
     _db_pass("venue_command_absence_sync",
              _reconcile_venue_command_absence_sync, "venue_command_absence_sync")
+    _db_pass("edli_acknowledged_venue_command_sync",
+             reconcile_edli_acknowledged_venue_command_sync,
+             "edli_acknowledged_venue_command_sync")
     _client_pass("live_entry_projection_repair",
                  reconcile_live_entry_projection_repairs, "live_entry_projection_repair", client_kw=True)
     _db_pass("filled_entry_position_link_repair",
