@@ -2744,6 +2744,11 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # Operator/manual entry pause is a pre-venue control state. No new order is
+    # posted while active; once cleared, the event must be re-decided from fresh
+    # belief/price evidence rather than burned as terminal or logged as an
+    # unknown fail-open reason.
+    "entries_paused",
     # Continuous redecision coordination: another live action already owns this
     # family, or the old leg is still exiting. The cure is state advancement from
     # that existing action, not burning the family forever.
