@@ -551,6 +551,26 @@ def test_scoped_transport_gap_with_progress_is_downloaded_not_failed(tmp_path, m
     assert report["written_row_count"] > 0
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
 
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_batched",
+        lambda **_kwargs: {
+            dl._BATCH_TRANSPORT_ERROR_KEY: (
+                "Client error '400 Bad Request' for residual scoped model",
+                None,
+            )
+        },
+    )
+    rerun = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_two_city_targets(),
+    )
+
+    assert rerun["transport_errors"]
+    assert rerun["written_row_count"] == 0
+    assert rerun["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+
 
 def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(monkeypatch) -> None:
     """A cooldown in another Open-Meteo lane must not suppress the BPF raw-input lane."""
