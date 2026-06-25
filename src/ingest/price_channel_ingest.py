@@ -810,6 +810,45 @@ def _edli_durable_fill_bridge_scan(
             raise ValueError(f"unexpected EDLI events table: {table!r}")
 
         candidate_rows = conn.execute(sql).fetchall()
+        incomplete_open_position_ids: set[str] = set()
+        try:
+            incomplete_rows = conn.execute(
+                """
+                SELECT position_id
+                  FROM position_current
+                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                   AND (
+                        p_posterior IS NULL
+                     OR p_posterior <= 0.0
+                     OR entry_method IS NULL
+                     OR entry_method = ''
+                     OR entry_method = 'ens_member_counting'
+                   )
+                """
+            ).fetchall()
+            incomplete_open_position_ids = {
+                str(_row_get(r, "position_id"))
+                for r in incomplete_rows
+                if _row_get(r, "position_id")
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EDLI durable fill-bridge scan: incomplete projection query failed "
+                "(non-fatal; normal scan continues): %s",
+                exc,
+            )
+        if incomplete_open_position_ids:
+            candidate_rows.sort(
+                key=lambda r: (
+                    0
+                    if edli_bridge_position_id(str(_row_get(r, "aggregate_id")))
+                    in incomplete_open_position_ids
+                    or edli_bridge_position_id_legacy(str(_row_get(r, "aggregate_id")))
+                    in incomplete_open_position_ids
+                    else 1,
+                    str(_row_get(r, "aggregate_id")),
+                )
+            )
     except Exception as exc:  # noqa: BLE001
         # Missing table / attach (e.g. a degraded boot) must not crash the
         # caller — the EDLI events persist and the next cycle retries.
@@ -823,7 +862,8 @@ def _edli_durable_fill_bridge_scan(
 
     bridged = 0
     new_fills_seen = 0
-    already_bridged_repairs_seen = 0
+    already_bridged_link_sync_seen = 0
+    already_bridged_repairs_attempted = 0
     for row in candidate_rows:
         aggregate_id = str(_row_get(row, "aggregate_id"))
         position_id = edli_bridge_position_id(aggregate_id)
@@ -845,8 +885,8 @@ def _edli_durable_fill_bridge_scan(
         ).fetchone()
         if existing is not None:
             existing_position_id = str(_row_get(existing, "position_id"))
-            if already_bridged_repairs_seen < max(0, already_bridged_repair_limit):
-                already_bridged_repairs_seen += 1
+            if already_bridged_link_sync_seen < max(0, already_bridged_repair_limit):
+                already_bridged_link_sync_seen += 1
                 try:
                     sync_venue_command_position_link_for_edli_fill(
                         conn,
@@ -862,34 +902,42 @@ def _edli_durable_fill_bridge_scan(
                         existing_position_id,
                         exc,
                     )
+            try:
+                p_posterior = float(_row_get(existing, "p_posterior") or 0.0)
+            except (TypeError, ValueError):
+                p_posterior = 0.0
+            entry_method = str(_row_get(existing, "entry_method") or "")
+            incomplete_projection = (
+                p_posterior <= 0.0 or entry_method in {"", "ens_member_counting"}
+            )
+            if (
+                incomplete_projection
+                and already_bridged_repairs_attempted
+                < max(0, already_bridged_repair_limit)
+            ):
+                already_bridged_repairs_attempted += 1
                 try:
-                    p_posterior = float(_row_get(existing, "p_posterior") or 0.0)
-                except (TypeError, ValueError):
-                    p_posterior = 0.0
-                entry_method = str(_row_get(existing, "entry_method") or "")
-                if p_posterior <= 0.0 or entry_method in {"", "ens_member_counting"}:
-                    try:
-                        result = materialize_position_current_from_edli_fill(
-                            conn, aggregate_id, now=now
-                        )
-                        if result is not None:
-                            logger.warning(
-                                "EDLI durable fill-bridge: REPAIRED incomplete bridged fill "
-                                "aggregate=%s -> position_id=%s p_posterior_was=%s "
-                                "entry_method_was=%s",
-                                aggregate_id,
-                                result.get("position_id"),
-                                p_posterior,
-                                entry_method,
-                            )
-                    except Exception as exc:  # noqa: BLE001
+                    result = materialize_position_current_from_edli_fill(
+                        conn, aggregate_id, now=now
+                    )
+                    if result is not None:
                         logger.warning(
-                            "EDLI durable fill-bridge: incomplete bridged fill repair failed "
-                            "for aggregate=%s position_id=%s: %s",
+                            "EDLI durable fill-bridge: REPAIRED incomplete bridged fill "
+                            "aggregate=%s -> position_id=%s p_posterior_was=%s "
+                            "entry_method_was=%s",
                             aggregate_id,
-                            existing_position_id,
-                            exc,
+                            result.get("position_id"),
+                            p_posterior,
+                            entry_method,
                         )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "EDLI durable fill-bridge: incomplete bridged fill repair failed "
+                        "for aggregate=%s position_id=%s: %s",
+                        aggregate_id,
+                        existing_position_id,
+                        exc,
+                    )
             # Already bridged (wide or legacy id) — idempotent skip.
             continue
 
