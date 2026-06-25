@@ -294,6 +294,44 @@ def _entry_authority_from_certificates(
     )
 
 
+def _entry_authority_from_decision_audit(
+    events: list[tuple[str, dict[str, Any]]],
+) -> tuple[float | None, float, str | None]:
+    """Recover qkernel entry belief from the accepted EDLI decision audit.
+
+    The durable fill bridge normally reads the immutable ActionableTradeCertificate
+    by hash. During boot recovery, however, the caller may have the EDLI aggregate
+    event stream without a readable certificate table on the same connection. The
+    accepted decision audit is still part of that aggregate and carries the same
+    qkernel economics stamped at submit time, so use it as a local projection
+    fallback instead of writing a fake zero posterior.
+    """
+
+    payload = _latest_payload(events, "DecisionProofAccepted") or {}
+    audit = payload.get("decision_audit")
+    if not isinstance(audit, dict):
+        audit = payload
+    q_live = _float_or_none(audit.get("q_live"))
+    q_lcb = _float_or_none(audit.get("q_lcb_5pct"))
+    entry_method: str | None = None
+    qkernel_payload = audit.get("qkernel_execution_economics")
+    if isinstance(qkernel_payload, dict):
+        qkernel_point = _float_or_none(qkernel_payload.get("q_dot_payoff"))
+        qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
+        if (
+            qkernel_point is not None
+            and qkernel_lcb is not None
+            and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+        ):
+            q_live = qkernel_point
+            q_lcb = qkernel_lcb
+            entry_method = "qkernel_spine"
+    ci_width = 0.0
+    if q_live is not None and q_lcb is not None and q_live > q_lcb:
+        ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
+    return q_live, ci_width, entry_method
+
+
 def _latest_payload(events: list[tuple[str, dict[str, Any]]], event_type: str) -> dict[str, Any] | None:
     for current_type, payload in reversed(events):
         if current_type == event_type:
@@ -1227,6 +1265,14 @@ def materialize_position_current_from_edli_fill(
         conn,
         actionable_certificate_hash=str(identity.get("actionable_certificate_hash") or ""),
     )
+    if certificate_q_live is None or not certificate_entry_method:
+        audit_q_live, audit_entry_ci_width, audit_entry_method = _entry_authority_from_decision_audit(events)
+        if certificate_q_live is None and audit_q_live is not None:
+            certificate_q_live = audit_q_live
+        if certificate_entry_ci_width <= 0.0 and audit_entry_ci_width > 0.0:
+            certificate_entry_ci_width = audit_entry_ci_width
+        if not certificate_entry_method and audit_entry_method:
+            certificate_entry_method = audit_entry_method
     if certificate_q_live is not None:
         identity["p_posterior"] = certificate_q_live
     if certificate_entry_ci_width > 0.0:

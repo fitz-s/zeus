@@ -83,20 +83,14 @@ _edli_market_channel_thread: "threading.Thread | None" = None
 # discipline, and the lock is per-process by construction.)
 _market_substrate_refresh_lock = threading.Lock()
 
-# Live-execution-mode constants (moved verbatim from src/main.py:83-96) — needed by the
+# Live-execution-mode constants (kept aligned with src/main.py) — needed by the
 # reconcile-runtime gate. Kept LOCAL here so the lane module never imports src.main.
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
     "disabled",
 }
 EDLI_EVENT_DRIVEN_MODES = {
-    "edli_shadow_no_submit",
-    "edli_submit_disabled_bridge",
-    "edli_live_canary",
     "edli_live",
 }
 
@@ -841,7 +835,7 @@ def _edli_durable_fill_bridge_scan(
         legacy_position_id = edli_bridge_position_id_legacy(aggregate_id)
         existing = conn.execute(
             """
-            SELECT position_id
+            SELECT position_id, p_posterior, entry_method
               FROM position_current
              WHERE position_id IN (?, ?)
              ORDER BY CASE WHEN position_id = ? THEN 0 ELSE 1 END
@@ -868,6 +862,34 @@ def _edli_durable_fill_bridge_scan(
                         existing_position_id,
                         exc,
                     )
+                try:
+                    p_posterior = float(_row_get(existing, "p_posterior") or 0.0)
+                except (TypeError, ValueError):
+                    p_posterior = 0.0
+                entry_method = str(_row_get(existing, "entry_method") or "")
+                if p_posterior <= 0.0 or entry_method in {"", "ens_member_counting"}:
+                    try:
+                        result = materialize_position_current_from_edli_fill(
+                            conn, aggregate_id, now=now
+                        )
+                        if result is not None:
+                            logger.warning(
+                                "EDLI durable fill-bridge: REPAIRED incomplete bridged fill "
+                                "aggregate=%s -> position_id=%s p_posterior_was=%s "
+                                "entry_method_was=%s",
+                                aggregate_id,
+                                result.get("position_id"),
+                                p_posterior,
+                                entry_method,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "EDLI durable fill-bridge: incomplete bridged fill repair failed "
+                            "for aggregate=%s position_id=%s: %s",
+                            aggregate_id,
+                            existing_position_id,
+                            exc,
+                        )
             # Already bridged (wide or legacy id) — idempotent skip.
             continue
 
@@ -968,10 +990,7 @@ def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
         return False
     if bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
         return True
-    return (
-        _live_execution_mode(edli_cfg) == "edli_shadow_no_submit"
-        and _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED")
-    )
+    return False
 
 
 # ---------------------------------------------------------------------------

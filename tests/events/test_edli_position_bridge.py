@@ -405,6 +405,125 @@ def test_bridge_projects_qkernel_authority_into_position_current(conn):
     assert row["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
 
+def test_bridge_projects_qkernel_authority_from_decision_audit_when_cert_unreadable(conn):
+    aggregate_id = "agg-edli-qkernel-audit-only-1"
+    pre_submit = {
+        "event_id": EVENT_ID,
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "final_intent_id": FINAL_INTENT_ID,
+        "strategy_key": "center_buy",
+        "condition_id": CONDITION_ID,
+        "token_id": ELECTED_YES_TOKEN,
+        "side": "BUY",
+        "direction": "buy_yes",
+        "native_token_side": "YES",
+        "outcome_label": "YES",
+        "city": "Tokyo",
+        "target_date": "2026-06-26",
+        "bin_label": "22C",
+        "metric": "low",
+        "unit": "C",
+        "q_live": 0.0,
+        "expected_edge_source_certificate_hash": "missing-actionable-cert",
+    }
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": EVENT_ID,
+            "final_intent_id": FINAL_INTENT_ID,
+            "decision_audit": {
+                "q_live": 0.18105161173018375,
+                "q_lcb_5pct": 0.01935548685529438,
+                "qkernel_execution_economics": {
+                    "side": "YES",
+                    "q_dot_payoff": 0.1507234,
+                    "payoff_q_lcb": 0.1374248,
+                },
+            },
+        },
+    )
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=3, event_type="ExecutionCommandCreated",
+                       payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "execution_command_id": EXECUTION_COMMAND_ID})
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=4, event_type="UserTradeObserved",
+                       payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "trade_status": "CONFIRMED",
+                                "fill_authority_state": "FILL_CONFIRMED", "venue_order_id": VENUE_ORDER_ID,
+                                "filled_size": 314.8, "avg_fill_price": 0.005, "fees": 0.0}, source_authority="user_channel")
+
+    materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    row = _position_current_rows(conn)[0]
+    assert row["entry_method"] == "qkernel_spine"
+    assert row["p_posterior"] == pytest.approx(0.1507234)
+    assert row["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
+
+
+def test_durable_fill_bridge_repairs_incomplete_existing_projection(conn):
+    from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+
+    aggregate_id = "agg-edli-qkernel-repair-existing-1"
+    pre_submit = {
+        "event_id": EVENT_ID,
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "final_intent_id": FINAL_INTENT_ID,
+        "strategy_key": "center_buy",
+        "condition_id": CONDITION_ID,
+        "token_id": ELECTED_YES_TOKEN,
+        "side": "BUY",
+        "direction": "buy_yes",
+        "native_token_side": "YES",
+        "outcome_label": "YES",
+        "city": "Tokyo",
+        "target_date": "2026-06-26",
+        "bin_label": "22C",
+        "metric": "low",
+        "unit": "C",
+        "q_live": 0.0,
+    }
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=2, event_type="ExecutionCommandCreated",
+                       payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "execution_command_id": EXECUTION_COMMAND_ID})
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=3, event_type="UserTradeObserved",
+                       payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "trade_status": "CONFIRMED",
+                                "fill_authority_state": "FILL_CONFIRMED", "venue_order_id": VENUE_ORDER_ID,
+                                "filled_size": 314.8, "avg_fill_price": 0.005, "fees": 0.0}, source_authority="user_channel")
+    materialize_position_current_from_edli_fill(conn, aggregate_id)
+    row = _position_current_rows(conn)[0]
+    assert row["p_posterior"] == 0.0
+    assert row["entry_method"] == "ens_member_counting"
+
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=4,
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": EVENT_ID,
+            "final_intent_id": FINAL_INTENT_ID,
+            "decision_audit": {
+                "qkernel_execution_economics": {
+                    "side": "YES",
+                    "q_dot_payoff": 0.1507234,
+                    "payoff_q_lcb": 0.1374248,
+                },
+            },
+        },
+    )
+
+    _edli_durable_fill_bridge_scan(
+        conn,
+        now=datetime(2026, 6, 25, 14, 40, tzinfo=timezone.utc),
+        already_bridged_repair_limit=10,
+    )
+
+    repaired = _position_current_rows(conn)[0]
+    assert repaired["entry_method"] == "qkernel_spine"
+    assert repaired["p_posterior"] == pytest.approx(0.1507234)
+
+
 def test_bridge_allows_day0_buy_no_settlement_capture(conn):
     aggregate_id = "agg-edli-day0-buyno-1"
     pre_submit = {
