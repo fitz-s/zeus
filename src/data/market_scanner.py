@@ -4148,6 +4148,98 @@ def _prefetch_selected_orderbooks(
     return books
 
 
+def _prefetch_selected_orderbooks_from_feasibility(
+    conn,
+    selected_candidates: list[tuple],
+    *,
+    captured: datetime,
+    already_prefetched: set[str] | None = None,
+) -> dict[str, dict]:
+    """Use fresh live price-channel book evidence when direct CLOB batch misses.
+
+    ``execution_feasibility_evidence`` is the trade-class live quote witness table
+    written by the price-channel daemon. This path does not create a second price
+    authority; it reuses the same CLOB-derived book rows already required by the
+    submit witness, and the reconstructed book still passes snapshot identity and
+    top-of-book validation before any candidate can become executable.
+    """
+
+    if not _table_exists(conn, "execution_feasibility_evidence"):
+        return {}
+    already = set(already_prefetched or set())
+    max_age_seconds = _positive_float_env(
+        "ZEUS_MARKET_DISCOVERY_FEASIBILITY_BOOK_MAX_AGE_SECONDS",
+        120.0,
+    )
+    cutoff = captured.astimezone(timezone.utc) - timedelta(seconds=max_age_seconds)
+    books: dict[str, dict] = {}
+    for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
+        token_id = _selected_token_for_direction(outcome, direction)
+        if not token_id or token_id in already or token_id in books:
+            continue
+        row = conn.execute(
+            """
+            SELECT token_id, direction, quote_seen_at, book_hash_before,
+                   best_bid_before, best_ask_before, depth_before_json
+              FROM execution_feasibility_evidence
+             WHERE token_id = ?
+               AND direction = ?
+             ORDER BY quote_seen_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (token_id, str(direction)),
+        ).fetchone()
+        if row is None:
+            continue
+        data = dict(row)
+        quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
+        if quote_seen_at is None or quote_seen_at < cutoff:
+            continue
+        book = _orderbook_from_feasibility_row(data, outcome=outcome)
+        if book is not None:
+            books[token_id] = book
+    return books
+
+
+def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, Any]) -> dict[str, Any] | None:
+    token_id = str(row.get("token_id") or "").strip()
+    if not token_id:
+        return None
+    try:
+        depth = json.loads(str(row.get("depth_before_json") or "{}"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(depth, dict):
+        return None
+    bids = depth.get("bids")
+    asks = depth.get("asks")
+    if not isinstance(bids, list) or not isinstance(asks, list):
+        return None
+    book: dict[str, Any] = {
+        "asset_id": token_id,
+        "market": token_id,
+        "bids": bids,
+        "asks": asks,
+        "hash": str(row.get("book_hash_before") or ""),
+    }
+    gamma_market_raw = outcome.get("gamma_market_raw")
+    if not isinstance(gamma_market_raw, dict):
+        gamma_market_raw = {}
+    tick_size = _first_field(outcome, "min_tick_size", "tick_size", "minimum_tick_size", "minTickSize")
+    if tick_size is None:
+        tick_size = _first_field(gamma_market_raw, "min_tick_size", "tick_size", "minimum_tick_size", "minTickSize")
+    min_order_size = _first_field(outcome, "min_order_size", "minimum_order_size", "minOrderSize")
+    if min_order_size is None:
+        min_order_size = _first_field(gamma_market_raw, "min_order_size", "minimum_order_size", "minOrderSize")
+    neg_risk = _boolish_market_field(outcome, "neg_risk", "negRisk", "negative_risk")
+    if neg_risk is None:
+        neg_risk = _boolish_market_field(gamma_market_raw, "neg_risk", "negRisk", "negative_risk")
+    book["tick_size"] = str(tick_size or "0.01")
+    book["min_order_size"] = str(min_order_size or "1")
+    book["neg_risk"] = bool(neg_risk)
+    return book
+
+
 def refresh_executable_market_substrate_snapshots(
     conn,
     *,
@@ -4362,6 +4454,19 @@ def refresh_executable_market_substrate_snapshots(
         selected_candidates,
         deadline=prefetch_deadline,
     )
+    if batch_orderbook_supported:
+        prefetched_books.update(
+            {
+                token_id: book
+                for token_id, book in _prefetch_selected_orderbooks_from_feasibility(
+                    conn,
+                    selected_candidates,
+                    captured=captured,
+                    already_prefetched=set(prefetched_books),
+                ).items()
+                if token_id not in prefetched_books
+            }
+        )
     prefetch_missing_skipped = 0
     clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}

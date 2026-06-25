@@ -1503,6 +1503,81 @@ def test_prefetch_singular_fallback_stops_after_default_failure_cap(monkeypatch)
     assert books == {}
 
 
+def test_prefetch_missing_orderbook_uses_fresh_feasibility_book(monkeypatch):
+    """Priority substrate can use the live price-channel witness when /books misses."""
+
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e1",
+            "evt1",
+            "cond-1",
+            "yes-1",
+            "YES",
+            "buy_yes",
+            _NOW.isoformat(),
+            "hash-1",
+            0.24,
+            0.27,
+            '{"bids":[{"price":"0.24","size":"10"}],"asks":[{"price":"0.27","size":"12"}]}',
+            _NOW.isoformat(),
+            1,
+        ),
+    )
+    conn.commit()
+    outcome = {
+        "token_id": "yes-1",
+        "no_token_id": "no-1",
+        "min_tick_size": "0.001",
+        "min_order_size": "1",
+        "neg_risk": True,
+    }
+    candidates = [(0, 0, 0, {"slug": "m1"}, outcome, "cond-1", "buy_yes")]
+
+    books = ms._prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        candidates,
+        captured=_NOW,
+        already_prefetched=set(),
+    )
+
+    assert sorted(books) == ["yes-1"]
+    assert books["yes-1"]["asset_id"] == "yes-1"
+    assert books["yes-1"]["asks"][0]["price"] == "0.27"
+    assert books["yes-1"]["tick_size"] == "0.001"
+    assert books["yes-1"]["neg_risk"] is True
+
+
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
     """A transient trade-DB WAL lock must not drop an otherwise fresh bin."""
 
