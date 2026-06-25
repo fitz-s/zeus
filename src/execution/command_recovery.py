@@ -38,6 +38,7 @@ import json
 import re
 import sqlite3
 import time
+from dataclasses import replace
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -49,6 +50,7 @@ from src.execution.command_bus import (
     CommandState,
     CommandEventType,
     IN_FLIGHT_STATES,
+    IntentKind,
     VenueCommand,
 )
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
@@ -6369,6 +6371,15 @@ def _latest_cancel_unknown_payload(events: list[dict]) -> dict | None:
     return latest_payload
 
 
+def _latest_maker_rest_cancel_requested_payload(events: list[dict]) -> dict | None:
+    latest_event_type, latest_payload = _latest_event_payload(events)
+    if latest_event_type != CommandEventType.CANCEL_REQUESTED.value:
+        return None
+    if str(latest_payload.get("source") or "") != "maker_rest_escalation":
+        return None
+    return latest_payload
+
+
 def _trade_matches_venue_order_id(raw: dict, venue_order_id: str) -> bool:
     if str(raw.get("taker_order_id") or raw.get("order_id") or raw.get("orderID") or "") == venue_order_id:
         return True
@@ -9918,13 +9929,47 @@ def _reconcile_row(
                     cmd.command_id, venue_status,
                 )
                 return "advanced"
-            else:
-                # Order still active; cancel ack pending.
-                logger.info(
-                    "recovery: command %s CANCEL_PENDING; venue status=%s; leaving (cancel ack pending)",
-                    cmd.command_id, venue_status,
-                )
-                return "stayed"
+            if (
+                cmd.intent_kind == IntentKind.ENTRY
+                and venue_status in _LIVE_ORDER_STATUSES
+                and not _is_positive_decimal(_order_matched_size(venue_resp))
+            ):
+                events = _command_events(conn, cmd.command_id)
+                cancel_requested_payload = _latest_maker_rest_cancel_requested_payload(events)
+                if cancel_requested_payload is not None:
+                    append_event(
+                        conn,
+                        command_id=cmd.command_id,
+                        event_type=CommandEventType.CANCEL_REPLACE_BLOCKED.value,
+                        occurred_at=now,
+                        payload={
+                            "venue_order_id": venue_order_id,
+                            "reason": "post_cancel_unknown_possible_side_effect",
+                            "requires_m5_reconcile": True,
+                            "semantic_cancel_status": "CANCEL_UNKNOWN",
+                            "cancel_outcome": {
+                                "status": "LIVE_AFTER_CANCEL_REQUEST",
+                                "venue_status": venue_status,
+                                "source": "command_recovery_cancel_pending_live_read",
+                                "latest_cancel_requested_payload": cancel_requested_payload,
+                            },
+                        },
+                    )
+                    review_cmd = replace(cmd, state=CommandState.REVIEW_REQUIRED)
+                    outcome = _review_required_cancel_unknown_live_order_recovery(
+                        conn,
+                        review_cmd,
+                        client,
+                    )
+                    if outcome == "error":
+                        return "error"
+                    return "advanced"
+            # Order still active; cancel ack pending.
+            logger.info(
+                "recovery: command %s CANCEL_PENDING; venue status=%s; leaving (cancel ack pending)",
+                cmd.command_id, venue_status,
+            )
+            return "stayed"
 
         # Should not reach here for valid IN_FLIGHT_STATES.
         logger.warning("recovery: command %s state=%s not handled; skipping", cmd.command_id, state.value)

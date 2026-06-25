@@ -415,6 +415,12 @@ def parse_cancel_response(raw: Any) -> CancelOutcome:
         return CancelOutcome("CANCELED", None, response)
     if response.get("success") is True and status in {"", "OK", "SUCCESS"}:
         return CancelOutcome("CANCELED", None, response)
+    if status in {"NOT_CANCELED", "NOT_CANCELLED", "CANCEL_NOT_CANCELED"}:
+        return CancelOutcome(
+            "NOT_CANCELED",
+            _reason_from(response.get("errorMessage") or response.get("error") or status, "not_canceled"),
+            response,
+        )
     return CancelOutcome("UNKNOWN", "unrecognized_cancel_response", response)
 
 

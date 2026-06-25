@@ -334,11 +334,14 @@ def run_persisted_cancels_for_expired_rests(
 
     1. append CANCEL_REQUESTED and commit,
     2. close the connection before the HTTP cancel,
-    3. append CANCEL_ACKED / CANCEL_FAILED / CANCEL_REPLACE_BLOCKED and commit.
+    3. append CANCEL_ACKED / CANCEL_REPLACE_BLOCKED and commit.
 
     A command whose pre-side-effect journal write fails is not sent to the venue.
     A successful venue cancel whose post-side-effect journal write fails is not
     harvested for redecision; command recovery must resolve the CANCEL_PENDING row.
+    ``NOT_CANCELED`` is cancel-unknown for ENTRY maker rests, not terminal
+    failure: the venue may still have a live order, or the cancel may have raced
+    with a match/cancel. M5 recovery owns the next proof read.
     """
     from src.execution.exit_safety import parse_cancel_response
 
@@ -397,10 +400,12 @@ def run_persisted_cancels_for_expired_rests(
             event_type = "CANCEL_ACKED"
             payload = {"venue_order_id": order_id, "cancel_outcome": outcome.raw_response}
         elif outcome is not None and outcome.status == "NOT_CANCELED":
-            event_type = "CANCEL_FAILED"
+            event_type = "CANCEL_REPLACE_BLOCKED"
             payload = {
                 "venue_order_id": order_id,
-                "reason": outcome.reason,
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "requires_m5_reconcile": True,
+                "semantic_cancel_status": "CANCEL_UNKNOWN",
                 "cancel_outcome": outcome.raw_response,
             }
         else:

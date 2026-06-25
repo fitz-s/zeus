@@ -2469,6 +2469,48 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
 
+    def test_maker_rest_cancel_pending_live_order_restores_acked(self, conn, mock_client):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-maker-live")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "venue_order_id": "vord-maker-live",
+                "source": "maker_rest_escalation",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "vord-maker-live",
+            "status": "LIVE",
+            "matched_size": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-2]["event_type"] == "CANCEL_REPLACE_BLOCKED"
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+        cancel_payload = json.loads(events[-2]["payload_json"])
+        clear_payload = json.loads(events[-1]["payload_json"])
+        assert cancel_payload["semantic_cancel_status"] == "CANCEL_UNKNOWN"
+        assert cancel_payload["requires_m5_reconcile"] is True
+        assert clear_payload["proof_class"] == "cancel_unknown_venue_order_live"
+
     def test_acked_terminal_no_fill_order_fact_expires_command_and_voids_pending_entry(
         self,
         conn,
@@ -5703,7 +5745,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["completed_partial_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        assert _get_state(conn, "cmd-exit") == "FILLED"
         event_types = [e["event_type"] for e in _get_events(conn, "cmd-exit")]
         assert event_types[-1] == "FILL_CONFIRMED"
         current = conn.execute(
