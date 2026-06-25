@@ -5109,10 +5109,50 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # per dispatch: "DO NOT migrate data. DO NOT touch state/*.db."
 
 
+_FORECASTS_LIVE_REQUIRED_INDEXES: frozenset[str] = frozenset(
+    {
+        "idx_forecast_posteriors_live_family_cycle",
+        "idx_raw_model_forecasts_current_family_cycle_members",
+    }
+)
+
+
 def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
-    """B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled; this check is now a no-op.
-    Schema drift is detected via content-hash fingerprint (scripts/check_schema_fingerprint.py).
-    Retained for call-site compatibility."""
+    """Assert the forecasts DB has live-required schema surfaces.
+
+    B2 (2026-05-28) removed the old schema-version counter; this assertion is the
+    lightweight runtime guard that prevents read-only live boot from declaring a
+    partially migrated forecasts DB "ready". Full DDL repair remains owned by
+    ``init_schema_forecasts`` on the forecast ingest daemon.
+    """
+
+    indexes = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    missing_indexes = sorted(_FORECASTS_LIVE_REQUIRED_INDEXES - indexes)
+    if missing_indexes:
+        raise RuntimeError(
+            "forecasts DB missing live-required indexes: "
+            f"{missing_indexes}; run init_schema_forecasts before live trading"
+        )
+
+    for table in ("forecast_posteriors", "raw_model_forecasts"):
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone() is None:
+            continue
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "trade_authority_status" in columns:
+            raise RuntimeError(
+                f"forecasts DB table {table} still has retired trade_authority_status column"
+            )
 
 
 _CALIBRATION_DECISION_GROUP_DDL = """

@@ -79,8 +79,9 @@ _FORECAST_BOOT_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
             "target_date",
             "metric",
             "source_cycle_time",
+            "source_available_at",
             "forecast_value_c",
-            "trade_authority_status",
+            "endpoint",
         }
     ),
     "readiness_state": frozenset({"strategy_key", "status", "dependency_json", "provenance_json"}),
@@ -90,6 +91,13 @@ _FORECAST_BOOT_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
     "job_run": frozenset({"job_run_id"}),
     "cycle_advance_enqueues": frozenset({"seed_file", "held_position", "enqueued_at"}),
 }
+
+_FORECAST_BOOT_REQUIRED_INDEXES: frozenset[str] = frozenset(
+    {
+        "idx_forecast_posteriors_live_family_cycle",
+        "idx_raw_model_forecasts_current_family_cycle_members",
+    }
+)
 
 FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"       # 00z trigger
 FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID = "forecast_live_opendata_daily_mx2t6_12z"  # 12z trigger
@@ -276,6 +284,16 @@ def _forecast_boot_schema_ready(conn: Any) -> bool:
             }
             if not required_columns.issubset(columns):
                 return False
+            if "trade_authority_status" in columns:
+                return False
+        indexes = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        if not _FORECAST_BOOT_REQUIRED_INDEXES.issubset(indexes):
+            return False
     except Exception:
         return False
     return True

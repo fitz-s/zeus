@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from src.ingest.forecast_live_daemon import (
+    _FORECAST_BOOT_REQUIRED_INDEXES,
     _FORECAST_BOOT_REQUIRED_SCHEMA,
     _forecast_boot_schema_ready,
 )
@@ -18,6 +19,9 @@ def _conn_with_required_schema(*, omit: tuple[str, str] | None = None) -> sqlite
                 continue
             defs.append(f"{column} TEXT")
         conn.execute(f"CREATE TABLE {table} ({', '.join(defs)})")
+    for index_name in _FORECAST_BOOT_REQUIRED_INDEXES:
+        table = "raw_model_forecasts" if "raw_model_forecasts" in index_name else "forecast_posteriors"
+        conn.execute(f"CREATE INDEX {index_name} ON {table} (city)")
     return conn
 
 
@@ -32,6 +36,24 @@ def test_forecast_live_boot_schema_fast_check_accepts_present_core_schema() -> N
 def test_forecast_live_boot_schema_fast_check_rejects_missing_required_column() -> None:
     conn = _conn_with_required_schema(omit=("forecast_posteriors", "runtime_layer"))
     try:
+        assert _forecast_boot_schema_ready(conn) is False
+    finally:
+        conn.close()
+
+
+def test_forecast_live_boot_schema_fast_check_rejects_missing_live_index() -> None:
+    conn = _conn_with_required_schema()
+    try:
+        conn.execute("DROP INDEX idx_raw_model_forecasts_current_family_cycle_members")
+        assert _forecast_boot_schema_ready(conn) is False
+    finally:
+        conn.close()
+
+
+def test_forecast_live_boot_schema_fast_check_rejects_retired_authority_column() -> None:
+    conn = _conn_with_required_schema()
+    try:
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN trade_authority_status TEXT")
         assert _forecast_boot_schema_ready(conn) is False
     finally:
         conn.close()

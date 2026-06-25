@@ -537,8 +537,8 @@ def _run_schema_guards() -> list:
     (name, passed, detail).
 
     Checks:
-      world_db_schema    — assert_schema_current (structural no-op) + canonical table presence
-      forecasts_db_schema — assert_schema_current_forecasts (structural no-op) + canonical table presence
+      world_db_schema    — assert_schema_current + canonical table presence
+      forecasts_db_schema — assert_schema_current_forecasts + live-required schema presence
       world_registry     — assert_db_matches_registry(WORLD)
       forecasts_registry — assert_db_matches_registry(FORECASTS)
     """

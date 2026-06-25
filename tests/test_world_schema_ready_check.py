@@ -166,8 +166,8 @@ class TestWorldSchemaReadyCheck:
         assert "zeus-forecasts.db" in msg
         assert "forecast-live" in msg
 
-    def test_forecasts_schema_ready_check_uses_canonical_table_presence(self, tmp_path, monkeypatch):
-        """Forecast schema proof comes from canonical table presence in zeus-forecasts.db."""
+    def test_forecasts_schema_ready_check_uses_live_required_schema_presence(self, tmp_path, monkeypatch):
+        """Forecast schema proof includes canonical tables and live-required hot-path indexes."""
         import sqlite3
 
         import src.state.db as db_module
@@ -178,6 +178,16 @@ class TestWorldSchemaReadyCheck:
             conn.execute("CREATE TABLE ensemble_snapshots (id INTEGER PRIMARY KEY)")
             conn.execute("CREATE TABLE settlement_outcomes (id INTEGER PRIMARY KEY)")
             conn.execute("CREATE TABLE source_run (id INTEGER PRIMARY KEY)")
+            conn.execute("CREATE TABLE forecast_posteriors (city TEXT)")
+            conn.execute("CREATE TABLE raw_model_forecasts (city TEXT)")
+            conn.execute(
+                "CREATE INDEX idx_forecast_posteriors_live_family_cycle "
+                "ON forecast_posteriors(city)"
+            )
+            conn.execute(
+                "CREATE INDEX idx_raw_model_forecasts_current_family_cycle_members "
+                "ON raw_model_forecasts(city)"
+            )
         monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db)
 
         assert _startup_forecasts_schema_ready_check() == "ready"
