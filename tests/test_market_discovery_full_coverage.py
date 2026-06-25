@@ -1352,6 +1352,45 @@ def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
     assert len(books) == 2  # only the first chunk's tokens; the rest retry later
 
 
+def test_prefetch_failed_large_chunk_splits_to_retry_chunks(monkeypatch):
+    """A large POST /books failure must not zero the whole substrate price surface."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            if len(call) == 6:
+                raise TimeoutError("handshake timeout")
+            return {t: {"asset_id": t, "bids": [], "asks": []} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
+
+    assert calls == [
+        ["yes-0", "yes-1", "yes-2", "yes-3", "yes-4", "yes-5"],
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+        ["yes-4", "yes-5"],
+    ]
+    assert sorted(books) == [f"yes-{i}" for i in range(6)]
+
+
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
     """A transient trade-DB WAL lock must not drop an otherwise fresh bin."""
 

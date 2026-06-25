@@ -512,6 +512,29 @@ def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
     assert pulls[0][1].detail > cr.IMPROVE_DELTA
 
 
+def test_rest_pull_holds_still_good_rest_without_material_reprice():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.71")
+    rest = cr.OpenRest(
+        command_id="cmd1", venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc", bin_label="b30", side="buy_yes",
+        condition_id="0xc30", resting_posterior=0.90, resting_snapshot_id="snap1",
+        limit_price=0.70, quote_age_ms=6 * 60 * 1000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == [], "a still-good maker rest needs material repricing before cancel-replace"
+
+
 def test_rest_pull_does_not_refresh_confirmed_value_on_stale_book():
     world = _mem_world()
     trade = _mem_trade()

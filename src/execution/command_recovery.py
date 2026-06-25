@@ -308,6 +308,57 @@ def _order_matched_size(raw: dict) -> str:
     return str(value)
 
 
+def _explicit_point_order_matched_size(point_order: dict | None) -> str | None:
+    """Matched/filled size only when the venue point-order payload says it explicitly.
+
+    Do not infer from making/taking amounts here: for canceled/expired orders those
+    fields can describe original order amounts, not executed exposure. Terminal
+    no-fill release needs a positive zero-fill proof, not a default.
+    """
+
+    value = _first_present(
+        point_order,
+        "matched_size",
+        "matchedSize",
+        "size_matched",
+        "sizeMatched",
+        "matched",
+        "matched_amount",
+        "matchedAmount",
+        "filled_size",
+        "filledSize",
+    )
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _terminal_point_order_zero_fill_proven(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    point_order: dict | None,
+) -> tuple[bool, str]:
+    """Return whether a terminal venue point-order proves zero fill.
+
+    A terminal venue status alone is not enough: CLOB orders can be canceled or
+    expire after partial matching. We release duplicate locks only when the point
+    order explicitly reports matched/filled size == 0 and both local trade facts
+    and point-order trade ids are absent.
+    """
+
+    matched_size = _explicit_point_order_matched_size(point_order)
+    if matched_size is None:
+        return False, "terminal_matched_size_missing"
+    if not _decimal_is_zero(matched_size):
+        return False, "terminal_matched_size_positive_or_invalid"
+    if _fill_trade_fact_count(conn, command_id) > 0:
+        return False, "terminal_positive_trade_fact_exists"
+    if _point_order_trade_ids(point_order):
+        return False, "terminal_point_order_trade_ids_present"
+    return True, "terminal_zero_fill_proven"
+
+
 def _is_positive_decimal(value: object) -> bool:
     try:
         parsed = Decimal(str(value))
@@ -9980,19 +10031,47 @@ def _reconcile_row(
                     )
                     return "advanced"
                 if venue_status in {"CANCELLED", "CANCELED", "EXPIRED"}:
-                    # Venue positively reports terminal no-fill for this order id. This is not an
-                    # operator-review state: leaving it in REVIEW_REQUIRED keeps the same-token
-                    # duplicate lock active and burns redecision events as active-order suppressions.
+                    no_fill_proven, no_fill_reason = _terminal_point_order_zero_fill_proven(
+                        conn,
+                        command_id=cmd.command_id,
+                        point_order=venue_resp,
+                    )
+                    if not no_fill_proven:
+                        append_event(
+                            conn,
+                            command_id=cmd.command_id,
+                            event_type=CommandEventType.REVIEW_REQUIRED.value,
+                            occurred_at=now,
+                            payload={
+                                "reason": no_fill_reason,
+                                "venue_order_id": venue_order_id,
+                                "venue_status": venue_status,
+                                "venue_response": venue_resp,
+                            },
+                        )
+                        logger.warning(
+                            "recovery: command %s SUBMITTING terminal status=%s lacks zero-fill proof -> REVIEW_REQUIRED (%s)",
+                            cmd.command_id,
+                            venue_status,
+                            no_fill_reason,
+                        )
+                        return "advanced"
                     append_event(
                         conn,
                         command_id=cmd.command_id,
                         event_type=CommandEventType.EXPIRED.value,
                         occurred_at=now,
-                        payload={"reason": "recovery_venue_terminal_no_fill", "venue_order_id": venue_order_id, "venue_status": venue_status},
+                        payload={
+                            "reason": "recovery_venue_terminal_no_fill",
+                            "venue_order_id": venue_order_id,
+                            "venue_status": venue_status,
+                            "zero_fill_proof": no_fill_reason,
+                        },
                     )
                     logger.info(
-                        "recovery: command %s SUBMITTING -> EXPIRED (venue terminal no-fill status=%s)",
-                        cmd.command_id, venue_status,
+                        "recovery: command %s SUBMITTING -> EXPIRED (venue terminal zero-fill status=%s)",
+                        cmd.command_id,
+                        venue_status,
                     )
                     return "advanced"
                 # Live / matched / active — ack it.
@@ -10048,16 +10127,47 @@ def _reconcile_row(
                     )
                     return "advanced"
                 if venue_status in {"CANCELLED", "CANCELED", "EXPIRED"}:
+                    no_fill_proven, no_fill_reason = _terminal_point_order_zero_fill_proven(
+                        conn,
+                        command_id=cmd.command_id,
+                        point_order=venue_resp,
+                    )
+                    if not no_fill_proven:
+                        append_event(
+                            conn,
+                            command_id=cmd.command_id,
+                            event_type=CommandEventType.REVIEW_REQUIRED.value,
+                            occurred_at=now,
+                            payload={
+                                "reason": no_fill_reason,
+                                "venue_order_id": venue_order_id,
+                                "venue_status": venue_status,
+                                "venue_response": venue_resp,
+                            },
+                        )
+                        logger.warning(
+                            "recovery: command %s UNKNOWN terminal status=%s lacks zero-fill proof -> REVIEW_REQUIRED (%s)",
+                            cmd.command_id,
+                            venue_status,
+                            no_fill_reason,
+                        )
+                        return "advanced"
                     append_event(
                         conn,
                         command_id=cmd.command_id,
                         event_type=CommandEventType.EXPIRED.value,
                         occurred_at=now,
-                        payload={"reason": "recovery_venue_terminal_no_fill", "venue_order_id": venue_order_id, "venue_status": venue_status},
+                        payload={
+                            "reason": "recovery_venue_terminal_no_fill",
+                            "venue_order_id": venue_order_id,
+                            "venue_status": venue_status,
+                            "zero_fill_proof": no_fill_reason,
+                        },
                     )
                     logger.info(
-                        "recovery: command %s UNKNOWN -> EXPIRED (venue terminal no-fill status=%s)",
-                        cmd.command_id, venue_status,
+                        "recovery: command %s UNKNOWN -> EXPIRED (venue terminal zero-fill status=%s)",
+                        cmd.command_id,
+                        venue_status,
                     )
                     return "advanced"
                 append_event(

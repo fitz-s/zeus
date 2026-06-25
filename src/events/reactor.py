@@ -1238,7 +1238,7 @@ class OpportunityEventReactor:
         if self._family_market_absence_provider is None:
             return None
         last_reason = self._transient_requeue_reasons.get(event.event_id)
-        if last_reason != "EXECUTABLE_SNAPSHOT_BLOCKED":
+        if _money_path_reason_base(last_reason or "") != "EXECUTABLE_SNAPSHOT_BLOCKED":
             return None
         family = self._family_identity(event)
         if family is None:
@@ -1548,7 +1548,7 @@ class OpportunityEventReactor:
                 # attempt cap — the event requeues until a horizon terminal fires.
                 last_reason = self._transient_requeue_reasons.get(event.event_id)
                 retry_not_before = None
-                if last_reason == "EXECUTABLE_SNAPSHOT_BLOCKED":
+                if _money_path_reason_base(last_reason or "") == "EXECUTABLE_SNAPSHOT_BLOCKED":
                     retry_not_before = (
                         decision_time.astimezone(UTC)
                         + timedelta(seconds=_snapshot_block_retry_delay_seconds())

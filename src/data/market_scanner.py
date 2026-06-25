@@ -3943,10 +3943,13 @@ def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
 
 
 # Live CLOB probe 2026-06-06: POST /books accepts 500 token_id rows in one
-# request and returns the full set; 1000 rows returns 400.  Keep the chunk at
-# the proven upper envelope so a 500+ token weather substrate cycle does not
-# degrade back into hundreds of serial GET /book calls.
-_BATCH_ORDERBOOK_CHUNK = 500
+# request and returns the full set; 1000 rows returns 400.  Live 2026-06-25
+# later showed that envelope is not a latency-stable operating point: a 484-token
+# request repeatedly hit SSL handshake timeout and zeroed the entire price
+# surface.  Keep batching, but use smaller primary chunks and split failed
+# chunks before deferring to the next tick.
+_BATCH_ORDERBOOK_CHUNK = 100
+_BATCH_ORDERBOOK_RETRY_CHUNK = 25
 
 
 def _selected_token_for_direction(outcome: dict, direction: str) -> str:
@@ -3977,8 +3980,9 @@ def _prefetch_selected_orderbooks(
     wrapper is unavailable or the call fails, returns an empty map. Batch-capable
     warm callers should defer missing books to a later tick instead of degrading
     into serial per-token GET /book.
-    Chunked at ``_BATCH_ORDERBOOK_CHUNK`` tokens/request (the /books endpoint has
-    no documented per-call token cap; we chunk conservatively).
+    Chunked at ``_BATCH_ORDERBOOK_CHUNK`` tokens/request, with failed chunks split
+    to ``_BATCH_ORDERBOOK_RETRY_CHUNK`` so one large TLS/API failure cannot make
+    the whole substrate cycle price-blind.
     """
 
     getter = getattr(clob, "get_orderbook_snapshots", None)
@@ -4018,8 +4022,50 @@ def _prefetch_selected_orderbooks(
         0.75,
     )
 
+    primary_chunk_size = min(
+        _BATCH_ORDERBOOK_CHUNK,
+        _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_CHUNK", _BATCH_ORDERBOOK_CHUNK),
+    )
+    retry_chunk_size = min(
+        primary_chunk_size,
+        _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_RETRY_CHUNK", _BATCH_ORDERBOOK_RETRY_CHUNK),
+    )
+
+    def _fetch_chunk_with_split(chunk: list[str]) -> dict[str, dict]:
+        try:
+            chunk_books = getter(chunk)
+        except Exception as exc:
+            if len(chunk) <= retry_chunk_size:
+                logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
+                return {}
+            logger.warning(
+                "Batch orderbook prefetch chunk failed (%d tokens); retrying in %d-token chunks: %s",
+                len(chunk),
+                retry_chunk_size,
+                exc,
+            )
+            split_books: dict[str, dict] = {}
+            for sub_start in range(0, len(chunk), retry_chunk_size):
+                sub_chunk = chunk[sub_start : sub_start + retry_chunk_size]
+                try:
+                    sub_books = getter(sub_chunk)
+                except Exception as sub_exc:
+                    logger.warning(
+                        "Batch orderbook prefetch retry chunk failed (%d tokens): %s",
+                        len(sub_chunk),
+                        sub_exc,
+                    )
+                    continue
+                if isinstance(sub_books, dict):
+                    split_books.update(sub_books)
+            return split_books
+        if isinstance(chunk_books, dict):
+            return chunk_books
+        return {}
+
     books: dict[str, dict] = {}
-    for chunk_index, start in enumerate(range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK)):
+    total_chunks = (len(token_ids) + primary_chunk_size - 1) // primary_chunk_size
+    for chunk_index, start in enumerate(range(0, len(token_ids), primary_chunk_size)):
         # Budget gate applies to chunk 2+ ONLY: the first chunk is the one POST that
         # replaces the per-token GET storm, so it always runs. Later chunks of a
         # multi-chunk cycle are deferred to a later cycle when the window is spent.
@@ -4030,21 +4076,13 @@ def _prefetch_selected_orderbooks(
                     "Batch orderbook prefetch stopped after chunk %d/%d "
                     "(window %.3fs below %.3fs minimum); remaining tokens fall back per-token",
                     chunk_index,
-                    (len(token_ids) + _BATCH_ORDERBOOK_CHUNK - 1) // _BATCH_ORDERBOOK_CHUNK,
+                    total_chunks,
                     remaining_window,
                     min_prefetch_window,
                 )
                 break
-        chunk = token_ids[start : start + _BATCH_ORDERBOOK_CHUNK]
-        try:
-            chunk_books = getter(chunk)
-        except Exception as exc:
-            # One bad chunk must not abort the cycle; those tokens fall back to
-            # per-token GET /book inside capture.
-            logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
-            continue
-        if isinstance(chunk_books, dict):
-            books.update(chunk_books)
+        chunk = token_ids[start : start + primary_chunk_size]
+        books.update(_fetch_chunk_with_split(chunk))
     return books
 
 

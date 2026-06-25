@@ -215,13 +215,15 @@ def _assert_forecasts_schema_ready_for_ingest() -> None:
         init_schema_forecasts,
     )
 
-    if _forecasts_schema_current_lightweight():
-        logger.info("init_schema_forecasts skipped: live-required forecast schema surfaces present")
-        return
-
     conn = get_forecasts_connection(write_class="bulk")
     try:
-        init_schema_forecasts(conn)
+        if _forecasts_schema_current_lightweight():
+            logger.info(
+                "init_schema_forecasts skipped: fast forecast schema probe passed; "
+                "running full schema assertion"
+            )
+        else:
+            init_schema_forecasts(conn)
         assert_schema_current_forecasts(conn)
         conn.commit()
     finally:
