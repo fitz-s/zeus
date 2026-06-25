@@ -7085,6 +7085,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
     except Exception:  # noqa: BLE001
         return 0
     expire_ids: list[str] = []
+    candidates: list[tuple[str, str, str, str, str]] = []
     for row in rows:
         try:
             event_id = str(row[0] or "")
@@ -7096,49 +7097,102 @@ def _edli_expire_unready_forecast_snapshot_pending(
             continue
         if not (event_id and causal_snapshot_id and city and target_date and metric):
             continue
+        candidates.append((event_id, causal_snapshot_id, city, target_date, metric))
+    if not candidates:
+        return 0
+
+    family_keys = sorted({(city, target_date, metric) for _, _, city, target_date, metric in candidates})
+    latest_cycle_by_family: dict[tuple[str, str, str], str] = {}
+    _FORECAST_FAMILY_CHUNK = 250
+    for start in range(0, len(family_keys), _FORECAST_FAMILY_CHUNK):
+        chunk = family_keys[start : start + _FORECAST_FAMILY_CHUNK]
+        key_predicate = " OR ".join(
+            "(city = ? AND target_date = ? AND temperature_metric = ?)" for _ in chunk
+        )
+        params: list[Any] = [REPLACEMENT_0_1_PRODUCT_ID, decision_time, decision_time]
+        for city, target_date, metric in chunk:
+            params.extend([city, target_date, metric])
         try:
-            latest = forecasts_conn.execute(
-                """
-                SELECT source_cycle_time
+            latest_rows = forecasts_conn.execute(
+                f"""
+                SELECT city, target_date, temperature_metric, source_cycle_time
                   FROM forecast_posteriors
                  WHERE product_id = ?
-                   AND city = ?
-                   AND target_date = ?
-                   AND temperature_metric = ?
                    AND (source_available_at IS NULL OR source_available_at <= ?)
                    AND (computed_at IS NULL OR computed_at <= ?)
-                 ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
-                 LIMIT 1
+                   AND ({key_predicate})
+                 ORDER BY city ASC,
+                          target_date ASC,
+                          temperature_metric ASC,
+                          source_cycle_time DESC,
+                          computed_at DESC,
+                          posterior_id DESC
                 """,
-                (REPLACEMENT_0_1_PRODUCT_ID, city, target_date, metric, decision_time, decision_time),
-            ).fetchone()
+                tuple(params),
+            ).fetchall()
         except Exception:  # noqa: BLE001
             continue
-        if latest is None or latest[0] is None:
+        for latest in latest_rows:
+            key = (str(latest[0] or ""), str(latest[1] or ""), str(latest[2] or ""))
+            if key not in latest_cycle_by_family and latest[3] is not None:
+                latest_cycle_by_family[key] = str(latest[3] or "")
+
+    member_count_by_family_cycle: dict[tuple[str, str, str, str], int] = {}
+    families_by_cycle_date: dict[str, list[tuple[str, str, str]]] = {}
+    for key, source_cycle_time in latest_cycle_by_family.items():
+        cycle_date = str(source_cycle_time or "")[:10]
+        if len(cycle_date) == 10:
+            families_by_cycle_date.setdefault(cycle_date, []).append(key)
+    for cycle_date, keys in families_by_cycle_date.items():
+        try:
+            cycle_start = f"{cycle_date}T00:00:00+00:00"
+            cycle_end = f"{(date.fromisoformat(cycle_date) + timedelta(days=1)).isoformat()}T00:00:00+00:00"
+        except ValueError:
+            continue
+        for start in range(0, len(keys), _FORECAST_FAMILY_CHUNK):
+            chunk = keys[start : start + _FORECAST_FAMILY_CHUNK]
+            key_predicate = " OR ".join(
+                "(city = ? AND target_date = ? AND metric = ?)" for _ in chunk
+            )
+            params: list[Any] = [cycle_start, cycle_end, decision_time]
+            for city, target_date, metric in chunk:
+                params.extend([city, target_date, metric])
+            try:
+                count_rows = forecasts_conn.execute(
+                    f"""
+                    SELECT city, target_date, metric, COUNT(DISTINCT model)
+                      FROM raw_model_forecasts
+                     WHERE source_cycle_time >= ?
+                       AND source_cycle_time < ?
+                       AND source_available_at <= ?
+                       AND forecast_value_c IS NOT NULL
+                       AND ({key_predicate})
+                     GROUP BY city, target_date, metric
+                    """,
+                    tuple(params),
+                ).fetchall()
+            except Exception:  # noqa: BLE001
+                continue
+            for count_row in count_rows:
+                key = (
+                    str(count_row[0] or ""),
+                    str(count_row[1] or ""),
+                    str(count_row[2] or ""),
+                    cycle_date,
+                )
+                member_count_by_family_cycle[key] = int(count_row[3] or 0)
+
+    for event_id, causal_snapshot_id, city, target_date, metric in candidates:
+        latest_cycle = latest_cycle_by_family.get((city, target_date, metric))
+        if latest_cycle is None:
             expire_ids.append(event_id)
             continue
-        cycle_date = str(latest[0] or "")[:10]
+        cycle_date = str(latest_cycle or "")[:10]
         current_causal = f"rmf-{city}|{target_date}|{metric}|{cycle_date}"
         if len(cycle_date) != 10 or causal_snapshot_id != current_causal:
             expire_ids.append(event_id)
             continue
-        try:
-            count_row = forecasts_conn.execute(
-                """
-                SELECT COUNT(DISTINCT model)
-                  FROM raw_model_forecasts
-                 WHERE city = ?
-                   AND target_date = ?
-                   AND metric = ?
-                   AND date(source_cycle_time) = ?
-                   AND source_available_at <= ?
-                   AND forecast_value_c IS NOT NULL
-                """,
-                (city, target_date, metric, cycle_date, decision_time),
-            ).fetchone()
-            member_count = int(count_row[0] or 0) if count_row is not None else 0
-        except Exception:  # noqa: BLE001
-            member_count = 0
+        member_count = member_count_by_family_cycle.get((city, target_date, metric, cycle_date), 0)
         if member_count < 3:
             expire_ids.append(event_id)
     if not expire_ids:

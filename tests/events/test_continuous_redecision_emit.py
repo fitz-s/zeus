@@ -1054,6 +1054,14 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
     )
 
 
+def test_unready_replacement_sweep_batches_forecast_reads():
+    src = inspect.getsource(main._edli_expire_unready_forecast_snapshot_pending)
+    assert "date(source_cycle_time)" not in src
+    assert "latest_cycle_by_family" in src
+    assert "member_count_by_family_cycle" in src
+    assert "COUNT(DISTINCT model)" in src
+
+
 def test_held_position_family_provider_excludes_closed_phases():
     conn = sqlite3.connect(":memory:")
     conn.execute(
