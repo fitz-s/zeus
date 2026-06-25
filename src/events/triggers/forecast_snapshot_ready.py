@@ -251,6 +251,50 @@ def _filter_rows_to_restricted_families(
     return [row for row in rows if _row_family_key(row) in restrict_to_families]
 
 
+def _family_restriction_sql(
+    *,
+    table_alias: str,
+    city_col: str,
+    target_col: str,
+    metric_col: str,
+    restrict_to_families: set[tuple[str, str, str]] | None,
+) -> tuple[str, tuple[str, ...]]:
+    """SQL predicate for the already-screened family set.
+
+    The caller still applies the Python filter after the query as a defensive
+    contract check, but live redecision must not scan the whole posterior or
+    coverage universe when the screen selected only a small family set.
+    """
+
+    if restrict_to_families is None:
+        return "", ()
+    families = tuple(
+        sorted(
+            (
+                str(city or "").strip(),
+                str(target or "").strip(),
+                str(metric or "").strip(),
+            )
+            for city, target, metric in restrict_to_families
+            if str(city or "").strip()
+            and str(target or "").strip()
+            and str(metric or "").strip()
+        )
+    )
+    if not families:
+        return " AND 0", ()
+    clauses: list[str] = []
+    params: list[str] = []
+    alias = table_alias.strip()
+    prefix = f"{alias}." if alias else ""
+    for city, target, metric in families:
+        clauses.append(
+            f"({prefix}{city_col} = ? AND {prefix}{target_col} = ? AND {prefix}{metric_col} = ?)"
+        )
+        params.extend((city, target, metric))
+    return " AND (" + " OR ".join(clauses) + ")", tuple(params)
+
+
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
 
 
@@ -620,6 +664,20 @@ class ForecastSnapshotReadyTrigger:
                 _cycle_index = 0
 
         _decision_iso = decision_time.astimezone(UTC).isoformat()
+        _family_filter_sql, _family_filter_params = _family_restriction_sql(
+            table_alias="fp",
+            city_col="city",
+            target_col="target_date",
+            metric_col="temperature_metric",
+            restrict_to_families=restrict_to_families,
+        )
+        _legacy_family_filter_sql, _legacy_family_filter_params = _family_restriction_sql(
+            table_alias="c0",
+            city_col="city",
+            target_col="target_local_date",
+            metric_col="temperature_metric",
+            restrict_to_families=restrict_to_families,
+        )
 
         if _posterior_lane:
             # mx2t3 carrier-decouple (GATE-1 C-A1): readiness/selection from forecast_posteriors.
@@ -662,6 +720,7 @@ class ForecastSnapshotReadyTrigger:
                       FROM forecast_posteriors fp
                      WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
                        {_posterior_runtime_filter}
+                       {_family_filter_sql}
                        AND (fp.source_available_at IS NULL OR fp.source_available_at <= ?)
                        AND (fp.computed_at IS NULL OR fp.computed_at <= ?)
                 ),
@@ -671,23 +730,6 @@ class ForecastSnapshotReadyTrigger:
                      WHERE p._family_rank = 1
                        AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
                        AND (p.computed_at IS NULL OR p.computed_at <= ?){_posterior_market_filter}
-                ),
-                raw_model_counts AS (
-                    SELECT
-                        rmf.city,
-                        rmf.target_date,
-                        rmf.metric,
-                        date(rmf.source_cycle_time) AS source_cycle_date,
-                        COUNT(DISTINCT rmf.model) AS raw_model_member_count
-                      FROM raw_model_forecasts rmf
-                      JOIN latest_posterior p
-                        ON p.city = rmf.city
-                       AND p.target_date = rmf.target_date
-                       AND p.temperature_metric = rmf.metric
-                       AND date(rmf.source_cycle_time) = date(p.source_cycle_time)
-                     WHERE rmf.source_available_at <= ?
-                       AND rmf.forecast_value_c IS NOT NULL
-                     GROUP BY rmf.city, rmf.target_date, rmf.metric, date(rmf.source_cycle_time)
                 )
                 SELECT
                     p.posterior_id AS coverage_id,
@@ -702,8 +744,8 @@ class ForecastSnapshotReadyTrigger:
                     p.target_date AS target_local_date,
                     p.temperature_metric AS temperature_metric,
                     '{POSTERIOR_BACKED_DATA_VERSION}' AS data_version,
-                    rmc.raw_model_member_count AS expected_members,
-                    rmc.raw_model_member_count AS observed_members,
+                    NULL AS expected_members,
+                    NULL AS observed_members,
                     NULL AS expected_steps_json,
                     NULL AS observed_steps_json,
                     NULL AS snapshot_ids_json,
@@ -723,8 +765,8 @@ class ForecastSnapshotReadyTrigger:
                     'COMPLETE' AS sr_completeness_status,
                     NULL AS sr_expected_steps_json,
                     NULL AS sr_observed_steps_json,
-                    rmc.raw_model_member_count AS sr_expected_members,
-                    rmc.raw_model_member_count AS sr_observed_members,
+                    NULL AS sr_expected_members,
+                    NULL AS sr_observed_members,
                     ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || p.city || '|' || p.target_date || '|'
                         || p.temperature_metric || '|' || substr(p.source_cycle_time, 1, 10)) AS snapshot_id,
                     p.city AS snapshot_city,
@@ -735,18 +777,18 @@ class ForecastSnapshotReadyTrigger:
                     p.posterior_identity_hash AS snapshot_manifest_hash,
                     NULL AS snapshot_members_json
                 FROM latest_posterior p
-                JOIN raw_model_counts rmc
-                  ON rmc.city = p.city
-                 AND rmc.target_date = p.target_date
-                 AND rmc.metric = p.temperature_metric
-                 AND rmc.source_cycle_date = date(p.source_cycle_time)
-                WHERE rmc.raw_model_member_count >= 3
                 ORDER BY p.source_cycle_time DESC, p.computed_at DESC
                 """
             rows = _dict_rows(
                 forecasts_conn,
                 _select_sql_base,
-                (_decision_iso, _decision_iso, _decision_iso, _decision_iso, _decision_iso),
+                (
+                    *_family_filter_params,
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                ),
             )
         else:
             replacement_filter = ""
@@ -792,7 +834,8 @@ class ForecastSnapshotReadyTrigger:
                                 c0.coverage_id DESC
                         ) AS _family_rank
                       FROM source_run_coverage c0
-                     WHERE c0.computed_at IS NULL OR c0.computed_at <= ?
+                     WHERE (c0.computed_at IS NULL OR c0.computed_at <= ?)
+                       {_legacy_family_filter_sql}
                 )
                 SELECT
                     c.*,
@@ -847,6 +890,7 @@ class ForecastSnapshotReadyTrigger:
                 _select_sql_base,
                 (
                     _decision_iso,
+                    *_legacy_family_filter_params,
                     _decision_iso,
                     _decision_iso,
                     _decision_iso,
@@ -863,6 +907,13 @@ class ForecastSnapshotReadyTrigger:
                 limit=max(1, len(rows) if limit is None else int(limit)),
                 cycle_index=0 if limit is None else _cycle_index,
             ).select_rows(rows)
+        if _posterior_lane and rows:
+            rows = _with_posterior_raw_member_counts(
+                forecasts_conn,
+                rows,
+                decision_iso=_decision_iso,
+                min_members=3,
+            )
         # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
         # gated by edli.edli_intake_phase_filter_enabled (default OFF). For
         # continuous re-decision (source is per-cycle) it is mandatory: same-day
@@ -1113,6 +1164,66 @@ def _dict_rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> l
     cur = conn.execute(sql, params)
     names = [description[0] for description in cur.description]
     return [dict(zip(names, row)) for row in cur.fetchall()]
+
+
+def _raw_model_member_count_for_posterior_row(
+    conn: sqlite3.Connection,
+    row: dict[str, Any],
+    *,
+    decision_iso: str,
+) -> int:
+    cycle_date = str(row.get("sr_source_cycle_time") or row.get("source_cycle_time") or "")[:10]
+    if len(cycle_date) != 10:
+        return 0
+    city = str(row.get("city") or row.get("snapshot_city") or "")
+    target_date = str(row.get("target_local_date") or row.get("snapshot_target_date") or "")
+    metric = str(row.get("temperature_metric") or row.get("snapshot_temperature_metric") or "")
+    if not (city and target_date and metric):
+        return 0
+    record = conn.execute(
+        """
+        SELECT COUNT(DISTINCT model)
+          FROM raw_model_forecasts
+         WHERE city = ?
+           AND target_date = ?
+           AND metric = ?
+           AND substr(source_cycle_time, 1, 10) = ?
+           AND source_available_at <= ?
+           AND forecast_value_c IS NOT NULL
+        """,
+        (city, target_date, metric, cycle_date, decision_iso),
+    ).fetchone()
+    return int(record[0] or 0) if record is not None else 0
+
+
+def _with_posterior_raw_member_counts(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    *,
+    decision_iso: str,
+    min_members: int = 3,
+) -> list[dict[str, Any]]:
+    """Attach raw-model carrier counts after fairness/restriction has bounded rows."""
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        count = _raw_model_member_count_for_posterior_row(
+            conn,
+            row,
+            decision_iso=decision_iso,
+        )
+        if count < min_members:
+            continue
+        enriched = dict(row)
+        for key in (
+            "expected_members",
+            "observed_members",
+            "sr_expected_members",
+            "sr_observed_members",
+        ):
+            enriched[key] = count
+        out.append(enriched)
+    return out
 
 
 def _source_run_from_join(row: dict[str, Any]) -> dict[str, Any]:
