@@ -4183,8 +4183,8 @@ def _prefetch_selected_orderbooks_from_feasibility(
                    best_bid_before, best_ask_before, depth_before_json
               FROM execution_feasibility_evidence
              WHERE token_id = ?
-               AND direction = ?
-             ORDER BY quote_seen_at DESC, created_at DESC
+             ORDER BY CASE WHEN direction = ? THEN 0 ELSE 1 END,
+                      quote_seen_at DESC, created_at DESC
              LIMIT 1
             """,
             (token_id, str(direction)),
