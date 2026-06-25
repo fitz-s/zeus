@@ -2907,7 +2907,15 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
 
 INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed", "quarantined", "admin_closed"})
 LEGACY_NONVOCABULARY_INACTIVE_STATES = frozenset({"quarantine_fill_failed", "quarantine_void_failed"})
-QUARANTINED_CHAIN_STATES = frozenset({"quarantined", "quarantine_expired"})
+NO_EXPOSURE_CHAIN_STATES = frozenset(
+    {
+        "chain_confirmed_zero",
+        "chain_absent_confirmed_position_unattributed",
+        "external_operator_closed",
+        "quarantined",
+        "quarantine_expired",
+    }
+)
 
 
 def _semantic_value(value: object) -> str:
@@ -2919,10 +2927,16 @@ def _semantic_value(value: object) -> str:
 def _is_runtime_open_position(pos: Position) -> bool:
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
+    chain_shares = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    local_projection_without_chain_exposure = (
+        chain_state == VenueVisibilityStatus.LOCAL_ONLY.value
+        and chain_shares <= 0.0
+    )
     return (
         state not in INACTIVE_RUNTIME_STATES
         and state not in LEGACY_NONVOCABULARY_INACTIVE_STATES
-        and chain_state not in QUARANTINED_CHAIN_STATES
+        and chain_state not in NO_EXPOSURE_CHAIN_STATES
+        and not local_projection_without_chain_exposure
     )
 
 
