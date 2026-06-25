@@ -1,35 +1,19 @@
-schema_version: 3
+schema_version: 4
 metadata:
   updated: '2026-06-23'
   owner: docs authority isolation rebuild
-  purpose: >
-    Machine-readable docs classification. Authority, reference, current facts,
-    runbooks, evidence, reports, archive, and rebuild history are separate classes.
+  purpose: Machine-readable docs classification and three-plane routing.
 
-class_law:
-  authority:
-    is_authority: true
-    default_read: task_required
-    may_contain_current_runtime_snapshot: false
-  reference:
-    is_authority: false
-    default_read: task_routed
-    may_contain_current_runtime_snapshot: false
-  current_fact_pointer:
-    is_authority: false
-    default_read: current_fact_tasks_only
-    requires_freshness_and_expiry: true
-  runbook:
-    is_authority: false
-    default_read: operation_tasks_only
-  evidence_report_archive_rebuild:
-    is_authority: false
-    default_read: false
+planes:
+  authority: law and machine law
+  operations: current facts, runtime artifacts, active work, receipts
+  persistent_special: reference, runbooks, evidence, reports, archives, rebuild history
 
 active_authority_docs:
   - docs/authority/AGENTS.md
   - docs/authority/zeus_current_architecture.md
   - docs/authority/zeus_current_delivery.md
+  - docs/authority/zeus_database_runtime_authority.md
   - docs/authority/zeus_forecast_fusion_authority.md
   - docs/authority/zeus_docs_classification_authority.md
   - docs/authority/zeus_change_control_constitution.md
@@ -37,9 +21,11 @@ active_authority_docs:
 
 machine_authority_manifests:
   - architecture/docs_registry.yaml
+  - architecture/docs_plane_manifest.yaml
   - architecture/reference_replacement.yaml
   - architecture/module_manifest.yaml
   - architecture/kernel_manifest.yaml
+  - architecture/db_runtime_manifest.yaml
   - architecture/forecast_fusion_manifest.yaml
   - architecture/task_boot_profiles.yaml
   - architecture/db_table_ownership.yaml
@@ -48,8 +34,7 @@ machine_authority_manifests:
   - architecture/money_path_objects.yaml
 
 canonical_references:
-  default_broad:
-    - docs/reference/zeus_prediction_market_quant_reference.md
+  default_broad: [docs/reference/zeus_prediction_market_quant_reference.md]
   focused:
     - docs/reference/zeus_domain_model.md
     - docs/reference/zeus_math_spec.md
@@ -76,34 +61,35 @@ non_default_history_patterns:
   - docs/operations/current/**
 
 entries:
-  - {path: docs/AGENTS.md, doc_class: router, authority: false, default_read: true}
-  - {path: docs/README.md, doc_class: router, authority: false, default_read: true}
-  - {path: docs/archive_registry.md, doc_class: archive_interface, authority: false, default_read: false}
-  - {path: docs/authority/AGENTS.md, doc_class: authority, authority: true, default_read: true}
-  - {path: docs/authority/zeus_current_architecture.md, doc_class: authority, authority: true, default_read: true}
-  - {path: docs/authority/zeus_current_delivery.md, doc_class: authority, authority: true, default_read: true}
-  - {path: docs/authority/zeus_forecast_fusion_authority.md, doc_class: authority, authority: true, default_read: true}
-  - {path: docs/authority/zeus_docs_classification_authority.md, doc_class: authority, authority: true, default_read: true}
-  - {path: docs/authority/zeus_change_control_constitution.md, doc_class: authority, authority: true, default_read: false}
-  - {path: docs/authority/ARCHIVAL_RULES.md, doc_class: authority, authority: true, default_read: true}
-  - {path: docs/reference/AGENTS.md, doc_class: reference_router, authority: false, default_read: true}
-  - {path: docs/reference/zeus_prediction_market_quant_reference.md, doc_class: reference, authority: false, default_read: true}
-  - {path: docs/reference/zeus_domain_model.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_math_spec.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_forecast_source_and_regional_model_reference.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_strategy_spec.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_market_settlement_reference.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_execution_lifecycle_reference.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_risk_strategy_reference.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_data_and_replay_reference.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/zeus_failure_modes_reference.md, doc_class: reference, authority: false, default_read: false}
-  - {path: docs/reference/modules/, doc_class: module_reference, authority: false, default_read: false}
-  - {path: docs/operations/AGENTS.md, doc_class: operations_router, authority: false, default_read: true}
-  - {path: docs/operations/current_state.md, doc_class: current_fact_pointer, authority: false, default_read: true}
-  - {path: docs/operations/current_data_state.md, doc_class: current_fact_pointer, authority: false, default_read: true}
-  - {path: docs/operations/current_source_validity.md, doc_class: current_fact_pointer, authority: false, default_read: true}
-  - {path: docs/runbooks/, doc_class: runbook, authority: false, default_read: false}
-  - {path: docs/evidence/, doc_class: evidence, authority: false, default_read: false}
-  - {path: docs/reports/, doc_class: report, authority: false, default_read: false}
-  - {path: docs/archive/, doc_class: archive, authority: false, default_read: false}
-  - {path: docs/rebuild/, doc_class: rebuild_history, authority: false, default_read: false}
+  - {path: docs/AGENTS.md, plane: persistent_special, doc_class: router, authority: false, default_read: true}
+  - {path: docs/README.md, plane: persistent_special, doc_class: router, authority: false, default_read: true}
+  - {path: docs/archive_registry.md, plane: persistent_special, doc_class: archive_interface, authority: false, default_read: false}
+  - {path: docs/authority/AGENTS.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_current_architecture.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_current_delivery.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_database_runtime_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_forecast_fusion_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_docs_classification_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_change_control_constitution.md, plane: authority, doc_class: authority, authority: true, default_read: false}
+  - {path: docs/authority/ARCHIVAL_RULES.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/reference/AGENTS.md, plane: persistent_special, doc_class: reference_router, authority: false, default_read: true}
+  - {path: docs/reference/zeus_prediction_market_quant_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: true}
+  - {path: docs/reference/zeus_domain_model.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_math_spec.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_forecast_source_and_regional_model_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_strategy_spec.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_market_settlement_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_execution_lifecycle_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_risk_strategy_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_data_and_replay_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/zeus_failure_modes_reference.md, plane: persistent_special, doc_class: reference, authority: false, default_read: false}
+  - {path: docs/reference/modules/, plane: persistent_special, doc_class: module_reference, authority: false, default_read: false}
+  - {path: docs/operations/AGENTS.md, plane: operations, doc_class: operations_router, authority: false, default_read: true}
+  - {path: docs/operations/current_state.md, plane: operations, doc_class: current_fact_pointer, authority: false, default_read: true}
+  - {path: docs/operations/current_data_state.md, plane: operations, doc_class: current_fact_pointer, authority: false, default_read: true}
+  - {path: docs/operations/current_source_validity.md, plane: operations, doc_class: current_fact_pointer, authority: false, default_read: true}
+  - {path: docs/runbooks/, plane: persistent_special, doc_class: runbook, authority: false, default_read: false}
+  - {path: docs/evidence/, plane: persistent_special, doc_class: evidence, authority: false, default_read: false}
+  - {path: docs/reports/, plane: persistent_special, doc_class: report, authority: false, default_read: false}
+  - {path: docs/archive/, plane: persistent_special, doc_class: archive, authority: false, default_read: false}
+  - {path: docs/rebuild/, plane: persistent_special, doc_class: rebuild_history, authority: false, default_read: false}
