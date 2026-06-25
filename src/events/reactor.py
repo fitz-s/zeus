@@ -61,6 +61,7 @@ from src.strategy.live_inference.live_admission import (
 UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
+DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -90,6 +91,24 @@ def _cycle_budget_seconds() -> float | None:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS
     return budget if budget > 0 else None
+
+
+def _fetch_batch_limit() -> int:
+    """Pagination size for unbounded ``process_pending(limit=None)`` cycles.
+
+    This is not a work cap: pending events stay pending and the cycle budget
+    decides when to return. Keeping each read page small prevents one large
+    world-DB fetch from spending the whole scheduler interval before the budget
+    guard can run.
+    """
+    raw = os.environ.get("ZEUS_REACTOR_FETCH_BATCH_LIMIT")
+    if raw is None:
+        return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
+    return max(1, min(250, limit))
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
@@ -733,7 +752,7 @@ class OpportunityEventReactor:
         # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
         budget = _cycle_budget_seconds()
         cycle_start = time.monotonic()
-        batch_limit = 250 if limit is None else max(1, int(limit))
+        batch_limit = _fetch_batch_limit() if limit is None else max(1, int(limit))
         remaining = None if limit is None else batch_limit
         try:
           while remaining is None or remaining > 0:

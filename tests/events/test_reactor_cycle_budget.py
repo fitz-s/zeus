@@ -144,6 +144,45 @@ def test_no_decision_path_calls_openmeteo_fetch_directly():
     )
 
 
+def test_unbounded_reactor_cycle_uses_small_fetch_pages(monkeypatch):
+    """limit=None means drain by pagination, not fetch a giant page first.
+
+    The wall-clock budget can only protect the scheduler after fetch_pending
+    returns, so live must not spend its whole interval on a single 250-row read
+    from the large world DB before it can observe the budget.
+    """
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("ZEUS_REACTOR_FETCH_BATCH_LIMIT", "17")
+
+    conn, store = _store()
+    requested_limits: list[int] = []
+
+    def _fetch_pending(**kwargs):
+        requested_limits.append(kwargs["limit"])
+        return []
+
+    store.fetch_pending = _fetch_pending  # type: ignore[method-assign]
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _d: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=lambda _e, _d: None,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor.process_pending(
+        decision_time=datetime(2026, 6, 5, 6, 0, tzinfo=timezone.utc),
+        limit=None,
+    )
+
+    assert requested_limits == [17]
+
+
 def test_pre_event_budget_check_stops_before_claiming_next_event(monkeypatch):
     """CADENCE GUARD (2026-06-11): the budget is also checked BEFORE each event.
 

@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1246,9 +1247,27 @@ def _settlement_skill_attribution_tick() -> None:
     historically-settled position on first run. Sole writer of
     settlement_attribution. Import local to keep src.main import-light.
     """
+    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
+        logger.info(
+            "settlement_skill_attribution skipped: live money-path cycle active"
+        )
+        return
     from src.analysis.settlement_skill_attribution import run_settlement_skill_attribution
 
-    stats = run_settlement_skill_attribution()
+    try:
+        stats = run_settlement_skill_attribution()
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if (
+            "database is locked" in message
+            or "database table is locked" in message
+            or "database is busy" in message
+        ):
+            logger.warning(
+                "settlement_skill_attribution deferred: database writer busy"
+            )
+            return
+        raise
     logger.info(
         "settlement_skill_attribution: graded=%s skill_win_rate=%s by_category=%s",
         stats.get("graded"), stats.get("skill_win_rate"), stats.get("by_category"),
