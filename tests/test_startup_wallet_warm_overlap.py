@@ -45,6 +45,8 @@ there is no warm thread at all.
 
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -185,3 +187,52 @@ def test_main_overlaps_wallet_warm_with_db_boot_work():
     assert schema_gate < warm_join, "schema gate not inside the warm/join overlap window"
     # Join happens immediately before the deterministic wallet gate.
     assert warm_join < wallet_gate, "warm thread not joined before the wallet gate"
+
+
+def test_startup_data_health_check_uses_existence_probes_for_large_tables(monkeypatch):
+    """Startup reminders must not full-scan large live tables before scheduler boot."""
+
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Conn:
+        def __init__(self):
+            self.sql: list[str] = []
+
+        def execute(self, sql):
+            self.sql.append(sql)
+            if "COUNT(DISTINCT city) FROM forecast_skill" in sql:
+                return _Cursor([len(main_mod.cities_by_name)])
+            if "COUNT(DISTINCT city) FROM model_bias" in sql:
+                return _Cursor([len(main_mod.cities_by_name)])
+            if "COUNT(*) FROM model_bias" in sql:
+                return _Cursor([0])
+            return _Cursor((1,))
+
+    fake_validation = types.SimpleNamespace(
+        run_validation=lambda: {"valid": True, "mismatches": []}
+    )
+    monkeypatch.setitem(sys.modules, "scripts.validate_assumptions", fake_validation)
+
+    conn = _Conn()
+    main_mod._startup_data_health_check(conn)
+
+    large_tables = {
+        "asos_wu_offsets",
+        "observation_instants",
+        "diurnal_curves",
+        "diurnal_peak_prob",
+        "temp_persistence",
+        "solar_daily",
+    }
+    for table in large_tables:
+        assert any(
+            f"SELECT 1 FROM {table} LIMIT 1" in sql for sql in conn.sql
+        ), f"{table} should use bounded existence probe"
+        assert not any(
+            f"SELECT COUNT(*) FROM {table}" in sql for sql in conn.sql
+        ), f"{table} must not be full-counted during startup"

@@ -4438,8 +4438,6 @@ def _startup_data_health_check(conn):
             )
 
         # 2. Data freshness check
-        from datetime import datetime, timezone, timedelta
-
         stale_tables = []
         for table, col in [
             ("asos_wu_offsets", None),
@@ -4450,8 +4448,8 @@ def _startup_data_health_check(conn):
             ("solar_daily", None),
         ]:
             try:
-                n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                if n == 0:
+                row = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                if row is None:
                     stale_tables.append(f"{table} (empty)")
             except Exception:
                 stale_tables.append(f"{table} (missing)")
