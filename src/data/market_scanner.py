@@ -120,7 +120,7 @@ def _snapshot_capture_busy_timeout_ms(
     configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
     floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
     progress_floor_ms = int(
-        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "750")
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
     )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
@@ -160,9 +160,9 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
     if per_city_limit != 0:
         return None
     try:
-        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "66"))
+        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "500"))
     except ValueError:
-        configured = 66
+        configured = 500
     return configured if configured > 0 else None
 
 
@@ -1732,7 +1732,11 @@ def _bool_env(name: str, default: bool) -> bool:
 def _slug_pattern_max_requests_from_env(max_requests: int | None = None) -> int:
     if max_requests is not None:
         return max(1, int(max_requests))
-    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", 28)
+    return _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", 512)
+
+
+def _slug_pattern_http_concurrency_from_env() -> int:
+    return max(1, min(64, _positive_int_env("ZEUS_MARKET_DISCOVERY_SLUG_CONCURRENCY", 16)))
 
 
 def _slug_pattern_budget_seconds_from_env(budget_seconds: float | None = None) -> float:
@@ -1812,44 +1816,108 @@ def _fetch_events_by_slug_pattern(
     budget_exhausted = False
     new_events: list[dict] = []
 
+    selected_jobs: list[tuple[str, str, str]] = []
     for step in range(len(jobs)):
-        if visited >= request_limit:
+        if len(selected_jobs) >= request_limit:
             break
-        if time.monotonic() >= deadline:
-            budget_exhausted = True
-            break
-        _date_str, _city, slug = jobs[(start + step) % len(jobs)]
-        visited += 1
+        selected_jobs.append(jobs[(start + step) % len(jobs)])
+
+    def _admit_slug_event(event: dict) -> None:
+        event_id = event.get("id") or event.get("slug")
+        if event_id in seen_ids:
+            return
+        if not _event_has_active_children(event, now_utc, clob_crosscheck=False):
+            return
+        seen_ids.add(event_id)
+        event["_discovery_path"] = "slug_pattern"
+        new_events.append(event)
+        logger.info(
+            "slug_pattern: discovered new event slug=%s id=%s",
+            event.get("slug"),
+            event.get("id"),
+        )
+
+    def _fetch_one_slug(slug: str) -> tuple[str, int | None, list[dict]]:
         try:
             resp = _gamma_get("/events", params={"slug": slug}, timeout=timeout, retries=retries)
         except httpx.HTTPError as exc:
             logger.debug("slug_pattern fetch failed for %s: %s", slug, exc)
-            continue
+            return slug, None, []
         if resp.status_code != 200:
             logger.debug("slug_pattern %s → HTTP %s", slug, resp.status_code)
-            continue
+            return slug, resp.status_code, []
         try:
             batch = resp.json()
         except Exception:
-            continue
+            return slug, resp.status_code, []
         if not isinstance(batch, list):
             batch = [batch] if isinstance(batch, dict) and batch else []
-        for event in batch:
-            if not isinstance(event, dict):
-                continue
-            event_id = event.get("id") or event.get("slug")
-            if event_id in seen_ids:
-                continue
-            if not _event_has_active_children(event, now_utc, clob_crosscheck=False):
-                continue
-            seen_ids.add(event_id)
-            event["_discovery_path"] = "slug_pattern"
-            new_events.append(event)
-            logger.info(
-                "slug_pattern: discovered new event slug=%s id=%s",
-                event.get("slug"),
-                event.get("id"),
-            )
+        return slug, resp.status_code, [event for event in batch if isinstance(event, dict)]
+
+    # Explicit small request limits are used by rotation tests and by any operator
+    # that intentionally wants serial probing. The production default scans the
+    # full configured opening horizon; run that path concurrently so 300+ direct
+    # slug lookups cannot take longer than the discovery interval.
+    concurrency = 1 if max_requests is not None else _slug_pattern_http_concurrency_from_env()
+    if concurrency <= 1 or len(selected_jobs) <= 1:
+        for _date_str, _city, slug in selected_jobs:
+            if time.monotonic() >= deadline:
+                budget_exhausted = True
+                break
+            visited += 1
+            _slug, _status, events = _fetch_one_slug(slug)
+            for event in events:
+                _admit_slug_event(event)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+
+        pending: dict = {}
+        next_job_index = 0
+
+        def _submit(executor: ThreadPoolExecutor) -> None:
+            nonlocal next_job_index, visited
+            while (
+                len(pending) < concurrency
+                and next_job_index < len(selected_jobs)
+                and time.monotonic() < deadline
+            ):
+                _date_str, _city, slug = selected_jobs[next_job_index]
+                next_job_index += 1
+                visited += 1
+                pending[executor.submit(_fetch_one_slug, slug)] = slug
+
+        with ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="zeus-slug-discovery",
+        ) as executor:
+            _submit(executor)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    budget_exhausted = True
+                    for future in pending:
+                        future.cancel()
+                    pending.clear()
+                    break
+                try:
+                    future = next(
+                        as_completed(
+                            tuple(pending),
+                            timeout=max(0.05, min(remaining, 0.5)),
+                        )
+                    )
+                except FuturesTimeoutError:
+                    continue
+                pending.pop(future, None)
+                try:
+                    _slug, _status, events = future.result()
+                except Exception as exc:  # noqa: BLE001 - one slug must not abort discovery
+                    logger.debug("slug_pattern worker failed: %s", exc)
+                    _submit(executor)
+                    continue
+                for event in events:
+                    _admit_slug_event(event)
+                _submit(executor)
 
     _SLUG_DISCOVERY_CURSOR = (start + visited) % len(jobs)
     if visited < len(jobs):

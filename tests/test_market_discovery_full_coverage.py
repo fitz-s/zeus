@@ -1161,6 +1161,14 @@ def test_unbounded_family_refresh_batches_complete_groups_per_tick(monkeypatch):
     assert summary["budget_truncated_city_count"] == 2
 
 
+def test_unbounded_family_refresh_default_cap_uses_batch_books_envelope(monkeypatch):
+    """Default full-family refresh cap should match the proven one-call /books envelope."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", raising=False)
+
+    assert ms._snapshot_capture_max_candidates_per_tick(per_city_limit=0) == 500
+
+
 def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):
     """Tiny prefetch window MUST still fire ONE batch POST /books, not fall back
     to a per-token GET /book storm.

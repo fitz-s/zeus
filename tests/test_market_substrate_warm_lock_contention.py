@@ -317,7 +317,7 @@ def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(mo
 
     assert single >= 4000
     assert 0 < batch < single
-    assert batch >= 750
+    assert batch >= 150
 
 
 # ---------------------------------------------------------------------------

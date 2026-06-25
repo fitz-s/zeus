@@ -400,6 +400,64 @@ def test_slug_pattern_discovery_rotates_under_request_budget(monkeypatch):
     assert [event["_discovery_path"] for event in first + second] == ["slug_pattern"] * 4
 
 
+def test_default_slug_pattern_discovery_covers_configured_opening_horizon(monkeypatch):
+    """The default slug sweep must reach deep current/next-day markets in one tick."""
+
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", raising=False)
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_LOOKAHEAD_DAYS", raising=False)
+
+    now = datetime(2026, 6, 25, 18, 30, tzinfo=timezone.utc)
+    target_dates = ms._slug_pattern_target_dates(now)
+    job_count = (
+        len(ms.SLUG_DISCOVERY_CITIES)
+        * len(ms.SLUG_DISCOVERY_PREFIXES)
+        * len(target_dates)
+    )
+
+    assert ms._slug_pattern_max_requests_from_env(None) >= job_count
+
+
+def test_slug_pattern_default_reaches_deep_slug_without_waiting_for_cursor(monkeypatch):
+    """Default discovery should not need many ticks before reaching late-sorted cities/dates."""
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, slug: str):
+            self._slug = slug
+
+        def json(self):
+            if self._slug == "highest-temperature-in-city-19-on-june-27-2026":
+                return [{"id": "evt-deep", "slug": self._slug, "markets": [{}]}]
+            return []
+
+    calls: list[str] = []
+
+    def fake_gamma_get(path: str, *, params: dict | None = None, timeout: float, retries: int):
+        assert path == "/events"
+        slug = str((params or {})["slug"])
+        calls.append(slug)
+        return Response(slug)
+
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SLUG_MAX_REQUESTS", raising=False)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_SLUG_CONCURRENCY", "4")
+    monkeypatch.setattr(ms, "SLUG_DISCOVERY_CITIES", [f"city-{i:02d}" for i in range(20)])
+    monkeypatch.setattr(ms, "SLUG_DISCOVERY_PREFIXES", ["highest-temperature-in-{city}-on-{date}"])
+    monkeypatch.setattr(ms, "_SLUG_DISCOVERY_CURSOR", 0)
+    monkeypatch.setattr(ms, "_gamma_get", fake_gamma_get)
+    monkeypatch.setattr(ms, "_event_has_active_children", lambda _event, _now, **_kwargs: True)
+
+    results = ms._fetch_events_by_slug_pattern(
+        set(),
+        datetime(2026, 6, 25, 18, 30, tzinfo=timezone.utc),
+        target_dates=["2026-06-25", "2026-06-26", "2026-06-27"],
+        budget_seconds=100,
+    )
+
+    assert "highest-temperature-in-city-19-on-june-27-2026" in calls
+    assert [event["id"] for event in results] == ["evt-deep"]
+
+
 def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     """Executable snapshot refresh must not monopolize live background execution."""
 
