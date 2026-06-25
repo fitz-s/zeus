@@ -7319,6 +7319,48 @@ def _edli_prune_interval_seconds(config: dict) -> float:
     return max(0.0, value)
 
 
+def _edli_unready_fsr_prune_min_active_pending(config: dict) -> int:
+    raw = config.get("reactor_unready_fsr_prune_min_active_pending", 1_000)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 1_000
+    return max(1, min(value, 50_000))
+
+
+def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) -> int:
+    """Count active replacement FSR rows up to ``limit`` for maintenance gating.
+
+    The spine-readiness sweep opens the forecasts DB and cross-checks live
+    posteriors/raw members. That is valuable backlog hygiene when the FSR queue
+    is large, but it is not a per-cycle decision prerequisite for a tiny active
+    set. Keep the gate on the world queue only so small live queues can keep
+    reaching candidate evaluation even when forecast ingestion is busy.
+    """
+
+    bounded_limit = max(1, min(int(limit or 1), 50_000))
+    try:
+        row = world_conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM (
+                    SELECT 1
+                      FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+                      JOIN opportunity_events e ON e.event_id = p.event_id
+                     WHERE p.consumer_name = 'edli_reactor_v1'
+                       AND p.processing_status = 'pending'
+                       AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+                       AND e.causal_snapshot_id LIKE 'rmf-%'
+                     LIMIT ?
+                   )
+            """,
+            (bounded_limit,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return bounded_limit
+    return int(row[0] or 0) if row is not None else 0
+
+
 def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     """Prune stale/superseded rows before snapshotting the redecision skip set.
 
@@ -7440,29 +7482,36 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
 
     try:
         _step_started = time.monotonic()
-        from src.state.db import get_forecasts_connection_read_only as _get_forecasts_ro
-
-        _forecasts_ro = _get_forecasts_ro()
-        try:
-            _unready_fsr_archived = _edli_expire_unready_forecast_snapshot_pending(
-                store.conn,
-                _forecasts_ro,
-                decision_time=decision_time.astimezone(timezone.utc).isoformat(),
-            )
-        finally:
-            _forecasts_ro.close()
-        _log_prune_step(
-            "expire_unready_forecast_snapshot_pending",
-            _step_started,
-            _unready_fsr_archived,
+        _unready_fsr_min_active = _edli_unready_fsr_prune_min_active_pending(edli_cfg)
+        _active_rmf_fsr_pending = _edli_active_rmf_forecast_snapshot_pending_count(
+            store.conn,
+            limit=_unready_fsr_min_active,
         )
-        if _unready_fsr_archived:
-            logger.info(
-                "EDLI reactor: expired %d forecast-snapshot pending rows whose latest "
-                "posterior lacks same-cycle raw-model spine members; reactor will not "
-                "spend proof budget on MU_SIGMA_NOT_STASHED candidates",
+        _unready_fsr_archived = 0
+        if _active_rmf_fsr_pending >= _unready_fsr_min_active:
+            from src.state.db import get_forecasts_connection_read_only as _get_forecasts_ro
+
+            _forecasts_ro = _get_forecasts_ro()
+            try:
+                _unready_fsr_archived = _edli_expire_unready_forecast_snapshot_pending(
+                    store.conn,
+                    _forecasts_ro,
+                    decision_time=decision_time.astimezone(timezone.utc).isoformat(),
+                )
+            finally:
+                _forecasts_ro.close()
+            _log_prune_step(
+                "expire_unready_forecast_snapshot_pending",
+                _step_started,
                 _unready_fsr_archived,
             )
+            if _unready_fsr_archived:
+                logger.info(
+                    "EDLI reactor: expired %d forecast-snapshot pending rows whose latest "
+                    "posterior lacks same-cycle raw-model spine members; reactor will not "
+                    "spend proof budget on MU_SIGMA_NOT_STASHED candidates",
+                    _unready_fsr_archived,
+                )
     except Exception as _spine_ready_sweep_exc:  # noqa: BLE001 — fail-soft
         logger.warning(
             "EDLI reactor: replacement FSR spine-readiness sweep failed (non-fatal): %r",

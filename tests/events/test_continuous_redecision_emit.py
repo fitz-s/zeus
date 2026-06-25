@@ -1065,6 +1065,41 @@ def test_unready_replacement_sweep_batches_forecast_reads():
     assert "COUNT(DISTINCT model)" in src
 
 
+def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    for city in ("Tokyo", "Paris", "Taipei"):
+        store.insert_or_ignore(
+            make_opportunity_event(
+                event_type="FORECAST_SNAPSHOT_READY",
+                entity_key=f"{city}|2026-06-25|high|rmf-2026-06-24",
+                source="cycle-test",
+                observed_at="2026-06-24T06:00:00+00:00",
+                available_at="2026-06-24T06:00:00+00:00",
+                received_at="2026-06-24T06:00:00+00:00",
+                causal_snapshot_id=f"rmf-{city}|2026-06-25|high|2026-06-24",
+                payload={
+                    "city": city,
+                    "target_date": "2026-06-25",
+                    "metric": "high",
+                    "snapshot_id": f"rmf-{city}|2026-06-25|high|2026-06-24",
+                },
+                priority=50,
+            )
+        )
+
+    assert main._edli_active_rmf_forecast_snapshot_pending_count(world, limit=2) == 2
+    assert main._edli_active_rmf_forecast_snapshot_pending_count(world, limit=10) == 3
+
+    cfg_src = inspect.getsource(main._edli_unready_fsr_prune_min_active_pending)
+    assert "reactor_unready_fsr_prune_min_active_pending" in cfg_src
+    prune_src = inspect.getsource(main._edli_prune_pending_working_set)
+    assert prune_src.index("_edli_active_rmf_forecast_snapshot_pending_count") < prune_src.index(
+        "_edli_expire_unready_forecast_snapshot_pending"
+    )
+
+
 def test_held_position_family_provider_excludes_closed_phases():
     conn = sqlite3.connect(":memory:")
     conn.execute(
