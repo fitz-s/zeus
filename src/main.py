@@ -6152,7 +6152,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 now_utc=now,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if _edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary):
+            if _edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary):
                 fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
                     entry_condition_scope,
                     now_utc=now,
@@ -6171,7 +6171,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 confirmed_held_scope &= fresh_held_scope
                 confirm_families &= fresh_confirmed_families
                 logger.info(
-                    "edli_redecision_screen: partial confirmation refresh admitted "
+                    "edli_redecision_screen: incomplete confirmation refresh admitted "
                     "fresh scoped families=%d/%d entry_scope=%d rest_scope=%d held_scope=%d "
                     "entry_conditions=%d rest_conditions=%d held_conditions=%d summary=%r",
                     len(fresh_confirmed_families),
@@ -6186,7 +6186,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 )
                 if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
                     logger.info(
-                        "edli_redecision_screen: confirmation refresh partial but no "
+                        "edli_redecision_screen: confirmation refresh incomplete but no "
                         "screened money-path condition has fresh substrate; skipping emit "
                         "this tick rather than queueing stale redecision families=%d",
                         len(set(all_families) | set(held_families)),
@@ -7019,9 +7019,10 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
     return False
 
 
-def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | None) -> bool:
-    # PARTIAL coverage routes to PER-FAMILY freshness admission — including when SOME
-    # families hit a transient `database is locked`. The scoped filter
+def _edli_confirmation_refresh_needs_scoped_freshness_filter(summary: dict | None) -> bool:
+    # Incomplete coverage routes to scoped freshness admission — including when SOME
+    # families hit a transient `database is locked` or the batch-prefetch cycle
+    # inserts zero rows while prior quotes are still fresh. The scoped filter
     # (_edli_families_with_fresh_scoped_executable_substrate) does an INDEPENDENT fresh read of
     # the money-path conditions' executable substrate, so a lock that left current
     # rests/candidates/held legs stale cannot admit them; it only excludes them.
@@ -7034,7 +7035,7 @@ def _edli_confirmation_refresh_needs_family_freshness_filter(summary: dict | Non
         return False
     return (
         str(summary.get("status") or "") == "refreshed"
-        and str(summary.get("executable_substrate_coverage_status") or "") == "PARTIAL"
+        and str(summary.get("executable_substrate_coverage_status") or "") in {"NONE", "PARTIAL"}
     )
 
 

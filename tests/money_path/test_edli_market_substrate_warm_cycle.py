@@ -232,7 +232,7 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "_market_substrate_refresh_lock" not in confirm_src
     assert "include_pending_families=False" in confirm_src
     assert "extra_priority_families=clean_families" in confirm_src
-    assert "_edli_confirmation_refresh_needs_family_freshness_filter(confirm_refresh_summary)" in screen_src
+    assert "_edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary)" in screen_src
     assert "_edli_families_with_fresh_scoped_executable_substrate(" in screen_src
     assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
     assert "confirmed_rest_scope &= fresh_rest_scope" in screen_src
@@ -308,23 +308,26 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
 def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
     """The emit gate must fail closed when confirmation refresh did not prove
     any executable-price coverage for the current money-path families. A PARTIAL
-    capture is not globally sufficient; it must be resolved by family freshness
+    capture is not globally sufficient; it must be resolved by scoped freshness
     proof before any family can be emitted."""
 
     assert main_module._edli_confirmation_refresh_unavailable(
         {
-            "status": "refreshed",
-            "executable_substrate_coverage_status": "NONE",
+            "status": "skipped_lock_busy",
+            "executable_substrate_coverage_status": "FULL",
             "failure_samples": [{"error": "database is locked"}],
         }
     )
     assert main_module._edli_confirmation_refresh_unavailable(
+        {"status": "error_refresh_failed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
+        {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
+    )
+    assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
-        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
-    )
-    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+    assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
         {
             "status": "refreshed",
             "executable_substrate_coverage_status": "PARTIAL",
