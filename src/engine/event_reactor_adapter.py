@@ -6506,7 +6506,12 @@ def _aggregate_terminal_venue_command_releases_lock(
     non-evidence and therefore do not release the fail-closed lock.
     """
 
-    def _command_state_on_conn(conn: sqlite3.Connection, execution_command_id: str) -> str | None:
+    def _command_state_on_conn(
+        conn: sqlite3.Connection,
+        *,
+        execution_command_id: str,
+        venue_order_ids: tuple[str, ...],
+    ) -> str | None:
         if not _adapter_table_exists(conn, "venue_commands"):
             return None
         cols = {
@@ -6521,6 +6526,10 @@ def _aggregate_terminal_venue_command_releases_lock(
         if "decision_id" in cols:
             match_terms.append("decision_id = ?")
             params.append(execution_command_id)
+        if "venue_order_id" in cols:
+            for venue_order_id in venue_order_ids:
+                match_terms.append("venue_order_id = ?")
+                params.append(venue_order_id)
         if not match_terms:
             return None
         command = conn.execute(
@@ -6536,6 +6545,11 @@ def _aggregate_terminal_venue_command_releases_lock(
         if command is None:
             return None
         return str(command[0] or "").strip().upper()
+
+    def _append_nonempty(values: list[str], value: object) -> None:
+        text = str(value or "").strip()
+        if text and text not in values:
+            values.append(text)
 
     try:
         row = live_cap_conn.execute(
@@ -6555,14 +6569,69 @@ def _aggregate_terminal_venue_command_releases_lock(
     except Exception:
         return False
 
-    current_conn_state = _command_state_on_conn(live_cap_conn, execution_command_id)
+    venue_order_ids: list[str] = []
+    try:
+        if _adapter_table_exists(live_cap_conn, "edli_live_order_projection"):
+            projection_row = live_cap_conn.execute(
+                """
+                SELECT venue_order_id
+                FROM edli_live_order_projection
+                WHERE aggregate_id = ?
+                LIMIT 1
+                """,
+                (aggregate_id,),
+            ).fetchone()
+            if projection_row is not None:
+                _append_nonempty(venue_order_ids, projection_row[0])
+    except Exception:
+        pass
+    try:
+        event_rows = live_cap_conn.execute(
+            """
+            SELECT
+              COALESCE(
+                json_extract(payload_json, '$.venue_order_id'),
+                json_extract(payload_json, '$.orderID'),
+                json_extract(payload_json, '$.orderId'),
+                json_extract(payload_json, '$.order_id'),
+                json_extract(payload_json, '$.id')
+              ) AS venue_order_id
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_type IN (
+                'VenueSubmitAcknowledged',
+                'VenueSubmitAttempted',
+                'UserOrderObserved',
+                'UserTradeObserved',
+                'Reconciled'
+              )
+            ORDER BY event_sequence DESC
+            LIMIT 8
+            """,
+            (aggregate_id,),
+        ).fetchall()
+        for event_row in event_rows:
+            _append_nonempty(venue_order_ids, event_row[0])
+    except Exception:
+        pass
+    venue_order_id_tuple = tuple(venue_order_ids)
+
+    current_conn_state = _command_state_on_conn(
+        live_cap_conn,
+        execution_command_id=execution_command_id,
+        venue_order_ids=venue_order_id_tuple,
+    )
     trade_conn_state = None
     try:
         from src.state.db import get_trade_connection_read_only
 
         trade_conn = get_trade_connection_read_only()
         try:
-            trade_conn_state = _command_state_on_conn(trade_conn, execution_command_id)
+            trade_conn_state = _command_state_on_conn(
+                trade_conn,
+                execution_command_id=execution_command_id,
+                venue_order_ids=venue_order_id_tuple,
+            )
         finally:
             try:
                 trade_conn.close()

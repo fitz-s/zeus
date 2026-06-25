@@ -775,6 +775,111 @@ def test_fixA_terminal_venue_command_releases_lock_from_trade_db(monkeypatch):
     assert _lock_reason(world_conn, limit_price=0.70) is None
 
 
+def test_fixA_terminal_venue_order_id_releases_lock_from_trade_db(monkeypatch):
+    """Production cancel shape: EDLI aggregate ids and venue command ids can differ,
+    so terminal closure must also match the canonical venue_order_id."""
+    from src.state import db as state_db
+
+    world_conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(world_conn)
+    _insert_live_order_event(
+        world_conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "0xterminalvenue",
+        },
+    )
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, venue_order_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "short-command-id",
+            "unrelated-decision-id",
+            "0xterminalvenue",
+            "CANCELLED",
+            "2026-06-25T19:10:39+00:00",
+            "2026-06-25T19:32:38+00:00",
+        ),
+    )
+
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade_conn)
+
+    assert _lock_reason(world_conn, limit_price=0.70) is None
+
+
+def test_fixA_active_venue_order_id_does_not_release_lock_from_trade_db(monkeypatch):
+    """A venue_order_id match only releases on terminal command state, not OPEN."""
+    from src.state import db as state_db
+
+    world_conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(world_conn)
+    _insert_live_order_event(
+        world_conn,
+        aggregate_id="aggregate-1",
+        sequence=3,
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "venue_order_id": "0xopenvenue",
+        },
+    )
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            decision_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, venue_order_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "short-command-id",
+            "unrelated-decision-id",
+            "0xopenvenue",
+            "OPEN",
+            "2026-06-25T19:10:39+00:00",
+            "2026-06-25T19:10:47+00:00",
+        ),
+    )
+
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade_conn)
+
+    reason = _lock_reason(world_conn, limit_price=0.70)
+    assert reason is not None
+    assert reason.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED")
+
+
 def test_fixA_unknown_indeterminate_state_fails_closed_suppresses():
     """FIX A (#125) fail-closed: a family order that exists but carries NO terminal
     marker (state UNKNOWN/indeterminate) is treated as ACTIVE — suppress, never risk
