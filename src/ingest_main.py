@@ -215,6 +215,10 @@ def _assert_forecasts_schema_ready_for_ingest() -> None:
         init_schema_forecasts,
     )
 
+    if _forecasts_schema_current_lightweight():
+        logger.info("init_schema_forecasts skipped: live-required forecast schema surfaces present")
+        return
+
     conn = get_forecasts_connection(write_class="bulk")
     try:
         init_schema_forecasts(conn)
@@ -222,6 +226,47 @@ def _assert_forecasts_schema_ready_for_ingest() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _forecasts_schema_current_lightweight() -> bool:
+    """Read-only live-required forecast schema check for fast daemon restarts."""
+    import sqlite3
+
+    from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+    required_indexes = {
+        "idx_forecast_posteriors_live_family_cycle",
+        "idx_raw_model_forecasts_endpoint_family_cycle_members",
+    }
+    try:
+        uri = f"file:{ZEUS_FORECASTS_DB_PATH}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            indexes = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+            }
+            if required_indexes - indexes:
+                return False
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            for table in ("forecast_posteriors", "raw_model_forecasts"):
+                if table not in tables:
+                    return False
+                columns = {
+                    str(row[1])
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if "trade_authority_status" in columns:
+                    return False
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
 def _is_source_paused(source_id: str) -> bool:
@@ -305,6 +350,23 @@ def _write_world_schema_ready_sentinel() -> None:
     tmp.write_text(json.dumps(payload))
     tmp.replace(path)
     logger.info("Wrote world_schema_ready sentinel: schema_fingerprint=%s", schema_fingerprint)
+
+
+def _world_schema_ready_sentinel_current() -> bool:
+    """True when a prior successful world init already matches the pinned schema fingerprint."""
+    from src.config import state_path
+
+    fingerprint_path = Path(__file__).parent.parent / "architecture" / "_schema_fingerprint.txt"
+    try:
+        expected = fingerprint_path.read_text().strip()
+        payload = json.loads(state_path("world_schema_ready.json").read_text())
+    except Exception:
+        return False
+    return (
+        bool(expected)
+        and payload.get("schema_version") == expected
+        and payload.get("init_schema_returned_ok") is True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1895,12 +1957,17 @@ def main() -> None:
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
 
-    # Schema init on world DB.
+    # Schema init on world DB.  A current sentinel means a prior init_schema
+    # already returned OK for the pinned DDL; skip the repeat write path on
+    # restarts so source-clock polling is not delayed behind a world DB lock.
     from src.state.db import init_schema, get_world_connection
-    conn = get_world_connection(write_class="bulk")
-    init_schema(conn)
-    conn.close()
-    logger.info("init_schema complete")
+    if _world_schema_ready_sentinel_current():
+        logger.info("init_schema skipped: current world_schema_ready sentinel matches pinned fingerprint")
+    else:
+        conn = get_world_connection(write_class="bulk")
+        init_schema(conn)
+        conn.close()
+        logger.info("init_schema complete")
     _assert_forecasts_schema_ready_for_ingest()
     logger.info("init_schema_forecasts + assert_schema_current_forecasts complete")
 

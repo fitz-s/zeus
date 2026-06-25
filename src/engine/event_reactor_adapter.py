@@ -3243,11 +3243,25 @@ def _build_event_bound_no_submit_receipt_core(
             provenance_capture=provenance_capture,
         )
     except ValueError as exc:
+        missing_reason = str(exc)
+        if missing_reason == "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="EXECUTABLE_SNAPSHOT_BLOCKED:DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+                source_status="MATCH",
+                family_complete=True,
+            )
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason=f"LIVE_INFERENCE_INPUTS_MISSING:{exc}",
+            reason=f"LIVE_INFERENCE_INPUTS_MISSING:{missing_reason}",
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
@@ -17335,15 +17349,12 @@ def _maker_quote_execution_price_from_snapshot(
     will reject a quote whose belief does not clear it (test (c)). The quote price
     here is the structural placement bound, not an edge claim.
 
-    SCOPE — buy_no ONLY (operator throughput-unlock directive 2026-06-10). The
-    favorite-longshot buy_no edge into an empty NO ask is the target edge class.
-    buy_yes into an empty YES ask is intentionally NOT maker-quoted here: a far-OTM
-    YES with an empty ask is exactly the Milan-24C incident class the direction law
-    fail-closes (buy_yes must be forecast-ADJACENT), and the EXECUTABLE_NATIVE_ASK_
-    MISSING no-bypass invariant for buy_yes stays intact. Symmetry can be enabled
-    later behind its own direction-law-gated test; today it returns None (no-trade).
+    SCOPE — direction-law-gated maker quoting for both YES and NO. The final proof
+    path still owns q_lcb, direction law, family coherence, and mode-consistent EV;
+    this seam only prices a rest behind complementary liquidity when the selected
+    native ask side is empty.
     """
-    if direction != "buy_no":
+    if direction not in {"buy_yes", "buy_no"}:
         return None
     comp_best_bid = _complementary_best_bid_for_direction(book, direction=direction)
     # SIBLING-ROW FALLBACK (2026-06-10 live-v12 fix): the NO-outcome snapshot row

@@ -9980,16 +9980,18 @@ def _reconcile_row(
                     )
                     return "advanced"
                 if venue_status in {"CANCELLED", "CANCELED", "EXPIRED"}:
-                    # Terminal-but-no-fill ambiguity — operator review.
+                    # Venue positively reports terminal no-fill for this order id. This is not an
+                    # operator-review state: leaving it in REVIEW_REQUIRED keeps the same-token
+                    # duplicate lock active and burns redecision events as active-order suppressions.
                     append_event(
                         conn,
                         command_id=cmd.command_id,
-                        event_type=CommandEventType.REVIEW_REQUIRED.value,
+                        event_type=CommandEventType.EXPIRED.value,
                         occurred_at=now,
                         payload={"reason": "recovery_venue_terminal_no_fill", "venue_order_id": venue_order_id, "venue_status": venue_status},
                     )
-                    logger.warning(
-                        "recovery: command %s SUBMITTING -> REVIEW_REQUIRED (venue terminal status=%s)",
+                    logger.info(
+                        "recovery: command %s SUBMITTING -> EXPIRED (venue terminal no-fill status=%s)",
                         cmd.command_id, venue_status,
                     )
                     return "advanced"
@@ -10049,12 +10051,12 @@ def _reconcile_row(
                     append_event(
                         conn,
                         command_id=cmd.command_id,
-                        event_type=CommandEventType.REVIEW_REQUIRED.value,
+                        event_type=CommandEventType.EXPIRED.value,
                         occurred_at=now,
                         payload={"reason": "recovery_venue_terminal_no_fill", "venue_order_id": venue_order_id, "venue_status": venue_status},
                     )
-                    logger.warning(
-                        "recovery: command %s UNKNOWN -> REVIEW_REQUIRED (venue terminal status=%s)",
+                    logger.info(
+                        "recovery: command %s UNKNOWN -> EXPIRED (venue terminal no-fill status=%s)",
                         cmd.command_id, venue_status,
                     )
                     return "advanced"

@@ -2693,6 +2693,7 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Forecast-source re-ingested AFTER this cycle's decision moment.
     "SOURCE_CAPTURED_AFTER_DECISION_TIME",
     # Executable family snapshot not captured yet / went stale this cycle.
+    "EXECUTABLE_SNAPSHOT_BLOCKED",
     "EXECUTABLE_SNAPSHOT_STALE",
     # Taker race: JIT recapture found all-in cost above max + bounded tolerance
     # (Miami 16:22:35Z — EV at the NEW price still strongly positive).

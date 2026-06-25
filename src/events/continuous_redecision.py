@@ -1789,20 +1789,50 @@ def screen_resting_orders(
                         family_id=rest.family_id, bin_label=rest.bin_label, side=rest.side,
                         action="CANCEL_REPLACE", reason="BOOK_MOVED", detail=drift,
                     )
-        # 3) Confirmed-value refresh — GATED under GTC-FIRST (operator goal 2026-06-23 "GTC not
-        #    taker"; the screen partner of mode_consistent_ev rule 6a'). This pull existed to
-        #    re-price an aged rest into a CROSS when crossing the ask was still +EV. With 6a'
-        #    gated (fresh +EV candidates REST instead of crossing), the pull's re-decision now
-        #    just RE-RESTS at the same bid+tick maker limit — so firing it cancelled-and-re-rested
-        #    a still-+EV resting maker every value-refresh window: pure churn that reset the venue
-        #    order / queue position and stopped the GTC rest from surviving to fill (live
-        #    2026-06-23: GTC rests cancelled reason=CONFIRMED_VALUE_REFRESH before any fill). The
-        #    rest is therefore HELD: it survives the full escalation window to fill as a GTC maker,
-        #    and the maker-rest deadline (src.execution.maker_rest_escalation) still escalates it to
-        #    a cross if unfilled. Adverse moves are STILL caught by screen_reprice (belief-decay,
-        #    above) and BOOK_MOVED still re-pegs to keep us competitive — so fair-value protection
-        #    is unchanged; only the now-pointless cross-pull churn is removed. (Reversible: restore
-        #    this block to re-enable the value-refresh cross-pull alongside rule 6a'.)
+        if decision is None:
+            # 3) Confirmed-value refresh. This is not an age-only cancel: an aged maker rest is
+            # pulled only when the latest conservative held-side q_lcb still clears the current
+            # executable ask, fee, c95 tick, and a material-improvement floor. The cancel then
+            # routes through the existing EDLI cert path; _family_rest_state arms the
+            # post-real-maker-window escalation lane, and executor duplicate guards still own
+            # final submit safety.
+            ask = ask_by_cid.get((rest.condition_id, rest.side))
+            if ask is not None:
+                try:
+                    if _parse(ask.freshness_deadline) <= screen_time:
+                        ask = None
+                except (TypeError, ValueError):
+                    ask = None
+            if ask is not None and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0:
+                belief = latest_cached_belief(world_conn, family_id=rest.family_id)
+                held_q_lcb = (
+                    _held_side_q_lcb(belief, bin_label=rest.bin_label, side=rest.side)
+                    if belief is not None
+                    else None
+                )
+                if held_q_lcb is not None:
+                    try:
+                        idx = belief.bin_labels.index(rest.bin_label) if belief is not None else -1
+                        yes_post = float(belief.p_posterior_vec[idx]) if idx >= 0 else float("nan")
+                        posterior_q = yes_post if rest.side == "buy_yes" else one_minus(yes_post)
+                    except (TypeError, ValueError, IndexError):
+                        posterior_q = float("nan")
+                    if math.isfinite(posterior_q):
+                        score = _entry_screen_robust_trade_score(
+                            q_posterior=posterior_q,
+                            q_lcb_5pct=float(held_q_lcb),
+                            price=float(ask.price),
+                            tick_size=ask.tick_size,
+                        )
+                        if score >= _improve_delta_for_tick(ask.tick_size) - _EPS:
+                            decision = RepriceDecision(
+                                family_id=rest.family_id,
+                                bin_label=rest.bin_label,
+                                side=rest.side,
+                                action="CANCEL_REPLACE",
+                                reason="CONFIRMED_VALUE_REFRESH",
+                                detail=score,
+                            )
         if decision is not None:
             out.append((rest, decision))
     return out

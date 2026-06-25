@@ -479,6 +479,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             models=updated_sources,
             include_previous_runs=False,
             prune_after=False,
+            allow_single_runs_fallback=False,
             release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
         )
         report["status"] = f"SOURCE_CLOCK_SCOPED_{report.get('status')}"

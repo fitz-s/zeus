@@ -576,6 +576,7 @@ def _default_live_fetch_batched(
     run: "datetime",
     target_local_date: "date",
     forecast_hours: int,
+    allow_per_model_fallback: bool = True,
 ) -> dict[str, tuple[float | None, float | None]]:
     """R1+R2: ONE single-runs call for ALL `models` at (city, target_date, cycle).
 
@@ -621,6 +622,13 @@ def _default_live_fetch_batched(
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
                 "(no per-model retry): %s",
+                exc,
+            )
+            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, None)}
+        if not allow_per_model_fallback:
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION batched single_runs fetch failed; "
+                "source-clock fast path records drop without per-model retry: %s",
                 exc,
             )
             return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, None)}
@@ -1077,6 +1085,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     models: Sequence[str] | None = None,
     include_previous_runs: bool = True,
     prune_after: bool = True,
+    allow_single_runs_fallback: bool = True,
     single_runs_fetch: SingleRunsFetchFn | None = None,
     previous_runs_fetch: PreviousRunsFetchFn | None = None,
     release_lag_hours: float = 14.0,
@@ -1198,6 +1207,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         for model, _city, _target_date, _metric, endpoint in persisted_keys
         if endpoint == "single_runs"
     }
+    single_fast_transport_failed: set[tuple[str, str, str]] = set()
     source_clock_single_runs = (
         {}
         if _use_legacy_per_model
@@ -1343,6 +1353,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     )
                     continue
                 request_cycle_iso = request.run.isoformat()
+                fast_fail_key = (model, city, request_cycle_iso)
+                if not allow_single_runs_fallback and fast_fail_key in single_fast_transport_failed:
+                    dropped.append(f"{model}:single_runs_fast_transport_cached_drop")
+                    continue
                 # R1+R2 skip: check both metrics already persisted for this (model,city,date,cycle).
                 metrics_needed = [
                     met for met in ("high", "low")
@@ -1371,6 +1385,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     run=single_run,
                     target_local_date=target_local_date,
                     forecast_hours=forecast_hours,
+                    allow_per_model_fallback=allow_single_runs_fallback,
                 )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if single_transport_error is not None:
@@ -1378,6 +1393,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     transport_errors.append(
                         f"single_runs:{city}:{target_date}:{single_error_text}"
                     )
+                    if not allow_single_runs_fallback:
+                        for model in single_models:
+                            single_fast_transport_failed.add((model, city, single_run.isoformat()))
                     if _is_quota_transport_error(single_error_text):
                         abort_transport = True
                 for model in single_models:
