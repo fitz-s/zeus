@@ -19,8 +19,9 @@ ncep_nbm/gfs_hrrr/gem_hrdps + in-domain regionals icon_d2/arome/ukmo_uk), this j
 jma_seamless, AND the alias-dedup probe icon_seamless were all DROPPED from the fusion; they are
 no longer fetched here.)
 
-  (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live capture
-      for replay; SPEC §3 single-runs identity). REUSES bayes_precision_fusion_capture._default_live_fetch.
+  (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live input
+      for the replacement posterior and replay; SPEC §3 single-runs identity). REUSES
+      bayes_precision_fusion_capture._default_live_fetch.
   (2) fixed-lead previous_runs fetch — the no-leak walk-forward train value via the OM
       previous-runs API temperature_2m_previous_dayN hourly var (SPEC §3 fixed-lead). Forces
       temperature_unit=celsius (forecast_value_c is ALWAYS degC -> SPEC §7 C/F unit-mix antibody).
@@ -30,9 +31,9 @@ no longer fetched here.)
 
 FAIL-SOFT IS STRUCTURAL: a per-model fetch failure (raise OR None) DROPS that model's row and
 the job proceeds with the survivors — a dropped model is simply absent (the fusion handles
-missing sources by construction). The job is a pure side-effect on raw_model_forecasts: it
-writes NOTHING into forecast_posteriors and touches NO posterior/q/center/spread/order, so the
-money path is byte-identical whether or not this job runs (gated by the SEPARATE capture flag).
+missing sources by construction). The job writes raw_model_forecasts only; the live materializer
+later consumes those rows as replacement-posterior inputs and writes forecast_posteriors. A
+missing current capture is therefore a live probability-input gap, not a harmless replay gap.
 """
 from __future__ import annotations
 
@@ -511,8 +512,9 @@ def _default_live_fetch_batched(
 
     Returns {model: (high_c, low_c)} for each model whose series is present in the
     response. Models absent from the response (400, None series) are omitted.
-    FAIL-SOFT: any per-model parse error omits that model; total network failure
-    returns {}.
+    FAIL-SOFT: any per-model parse error omits that model. A non-quota batched transport
+    failure falls back to one request per model so one unsupported batched combination cannot
+    suppress the whole live current-cycle capture.
     """
     try:
         from src.data.openmeteo_client import fetch  # noqa: PLC0415
@@ -530,7 +532,7 @@ def _default_live_fetch_batched(
             "latitude": latitude,
             "longitude": longitude,
             "hourly": "temperature_2m",
-            "models": om_ids,
+            "models": ",".join(om_ids),
             "run": run_iso,
             "forecast_hours": forecast_hours,
             "temperature_unit": "celsius",
@@ -545,8 +547,92 @@ def _default_live_fetch_batched(
         )
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
-        _LOG.warning("BAYES_PRECISION_FUSION batched single_runs fetch failed (fail-soft): %s", exc)
-        return {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
+        batched_error_text = str(exc)
+        if _is_quota_transport_error(batched_error_text):
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
+                "(no per-model retry): %s",
+                exc,
+            )
+            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, None)}
+
+        _LOG.warning(
+            "BAYES_PRECISION_FUSION batched single_runs fetch failed; retrying per-model "
+            "so the cycle can retain surviving live inputs: %s",
+            exc,
+        )
+
+    from src.data.openmeteo_client import fetch  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        SINGLE_RUNS_FORECAST_URL,
+    )
+
+    fallback: dict[str, tuple[float | None, float | None]] = {}
+    fallback_errors: list[str] = []
+    run_iso = (
+        run.strftime("%Y-%m-%dT%H:%M")
+        if hasattr(run, "strftime")
+        else str(run)
+    )
+    for model in models:
+        om_id = OPENMETEO_MODEL_IDS.get(model, model)
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": "temperature_2m",
+            "models": om_id,
+            "run": run_iso,
+            "forecast_hours": forecast_hours,
+            "temperature_unit": "celsius",
+            "timezone": timezone_name,
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+        }
+        try:
+            payload = fetch(
+                SINGLE_RUNS_FORECAST_URL,
+                params,
+                endpoint_label=f"bayes_precision_fusion_{model}_single_runs_fallback",
+                quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+                fast_fail_429=True,
+            )
+            parsed = _parse_batched_single_runs_payload(
+                payload,
+                [model],
+                target_local_date,
+                timezone_name,
+            )
+            if model in parsed:
+                fallback[model] = parsed[model]
+            else:
+                fallback_errors.append(f"{model}:missing_series")
+        except Exception as model_exc:
+            model_error_text = str(model_exc)
+            fallback_errors.append(f"{model}:{model_error_text}")
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION per-model single_runs fallback dropped %s "
+                "(fail-soft): %s",
+                model,
+                model_exc,
+            )
+            if _is_quota_transport_error(model_error_text):
+                break
+
+    if fallback:
+        fallback[_BATCH_TRANSPORT_ERROR_KEY] = (
+            "batched_failed="
+            + batched_error_text
+            + ("; fallback_errors=" + ",".join(fallback_errors[:8]) if fallback_errors else ""),
+            None,
+        )
+        return fallback
+    return {
+        _BATCH_TRANSPORT_ERROR_KEY: (
+            "batched_failed="
+            + batched_error_text
+            + ("; fallback_errors=" + ",".join(fallback_errors[:8]) if fallback_errors else ""),
+            None,
+        )
+    }
 
 
 def _parse_batched_single_runs_payload(
@@ -628,7 +714,7 @@ def _default_previous_runs_fetch_batched(
             "start_date": target_date,
             "end_date": target_date,
             "hourly": hourly_var,
-            "models": om_ids,
+            "models": ",".join(om_ids),
             "temperature_unit": "celsius",
             "timezone": timezone_name,
         }

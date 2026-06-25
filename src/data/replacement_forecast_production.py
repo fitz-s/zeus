@@ -290,9 +290,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
     ``settings['edli']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
     SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
     OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
-    zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
-    center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
-    daily, fail-soft (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
+    zeus-forecasts.db. It does not directly write forecast_posteriors or orders; those rows are
+    live replacement-posterior inputs consumed by the materializer. Forward, daily, fail-soft
+    (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
     there is no forecast_db / no targets."""
     try:
         if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
@@ -1010,8 +1010,9 @@ def _replacement_forecast_download_cycle() -> None:
                 "replacement forecast current-target download report: %s", download_report
             )
     # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model capture/accrual (forward + fixed-lead), gated by the
-    # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Pure side-effect on
-    # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
+    # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Writes only
+    # raw_model_forecasts here; downstream live materialization consumes those rows to build
+    # replacement posteriors. Fail-soft.
     bayes_precision_fusion_capture_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     if bayes_precision_fusion_capture_report is not None and bayes_precision_fusion_capture_report.get("status") not in {
         "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",

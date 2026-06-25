@@ -19,7 +19,7 @@ All fetchers are injected (NO network).
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -606,6 +606,103 @@ def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(
     )
 
     assert got == {"icon_global": (19.5, 17.25)}
+
+
+def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> None:
+    """Batched Open-Meteo requests must use the documented comma-separated models value."""
+    import src.data.openmeteo_client as om
+    from src.data import bayes_precision_fusion_download as dl
+    from src.forecast.model_selection import ANCHOR_MODEL
+
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "hourly": {
+                    "temperature_2m_previous_day1_icon_global": [18.0, 19.5, 17.25],
+                    "temperature_2m_previous_day1_ecmwf_ifs025": [20.0, 21.0, 19.0],
+                }
+            }
+
+    def _fake_get(_url, *, params, **_kwargs):
+        captured["models"] = params["models"]
+        return _Resp()
+
+    monkeypatch.setattr(om.httpx, "get", _fake_get)
+
+    got = dl._default_previous_runs_fetch_batched(
+        models=["icon_global", ANCHOR_MODEL],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        target_date="2026-06-09",
+        lead_days=1,
+    )
+
+    assert captured["models"] == "icon_global,ecmwf_ifs025"
+    assert got == {"icon_global": (19.5, 17.25), ANCHOR_MODEL: (21.0, 19.0)}
+
+
+def test_default_single_runs_batched_400_falls_back_per_model(monkeypatch) -> None:
+    """A provider 400 on the combined models request must not erase the whole live cycle.
+
+    Open-Meteo sometimes rejects a batched models combination even though the individual model
+    requests are valid. The live current-capture lane must preserve the valid per-model rows so
+    replacement posterior materialization can still advance on fresh evidence.
+    """
+    import src.data.openmeteo_client as om
+    from src.data import bayes_precision_fusion_download as dl
+
+    requested_models: list[object] = []
+
+    def _payload(value: float) -> dict:
+        return {
+            "hourly": {
+                "time": [
+                    "2026-06-09T00:00",
+                    "2026-06-09T03:00",
+                    "2026-06-09T12:00",
+                    "2026-06-09T21:00",
+                ],
+                "temperature_2m": [value - 1.0, value, value + 2.0, value + 1.0],
+            },
+            "hourly_units": {"temperature_2m": "°C"},
+        }
+
+    def _fake_fetch(_url, params, **_kwargs):
+        requested_models.append(params["models"])
+        if params["models"] == "icon_global,ecmwf_ifs":
+            raise RuntimeError("Client error '400 Bad Request' for batched models")
+        if params["models"] == "icon_global":
+            return _payload(20.0)
+        if params["models"] == "ecmwf_ifs":
+            return _payload(22.0)
+        raise RuntimeError("unexpected model")
+
+    monkeypatch.setattr(om, "fetch", _fake_fetch)
+
+    got = dl._default_live_fetch_batched(
+        models=["icon_global", "ecmwf_ifs"],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        target_local_date=date(2026, 6, 9),
+        forecast_hours=120,
+    )
+
+    assert requested_models == ["icon_global,ecmwf_ifs", "icon_global", "ecmwf_ifs"]
+    assert got["icon_global"] == (22.0, 19.0)
+    assert got["ecmwf_ifs"] == (24.0, 21.0)
+    assert dl._BATCH_TRANSPORT_ERROR_KEY in got
+    assert "400 Bad Request" in got[dl._BATCH_TRANSPORT_ERROR_KEY][0]
 
 
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:
