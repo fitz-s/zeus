@@ -5022,18 +5022,52 @@ def _edli_event_reactor_cycle() -> None:
         ):
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         _log_stage("day0_prefetch")
+        _prune_mutex = _world_write_mutex()
+        _prune_mutex.acquire()
+        try:
+            _edli_prune_pending_working_set(store, decision_time=now)
+            conn.commit()
+        finally:
+            _prune_mutex.release()
+        _log_stage("pending_prune")
+        _fsr_events = []
+        if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+            try:
+                _fair_source = _edli_next_redecision_source()
+                _fsr_pending = _edli_pending_entity_keys(
+                    conn,
+                    event_types=("FORECAST_SNAPSHOT_READY",),
+                )
+                _fsr_events = _edli_build_forecast_snapshot_events(
+                    conn,
+                    decision_time=now,
+                    received_at=received_at,
+                    limit=forecast_emit_limit,
+                    source=_fair_source,
+                    already_pending_keys=_fsr_pending,
+                    suppress_recent_no_value_refutations=True,
+                )
+                _log_stage("forecast_snapshot_build")
+            except sqlite3.OperationalError as _emit_lock_exc:
+                if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
+                    logger.warning(
+                        "EDLI reactor: forecast-snapshot build hit transient DB lock "
+                        "(%r) — skipping emit this cycle, draining already-queued candidates.",
+                        _emit_lock_exc,
+                    )
+                else:
+                    raise
         # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
         # prune+emit+commit unit under the process-global world-DB write mutex so it
-        # never holds the WAL write lock concurrently with the ingestor (no HTTP
-        # is done inside this block — the emit reads forecasts/trade DBs and
-        # writes world — so the mutex stays short and never spans a venue fetch).
+        # never holds the WAL write lock concurrently with the ingestor. Forecast
+        # selection/no-value refutation and Day0 HTTP have already completed above;
+        # the mutex only covers prune/write/commit.
         # Explicit acquire/finally (not ``with``) to avoid reindenting the block.
         _emit_mutex = _world_write_mutex()
         _emit_mutex.acquire()
         try:
-            _edli_prune_pending_working_set(store, decision_time=now)
             if edli_cfg.get("forecast_snapshot_trigger_enabled"):
                 # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
                 # opportunity_events to the WAL world DB shared with the market-channel
@@ -5043,26 +5077,17 @@ def _edli_event_reactor_cycle() -> None:
                 # candidates already queued from prior cycles. Catch ONLY the transient lock
                 # (narrow, by message) and continue; real schema/logic faults still propagate.
                 try:
-                    # COVERAGE-FAIRNESS (universe-collapse fix 2026-06-04; Wave-1 2026-06-12:
-                    # now UNCONDITIONAL). The fairness round-robin rotates the selection
-                    # window by cycle_index, parsed from a monotonic `cycle-N` source — fed
-                    # here so every cycle advances the window and re-emits. Covers all
-                    # (city,metric) families in ceil(N/limit) cycles. The former
-                    # coverage_fairness_emit_enabled flag (and the None-source one-shot OFF
-                    # path that left A-L permanently dark) is DELETED.
-                    _fair_source = _edli_next_redecision_source()
-                    _fsr_pending = _edli_pending_entity_keys(
+                    _current_fsr_pending = _edli_pending_entity_keys(
                         conn,
                         event_types=("FORECAST_SNAPSHOT_READY",),
                     )
-                    _edli_emit_forecast_snapshot_events(
-                        conn,
-                        decision_time=now,
-                        received_at=received_at,
-                        limit=forecast_emit_limit,
-                        source=_fair_source,
-                        already_pending_keys=_fsr_pending,
-                    )
+                    _fresh_fsr_events = [
+                        event for event in _fsr_events
+                        if event.entity_key not in _current_fsr_pending
+                    ]
+                    from src.events.event_writer import EventWriter
+
+                    EventWriter(conn).write_many(_fresh_fsr_events)
                     _log_stage("forecast_snapshot_emit")
                 except sqlite3.OperationalError as _emit_lock_exc:
                     if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -5981,7 +6006,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             get_world_connection_read_only,
             get_trade_connection_read_only,
             get_world_connection,
-            ZEUS_FORECASTS_DB_PATH,
             get_forecasts_connection_read_only,
         )
 
@@ -6231,31 +6255,18 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         )
         from src.state.db import world_write_mutex as _world_write_mutex
 
-        world = get_world_connection()
-        try:
-            _att = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
-            if "forecasts" not in _att:
-                world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-        except Exception:  # noqa: BLE001
-            pass
+        world_scan_ro = get_world_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
-        emit_mutex = _world_write_mutex()
-        emit_mutex.acquire()
         try:
-            expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
-                world,
-                set(all_families),
-                decision_time=received_at,
-            )
-            trig = ForecastSnapshotReadyTrigger(
-                EventWriter(world),
-                live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
-            )
-            pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
+            pending = _edli_pending_entity_keys(world_scan_ro, event_types=(REDECISION_EVENT_TYPE,))
             pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
             emit_families = set(all_families) - pending_families
             if emit_families:
-                emitted = trig.scan_committed_snapshots(
+                trig = ForecastSnapshotReadyTrigger(
+                    EventWriter(world_scan_ro),
+                    live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
+                )
+                events_to_emit = trig.build_committed_snapshot_events(
                     forecasts_conn=forecasts_ro,
                     decision_time=now,
                     received_at=received_at,
@@ -6267,14 +6278,35 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     phase_filter_exempt_families=set(),
                 )
             else:
-                emitted = []
-            world.commit()
+                events_to_emit = []
         finally:
-            emit_mutex.release()
             try:
                 forecasts_ro.close()
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                world_scan_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        world = get_world_connection()
+        emit_mutex = _world_write_mutex()
+        emit_mutex.acquire()
+        try:
+            expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                world,
+                set(all_families),
+                decision_time=received_at,
+            )
+            current_pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
+            fresh_events = [
+                event for event in events_to_emit
+                if event.entity_key not in current_pending
+            ]
+            emitted = EventWriter(world).write_many(fresh_events)
+            world.commit()
+        finally:
+            emit_mutex.release()
             try:
                 world.close()
             except Exception:  # noqa: BLE001
@@ -6518,6 +6550,37 @@ def _edli_emit_forecast_snapshot_events(
     """
 
     from src.events.event_writer import EventWriter
+
+    events = _edli_build_forecast_snapshot_events(
+        world_conn,
+        decision_time=decision_time,
+        received_at=received_at,
+        limit=limit,
+        source=source,
+        already_pending_keys=already_pending_keys,
+        suppress_recent_no_value_refutations=True,
+    )
+    return len(EventWriter(world_conn).write_many(events))
+
+
+def _edli_build_forecast_snapshot_events(
+    world_conn,
+    *,
+    decision_time: datetime,
+    received_at: str,
+    limit: int | None,
+    source: str | None = None,
+    already_pending_keys: set[str] | None = None,
+    suppress_recent_no_value_refutations: bool = False,
+) -> list[Any]:
+    """Build FSR events without mutating world DB.
+
+    The live reactor calls this before taking ``world_write_mutex``. Forecast
+    selection and no-value refutation reads can touch large side tables; the
+    mutex must only cover the prune/write/commit unit.
+    """
+
+    from src.events.event_writer import EventWriter
     from src.events.triggers.forecast_snapshot_ready import (
         ForecastSnapshotReadyTrigger,
         executable_forecast_live_eligible_reader,
@@ -6530,16 +6593,14 @@ def _edli_emit_forecast_snapshot_events(
             EventWriter(world_conn),
             live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
         )
-        return len(
-            trigger.scan_committed_snapshots(
-                forecasts_conn=forecasts_conn,
-                decision_time=decision_time,
-                received_at=received_at,
-                limit=limit,
-                source=source,
-                already_pending_keys=already_pending_keys,
-                suppress_recent_no_value_refutations=True,
-            )
+        return trigger.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=limit,
+            source=source,
+            already_pending_keys=already_pending_keys,
+            suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
         )
     finally:
         forecasts_conn.close()

@@ -435,6 +435,32 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
     assert json.loads(payload)["completeness_status"] == "COMPLETE"
 
 
+def test_build_committed_snapshot_events_does_not_write_world_rows():
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_chicago_2026_05_24(forecasts_conn)
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+    )
+
+    assert len(events) == 1
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    written = EventWriter(world_conn).write_many(events)
+    assert len(written) == 1
+    assert written[0].inserted is True
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+
+
 def _seed_committed_chicago_2026_05_24(forecasts_conn) -> None:
     """Insert a COMPLETE/LIVE_ELIGIBLE Chicago high coverage for target 2026-05-24
     (the same shape as test_scan_committed_snapshots_emits_from_source_run_coverage)."""

@@ -600,9 +600,9 @@ def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
     assert "emit_families = set(all_families) - pending_families" in screen_src
     assert "if emit_families:" in screen_src
     assert "restrict_to_families=emit_families" in screen_src
-    assert "emitted = []" in screen_src
+    assert "events_to_emit = []" in screen_src
     assert screen_src.index("emit_families = set(all_families) - pending_families") < screen_src.index(
-        "trig.scan_committed_snapshots"
+        "trig.build_committed_snapshot_events"
     )
 
 
@@ -804,7 +804,7 @@ def test_restricted_redecision_filters_before_fairness_window():
         selected[0]["snapshot_temperature_metric"],
     )] == [("Tokyo", "2026-06-18", "low")]
 
-    src = inspect.getsource(ForecastSnapshotReadyTrigger.scan_committed_snapshots)
+    src = inspect.getsource(ForecastSnapshotReadyTrigger.build_committed_snapshot_events)
     assert src.index("rows = _filter_rows_to_restricted_families") < src.index(
         "rows = CoverageFairnessRequest"
     )

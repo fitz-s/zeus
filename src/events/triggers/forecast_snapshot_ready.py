@@ -590,7 +590,7 @@ class ForecastSnapshotReadyTrigger:
         )
         return self._writer.write(event)
 
-    def scan_committed_snapshots(
+    def build_committed_snapshot_events(
         self,
         *,
         forecasts_conn: sqlite3.Connection,
@@ -603,8 +603,8 @@ class ForecastSnapshotReadyTrigger:
         restrict_to_families: set[tuple[str, str, str]] | None = None,
         phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
         suppress_recent_no_value_refutations: bool = False,
-    ) -> list[EventWriteResult]:
-        """Catch up from committed source_run/source_run_coverage/snapshot rows.
+    ) -> list[OpportunityEvent]:
+        """Build opportunity events from committed source_run/source_run_coverage/snapshot rows.
 
         When ``source`` is supplied (continuous re-decision), each emitted event uses it as the
         event ``source`` so the idempotency_key differs per cycle and committed families re-emit a
@@ -612,6 +612,9 @@ class ForecastSnapshotReadyTrigger:
         every cycle against just-in-time-refreshed prices. ``already_pending_keys`` (entity_keys with
         an unprocessed event) are skipped so the re-decision scan does not pile duplicates onto the
         pending queue. Both default-None → the original one-shot catch-up behavior is unchanged.
+
+        This method is intentionally write-free so callers can do forecast-heavy selection outside
+        the world write mutex and keep the live event writer's critical section short.
         """
 
         # mx2t3 carrier-decouple (GATE-1 C-A2): under the replacement lane readiness rides
@@ -930,7 +933,7 @@ class ForecastSnapshotReadyTrigger:
             source is not None or _intake_phase_filter_enabled()
         )
         pending_skip = already_pending_keys or set()
-        results: list[EventWriteResult] = []
+        results: list[OpportunityEvent] = []
         for row in reversed(rows):
             source_run = _source_run_from_join(row)
             coverage = _coverage_from_join(row)
@@ -1009,8 +1012,36 @@ class ForecastSnapshotReadyTrigger:
                     decision_time=decision_time,
                 ) is not None:
                     continue
-            results.append(self._writer.write(event))
+            results.append(event)
         return results
+
+    def scan_committed_snapshots(
+        self,
+        *,
+        forecasts_conn: sqlite3.Connection,
+        decision_time: datetime,
+        received_at: str,
+        limit: int | None = 100,
+        source: str | None = None,
+        already_pending_keys: set[str] | None = None,
+        event_type: str = "FORECAST_SNAPSHOT_READY",
+        restrict_to_families: set[tuple[str, str, str]] | None = None,
+        phase_filter_exempt_families: set[tuple[str, str, str]] | None = None,
+        suppress_recent_no_value_refutations: bool = False,
+    ) -> list[EventWriteResult]:
+        events = self.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=limit,
+            source=source,
+            already_pending_keys=already_pending_keys,
+            event_type=event_type,
+            restrict_to_families=restrict_to_families,
+            phase_filter_exempt_families=phase_filter_exempt_families,
+            suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
+        )
+        return self._writer.write_many(events)
 
 
 def executable_forecast_live_eligible_reader(
