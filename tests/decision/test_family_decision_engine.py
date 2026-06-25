@@ -882,6 +882,61 @@ def test_symmetric_center_yes_dominance_does_not_force_weaker_yes():
     assert selected is selected_no
 
 
+def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():
+    """Shanghai correction: choose the cheaper center YES for the same upside.
+
+    The selected single NO can have higher apparent utility density, but the
+    family expression formed by the two adjacent NOs is a guaranteed floor plus
+    the same center-bin upside as BUY_YES. If that expression ties up more
+    capital and has no better edge density, the optimizer should canonicalize to
+    center YES instead of letting repeated cycles assemble the costly NO pair.
+    """
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.11,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("5"),
+    )
+    sibling_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b26", cost=0.80),
+        edge_lcb=0.10,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.80,
+        optimal_stake_usd=Decimal("5"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.53,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, center_yes, sibling_no],
+        forecast_bin="b25",
+    )
+
+    assert selected is center_yes
+    pair_payoff = selected_no.route.payoff_vector + sibling_no.route.payoff_vector
+    assert np.all(pair_payoff - np.min(pair_payoff) >= center_yes.route.payoff_vector)
+    assert float(center_yes.economics.cost.value) < (
+        float(selected_no.economics.cost.value) + float(sibling_no.economics.cost.value)
+    )
+
+
 def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
     """The terminal total-utility objective only applies when explicitly requested."""
     case = _case()
@@ -1300,13 +1355,13 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
                 basis="OOF_WILSON_95_MISSING_CELL",
             )
         return GuardVerdict(
-            q_safe=0.30,
+            q_safe=0.20,
             trade=True,
             abstained=False,
             cell_key="high|L1|YES|modal|qb10->tail_qb6+",
-            L_g=0.30,
+            L_g=0.20,
             n_g=64,
-            bucket_floor=0.30,
+            bucket_floor=0.20,
             basis="OOF_WILSON_95_POOLED_TAIL",
         )
 
@@ -1319,7 +1374,7 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
             space,
             "b25",
             q_point=float(jq.q_by_bin_id["b25"]),
-            q_lcb=0.30,
+            q_lcb=0.20,
             price="0.050",
         ),
     }

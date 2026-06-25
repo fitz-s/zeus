@@ -1098,7 +1098,81 @@ class FamilyDecisionEngine:
             and center_point_density > selected_point_density
         ):
             return center_yes
+        adjacent_pair = self._adjacent_no_pair_for_center(
+            scored=scored,
+            forecast_bin=forecast_bin,
+            selected_decision=selected_decision,
+        )
+        if adjacent_pair is None:
+            return selected_decision
+        left, right = adjacent_pair
+        pair_payoff = np.asarray(left.route.payoff_vector, dtype=float) + np.asarray(
+            right.route.payoff_vector, dtype=float
+        )
+        center_payoff = np.asarray(center_yes.route.payoff_vector, dtype=float)
+        # Shanghai-form equivalence/dominance: buying adjacent NOs can embed a
+        # guaranteed floor plus the center-bin upside, sometimes with extra tail
+        # payoff. The floor is not alpha; it is extra locked capital. Compare
+        # the outcome-dependent upside after removing that guaranteed
+        # component, and canonicalize to center YES only when the broader NO
+        # expression does not earn its extra capital via better densities.
+        pair_upside = pair_payoff - float(np.min(pair_payoff))
+        if not np.all(pair_upside + 1e-9 >= center_payoff):
+            return selected_decision
+        pair_cost = float(left.economics.cost.value) + float(right.economics.cost.value)
+        if not (np.isfinite(pair_cost) and pair_cost > 0.0):
+            return selected_decision
+        try:
+            # Use the already-computed leg economics for a conservative density
+            # proxy. This is enough for canonicalization: center YES must be no
+            # worse than the NO expression on both lower-bound and point edge
+            # density, while tying up strictly less capital.
+            pair_edge = float(left.economics.edge_lcb) + float(right.economics.edge_lcb)
+            pair_point = float(left.economics.point_ev) + float(right.economics.point_ev)
+        except Exception:  # noqa: BLE001
+            return selected_decision
+        eps = 1e-9
+        if (
+            center_cost + eps < pair_cost
+            and center_edge_density + eps >= pair_edge / pair_cost
+            and center_point_density + eps >= pair_point / pair_cost
+        ):
+            return center_yes
         return selected_decision
+
+    def _adjacent_no_pair_for_center(
+        self,
+        *,
+        scored: Sequence[CandidateDecision],
+        forecast_bin: str,
+        selected_decision: CandidateDecision,
+    ) -> tuple[CandidateDecision, CandidateDecision] | None:
+        bin_ids = [d.route.bin_id for d in scored]
+        ordered_unique = list(dict.fromkeys(bin_ids))
+        try:
+            idx = ordered_unique.index(forecast_bin)
+        except ValueError:
+            return None
+        if idx <= 0 or idx >= len(ordered_unique) - 1:
+            return None
+        left_id = ordered_unique[idx - 1]
+        right_id = ordered_unique[idx + 1]
+        if selected_decision.route.bin_id not in {left_id, right_id}:
+            return None
+        by_key = {(d.route.side, d.route.bin_id): d for d in scored}
+        left = by_key.get(("NO", left_id))
+        right = by_key.get(("NO", right_id))
+        if left is None or right is None:
+            return None
+        for leg in (left, right):
+            if (
+                not leg.route.route_cost.executable
+                or not leg.coherence_allows
+                or leg.economics.edge_lcb <= 0.0
+                or leg.economics.optimal_delta_u <= 0.0
+            ):
+                return None
+        return left, right
 
     def _portfolio_comparisons(
         self,
