@@ -23,7 +23,7 @@ import json
 import math
 import sqlite3
 import hashlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -200,6 +200,44 @@ def _role_possession_available_at(
         proof_of_possession_available_at(possession),
         field_name="role_possession_available_at",
     )
+
+
+def _posterior_source_available_at(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> datetime:
+    """Return the honest fused-posterior availability instant.
+
+    The posterior cannot exist before the slowest contributing role is actually
+    possessed. Request-level times are preflight hints; source_run rows, when
+    present, are the stronger evidence because they record the completed fetch.
+    """
+
+    return max(
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.baseline_source_run_id,
+            request_source_available_at=request.baseline_source_available_at,
+        ),
+        _role_possession_available_at(
+            conn,
+            source_run_id=request.openmeteo_source_run_id,
+            request_source_available_at=request.openmeteo_source_available_at,
+        ),
+    )
+
+
+def _request_with_materialization_clock(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> ReplacementForecastMaterializeRequest:
+    """Lift computed_at to the first instant the posterior could truly exist."""
+
+    computed_at = _to_utc(request.computed_at, field_name="computed_at")
+    source_available_at = _posterior_source_available_at(conn, request)
+    if source_available_at <= computed_at:
+        return request
+    return replace(request, computed_at=source_available_at)
 
 
 def _date_text(value: date | str) -> str:
@@ -2159,19 +2197,7 @@ def _compute_posterior_payload(
     # constructed before its LAST-arriving input landed — availability is gated by the slowest
     # dependency. The old max(request.*_source_available_at) used the cycle-time nominal-lag GUESS
     # (~8.4h early for the baseline) as each input; this recovers the honest possession time.
-    _possession_candidates = [
-        _role_possession_available_at(
-            conn,
-            source_run_id=request.baseline_source_run_id,
-            request_source_available_at=request.baseline_source_available_at,
-        ),
-        _role_possession_available_at(
-            conn,
-            source_run_id=request.openmeteo_source_run_id,
-            request_source_available_at=request.openmeteo_source_available_at,
-        ),
-    ]
-    available_at = max(_possession_candidates).isoformat()
+    available_at = _posterior_source_available_at(conn, request).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
     _n_bins_seed = len(request.bins) or 1
@@ -3125,6 +3151,9 @@ def compute_replacement_posterior_readonly(
         return None
     if _precision_guard_block_reason(request):
         return None
+    request = _request_with_materialization_clock(conn, request)
+    if _prewrite_block_reasons(request):
+        return None
     # anchor_id is consumed ONLY by the write-path identity hash (not built here),
     # so a sentinel is safe; the read path never persists a posterior row.
     metric = _metric(request.temperature_metric)
@@ -3242,6 +3271,16 @@ def materialize_replacement_forecast_live(
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=precision_block_reasons,
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
+    request = _request_with_materialization_clock(conn, request)
+    prewrite_reasons = _prewrite_block_reasons(request)
+    if prewrite_reasons:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=prewrite_reasons,
             posterior_id=None,
             anchor_id=None,
             readiness_id=None,

@@ -845,6 +845,9 @@ def build_economic_close_canonical_write(
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
+    projection["exit_retry_count"] = 0
+    projection["next_exit_retry_at"] = ""
+    projection["order_status"] = "filled"
 
     occurred_at = _non_empty(
         getattr(position, "last_exit_at", ""),

@@ -916,6 +916,24 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
 
 
+def test_overlay_rejects_nonfinite_qkernel_execution_economics():
+    """A non-finite qkernel value must not reach canonical JSON receipt hashing."""
+
+    from dataclasses import replace
+
+    economics = replace(
+        _selected_economics(
+            edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+        ),
+        delta_u_at_min=float("-inf"),
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+        is None
+    )
+
+
 def test_qkernel_execution_economics_requires_direction_law_and_coherence():
     """Tokyo-class regression: positive qkernel edge is not enough without live structural proofs."""
 

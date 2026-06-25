@@ -90,6 +90,7 @@ a typed ``SPINE_WIRING_FAULT`` no-trade so the reactor emits a deterministic rec
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -1433,6 +1434,20 @@ def _candidate_qkernel_execution_economics_payload(
     try:
         cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
         edge_lcb = float(selected.edge_lcb)
+        point_ev = float(selected.point_ev)
+        delta_u_at_min = float(selected.delta_u_at_min)
+        optimal_delta_u = float(selected.optimal_delta_u)
+        q_dot_payoff = float(selected.q_dot_payoff)
+        finite_execution_values = (
+            cost_value,
+            edge_lcb,
+            point_ev,
+            delta_u_at_min,
+            optimal_delta_u,
+            q_dot_payoff,
+        )
+        if not all(math.isfinite(value) for value in finite_execution_values):
+            return None
         payload: dict[str, Any] = {
             "source": "qkernel_spine",
             "decision_id": getattr(decision, "decision_id", None),
@@ -1441,11 +1456,11 @@ def _candidate_qkernel_execution_economics_payload(
             "route_id": selected.route_id,
             "payoff_q_lcb": edge_lcb + cost_value,
             "edge_lcb": edge_lcb,
-            "point_ev": float(selected.point_ev),
-            "delta_u_at_min": float(selected.delta_u_at_min),
+            "point_ev": point_ev,
+            "delta_u_at_min": delta_u_at_min,
             "optimal_stake_usd": str(selected.optimal_stake_usd),
-            "optimal_delta_u": float(selected.optimal_delta_u),
-            "q_dot_payoff": float(selected.q_dot_payoff),
+            "optimal_delta_u": optimal_delta_u,
+            "q_dot_payoff": q_dot_payoff,
             "cost": cost_value,
         }
         if route is not None and candidate_decision is not None:

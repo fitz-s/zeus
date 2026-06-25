@@ -1475,6 +1475,7 @@ COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 # state (held across cycles so a bare price wiggle does not re-fire — R6). Plain dict mutated only
 # under the lock-held job; no cross-thread contention beyond the advisory acquire.
 _edli_redecision_screen_lock = threading.Lock()
+_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS = 20 * 60
 _edli_redecision_acted_state: dict = {}
 
 
@@ -6382,10 +6383,27 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 decision_time=received_at,
             )
             current_pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
-            fresh_events = [
-                event for event in events_to_emit
-                if event.entity_key not in current_pending
-            ]
+            fresh_events = []
+            for event in events_to_emit:
+                if event.entity_key in current_pending:
+                    continue
+                try:
+                    payload = json.loads(str(event.payload_json or "{}"))
+                    event_family = (
+                        str(payload.get("city") or "").strip(),
+                        str(payload.get("target_date") or "").strip(),
+                        str(payload.get("metric") or "").strip(),
+                    )
+                except Exception:  # noqa: BLE001
+                    event_family = ("", "", "")
+                if event_family in rest_pull_families:
+                    fresh_events.append(_redecision_event_with_origin(event, "rest_pull"))
+                elif event_family in held_reemit_families:
+                    fresh_events.append(_redecision_event_with_origin(event, "held_position"))
+                elif event_family in family_keys:
+                    fresh_events.append(_redecision_event_with_origin(event, "entry_screen"))
+                else:
+                    fresh_events.append(event)
             emitted = EventWriter(world).write_many(fresh_events)
             world.commit()
         finally:
@@ -7199,6 +7217,64 @@ def _edli_reemittable_held_position_family_keys(
     )
 
 
+def _redecision_event_with_origin(event: Any, origin: str) -> Any:
+    """Return an equivalent immutable redecision event with explicit scheduler origin."""
+
+    try:
+        from src.events.opportunity_event import make_opportunity_event
+
+        payload = json.loads(str(event.payload_json or "{}"))
+        if not isinstance(payload, dict):
+            return event
+        payload["redecision_origin"] = str(origin)
+        return make_opportunity_event(
+            event_type=event.event_type,
+            entity_key=event.entity_key,
+            source=event.source,
+            observed_at=event.observed_at,
+            available_at=event.available_at,
+            received_at=event.received_at,
+            causal_snapshot_id=event.causal_snapshot_id,
+            payload=payload,
+            priority=event.priority,
+            expires_at=event.expires_at,
+            created_at=event.created_at,
+        )
+    except Exception:  # noqa: BLE001
+        return event
+
+
+def _redecision_payload_origin(payload: Mapping[str, Any]) -> str:
+    return str(payload.get("redecision_origin") or "").strip().lower()
+
+
+def _preserve_recent_rest_pull_redecision(
+    payload: Mapping[str, Any],
+    *,
+    event_created_at: str,
+    decision_dt: datetime,
+) -> bool:
+    """Keep cancel/reprice redecision rows alive long enough for the fresh screen.
+
+    A pulled maker rest is removed from the open-rest input set as soon as the
+    terminal cancel/no-fill fact is reconciled. The follow-on redecision event is
+    the durable continuity proof for that family; expiring it on the next generic
+    no-edge screen erases the price-management chain before the reactor can
+    reprice/re-submit/decline from current evidence.
+    """
+
+    if _redecision_payload_origin(payload) != "rest_pull":
+        return False
+    try:
+        created_dt = datetime.fromisoformat(str(event_created_at).replace("Z", "+00:00"))
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=timezone.utc)
+        age_seconds = (decision_dt - created_dt.astimezone(timezone.utc)).total_seconds()
+    except Exception:  # noqa: BLE001
+        return False
+    return 0.0 <= age_seconds < float(_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS)
+
+
 def _edli_expire_unadmitted_redecision_pending(
     world_conn,
     admitted_families: set[tuple[str, str, str]],
@@ -7220,9 +7296,11 @@ def _edli_expire_unadmitted_redecision_pending(
         decision_dt = datetime.fromisoformat(str(decision_time).replace("Z", "+00:00"))
         if decision_dt.tzinfo is None:
             decision_dt = decision_dt.replace(tzinfo=timezone.utc)
+        decision_dt = decision_dt.astimezone(timezone.utc)
         stale_processing_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
         pending_admission_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
     except Exception:  # noqa: BLE001
+        decision_dt = datetime.now(timezone.utc)
         stale_processing_cutoff = ""
         pending_admission_cutoff = ""
 
@@ -7269,7 +7347,7 @@ def _edli_expire_unadmitted_redecision_pending(
             rows.extend(
                 world_conn.execute(
                     f"""
-                    SELECT e.event_id, e.payload_json
+                    SELECT e.event_id, e.payload_json, e.created_at
                       FROM opportunity_events e
                      WHERE e.event_type = ?
                        AND e.created_at <= ?
@@ -7291,6 +7369,7 @@ def _edli_expire_unadmitted_redecision_pending(
         try:
             event_id = str(row[0] or "")
             payload = json.loads(str(row[1] or "{}"))
+            event_created_at = str(row[2] or "")
             family = (
                 str(payload.get("city") or "").strip(),
                 str(payload.get("target_date") or "").strip(),
@@ -7301,6 +7380,12 @@ def _edli_expire_unadmitted_redecision_pending(
         if not event_id or not all(family):
             continue
         if family not in admitted_families:
+            if _preserve_recent_rest_pull_redecision(
+                payload,
+                event_created_at=event_created_at,
+                decision_dt=decision_dt,
+            ):
+                continue
             expire_ids.append(event_id)
     if not expire_ids:
         return 0

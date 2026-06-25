@@ -2970,6 +2970,10 @@ def compute_economic_close(
         pos.pre_exit_state = ""
         pos.exit_price = exit_price
         pos.exit_reason = exit_reason
+        pos.exit_state = "sell_filled"
+        pos.next_exit_retry_at = ""
+        pos.exit_retry_count = 0
+        pos.last_exit_error = ""
         pos.last_exit_at = now
         pos.pnl = _compute_realized_pnl(pos, exit_price)
         _track_exit(state, pos)

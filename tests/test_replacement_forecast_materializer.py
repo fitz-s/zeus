@@ -39,6 +39,7 @@ import src.data.replacement_forecast_materializer as materializer_mod
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
+from src.state.source_run_repo import write_source_run
 
 UTC = timezone.utc
 _DEFAULT_PRECISION_GUARD = object()
@@ -76,6 +77,51 @@ def _conn() -> sqlite3.Connection:
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
     return conn
+
+
+def _ensure_source_run_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            track TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            ingest_mode TEXT NOT NULL,
+            origin_mode TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_issue_time TEXT,
+            source_release_time TEXT,
+            source_available_at TEXT,
+            fetch_started_at TEXT,
+            fetch_finished_at TEXT,
+            captured_at TEXT,
+            imported_at TEXT,
+            valid_time_start TEXT,
+            valid_time_end TEXT,
+            target_local_date TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            temperature_metric TEXT,
+            physical_quantity TEXT,
+            observation_field TEXT,
+            dataset_id TEXT,
+            expected_members INTEGER,
+            observed_members INTEGER,
+            expected_steps_json TEXT NOT NULL DEFAULT '[]',
+            observed_steps_json TEXT NOT NULL DEFAULT '[]',
+            expected_count INTEGER,
+            observed_count INTEGER,
+            completeness_status TEXT NOT NULL,
+            partial_run INTEGER NOT NULL DEFAULT 0,
+            raw_payload_hash TEXT,
+            manifest_hash TEXT,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
 
 
 def _anchor(*, source_cycle_time: datetime | None = None) -> OpenMeteoIfs9LocalDayAnchor:
@@ -513,6 +559,49 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
         assert q_lcb[key] <= point <= q_ucb[key]
     assert not any(str(key).startswith(("buy_no:", "no:")) for key in q_lcb)
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
+
+
+def test_materializer_lifts_computed_at_to_source_run_possession(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _conn()
+    _ensure_source_run_table(conn)
+    _install_live_fusion(monkeypatch)
+    late_possession = _dt(4, 5)
+    for source_run_id, source_id, track in (
+        ("b0-run", "ecmwf_open_data", "mx2t3_high"),
+        ("om9-run", "openmeteo_ecmwf_ifs9", "localday_high"),
+    ):
+        write_source_run(
+            conn,
+            source_run_id=source_run_id,
+            source_id=source_id,
+            track=track,
+            release_calendar_key=f"{source_id}:{track}",
+            source_cycle_time=_dt(0),
+            source_available_at=_dt(2),
+            fetch_finished_at=late_possession,
+            captured_at=late_possession,
+            imported_at=late_possession,
+            status="SUCCESS",
+            completeness_status="COMPLETE",
+            city_id="Shanghai",
+            city_timezone="Asia/Shanghai",
+            target_local_date=date(2026, 6, 7),
+            temperature_metric="high",
+            data_version="forecast_v2",
+        )
+
+    result = materialize_replacement_forecast_live(
+        conn,
+        _request(computed_at=_dt(4), expires_at=_dt(6)),
+    )
+
+    assert result.ok is True
+    row = conn.execute(
+        "SELECT source_available_at, computed_at FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.posterior_id,),
+    ).fetchone()
+    assert row["source_available_at"] == late_possession.isoformat()
+    assert row["computed_at"] == late_possession.isoformat()
 
 
 def test_materializer_blocks_day0_without_observed_extreme() -> None:

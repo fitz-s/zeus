@@ -8292,6 +8292,7 @@ def _forecast_authority_payload_from_posterior(
                AND city = ? AND target_date = ? AND temperature_metric = ?
                AND (source_available_at IS NULL OR source_available_at <= ?)
                AND (computed_at IS NULL OR computed_at <= ?)
+               AND datetime(source_available_at) <= datetime(computed_at)
              ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
              LIMIT 1
             """,

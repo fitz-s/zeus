@@ -8,6 +8,7 @@
 """Relationship tests for the per-cycle re-emission seam (src.events.triggers.forecast_snapshot_ready)."""
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -733,6 +734,109 @@ def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
     ).fetchone()
     assert expired == 0
     assert tuple(row) == ("pending", None)
+
+
+def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
+    """Cancel/reprice continuity must survive after the rest leaves the open-rest set."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    payload = dataclasses.asdict(
+        _ready_payload(
+            city="Paris",
+            target_date="2026-06-19",
+            metric="low",
+            source_run_id="run-rest-pull",
+            snapshot_id="snap-rest-pull",
+        )
+    )
+    payload["redecision_origin"] = "rest_pull"
+    rest_pull = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Paris|2026-06-19|low|run-rest-pull",
+        source="cycle-rest-pull",
+        observed_at="2026-06-17T15:45:00+00:00",
+        available_at="2026-06-17T15:45:00+00:00",
+        received_at="2026-06-17T15:45:00+00:00",
+        causal_snapshot_id="snap-rest-pull",
+        payload=payload,
+        priority=50,
+        created_at="2026-06-17T15:45:00+00:00",
+    )
+    store.insert_or_ignore(rest_pull)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (rest_pull.entity_key,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("pending", None)
+
+
+def test_old_rest_pull_redecision_still_expires_without_current_edge():
+    """The rest-pull grace is a continuity window, not an infinite pending queue."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    payload = dataclasses.asdict(
+        _ready_payload(
+            city="Paris",
+            target_date="2026-06-19",
+            metric="low",
+            source_run_id="run-old-rest-pull",
+            snapshot_id="snap-old-rest-pull",
+        )
+    )
+    payload["redecision_origin"] = "rest_pull"
+    old_rest_pull = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Paris|2026-06-19|low|run-old-rest-pull",
+        source="cycle-old-rest-pull",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="snap-old-rest-pull",
+        payload=payload,
+        priority=50,
+        created_at="2026-06-17T15:00:00+00:00",
+    )
+    store.insert_or_ignore(old_rest_pull)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (old_rest_pull.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value",
+    )
 
 
 def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
