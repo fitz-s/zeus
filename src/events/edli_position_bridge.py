@@ -54,6 +54,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from src.contracts.semantic_types import EntryMethod
+
 logger = logging.getLogger(__name__)
 
 
@@ -256,7 +258,7 @@ def _entry_authority_from_certificates(
         ):
             q_live = qkernel_point
             q_lcb = qkernel_lcb
-            entry_method = "qkernel_spine"
+            entry_method = EntryMethod.QKERNEL_SPINE.value
     ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
@@ -325,7 +327,7 @@ def _entry_authority_from_decision_audit(
         ):
             q_live = qkernel_point
             q_lcb = qkernel_lcb
-            entry_method = "qkernel_spine"
+            entry_method = EntryMethod.QKERNEL_SPINE.value
     ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))

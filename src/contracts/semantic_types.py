@@ -131,6 +131,7 @@ class EntryMethod(str, Enum):
     """Known probability refresh methods carried by Position across modules."""
 
     ENS_MEMBER_COUNTING = "ens_member_counting"
+    QKERNEL_SPINE = "qkernel_spine"
     DAY0_OBSERVATION = "day0_observation"
 
     @classmethod

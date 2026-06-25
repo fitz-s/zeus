@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.contracts.semantic_types import EntryMethod
 from src.events.edli_position_bridge import (
     EdliPositionBridgeError,
     edli_bridge_position_id,
@@ -45,6 +46,10 @@ FINAL_INTENT_ID = "intent-edli-1"
 EXECUTION_COMMAND_ID = "execcmd-edli-1"
 EVENT_ID = "evt-edli-1"
 VENUE_ORDER_ID = "venue-order-1"
+
+
+def test_qkernel_spine_is_registered_live_entry_method():
+    assert EntryMethod.from_value(EntryMethod.QKERNEL_SPINE.value) is EntryMethod.QKERNEL_SPINE
 
 
 @pytest.fixture()
@@ -400,7 +405,7 @@ def test_bridge_projects_qkernel_authority_into_position_current(conn):
 
     row = _position_current_rows(conn)[0]
     assert row["direction"] == "buy_yes"
-    assert row["entry_method"] == "qkernel_spine"
+    assert row["entry_method"] == EntryMethod.QKERNEL_SPINE.value
     assert row["p_posterior"] == pytest.approx(0.1507234)
     assert row["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
@@ -456,7 +461,7 @@ def test_bridge_projects_qkernel_authority_from_decision_audit_when_cert_unreada
     materialize_position_current_from_edli_fill(conn, aggregate_id)
 
     row = _position_current_rows(conn)[0]
-    assert row["entry_method"] == "qkernel_spine"
+    assert row["entry_method"] == EntryMethod.QKERNEL_SPINE.value
     assert row["p_posterior"] == pytest.approx(0.1507234)
     assert row["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
@@ -520,7 +525,7 @@ def test_durable_fill_bridge_repairs_incomplete_existing_projection(conn):
     )
 
     repaired = _position_current_rows(conn)[0]
-    assert repaired["entry_method"] == "qkernel_spine"
+    assert repaired["entry_method"] == EntryMethod.QKERNEL_SPINE.value
     assert repaired["p_posterior"] == pytest.approx(0.1507234)
 
 
@@ -578,10 +583,10 @@ def test_durable_fill_bridge_prioritizes_incomplete_open_projection_over_healthy
         """
         UPDATE position_current
            SET p_posterior = 0.61,
-               entry_method = 'qkernel_spine'
+               entry_method = ?
          WHERE position_id = ?
         """,
-        (healthy_position_id,),
+        (EntryMethod.QKERNEL_SPINE.value, healthy_position_id),
     )
 
     incomplete_aggregate = "agg-999-incomplete-open"
@@ -670,7 +675,7 @@ def test_durable_fill_bridge_prioritizes_incomplete_open_projection_over_healthy
         """,
         (edli_bridge_position_id(incomplete_aggregate),),
     ).fetchone()
-    assert repaired["entry_method"] == "qkernel_spine"
+    assert repaired["entry_method"] == EntryMethod.QKERNEL_SPINE.value
     assert repaired["p_posterior"] == pytest.approx(0.1507234)
 
 
@@ -818,7 +823,7 @@ def test_durable_fill_bridge_repairs_command_linked_short_position_projection(co
         """,
         (short_position_id,),
     ).fetchone()
-    assert repaired["entry_method"] == "qkernel_spine"
+    assert repaired["entry_method"] == EntryMethod.QKERNEL_SPINE.value
     assert repaired["p_posterior"] == pytest.approx(0.1507234)
     assert repaired["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 

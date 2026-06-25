@@ -3274,6 +3274,7 @@ def _refresh_day0_monitor_probability(
 
     registry = {
         EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
+        EntryMethod.QKERNEL_SPINE.value: _refresh_ens_member_counting,
         EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
     }
     refresh_pos = pos
