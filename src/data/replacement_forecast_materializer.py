@@ -73,8 +73,8 @@ UTC = timezone.utc
 # A posterior row's `replacement_q_mode` is DERIVED at materialization time (never guessed)
 # and recorded in provenance_json. The live gate (event_reactor_adapter) admits ONLY the two
 # fused-Normal modes; every other mode is a deterministic no-submit. This kills the silent
-# degradation category: with all flags on, a row that fell back to the legacy member-vote
-# soft-anchor q, anchor-only current surrogate, fused-q build failure, or flag-off path used
+# degradation category: with all flags on, a row that used anchor-only current surrogate,
+# fused-center-only q, fused-q build failure, or flag-off path used
 # to differ ONLY by a WARNING log + a q_shape string — live EDLI could size Kelly under a
 # different probability regime than the release evidence assumes. The mode is a fail-closed
 # data-class label.
@@ -82,23 +82,21 @@ UTC = timezone.utc
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
 REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
-REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
 REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
 # PR#403 FIX (2026-06-09) — fused-q succeeded but the bounds failed. DISTINCT from
 # FUSED_Q_BUILD_FAILED (the point q is fine; only the bounds are absent). The fused-Normal
-# q point is STILL written to the DB (shadow materialization completes for accrual), but
+# q point is STILL written to the DB (blocked-candidate materialization completes for accrual), but
 # live eligibility is killed. Without this a FULL/PARTIAL row with NULL q_lcb_json would be
 # live-eligible, letting buy_yes fall back to legacy bounds — exactly the two-measures
 # disease (fused-Normal q point + legacy LCB authority) that the Milan incident root-caused.
 REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING = "FUSED_NORMAL_BOUNDS_MISSING"
 # The fused CENTER materialized q purely from N(mu*, sigma), but the certified fused-q
 # SHAPE/BOUNDS bootstrap did not run (flag-off / fused-q build failure / predictive_sigma thin).
-# This replaces the old cold fail-closed fallback. The live gate licenses solely
+# This replaces the old cold fail-closed path. The live gate licenses solely
 # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this mode never carries, so a
 # fused-center-only row is materialized for experiment accrual but is NOT live-tradeable. Diagnosably
-# distinct from FUSED_Q_BUILD_FAILED (which produced NO center q) and from the legacy
-# SOFT_ANCHOR_FALLBACK.
+# distinct from FUSED_Q_BUILD_FAILED (which produced NO center q).
 REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL = "FUSED_CENTER_ONLY_NORMAL"
 
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
@@ -273,18 +271,30 @@ def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -
     columns = _table_columns(conn, "observation_instants")
     if not columns:
         return
+    desired_view_sql = (
+        "CREATE VIEW observation_hourly_extrema AS\n"
+        "            SELECT\n"
+        "                o.*,\n"
+        "                o.running_max AS hour_bucket_max,\n"
+        "                o.running_min AS hour_bucket_min\n"
+        "            FROM observation_instants o"
+    )
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema'"
+    ).fetchone()
+    view_sql = str(row[0] if row else "")
+    has_v2 = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema_v2'"
+    ).fetchone()
+    if "running_min" in columns and view_sql == desired_view_sql and has_v2 is None:
+        return
     if "running_min" not in columns:
         conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
-    conn.execute("""
-        CREATE VIEW observation_hourly_extrema AS
-            SELECT
-                o.*,
-                o.running_max AS hour_bucket_max,
-                o.running_min AS hour_bucket_min
-            FROM observation_instants o
-    """)
+    if has_v2 is not None:
+        conn.execute("DROP VIEW observation_hourly_extrema_v2")
+    if view_sql:
+        conn.execute("DROP VIEW observation_hourly_extrema")
+    conn.execute(desired_view_sql)
 
 
 def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
@@ -787,7 +797,7 @@ def _replacement_settlement_sigma_floor_lookup(
     Returns ``(floor_c, unavailable_reason)``:
       - ``(value, None)`` when a positive floor exists for the (city, season, metric) cell.
       - ``(None, reason)`` when the floor lookup is missing/malformed for the cell — recording-only,
-        NEVER blocks shadow materialization. The reason is folded into provenance.
+        NEVER blocks blocked-candidate materialization. The reason is folded into provenance.
 
     Single-builder: this calls src.calibration.emos.settlement_sigma_floor (the SAME lookup the
     EMOS q-builder uses, keyed city|season|metric via emos_cell_key), with required=False so a
@@ -810,7 +820,7 @@ def _replacement_settlement_sigma_floor_lookup(
         if not (math.isfinite(floor_value) and floor_value > 0.0):
             return None, f"SETTLEMENT_SIGMA_FLOOR_NON_POSITIVE:{floor_value}"
         return floor_value, None
-    except Exception as exc:  # fail-soft: never block shadow materialization
+    except Exception as exc:  # fail-soft: never block blocked-candidate materialization
         return None, f"SETTLEMENT_SIGMA_FLOOR_LOOKUP_ERROR:{type(exc).__name__}"
 
 
@@ -1404,7 +1414,7 @@ def _replacement_bayes_precision_fusion_override(
         # predictive_sigma_c / anchor_sigma_c (fused.sd) are UNTOUCHED (no Kelly double-
         # count). This is LIVE-DIRECT: the warming is active wherever the table has a cell;
         # rollout is controlled by populating config/grid_representativeness.json + the
-        # deploy commit, never by a dormant code flag (operator no-shadow law).
+        # deploy commit, never by a dormant code flag (operator no-blocked law).
         _sigma_repr_by_model = _build_sigma_repr_by_model(
             request.city, list(_raw_m2_and_n.keys()), anchor_model=_ANCHOR
         )
@@ -1588,7 +1598,7 @@ def _replacement_bayes_precision_fusion_override(
             precision_basis_hash=_precision_basis_hash,
             cold_start_excluded_models=_cold_start_excluded,
         )
-    except Exception as exc:  # fail-soft: never break shadow materialization
+    except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
             import logging  # noqa: PLC0415
             logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
@@ -1752,7 +1762,7 @@ def _build_fused_q_bounds(
     When ``return_samples`` is true, also return the per-bin draw vectors so the
     live decision adapter can compute empirical edge p-values directly.
 
-    PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): each draw's row is
+    PATH-A COHERENCE (2026-06-18 FINAL no-blocked execution flow §5): each draw's row is
     renormalized to the probability simplex BEFORE the marginal quantile — the IDENTICAL
     renormalize-then-quantile transform ``src/probability/joint_q_band.build_joint_q_band``
     (the q_lcb AUTHORITY) performs. This makes the modal-collapse defect of the old raw
@@ -1831,7 +1841,7 @@ def _build_fused_q_bounds(
     else:
         probs = np.clip(cdf_high - cdf_low, 0.0, 1.0)  # (N, M) per-draw per-bin mass
 
-    # PATH-A COHERENCE (2026-06-18 FINAL no-shadow execution flow §5): renormalize EACH
+    # PATH-A COHERENCE (2026-06-18 FINAL no-blocked execution flow §5): renormalize EACH
     # draw's row to the probability simplex BEFORE taking the marginal quantile — the
     # EXACT transformation src/probability/joint_q_band.build_joint_q_band performs
     # (q_k = q_k / q_k.sum() per draw, then quantile along axis 0). Without this the
@@ -1921,14 +1931,14 @@ def _compute_posterior_payload(
     # activation guard (n>=n_min) + EB shrink toward 0 by SE + a do-no-harm walk-forward gate.
     # The fitted, auditable artifact state/anchor_representativeness_debias.json carries δ_city;
     # the loader (src/calibration/anchor_representativeness_debias.py) returns δ_city ONLY for an
-    # activated, gate-passing HIGH cell, else None. ARTIFACT-GATED, not a shadow flag: when the
+    # activated, gate-passing HIGH cell, else None. ARTIFACT-GATED, not a blocked flag: when the
     # artifact is absent (current live state — gitignored generated file) the loader returns None
     # → bias_shift_c stays None → BYTE-IDENTICAL to today. It goes live the moment the operator
     # places the fitted artifact in state/ and restarts (same posture as the σ-floor artifact).
     # SIGN: δ_city = anchor − settlement; applied below as corrected = raw − δ_city, so a cold
     # anchor (δ<0) warms and a hot anchor (δ>0) cools; the corrected center feeds the fusion prior
     # → the de-bias propagates into the fused μ*. FAIL-SOFT: any error → None (family-level fallback).
-    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-shadow execution flow §3-§4; operator
+    # RAW NO-DE-BIAS LAW (2026-06-18 FINAL no-blocked execution flow §3-§4; operator
     # "NO fitted forward per-city de-bias"): the consumed posterior center is RAW. The
     # per-city representativeness de-bias (``get_city_debias_c`` → δ_city) is a FITTED
     # FORWARD PER-CITY shift on μ — forbidden under the RAW law. It is forced to None
@@ -2008,9 +2018,8 @@ def _compute_posterior_payload(
     # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
     settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
     # Q_LCB / Q_UCB outputs. The certified bootstrap basis is present only when fused-q is built and
-    # bound construction succeeds. If it fails, the soft-anchor Wilson fallback below may publish
-    # lower/upper carrier bounds under its own non-live-eligible basis; if that fallback also fails,
-    # q_lcb_json/q_ucb_json remain NULL.
+    # bound construction succeeds. If it fails, carrier bounds may remain present under their own
+    # non-live-eligible basis; if that also fails, q_lcb_json/q_ucb_json remain NULL.
     q_lcb_map: dict[str, float] | None = None
     q_ucb_map: dict[str, float] | None = None
     q_bootstrap_samples_by_bin: dict[str, list[float]] | None = None
@@ -2021,7 +2030,7 @@ def _compute_posterior_payload(
     _far_tail_honesty_count: int = 0
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
-        replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
+        replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
     if (
         bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
@@ -2045,7 +2054,7 @@ def _compute_posterior_payload(
             # and widen: sigma_used = max(sigma_pred, floor). max() only WIDENS -> flatter q ->
             # fewer overconfident bets (it can never tighten). When the fitted floor exists for
             # the cell it applies; when it is absent/malformed for the cell the lookup returns
-            # None and the floor is simply not applied (recorded, NEVER blocks shadow). One
+            # None and the floor is simply not applied (recorded, NEVER blocks blocked). One
             # construction rule, no knob.
             _sigma_pred = float(bayes_precision_fusion_override.predictive_sigma_c)
             _sigma_used = _sigma_pred
@@ -2057,7 +2066,7 @@ def _compute_posterior_payload(
             # an unfitted family (e.g. F today, n=47<60) returns (1.0, 0.0) so the correction stays
             # INERT for it automatically. Evidence: C n=215 settled cells, fitted k≈1.58 + w≈0.28 brings
             # the mode-bin d=0 realized/expected ratio from ~0.51 to ~0.96 (see the calibration table in
-            # the artifact and docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
+            # the artifact and docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md).
             # Contract: σ-scale applies BEFORE the floor (floor stays a lower bound on the scaled σ);
             # the uniform mixture w is applied to the FINAL normalized q below (after integration).
             # Per-family licensing is the artifact's job (a REFUSED family → (1.0,0.0,0.0) inert from
@@ -2361,7 +2370,7 @@ def _compute_posterior_payload(
             # the mode; floor application is purely data-availability driven above.
             # PR#403 FIX (2026-06-09): bounds required for live eligibility. FUSED_NORMAL_FULL/PARTIAL
             # now REQUIRES both q_lcb_map and q_ucb_map successfully built. Bounds failure degrades
-            # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (shadow accrual continues) but the
+            # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (blocked-candidate accrual continues) but the
             # live gate will reject this mode. This kills the two-measures disease: fused-Normal q
             # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
             if q_lcb_map is None or q_ucb_map is None:
@@ -2373,18 +2382,16 @@ def _compute_posterior_payload(
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
         except Exception as _exc:
-            # FIX 1 — the fused-q construction itself raised and fails CLOSED to the soft-anchor q.
-            # This is DISTINCT from flag-off / predictive_sigma None (SOFT_ANCHOR_FALLBACK): the
-            # mode records that a fused-q was attempted and failed, so the live gate rejects it with
-            # a mode that is diagnosably different from a deliberate fallback.
+            # FIX 1 — the fused-q construction itself raised and fails CLOSED.
+            # This is DISTINCT from flag-off / predictive_sigma None: the mode records that a fused-q
+            # was attempted and failed, so the live gate rejects it with a specific failure mode.
             replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED
             settlement_sigma_floor_applied = False
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
             settlement_sigma_floor_catchall_capped = ()
-            # The fused-q (incl. any σ-scale / uniform-mixture / σ-floor) was discarded → soft-anchor q
-            # has none applied. Reset all three provenance fields so they cannot misreport on the
-            # fallback q.
+            # The fused-q (incl. any sigma-scale / uniform-mixture / sigma-floor) was discarded.
+            # Reset all three provenance fields so they cannot misreport on the retained non-live q.
             sigma_scale_k_applied = None
             uniform_mixture_w_applied = None
             sigma_floor_steps_applied = None
@@ -2396,15 +2403,15 @@ def _compute_posterior_payload(
                 )
             except Exception:
                 pass
-    # FUSED-CENTER-ONLY NORMAL FALLBACK. Reached when the live fused-q shape was NOT produced — flag-off, no fused override,
+    # FUSED-CENTER-ONLY NORMAL NON-LIVE PATH. Reached when the live fused-q shape was NOT produced — flag-off, no fused override,
     # predictive_sigma None, or a fused-q build failure — i.e. q_shape is still the seeded
     # placeholder, NOT "fused_normal_direct". If a multi-model fused CENTER exists (override present) with a usable
     # spread, build q PURELY from N(mu*, sigma) over the SAME settlement bins (anchor_weight
     # using the SAME emos.bin_probability_settlement integrator the
     # live path uses. If even that is impossible (no override, or no finite spread), q is left at the
     # uniform seed and the row is recorded NON-tradeable (the live gate licenses only
-    # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this fallback never
-    # carries). This fallback is experiment-only; it is intentionally not live-eligible.
+    # FUSED_NORMAL_{FULL,PARTIAL} with the certified bootstrap basis, which this path never
+    # carries). This path is experiment-only; it is intentionally not live-eligible.
     # FAIL-SOFT: any error leaves q at the prior value and logs.
     if q_shape not in {"fused_normal_direct", "fused_day0_conditioned_normal"} and bayes_precision_fusion_override is not None:
         try:
@@ -2444,8 +2451,7 @@ def _compute_posterior_payload(
                     replacement_sigma_basis = "fused_center_residual_std"
                     # Distinct mode: a fused CENTER materialized the q but the certified fused-q
                     # bootstrap shape/bounds did NOT (so the live gate still rejects it). Diagnosably
-                    # different from FUSED_Q_BUILD_FAILED (no center q at all) and from the deliberate
-                    # SOFT_ANCHOR_FALLBACK.
+                    # different from FUSED_Q_BUILD_FAILED (no center q at all).
                     replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
         except Exception as _fcexc:
             try:
@@ -2618,7 +2624,7 @@ def _compute_posterior_payload(
         # C3 calibration surface 2026-06-12 — FITTED σ scale + uniform-mixture provenance (一切可被溯源).
         # Both None when inert (artifact missing / family unfitted / k=1.0,w=0.0). Float applied values
         # when the correction fired. Source: state/sigma_scale_fit.json (MLE, operator law 2026-06-12).
-        # Authority: docs/operations/c3_sigma_calibration_surface_2026-06-12.md
+        # Authority: docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md
         "sigma_scale_k_applied": sigma_scale_k_applied,
         "uniform_mixture_w_applied": uniform_mixture_w_applied,
         # FITTED absolute σ-floor (step units) provenance (σ-refit report 2026-06-13, task #69). None

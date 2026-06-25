@@ -333,19 +333,31 @@ def _ensure_observation_hourly_extrema_compatibility(conn: sqlite3.Connection) -
     columns = _table_columns(conn, "observation_instants")
     if not columns:
         return
+    desired_view_sql = (
+        "CREATE VIEW observation_hourly_extrema AS\n"
+        "            SELECT\n"
+        "                o.*,\n"
+        "                o.running_max AS hour_bucket_max,\n"
+        "                o.running_min AS hour_bucket_min\n"
+        "            FROM observation_instants o"
+    )
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema'"
+    ).fetchone()
+    view_sql = str(row[0] if row else "")
+    has_v2 = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='observation_hourly_extrema_v2'"
+    ).fetchone()
+    if "running_min" in columns and view_sql == desired_view_sql and has_v2 is None:
+        return
     if "running_min" not in columns:
         conn.execute("ALTER TABLE observation_instants ADD COLUMN running_min REAL")
         columns.add("running_min")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema_v2")
-    conn.execute("DROP VIEW IF EXISTS observation_hourly_extrema")
-    conn.execute("""
-        CREATE VIEW observation_hourly_extrema AS
-            SELECT
-                o.*,
-                o.running_max AS hour_bucket_max,
-                o.running_min AS hour_bucket_min
-            FROM observation_instants o
-    """)
+    if has_v2 is not None:
+        conn.execute("DROP VIEW observation_hourly_extrema_v2")
+    if view_sql:
+        conn.execute("DROP VIEW observation_hourly_extrema")
+    conn.execute(desired_view_sql)
 
 
 def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
@@ -466,37 +478,6 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
             WHERE posterior_identity_hash IS NOT NULL
     """)
     _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS replacement_shadow_decisions (
-            decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            posterior_id INTEGER NOT NULL REFERENCES forecast_posteriors(posterior_id),
-            baseline_source_run_id TEXT,
-            market_snapshot_id TEXT NOT NULL,
-            condition_id TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            decision_time TEXT NOT NULL,
-            baseline_direction TEXT NOT NULL,
-            candidate_direction TEXT NOT NULL,
-            allowed_direction TEXT NOT NULL,
-            baseline_q_lcb REAL NOT NULL CHECK (baseline_q_lcb >= 0.0 AND baseline_q_lcb <= 1.0),
-            candidate_q_lcb REAL NOT NULL CHECK (candidate_q_lcb >= 0.0 AND candidate_q_lcb <= 1.0),
-            allowed_q_lcb REAL NOT NULL CHECK (allowed_q_lcb >= 0.0 AND allowed_q_lcb <= 1.0),
-            baseline_kelly_fraction REAL NOT NULL CHECK (baseline_kelly_fraction >= 0.0),
-            candidate_kelly_fraction REAL NOT NULL CHECK (candidate_kelly_fraction >= 0.0),
-            allowed_kelly_fraction REAL NOT NULL CHECK (allowed_kelly_fraction >= 0.0),
-            veto INTEGER NOT NULL CHECK (veto IN (0, 1)),
-            veto_reason TEXT,
-            dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
-            provenance_json TEXT NOT NULL DEFAULT '{}',
-            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
-            UNIQUE(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_replacement_shadow_decisions_market_time
-            ON replacement_shadow_decisions(condition_id, token_id, decision_time)
-    """)
 
     # ------------------------------------------------------------------------
     # raw_model_forecasts  (BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture)
