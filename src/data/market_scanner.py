@@ -4030,6 +4030,32 @@ def _prefetch_selected_orderbooks(
         primary_chunk_size,
         _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_RETRY_CHUNK", _BATCH_ORDERBOOK_RETRY_CHUNK),
     )
+    singular_getter = getattr(clob, "get_orderbook_snapshot", None)
+    singular_fallback_cap = _positive_int_env(
+        "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS",
+        24,
+    )
+    singular_fallback_used = 0
+
+    def _singular_fallback(chunk: list[str]) -> dict[str, dict]:
+        nonlocal singular_fallback_used
+        if not callable(singular_getter) or singular_fallback_used >= singular_fallback_cap:
+            return {}
+        out: dict[str, dict] = {}
+        for tok in chunk:
+            if singular_fallback_used >= singular_fallback_cap:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            singular_fallback_used += 1
+            try:
+                book = singular_getter(tok)
+            except Exception as exc:
+                logger.warning("Singular orderbook fallback failed token=%s: %s", tok, exc)
+                continue
+            if isinstance(book, dict):
+                out[tok] = book
+        return out
 
     def _fetch_chunk_with_split(chunk: list[str]) -> dict[str, dict]:
         try:
@@ -4037,7 +4063,7 @@ def _prefetch_selected_orderbooks(
         except Exception as exc:
             if len(chunk) <= retry_chunk_size:
                 logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
-                return {}
+                return _singular_fallback(chunk)
             logger.warning(
                 "Batch orderbook prefetch chunk failed (%d tokens); retrying in %d-token chunks: %s",
                 len(chunk),
@@ -4055,6 +4081,7 @@ def _prefetch_selected_orderbooks(
                         len(sub_chunk),
                         sub_exc,
                     )
+                    split_books.update(_singular_fallback(sub_chunk))
                     continue
                 if isinstance(sub_books, dict):
                     split_books.update(sub_books)
