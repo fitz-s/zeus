@@ -578,6 +578,56 @@ class TestMetrics:
     def test_directional_accuracy_perfect(self):
         assert directional_accuracy([0.8, 0.2, 0.9], [1, 0, 1]) == pytest.approx(1.0)
 
+    def test_riskguard_brier_sample_skips_non_learning_backfill_rows(self):
+        rows = [
+            {
+                "id": "newest-repair-no-snapshot",
+                "learning_snapshot_ready": False,
+                "metric_ready": True,
+                "p_posterior": 0.99,
+                "outcome": 0,
+            },
+            {
+                "id": "learning-ready-1",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": 0.78,
+                "outcome": 1,
+            },
+            {
+                "id": "missing-prob",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": None,
+                "outcome": 1,
+            },
+            {
+                "id": "metric-not-ready",
+                "learning_snapshot_ready": True,
+                "metric_ready": False,
+                "p_posterior": 0.65,
+                "outcome": 1,
+            },
+            {
+                "id": "learning-ready-2",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": 0.31,
+                "outcome": 0,
+            },
+            {
+                "id": "learning-ready-3",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "p_posterior": 0.52,
+                "outcome": 1,
+            },
+        ]
+
+        selected = riskguard_module._riskguard_brier_metric_rows(rows, limit=2)
+
+        assert [row["id"] for row in selected] == ["learning-ready-1", "learning-ready-2"]
+
 
 
 class TestRiskEvaluation:

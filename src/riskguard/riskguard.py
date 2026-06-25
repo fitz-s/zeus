@@ -58,6 +58,9 @@ from src.state.portfolio import (
     Position,
     load_portfolio,
 )
+
+RISKGUARD_SETTLEMENT_LIMIT = 50
+RISKGUARD_BRIER_SCAN_LIMIT = 200
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
@@ -1011,6 +1014,31 @@ def _entry_execution_summary(conn: sqlite3.Connection, *, limit: int = 200) -> d
     return {"overall": overall, "by_strategy": by_strategy}
 
 
+def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SETTLEMENT_LIMIT) -> list[dict]:
+    """Return learning-ready settlement rows for probability quality metrics.
+
+    Settlement truth quality and probability learning lineage are different
+    surfaces. A SETTLED event with complete canonical settlement payload is
+    valid settlement truth, but if it lacks the decision snapshot it must not
+    displace a learning-ready row in the Brier sample. Settlement backfills can
+    be newest by occurred_at while carrying no decision snapshot; using them as
+    the latest Brier rows turns a data repair into a false reduce-only halt.
+    """
+
+    metric_rows: list[dict] = []
+    for row in rows:
+        if not row.get("learning_snapshot_ready", False):
+            continue
+        if not row.get("metric_ready", True):
+            continue
+        if row.get("p_posterior") is None or row.get("outcome") is None:
+            continue
+        metric_rows.append(row)
+        if len(metric_rows) >= limit:
+            break
+    return metric_rows
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
@@ -1510,7 +1538,11 @@ def _tick_once() -> RiskLevel:
             return RiskLevel.DATA_DEGRADED
 
         current_bankroll_usd = float(bankroll_of_record.value_usd)
-        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
+        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=RISKGUARD_SETTLEMENT_LIMIT)
+        brier_candidate_rows = query_authoritative_settlement_rows(
+            zeus_conn,
+            limit=RISKGUARD_BRIER_SCAN_LIMIT,
+        )
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
         settlement_storage_source = (
             settlement_row_storage_sources[0]
@@ -1521,7 +1553,7 @@ def _tick_once() -> RiskLevel:
         degraded_rows = 0
         learning_snapshot_ready_count = 0
         canonical_payload_complete_count = 0
-        metric_ready_rows = []
+        settlement_metric_ready_rows = []
         for row in settlement_rows:
             authority_level = str(row.get("authority_level", "unknown"))
             settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
@@ -1542,7 +1574,7 @@ def _tick_once() -> RiskLevel:
             if row.get("canonical_payload_complete", False):
                 canonical_payload_complete_count += 1
             if row.get("metric_ready", True) and row.get("p_posterior") is not None and row.get("outcome") is not None:
-                metric_ready_rows.append(row)
+                settlement_metric_ready_rows.append(row)
 
         realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
             zeus_conn,
@@ -1550,9 +1582,10 @@ def _tick_once() -> RiskLevel:
         )
         portfolio = replace(portfolio, recent_exits=realized_exits)
 
-        p_forecasts = [float(r["p_posterior"]) for r in metric_ready_rows]
-        outcomes = [int(r["outcome"]) for r in metric_ready_rows]
-        strategy_settlement_summary = _strategy_settlement_summary(metric_ready_rows)
+        brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
+        p_forecasts = [float(r["p_posterior"]) for r in brier_metric_rows]
+        outcomes = [int(r["outcome"]) for r in brier_metric_rows]
+        strategy_settlement_summary = _strategy_settlement_summary(settlement_metric_ready_rows)
         entry_execution_summary = _entry_execution_summary(zeus_conn)
         try:
             tracker = load_tracker()
@@ -1573,7 +1606,7 @@ def _tick_once() -> RiskLevel:
         # Evaluate levels
         brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
         settlement_quality_level = RiskLevel.GREEN
-        if settlement_rows and not metric_ready_rows:
+        if settlement_rows and not settlement_metric_ready_rows:
             settlement_quality_level = RiskLevel.RED
         elif degraded_rows > 0:
             settlement_quality_level = RiskLevel.YELLOW
@@ -1779,13 +1812,16 @@ def _tick_once() -> RiskLevel:
                 "realized_truth_source": realized_truth_source,
                 "realized_degraded": realized_degraded,
                 "settlement_sample_size": len(p_forecasts),
+                "settlement_brier_scan_limit": RISKGUARD_BRIER_SCAN_LIMIT,
+                "settlement_brier_candidate_count": len(brier_candidate_rows),
                 "settlement_storage_source": settlement_storage_source,
                 "settlement_row_storage_sources": settlement_row_storage_sources,
                 "settlement_authority_levels": settlement_authority_levels,
                 "settlement_degraded_row_count": degraded_rows,
                 "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
                 "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
-                "settlement_metric_ready_count": len(metric_ready_rows),
+                "settlement_metric_ready_count": len(settlement_metric_ready_rows),
+                "settlement_brier_learning_ready_count": len(brier_metric_rows),
                 # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
                 # hit rate computed from brier forecasts (did p>0.5 match the
                 # outcome?). It is NOT the same as trade profitability rate, which
@@ -1921,7 +1957,8 @@ def _tick_once() -> RiskLevel:
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
             "settlement_quality": (
-                f"metric_ready={len(metric_ready_rows)}/{len(settlement_rows)} "
+                f"metric_ready={len(settlement_metric_ready_rows)}/{len(settlement_rows)} "
+                f"brier_learning_ready={len(brier_metric_rows)}/{len(brier_candidate_rows)} "
                 f"degraded={degraded_rows} storage={settlement_storage_source}"
             ),
             "execution_quality": (
