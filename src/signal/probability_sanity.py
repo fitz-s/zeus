@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-D;
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-D;
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §3, §4;
 #   docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §3 §4 (LIVE-PROB-P0);
 #   docs/operations/task_2026-05-23_probability_phantom_edge/FIX_PLAN.md §B §E §F (2026-05-23 operator spec)
@@ -267,10 +267,8 @@ def check_cumulative_tail_discrepancy(
         evidence_dict always contains keys: tail_cal, tail_mkt, entropy
           (combined both sides; non-None whenever market_prices is not None).
 
-    The caller (evaluator.py) reads ``settings["probability_sanity"]["tail_discrepancy_mode"]``
-    ("hard"|"shadow") to decide whether to hard-reject or log-only when this returns (False,...).
     The predicate always returns the truthful (ok=False, reason) when a phantom is detected,
-    regardless of the mode flag — making it independently testable.
+    making it independently testable.
     """
     if market_prices is None:
         return True, None, None
@@ -464,12 +462,8 @@ def _edge_bin_sanity_thresholds() -> dict[str, Any]:
     Returns dict with all required threshold keys.  Absent block or absent key
     falls back to defaults — behavior is unchanged if block is missing.
 
-    Also returns ``apply_to_strategies`` and ``apply_to_metrics`` lists.
-    When a call's metric is not in ``apply_to_metrics``, the gate runs in
-    shadow/log-only mode regardless of the top-level ``mode`` setting.
-    ``apply_to_strategies`` is advisory metadata only — it is NOT used to
-    downgrade mode.  Empty ``apply_to_metrics`` (default when key absent)
-    means "apply to all" — full back-compat.
+    Also returns ``apply_to_strategies`` and ``apply_to_metrics`` lists as
+    telemetry/config provenance. They do not downgrade enforcement.
     """
     block: dict[str, Any] = {}
     from src.config import settings
@@ -540,15 +534,9 @@ def probability_edge_bin_sanity(
     member support is treated as the market's boundary-case approval.  Member support
     is retained for telemetry context in all sub-floor rejection paths.
 
-    APPLY-METRICS ENFORCEMENT (2026-05-24):
-    The gate runs in HARD mode only when metric ∈ apply_to_metrics (from the
-    probability_edge_bin_sanity config block). If metric is not in the list, effective
-    mode is downgraded to SHADOW (log-only; does NOT set should_trade=False).
-    apply_to_strategies is advisory metadata only — it is NOT used as a hard filter.
-    Excluding any active live strategy (e.g. opening_inertia) from hard-gating would
-    create a phantom hole on that strategy. The hard gate applies to ALL non-day0
-    strategies for the listed metric(s).
-    Empty apply_to_metrics (default when key absent) means "apply to all" — full back-compat.
+    Enforcement is always hard when the predicate fires. ``apply_to_metrics`` and
+    ``apply_to_strategies`` remain telemetry/config provenance only; they do not
+    create a non-blocking production path.
 
     Reject ONLY when ALL of the following hold:
       1. 0 < p_market[edge] <= low_price_threshold (sub-floor quoted bin; strictly below OR at the
@@ -569,11 +557,8 @@ def probability_edge_bin_sanity(
         p_cal: calibrated probability array.
         p_market: per-bin market prices; None → always PASS.
         direction: "buy_yes" | "buy_no" | "" (for telemetry).
-        metric: "high" | "low" | "" (gate enforcement: must be in apply_to_metrics for HARD;
-            if apply_to_metrics is non-empty and metric is absent, mode is downgraded to shadow).
-        strategy_key: strategy label (telemetry only; apply_to_strategies is advisory metadata
-            and is NOT used to downgrade mode — the hard gate applies to ALL non-day0
-            strategies for any metric that is in apply_to_metrics).
+        metric: "high" | "low" | "" (telemetry/config provenance only).
+        strategy_key: strategy label (telemetry only).
         market_phase: opaque label (for telemetry).
         config: optional pre-loaded threshold dict (overrides settings.json; for testing).
 
@@ -582,7 +567,6 @@ def probability_edge_bin_sanity(
         (False, reason_code_str, telemetry_dict) — gate rejects; reason_code_str is one of:
           PROBABILITY_EDGE_BIN_UNSUPPORTED — no member support, tail position, ratio high
           PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT — low price + no support, market disagrees
-          (shadow mode: reason_code_str = PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW)
           (hard mode: reason_code_str = PROBABILITY_TAIL_SHAPE_ANOMALY_HARD)
         telemetry_dict always has keys:
           edge_bin_idx, edge_bin_label, edge_bin_p_raw, edge_bin_p_cal, edge_bin_p_market,
@@ -597,17 +581,6 @@ def probability_edge_bin_sanity(
     min_member_support = thresholds["min_edge_bin_member_support"]
     # tail_min_bins = 2: reuse same contiguity guard as legacy predicate
     tail_min_bins = 2
-
-    # APPLY-METRICS ENFORCEMENT (2026-05-24): downgrade mode to shadow when
-    # metric is outside the validated hard-mode scope.
-    # FP=0 was proven for HIGH only (critic M1); LOW is unvalidated → shadow-only.
-    # apply_to_strategies is NOT used as a hard filter — excluding any active live
-    # strategy (e.g. opening_inertia) would create a phantom hole. The hard gate
-    # applies to ALL non-day0 strategies for the listed metric(s).
-    # Empty list in config means "apply to all" (back-compat when key absent).
-    apply_to_metrics: list[str] = thresholds.get("apply_to_metrics", [])
-    if apply_to_metrics and metric not in apply_to_metrics:
-        mode = "shadow"
 
     p_cal_arr = np.asarray(p_cal, dtype=np.float64)
     p_raw_arr = np.asarray(p_raw, dtype=np.float64)
@@ -724,18 +697,12 @@ def probability_edge_bin_sanity(
         f"run_length={run_length},mode_idx={mode_idx}"
     )
 
-    if mode == "hard":
-        reason_code = "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD"
-        # Enrich hard-mode rejections with specific codes based on support/price pattern.
-        # Shadow-mode rejections retain PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW so callers
-        # can distinguish apply-list-downgraded from genuine hard blocks.
-        if member_support < min_member_support and 0.0 < px_edge <= low_price_threshold:
-            # Low price + no member support = strongest phantom signal
-            reason_code = "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT"
-        elif member_support < min_member_support:
-            reason_code = "PROBABILITY_EDGE_BIN_UNSUPPORTED"
-    else:
-        reason_code = "PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW"
+    reason_code = "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD"
+    if member_support < min_member_support and 0.0 < px_edge <= low_price_threshold:
+        # Low price + no member support = strongest phantom signal
+        reason_code = "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT"
+    elif member_support < min_member_support:
+        reason_code = "PROBABILITY_EDGE_BIN_UNSUPPORTED"
 
     full_reason = f"{reason_code}:{detail}"
     telemetry["probability_sanity_reason"] = full_reason

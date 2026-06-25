@@ -6,7 +6,6 @@
 Covers:
   P0 #1 — season-pool fallback passes cycle/source_id/horizon_profile
   P0 #2 — _resolve_pin_for_bucket key includes cycle axis
-  P1 #3 — _write_entry_readiness_for_candidate derives route keys
   P2 #5 — derive_phase2_keys_from_ens_result uses parse_cycle_from_issue_time
   P2 #6 — deactivate_model uses 9-tuple WHERE (matches legacy-keyed rows)
 
@@ -178,86 +177,6 @@ def test_resolve_pin_for_bucket_cycle_in_key(monkeypatch, tmp_path):
     assert k00 != k12
 
     mgr_module._PIN_CONFIG_CACHE = None
-
-
-# ---------------------------------------------------------------------------
-# P1 #3 — _write_entry_readiness_for_candidate derives route keys
-# ---------------------------------------------------------------------------
-
-def test_write_entry_readiness_derives_cycle_from_decision_time():
-    """P1 #3: decision_time at 03:00Z → cycle='12' (yesterday's 12z).
-    evaluate_calibration_transfer_policy_with_evidence called with
-    source_cycle='12', target_cycle='12', season derived, cluster=city.cluster.
-    """
-    from src.engine.evaluator import _write_entry_readiness_for_candidate
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX
-
-    city = _city(cluster="US-Northeast")
-    decision_time = datetime(2026, 6, 15, 3, 0, 0, tzinfo=timezone.utc)
-    target_local_date = date(2026, 6, 15)
-
-    mock_cfg = MagicMock()
-    mock_cfg.source_id = "tigge_mars"
-
-    with patch(
-        "src.engine.evaluator.evaluate_calibration_transfer_policy_with_evidence"
-    ) as mock_policy, \
-    patch("src.engine.evaluator.evaluate_entry_forecast_rollout_gate"), \
-    patch("src.engine.evaluator.read_promotion_evidence", return_value=None), \
-    patch("src.engine.evaluator.write_entry_readiness"):
-        mock_policy.return_value = MagicMock()
-        _write_entry_readiness_for_candidate(
-            MagicMock(),  # conn
-            cfg=mock_cfg,
-            city=city,
-            target_local_date=target_local_date,
-            temperature_metric=HIGH_LOCALDAY_MAX,
-            market_family="high_test",
-            condition_id="cid_test",
-            decision_time=decision_time,
-        )
-
-    assert mock_policy.called
-    kwargs = mock_policy.call_args.kwargs
-    assert kwargs["source_cycle"] == "12", f"Expected '12', got {kwargs['source_cycle']!r}"
-    assert kwargs["target_cycle"] == "12", f"Expected '12', got {kwargs['target_cycle']!r}"
-    assert kwargs["cluster"] == "US-Northeast"
-    # JJA for June in NH
-    assert kwargs["season"] == "JJA", f"Expected 'JJA', got {kwargs['season']!r}"
-    assert kwargs["horizon_profile"] == "full"
-
-
-def test_write_entry_readiness_midday_gets_cycle_00():
-    """P1 #3: decision_time at 12:00Z → cycle='00'."""
-    from src.engine.evaluator import _write_entry_readiness_for_candidate
-    from src.types.metric_identity import HIGH_LOCALDAY_MAX
-
-    city = _city(cluster="US-Northeast")
-    decision_time = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
-
-    mock_cfg = MagicMock()
-    mock_cfg.source_id = "tigge_mars"
-
-    with patch(
-        "src.engine.evaluator.evaluate_calibration_transfer_policy_with_evidence"
-    ) as mock_policy, \
-    patch("src.engine.evaluator.evaluate_entry_forecast_rollout_gate"), \
-    patch("src.engine.evaluator.read_promotion_evidence", return_value=None), \
-    patch("src.engine.evaluator.write_entry_readiness"):
-        mock_policy.return_value = MagicMock()
-        _write_entry_readiness_for_candidate(
-            MagicMock(),
-            cfg=mock_cfg,
-            city=city,
-            target_local_date=date(2026, 6, 15),
-            temperature_metric=HIGH_LOCALDAY_MAX,
-            market_family="high_test",
-            condition_id="cid_test",
-            decision_time=decision_time,
-        )
-
-    kwargs = mock_policy.call_args.kwargs
-    assert kwargs["source_cycle"] == "00"
 
 
 # ---------------------------------------------------------------------------

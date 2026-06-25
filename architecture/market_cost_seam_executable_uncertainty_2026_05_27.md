@@ -294,7 +294,6 @@ Every uncertainty source contributes to size reduction EXACTLY ONCE — either v
 | Bootstrap with transfer σ | `transfer_logit_sigma` + `_bootstrap_bin` | EXISTS — add market σ alongside |
 | MODEL_ONLY default posterior | `MODEL_ONLY_POSTERIOR_MODE` | EXISTS — preserve |
 | Polymarket fee formula | `polymarket_fee` | EXISTS — reuse |
-| MarketPriorDistribution contract for shadow blending | `MarketPriorDistribution` | EXISTS — preserve, future shadow work uses it |
 
 ## Execution order
 

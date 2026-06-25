@@ -109,7 +109,7 @@ def test_calendar_entries_have_safe_fetch_for_live() -> None:
 
 def test_partial_and_late_arrival_are_distinct_axes() -> None:
     """Antibody: the partial-completeness axis (calendar partial_policy:
-    BLOCK_LIVE/SHADOW_ONLY/ALLOW) must NOT be conflated with the late-write
+    BLOCK_LIVE/ALLOW) must NOT be conflated with the late-write
     disposition axis (LateArrivalPolicy: replace/append/quarantine/ignore/backfill).
 
     A prior draft collapsed these into one enum; this locks them apart by value sets.
@@ -119,7 +119,7 @@ def test_partial_and_late_arrival_are_distinct_axes() -> None:
     partial_values = {p.value for p in PartialPolicy}
     late_values = {p.value for p in LateArrivalPolicy}
 
-    assert partial_values == {"BLOCK_LIVE", "SHADOW_ONLY", "ALLOW"}, partial_values
+    assert partial_values == {"BLOCK_LIVE", "ALLOW"}, partial_values
     assert late_values == {
         "replace_same_idempotency_key",
         "append_revision",
@@ -187,9 +187,6 @@ def test_default_late_arrival_helper_is_fail_safe() -> None:
     assert default_late_arrival_for(PartialPolicy.BLOCK_LIVE, backfill_only=True) is (
         LateArrivalPolicy.BACKFILL_ONLY
     )
-    assert default_late_arrival_for(PartialPolicy.SHADOW_ONLY, backfill_only=False) is (
-        LateArrivalPolicy.BACKFILL_ONLY
-    )
     assert default_late_arrival_for(PartialPolicy.BLOCK_LIVE, backfill_only=False) is (
         LateArrivalPolicy.REPLACE_SAME_IDEMPOTENCY_KEY
     )
@@ -232,4 +229,4 @@ def test_unknown_partial_policy_coerces_to_block_live() -> None:
 
     assert _coerce_partial_policy(None) is PartialPolicy.BLOCK_LIVE
     assert _coerce_partial_policy("NONSENSE") is PartialPolicy.BLOCK_LIVE
-    assert _coerce_partial_policy("SHADOW_ONLY") is PartialPolicy.SHADOW_ONLY
+    assert _coerce_partial_policy("BLOCK_LIVE") is PartialPolicy.BLOCK_LIVE

@@ -75,10 +75,9 @@ ARM_SCRIPT = "scripts/arm_live_mode.sh"
 OPERATOR_APPROVAL_PATTERN = re.compile(r"^OPS-\d{4}-\d{2}-\d{2}-")
 
 ALLOWED_TRANSITIONS = {
-    "shadow": {"shadow", "canary"},
-    "canary": {"shadow", "canary", "live"},
-    "live": {"shadow", "canary", "live"},
-    "blocked": {"shadow", "canary", "live", "blocked"},
+    "canary": {"blocked", "canary", "live"},
+    "live": {"blocked", "canary", "live"},
+    "blocked": {"blocked", "canary", "live"},
 }
 
 
@@ -336,7 +335,7 @@ def cmd_unarm(args: argparse.Namespace) -> int:
     cutover_path = state_path(CUTOVER_GUARD_FILENAME) if not args.cutover_path else Path(args.cutover_path)
     tombstone_path = state_path(TOMBSTONE_FILENAME) if not args.tombstone_path else Path(args.tombstone_path)
 
-    print("=== unarm (rollback to NORMAL/shadow) ===")
+    print("=== unarm (rollback to NORMAL/blocked) ===")
     print(f"  cutover_guard      : {cutover_path}")
     print(f"  tombstone          : {tombstone_path}")
     print()
@@ -344,8 +343,8 @@ def cmd_unarm(args: argparse.Namespace) -> int:
     print("=== planned actions ===")
     print(f"  1. rewrite {cutover_path} state -> 'NORMAL' (atomic, preserve history)")
     print(f"  2. touch   {tombstone_path}  (restore fail-closed sentinel)")
-    print(f"  3. export {ROLLOUT_MODE_ENV}=shadow")
-    print(f"  4. # also update config/settings.json -> entry_forecast.rollout_mode = 'shadow'")
+    print(f"  3. export {ROLLOUT_MODE_ENV}=blocked")
+    print(f"  4. # also update config/settings.json -> entry_forecast.rollout_mode = 'blocked'")
     print(f"  5. launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}")
     print()
 
@@ -449,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
         "flip-mode",
         help="Validate a rollout-mode transition; print env + launchctl command (no exec).",
     )
-    p_flip.add_argument("target_mode", choices=["shadow", "canary", "live"])
+    p_flip.add_argument("target_mode", choices=["blocked", "canary", "live"])
     p_flip.add_argument("--force", action="store_true", help="bypass transition / decision checks")
     p_flip.add_argument("--evidence-path", default=None, help="override evidence JSON path")
     p_flip.set_defaults(func=cmd_flip_mode)

@@ -57,14 +57,14 @@ FORECASTS_DB = f"{STATE}/zeus-forecasts.db"
 # (e.g. LIVE_INFERENCE_INPUTS_MISSING = a missing q_ucb input, which is a
 # data-availability problem, NOT honest "no edge"). The reason text is the
 # decisive signal; transient patterns are checked first because a missing
-# input / blocked snapshot / shadow-scope gate means we never even got to
+# input / blocked snapshot / non-submit scope gate means we never even got to
 # weigh the economics.
 _TRANSIENT_TOKENS = (
     "TRANSIENT", "STALE", "LOCK", "NOT_COMPLETE", "NOT_LIVE_ELIGIBLE",
     "SNAPSHOT_BLOCKED", "EXHAUSTED", "SOURCE_RUN", "FSR_",
     "NATIVE_ASK_MISSING", "INPUTS_MISSING", "MISSING", "BUSY", "TIMEOUT",
     "RETRY", "DEGRADED", "REVIEW_REQUIRED", "AVAILABILITY", "FRESH",
-    "SHADOW_ONLY", "SCOPE", "UNAVAILABLE", "RISK_GUARD",  # riskguard storms = substrate (memory 2026-06-12)
+    "SHADOW_ONLY", "SCOPE", "UNAVAILABLE", "RISK_GUARD",  # historical no-submit status / substrate storms
 )
 _ECONOMIC_TOKENS = (
     "NON_POSITIVE", "NEGATIVE", "EDGE", "NO_EDGE", "Q_LCB",
@@ -131,7 +131,7 @@ def classify_block(stage: str | None, reason: str | None) -> str:
     """transient | economic | unknown — reason-led substring heuristic, display only.
 
     The REASON dominates the stage name: a substrate cause (missing input,
-    blocked snapshot, shadow-scope gate, riskguard storm) means the trade
+    blocked snapshot, non-submit scope gate, riskguard storm) means the trade
     never reached an honest economic verdict, so transient is checked first
     and against the reason text. The stage name is only a weak tiebreaker.
     """
@@ -412,7 +412,7 @@ def section_selection() -> dict:
     slope near 1 means the EB-shrunk edge is an unbiased predictor of realized
     edge (winner's curse corrected); slope << 1 means still under-shrinking;
     intercept != 0 means residual center bias. This is the settlement-graded
-    winner's-curse diagnostic over the EB-shrinkage SHADOW columns (the
+    winner's-curse diagnostic over the EB-shrinkage audit columns (the
     decision-replacement flag was removed 2026-06-13; the live selection gate is
     the BH/FDR pass unconditionally — these columns remain settlement telemetry).
 
@@ -449,7 +449,7 @@ def section_selection() -> dict:
                 authority_by_token[r["token_id"]] = r["selection_authority"]
         out["receipts_with_edge_shrunk"] = len(shrunk_by_token)
         if not shrunk_by_token:
-            out["status"] = "no receipts carry edge_shrunk yet (shadow not populated)"
+            out["status"] = "no receipts carry edge_shrunk yet (audit column not populated)"
             return out
 
         tconn = ro(TRADES_DB)

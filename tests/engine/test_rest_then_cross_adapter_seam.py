@@ -3,7 +3,7 @@
 #   added TestEscalationCrossRerestRace — a post-escalation serial re-rest must
 #   not shadow the armed cross; double-submit safety preserved via the executor
 #   dedup backstop)
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 #   + docs/evidence/live_order_pathology/2026-06-21_escalation_cross_fix.md
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
 

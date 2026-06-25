@@ -156,8 +156,7 @@ def _parse_evidence_payload_cached(
     Phase C-perf-cache (critic ATTACK 3 follow-up): cache keyed by
     ``(path, mtime_ns, size, ino, ctime_ns)`` so the daemon does not
     re-parse the file 200×/cycle when both
-    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` and
-    ``ZEUS_ENTRY_FORECAST_READINESS_WRITER`` are ON.
+    ``ZEUS_ENTRY_FORECAST_ROLLOUT_GATE`` is ON.
 
     Cache key strength (2026-05-04, codex P2 follow-up on PR #47):
     keying on ``(mtime_ns, size)`` alone allowed stale entries to

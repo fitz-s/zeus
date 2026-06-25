@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-12
 # Authority basis: operator no-overengineering law 2026-06-12 verbatim
 #   "不允许设置任何的cap，实际上消除我系统中的过度设计" + Wave-1 of
-#   docs/operations/overengineering_simplification_plan_2026-06-12.md.
+#   docs/archive/2026-Q2/operations_historical/overengineering_simplification_plan_2026-06-12.md.
 """Wave-1 antibody suite: artificial throttles stay DELETED.
 
 These tests make the re-introduction of the deleted caps / canary gates / shadow

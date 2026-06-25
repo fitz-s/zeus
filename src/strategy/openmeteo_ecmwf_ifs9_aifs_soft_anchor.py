@@ -30,7 +30,7 @@ EPSILON = 1e-15
 # previously-zero bin, lowering (not raising) confidence on the formerly-un-hittable category. It
 # is therefore a structural normalizability guarantee, NOT the trading-mass change. The MEANINGFUL
 # economic mass remains the single flag-gated alpha knob (member_vote_smoothing_alpha, default-OFF,
-# on the shadow->prove->promote ladder): the floor and the alpha compose as ONE mechanism through
+# on the blocked->prove->promote ladder): the floor and the alpha compose as ONE mechanism through
 # this same normalized prior -- the floor guarantees >0 / normalizable for every bin unconditionally;
 # the alpha, when proven and promoted, lands the trade-relevant mass through the SAME path. No
 # parallel smoothing or posterior path is created (iron rule #4).
@@ -84,7 +84,7 @@ class SoftAnchorPosterior:
     anchor_sigma_c: float
     source_id: str = SOURCE_ID
     product_id: str = PRODUCT_ID
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
     def __post_init__(self) -> None:
@@ -94,8 +94,8 @@ class SoftAnchorPosterior:
         total = sum(self.probabilities.values())
         if abs(total - 1.0) > 1e-9:
             raise ValueError("posterior probabilities must sum to 1")
-        if self.trade_authority_status != "SHADOW_ONLY" or self.training_allowed:
-            raise ValueError("soft-anchor posterior is shadow-only until promoted by evidence")
+        if self.trade_authority_status != "BLOCKED" or self.training_allowed:
+            raise ValueError("soft-anchor posterior is blocked until promoted by evidence")
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,7 @@ class SoftAnchorDisagreementDiagnostic:
     disagreement_scale: float
     reason_codes: tuple[str, ...]
     product_id: str = PRODUCT_ID
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
 
     @property
     def promotion_allowed(self) -> bool:
@@ -135,23 +135,6 @@ class SoftAnchorDisagreementDiagnostic:
             "trade_authority_status": self.trade_authority_status,
             "promotion_allowed": False,
         }
-
-
-@dataclass(frozen=True)
-class ShadowVetoGuardrail:
-    baseline_direction: str
-    candidate_direction: str
-    allowed_direction: str
-    baseline_q_lcb: float
-    candidate_q_lcb: float
-    allowed_q_lcb: float
-    baseline_kelly_fraction: float
-    candidate_kelly_fraction: float
-    allowed_kelly_fraction: float
-    veto: bool
-    reasons: tuple[str, ...]
-    product_id: str = PRODUCT_ID
-    trade_authority_status: str = "SHADOW_VETO_ONLY"
 
 
 def _normalize_probabilities(probabilities: Mapping[str, float]) -> dict[str, float]:
@@ -292,48 +275,3 @@ def build_source_disagreement_sigma_widening(
 def selected_bin(probabilities: Mapping[str, float]) -> str:
     normalized = _normalize_probabilities(probabilities)
     return max(normalized, key=lambda key: (normalized[key], key))
-
-
-def apply_shadow_veto_guardrail(
-    *,
-    baseline_direction: str,
-    candidate_direction: str,
-    baseline_q_lcb: float,
-    candidate_q_lcb: float,
-    baseline_kelly_fraction: float,
-    candidate_kelly_fraction: float,
-) -> ShadowVetoGuardrail:
-    for field_name, value in (
-        ("baseline_q_lcb", baseline_q_lcb),
-        ("candidate_q_lcb", candidate_q_lcb),
-        ("baseline_kelly_fraction", baseline_kelly_fraction),
-        ("candidate_kelly_fraction", candidate_kelly_fraction),
-    ):
-        if not math.isfinite(float(value)):
-            raise ValueError(f"{field_name} must be finite")
-    if not baseline_direction or not candidate_direction:
-        raise ValueError("directions must be non-empty")
-
-    allowed_q_lcb = max(0.0, min(1.0, min(float(baseline_q_lcb), float(candidate_q_lcb))))
-    allowed_kelly = max(0.0, min(float(baseline_kelly_fraction), float(candidate_kelly_fraction)))
-    reasons: list[str] = []
-    if candidate_direction != baseline_direction:
-        reasons.append("SOFT_ANCHOR_DIRECTION_DISAGREEMENT")
-    if allowed_q_lcb < float(baseline_q_lcb) - EPSILON:
-        reasons.append("SOFT_ANCHOR_LOWER_Q_LCB")
-    if allowed_kelly < float(baseline_kelly_fraction) - EPSILON:
-        reasons.append("SOFT_ANCHOR_LOWER_KELLY")
-
-    return ShadowVetoGuardrail(
-        baseline_direction=baseline_direction,
-        candidate_direction=candidate_direction,
-        allowed_direction=baseline_direction,
-        baseline_q_lcb=float(baseline_q_lcb),
-        candidate_q_lcb=float(candidate_q_lcb),
-        allowed_q_lcb=allowed_q_lcb,
-        baseline_kelly_fraction=float(baseline_kelly_fraction),
-        candidate_kelly_fraction=float(candidate_kelly_fraction),
-        allowed_kelly_fraction=allowed_kelly,
-        veto=bool(reasons),
-        reasons=tuple(reasons),
-    )

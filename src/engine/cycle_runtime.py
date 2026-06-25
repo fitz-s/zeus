@@ -62,9 +62,8 @@ def _canonical_strategy_keys() -> frozenset[str]:
     """Strategies cycle_runtime treats as canonical for telemetry/attribution.
 
     Equals the registry's ``live_safe_keys()`` — every boot-allowed strategy
-    (live + shadow) is canonical because shadow strategies still emit
-    decisions that need attribution. Recomputed on every call so registry
-    swaps in tests propagate without import-order surprises.
+    is canonical for attribution. Recomputed on every call so registry swaps
+    in tests propagate without import-order surprises.
     """
     from src.strategy.strategy_profile import live_safe_keys
     return live_safe_keys()
@@ -569,7 +568,7 @@ def _attach_corrected_pricing_authority(
     tokens = dict(getattr(decision, "tokens", {}) or {})
     edge = getattr(decision, "edge", None)
     if edge is None:
-        raise ValueError("corrected pricing shadow requires edge")
+        raise ValueError("corrected pricing authority requires edge")
     setattr(decision, "final_execution_intent", None)
     decision_snapshot_id = str(getattr(decision, "decision_snapshot_id", "") or "").strip()
     if not decision_snapshot_id:
@@ -578,7 +577,7 @@ def _attach_corrected_pricing_authority(
             or ""
         ).strip()
     if not decision_snapshot_id:
-        raise ValueError("corrected pricing shadow requires decision_snapshot_id")
+        raise ValueError("corrected pricing authority requires decision_snapshot_id")
 
     candidate_limit = Decimal(str(candidate_limit_price))
     candidate_expected_fill = Decimal(str(candidate_expected_fill_price_before_fee))
@@ -604,7 +603,7 @@ def _attach_corrected_pricing_authority(
             limit_price=candidate_limit,
         )
         if sweep.average_price is None:
-            raise ValueError("corrected pricing shadow sweep produced no executable fill")
+            raise ValueError("corrected pricing sweep produced no executable fill")
         candidate_expected_fill = sweep.average_price
         depth_status = sweep.depth_status
         sweep_payload = {
@@ -841,7 +840,7 @@ def _ensure_fresh_executable_snapshot(
 ):
     """Return a snapshot that satisfies the 30s freshness gate, re-capturing if stale.
 
-    Root cause (2026-05-24, docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
+    Root cause (2026-05-24, docs/archive/2026-Q2/operations_historical/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
     the 5-min mode run's discovery→reprice latency exceeds the 30s freshness window,
     so the persisted cycle snapshot is already stale at submit and reprice raised
     ``executable_snapshot_stale`` — killing real above-floor edges. The 30s gate is
@@ -970,7 +969,7 @@ def _propagate_recaptured_snapshot_fields(snapshot_fields, fresh_snapshot) -> No
 def _reprice_recapture_fresh_snapshot(conn, snapshot_id, *, decision, stale_snapshot, now):
     """Open a short-lived public CLOB client and re-capture a fresh snapshot for ONE market.
 
-    Activates the fresh-at-submit path (see docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
+    Activates the fresh-at-submit path (see docs/archive/2026-Q2/operations_historical/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md):
     the persisted cycle snapshot is stale because the mode run's discovery->reprice latency
     exceeds the 30s window. PolymarketClient() public orderbook reads need no auth/keychain
     (httpx _public_http), so this is a read-only fresh price fetch — it places no orders.
@@ -2366,9 +2365,9 @@ def _record_final_intent_frontier(
         maybe_reprice = tokens.get("executable_snapshot_reprice")
         if isinstance(maybe_reprice, dict):
             reprice_payload = maybe_reprice
-    snapshot_shadow = reprice_payload.get("corrected_pricing_evidence")
-    if not isinstance(snapshot_shadow, dict):
-        snapshot_shadow = {}
+    corrected_pricing_evidence = reprice_payload.get("corrected_pricing_evidence")
+    if not isinstance(corrected_pricing_evidence, dict):
+        corrected_pricing_evidence = {}
     fields = snapshot_fields or {}
     attempt = {
         "family_key": _family_key_for_frontier(candidate, city_name),
@@ -2390,12 +2389,12 @@ def _record_final_intent_frontier(
         "executable_snapshot_id": str(fields.get("executable_snapshot_id") or ""),
         "book_semantics": str(
             reprice_payload.get("book_semantics")
-            or snapshot_shadow.get("book_semantics")
+            or corrected_pricing_evidence.get("book_semantics")
             or ""
         ),
         "market_prior_status": str(
             reprice_payload.get("market_prior_status")
-            or snapshot_shadow.get("market_prior_status")
+            or corrected_pricing_evidence.get("market_prior_status")
             or ""
         ),
     }
@@ -2539,16 +2538,16 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
     reported_fill_price = float(result.fill_price or 0.0)
     submitted_limit_price = float(result.submitted_price or 0.0)
     fallback_edge_price = float(decision.edge.entry_price or 0.0)
-    corrected_shadow = {}
+    corrected_pricing_evidence = {}
     try:
-        corrected_shadow = (
+        corrected_pricing_evidence = (
             decision.tokens.get("executable_snapshot_reprice", {})
             .get("corrected_pricing_evidence", {})
         )
     except AttributeError:
-        corrected_shadow = {}
+        corrected_pricing_evidence = {}
     pricing_semantics_id = str(
-        corrected_shadow.get("pricing_semantics_id")
+        corrected_pricing_evidence.get("pricing_semantics_id")
         or "legacy_unclassified"
     )
     command_state = str(getattr(result, "command_state", "") or "")
@@ -2636,14 +2635,14 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         shares_submitted=submitted_shares,
         shares_filled=shares_filled,
         shares_remaining=shares_remaining,
-        entry_cost_basis_id=str(corrected_shadow.get("cost_basis_id") or ""),
-        entry_cost_basis_hash=str(corrected_shadow.get("cost_basis_hash") or ""),
+        entry_cost_basis_id=str(corrected_pricing_evidence.get("cost_basis_id") or ""),
+        entry_cost_basis_hash=str(corrected_pricing_evidence.get("cost_basis_hash") or ""),
         entry_economics_authority=entry_economics_authority,
         fill_authority=fill_authority,
         pricing_semantics_id=pricing_semantics_id,
         execution_cost_basis_version=str(
-            corrected_shadow.get("execution_cost_basis_version")
-            or corrected_shadow.get("cost_basis_id")
+            corrected_pricing_evidence.get("execution_cost_basis_version")
+            or corrected_pricing_evidence.get("cost_basis_id")
             or ""
         ),
         corrected_executable_economics_eligible=corrected_executable_economics_eligible,
@@ -2744,7 +2743,7 @@ def _emit_day0_window_entered_canonical_if_available(
             (getattr(pos, "trade_id", ""),),
         ).fetchone()
         next_seq = int((row[0] if row else 0) or 0) + 1
-        # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): DAY0_WINDOW
+        # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): DAY0_WINDOW
         # transition target is the event's defining phase; pass explicitly.
         events, projection = build_day0_window_entered_canonical_write(
             pos,
@@ -2914,7 +2913,7 @@ def _apply_family_monitor_overlay(
     """Require a family value check before a statistical single-leg exit.
 
     This is live monitor logic over already-refreshed held-side probabilities and
-    held-side bids. It does not read replay/shadow data and it never creates a
+    held-side bids. It does not read replay data and it never creates a
     new entry; it records the current family value evidence for every held
     position and only prevents a single leg from liquidating when the current
     family vector's hold value dominates its direct-sell value.
@@ -3057,7 +3056,7 @@ def _dual_write_canonical_entry_if_available(
     # originate from an accept-path `EdgeDecision` (e.g. test harnesses);
     # the payload simply omits the key, preserving pre-slice wire format.
     #
-    # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): caller supplies
+    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): caller supplies
     # the explicit ``phase_after`` so the canonical builder does not derive
     # it from runtime Position.state strings. PENDING_ENTRY when the order
     # is pending; ACTIVE / DAY0_WINDOW when the order has filled.
@@ -5175,7 +5174,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             except Exception as exc:  # noqa: BLE001 - derived telemetry is fail-soft.
                 # AB3: every queued decision/telemetry-lane write (opportunity_fact,
                 # probability_trace, microstructure, forward_market_substrate,
-                # shadow_signal, settlement_day_observation_authority, ...) flows
+                # signal evidence, settlement_day_observation_authority, ...) flows
                 # through here. A swallowed exception is indistinguishable from a
                 # lane with nothing to write; name + count it so a dead lane fails
                 # loud. Behavior preserved: degraded still set, cycle not blocked.
@@ -6332,7 +6331,6 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                     conn=_no_trade_conn,
                                     strategy_key=str(getattr(_nd, "strategy_key", "") or "") or None,
                                     event_source=str(getattr(_nd, "edge_source", "") or "") or None,
-                                    shadow_runtime=str(env).lower() != "live",
                                 )
                             except Exception as _nte_exc:
                                 logger.warning(
@@ -6375,32 +6373,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                         for d in decisions
                     ]
-                    evidence_payload = {
-                        "city": city.name,
-                        "target_date": candidate.target_date,
-                        "timestamp": decision_time.isoformat(),
-                        "decision_snapshot_id": first.decision_snapshot_id,
-                        "p_raw_json": json.dumps(first.p_raw.tolist() if getattr(first, "p_raw", None) is not None else []),
-                        "p_cal_json": json.dumps(first.p_cal.tolist() if getattr(first, "p_cal", None) is not None else []),
-                        "edges_json": json.dumps(edges_payload),
-                        "lead_hours": float(lead_hours_to_date_start(date.fromisoformat(candidate.target_date), city.timezone, decision_time)),
-                    }
-
-                    def _write_shadow_signal(payload=evidence_payload) -> None:
-                        from src.state.db import log_shadow_signal
-
-                        log_shadow_signal(conn, **payload)
-
-                    _queue_derived_write(
-                        f"shadow_signal:{city.name}:{candidate.target_date}",
-                        _write_shadow_signal,
-                    )
+                    _ = edges_payload
                 except Exception as exc:
-                    # AB3: shadow-signal telemetry-lane build/queue failure. Was
-                    # logged but uncounted; now counted so a chronically-failing
-                    # shadow lane is detectable downstream. degraded preserved.
                     deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
-                    _record_lane_write_failure(summary, "shadow_signal_build", exc)
+                    _record_lane_write_failure(summary, "decision_evidence_build", exc)
             family_fallback_submit_satisfied = False
             for d in decisions:
                 if False:
@@ -7341,7 +7317,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             # with explicit nested SAVEPOINT, so placing the
                             # dual-write here no longer releases sp_candidate_*
                             # on commit. Closes torn-state window per T4.0 F3.
-                            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28):
+                            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28):
                             # derive phase_after from the runtime_order_status
                             # (mapped to the runtime state via
                             # initial_entry_runtime_state_for_order_status above)

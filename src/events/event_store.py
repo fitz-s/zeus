@@ -210,7 +210,7 @@ class EventStore:
         ).isoformat()
         # Scope-aware claim tier (ONE ordering authority, shared with the emit
         # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
-        # clause so shadow-only day0 events fall to Tier 2 — strictly below the
+        # clause so non-tradeable day0 events fall to Tier 2 — strictly below the
         # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
         # PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput incident).
         #

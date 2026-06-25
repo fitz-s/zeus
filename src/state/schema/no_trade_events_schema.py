@@ -30,14 +30,14 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
         no_trade_events CHECK extended to accept v23 rows.
   - 24: Phase 5 T2 (2026-05-21) — regime_correlation_cache table added;
         no_trade_events CHECK extended to accept v24 rows.
-  - 25: live authority/shadow/risk follow-up (2026-05-21) — shadow decision
-        provenance schema bump; no_trade_events CHECK extended to accept v25 rows.
-  - 26: evidence governance follow-up (2026-05-21) — structured strategy_key,
-        event_source, and shadow_runtime provenance for evidence_report.
+  - 25: live authority/risk follow-up (2026-05-21) — provenance schema bump;
+        no_trade_events CHECK extended to accept v25 rows.
+  - 26: evidence governance follow-up (2026-05-21) — structured strategy_key
+        and event_source provenance for evidence_report.
   - 27: P1/P2 architecture review (2026-05-22) — evidence lifecycle fields
         (revoke/expiry) in evidence_tier_assignments; day0_nowcast_entry strategy.
   - 28: neg_risk_basket NEGRISK_NO_PROFITABLE_BASKET reason enum member.
-  - 29: settlement_capture_shadow: +4 NoTradeReason members
+  - 29: settlement_capture physical-interval reasons: +4 NoTradeReason members
         (PHYSICAL_INTERVAL_DATA_GATED, PHYSICAL_INTERVAL_OVERLAP,
         PHYSICAL_INTERVAL_UNPROFITABLE, SETTLEMENT_CAPTURE_NOT_LOCKED).
 
@@ -128,7 +128,6 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     reason_detail       TEXT,
     strategy_key        TEXT,
     event_source        TEXT,
-    shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
     schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
@@ -149,7 +148,6 @@ CREATE TABLE no_trade_events_new (
     reason_detail       TEXT,
     strategy_key        TEXT,
     event_source        TEXT,
-    shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
     schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
@@ -274,14 +272,13 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     # schema_version IN (...) list.  This replaces the former hardcoded
     # "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27" substring check which
     # silently skips when a prod-v28 table is present, leaving new enum members out of
-    # the reason CHECK and causing IntegrityError on every shadow no_trade write.
+    # the reason CHECK and causing IntegrityError on every no_trade write.
     if (
         not any(r.value not in table_sql for r in NoTradeReason)
         and SCHEMA_VERSION in _schema_version_in_list(table_sql)
         and "schema_compatibility" in table_sql
         and "strategy_key" in table_sql
         and "event_source" in table_sql
-        and "shadow_runtime" in table_sql
     ):
         return
     if table_sql and "schema_compatibility" not in table_sql:
@@ -297,15 +294,6 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE no_trade_events ADD COLUMN strategy_key TEXT")
     if table_sql and "event_source" not in columns:
         conn.execute("ALTER TABLE no_trade_events ADD COLUMN event_source TEXT")
-    if table_sql and "shadow_runtime" not in columns:
-        conn.execute(
-            """
-            ALTER TABLE no_trade_events
-            ADD COLUMN shadow_runtime INTEGER NOT NULL DEFAULT 0
-            CHECK (shadow_runtime IN (0, 1))
-            """
-        )
-
     conn.execute("DROP TABLE IF EXISTS no_trade_events_new")
     conn.execute(_CREATE_TABLE_REBUILD_SQL)
 
@@ -330,7 +318,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             market_slug, temperature_metric, target_date,
             observation_time, decision_seq,
             reason, reason_detail,
-            strategy_key, event_source, shadow_runtime,
+            strategy_key, event_source,
             observed_at, schema_version, schema_compatibility{_spine_insert_cols}
         )
         SELECT
@@ -340,7 +328,6 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             reason_detail,
             strategy_key,
             event_source,
-            shadow_runtime,
             observed_at,
             CASE
                 WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42) THEN schema_version

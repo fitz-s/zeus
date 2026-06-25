@@ -557,7 +557,7 @@ def test_replay_context_snapshot_only_fallback_prefers_v2(tmp_path):
     assert fallback_ref is not None
     assert fallback_ref["source"] == "ensemble_snapshots.available_at"
     assert fallback_ref["snapshot_id"] == 132
-    assert fallback_ref["authority_scope"] == "diagnostic_non_promotion"
+    assert fallback_ref["authority_scope"] == "offline_no_promotion"
 
 
 def test_replay_context_v2_snapshot_lookup_is_metric_scoped(tmp_path):
@@ -717,42 +717,3 @@ def test_replay_context_snapshot_only_fallback_requires_p_raw(tmp_path):
     assert fallback_ref is not None
     assert fallback_ref["source"] == "ensemble_snapshots.available_at"
     assert fallback_ref["snapshot_id"] == 602
-
-
-def test_replay_context_can_fallback_to_shadow_signal_reference(tmp_path):
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    _enable_legacy_snapshot_fixture(conn)
-    conn.execute(
-        """
-        INSERT INTO ensemble_snapshots
-        (snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
-         issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, p_raw_json, spread, is_bimodal, model_version, dataset_id)
-        VALUES (41, 'Dallas', '2026-04-05', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
-                '2026-04-04T00:00:00Z', '2026-04-05T00:00:00Z',
-                '2026-04-04T08:00:00Z', '2026-04-04T08:05:00Z', 24.0, '[12.0]', '[0.1,0.9]', 2.0, 0, 'ecmwf', 'v1')
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO shadow_signals
-        (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
-        VALUES ('Dallas', '2026-04-05', '2026-04-04T10:00:00+00:00', '41',
-                '[0.1, 0.9]', '[0.15, 0.85]',
-                '[{\"bin_label\":\"39-40°F\"},{\"bin_label\":\"41-42°F\"}]',
-                14.0)
-        """
-    )
-    fallback_ctx = ReplayContext(conn, allow_snapshot_only_reference=True)
-    ref = fallback_ctx.get_decision_reference_for("Dallas", "2026-04-05")
-    conn.close()
-
-    assert ref is not None
-    assert ref["source"] == "legacy_shadow_signal_diagnostic"
-    assert ref["storage_source"] == "shadow_signals"
-    assert ref["authority_scope"] == "diagnostic_non_promotion"
-    assert ref["snapshot_id"] == 41
-    assert ref["bin_labels"] == ["39-40°F", "41-42°F"]
-    assert ref["p_cal_vector"] == [0.15, 0.85]

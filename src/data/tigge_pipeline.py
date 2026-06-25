@@ -184,7 +184,7 @@ def determine_catch_up_dates(
     Bounded by ``max_lookback_days`` to avoid runaway backfills. The newest
     issue date considered is yesterday — TIGGE on the public MARS archive
     has a **48-hour embargo** (confirmed at <https://confluence.ecmwf.int/>;
-    see ``docs/operations/tigge_daemon_integration.md`` §"Source role"),
+    see ``docs/archive/2026-Q2/operations_historical/tigge_daemon_integration.md`` §"Source role"),
     so today's 00Z cannot be requested same-day under any circumstances.
     The earlier "TIGGE posts by 10:00 UTC" comment was wrong and has been
     purged. The oldest is ``max(yesterday - max_lookback_days + 1,

@@ -13,7 +13,7 @@
 # Polygon membership is point-in-polygon over (lat, lon) of the city's settlement coordinate.
 #
 # IMPORTANT: presence here is domain plumbing only. It does NOT enable any source, fetch, or
-# trade authority. ICON-D2/AROME stay shadow-only / deferred per BAYES_PRECISION_FUSION_PROOF_RESULT.md until an
+# trade authority. ICON-D2/AROME stay blocked / deferred per BAYES_PRECISION_FUSION_PROOF_RESULT.md until an
 # ingest+calibration path exists. The BAYES_PRECISION_FUSION fusion flag (replacement_0_1_bayes_precision_fusion_enabled) is
 # default-OFF; with it OFF this file is inert.
 
@@ -177,3 +177,131 @@ domains:
       lat_max: 62.00
       lon_min: -142.00
       lon_max: -52.00
+
+  nam_conus:
+    model_name: nam_conus
+    region_label: conus
+    max_lead_days: 3
+    polygon:
+      - [-126.00, 20.00]
+      - [-64.00, 20.00]
+      - [-64.00, 52.00]
+      - [-126.00, 52.00]
+      - [-126.00, 20.00]
+    bounding_box:
+      lat_min: 20.00
+      lat_max: 52.00
+      lon_min: -126.00
+      lon_max: -64.00
+
+  dmi_harmonie_europe:
+    model_name: dmi_harmonie_europe
+    region_label: northern_europe
+    max_lead_days: 2
+    polygon:
+      - [-15.00, 48.00]
+      - [35.00, 48.00]
+      - [35.00, 72.00]
+      - [-15.00, 72.00]
+      - [-15.00, 48.00]
+    bounding_box:
+      lat_min: 48.00
+      lat_max: 72.00
+      lon_min: -15.00
+      lon_max: 35.00
+
+  knmi_harmonie_netherlands:
+    model_name: knmi_harmonie_netherlands
+    region_label: benelux_north_sea
+    max_lead_days: 2
+    polygon:
+      - [2.00, 49.00]
+      - [9.00, 49.00]
+      - [9.00, 55.00]
+      - [2.00, 55.00]
+      - [2.00, 49.00]
+    bounding_box:
+      lat_min: 49.00
+      lat_max: 55.00
+      lon_min: 2.00
+      lon_max: 9.00
+
+  kma_ldps:
+    model_name: kma_ldps
+    region_label: korea
+    max_lead_days: 2
+    polygon:
+      - [124.00, 32.00]
+      - [132.00, 32.00]
+      - [132.00, 40.00]
+      - [124.00, 40.00]
+      - [124.00, 32.00]
+    bounding_box:
+      lat_min: 32.00
+      lat_max: 40.00
+      lon_min: 124.00
+      lon_max: 132.00
+
+  kma_gdps:
+    model_name: kma_gdps
+    region_label: global_kma_gdps
+    max_lead_days: 12
+    polygon:
+      - [-180.00, -90.00]
+      - [180.00, -90.00]
+      - [180.00, 90.00]
+      - [-180.00, 90.00]
+      - [-180.00, -90.00]
+    bounding_box:
+      lat_min: -90.00
+      lat_max: 90.00
+      lon_min: -180.00
+      lon_max: 180.00
+
+  met_nordic:
+    model_name: met_nordic
+    region_label: nordic
+    max_lead_days: 2
+    polygon:
+      - [4.00, 54.00]
+      - [32.00, 54.00]
+      - [32.00, 72.00]
+      - [4.00, 72.00]
+      - [4.00, 54.00]
+    bounding_box:
+      lat_min: 54.00
+      lat_max: 72.00
+      lon_min: 4.00
+      lon_max: 32.00
+
+  italiameteo_icon_2i:
+    model_name: italiameteo_icon_2i
+    region_label: italy
+    max_lead_days: 2
+    polygon:
+      - [5.00, 35.00]
+      - [19.00, 35.00]
+      - [19.00, 48.00]
+      - [5.00, 48.00]
+      - [5.00, 35.00]
+    bounding_box:
+      lat_min: 35.00
+      lat_max: 48.00
+      lon_min: 5.00
+      lon_max: 19.00
+
+  jma_msm:
+    model_name: jma_msm
+    region_label: japan
+    max_lead_days: 2
+    polygon:
+      - [122.00, 22.00]
+      - [154.00, 22.00]
+      - [154.00, 48.00]
+      - [122.00, 48.00]
+      - [122.00, 22.00]
+    bounding_box:
+      lat_min: 22.00
+      lat_max: 48.00
+      lon_min: 122.00
+      lon_max: 154.00

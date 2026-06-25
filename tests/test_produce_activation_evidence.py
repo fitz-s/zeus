@@ -57,58 +57,6 @@ def _complete_evidence() -> EntryForecastPromotionEvidence:
 
 
 # -------------------------------------------------------------------- #
-# C3 writer evidence
-# -------------------------------------------------------------------- #
-
-
-def test_produce_c3_no_evidence_lands_blocked_row_artifact(tmp_path: Path):
-    """No promotion-evidence file ⇒ writer dry-run lands BLOCKED row.
-    Verdict.ready_to_flip is True because BLOCKED-with-EVIDENCE-MISSING
-    is the **expected** first-flip state (writer fail-closed by
-    construction). Artifact contains the SQL dump of the row.
-    """
-
-    verdict = scripts.produce_c3_writer_evidence(
-        out_dir=tmp_path,
-        promotion_evidence_path=tmp_path / "absent.json",
-        as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
-    )
-
-    assert verdict["flag"] == "ZEUS_ENTRY_FORECAST_READINESS_WRITER"
-    assert verdict["rows_written"] == 1
-    assert verdict["row_status"] == "BLOCKED"
-    assert "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING" in verdict["row_reason_codes"]
-    assert verdict["ready_to_flip"] is True
-
-    artifact = Path(verdict["artifact_path"])
-    assert artifact.exists()
-    assert artifact.is_relative_to(tmp_path)
-    body = artifact.read_text()
-    assert "BLOCKED" in body
-    assert "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING" in body
-    assert "strategy_key" in body  # SQL dump column header
-
-
-def test_produce_c3_complete_evidence_lands_live_eligible_row(tmp_path: Path):
-    """Complete on-disk evidence ⇒ writer lands LIVE_ELIGIBLE row.
-    Verdict.ready_to_flip True; artifact dumps the row.
-    """
-
-    evidence_path = tmp_path / "evidence.json"
-    write_promotion_evidence(_complete_evidence(), path=evidence_path)
-
-    verdict = scripts.produce_c3_writer_evidence(
-        out_dir=tmp_path,
-        promotion_evidence_path=evidence_path,
-        as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
-    )
-
-    assert verdict["row_status"] == "LIVE_ELIGIBLE"
-    assert verdict["ready_to_flip"] is True
-    assert verdict["row_reason_codes"]  # any non-empty list
-
-
-# -------------------------------------------------------------------- #
 # C1 rollout-gate evidence
 # -------------------------------------------------------------------- #
 
@@ -265,7 +213,7 @@ def test_produce_c4_no_diff_when_blockers_empty(tmp_path: Path):
 
 
 def test_produce_all_writes_summary_artifact(tmp_path: Path):
-    """``produce_all`` runs c1, c3, c4 in sequence and writes a
+    """``produce_all`` runs c1 and c4 in sequence and writes a
     summary markdown to ``<out_dir>/<date>_summary.md`` referencing
     each per-flag artifact. The summary has a unified verdict table.
     """
@@ -292,26 +240,19 @@ def test_produce_all_writes_summary_artifact(tmp_path: Path):
         promotion_evidence_path=evidence_path,
         check_fn=fake_check,
         as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
-        skip_tests=True,  # already running inside pytest; avoids re-entrant subprocess
     )
 
     assert summary["c1"]["ready_to_flip"] is True
-    assert summary["c3"]["ready_to_flip"] is True
     assert summary["c4"]["ready_to_flip"] is True
-    # test_gate key is present and reports passed (skip_tests=True means exit 0)
-    assert summary["test_gate"]["passed"] is True
 
     summary_path = Path(summary["summary_path"])
     assert summary_path.exists()
     body = summary_path.read_text()
     # Markdown sanity — must reference each flag by name and link the
     # underlying artifact paths so the operator can drill in.
-    assert "ZEUS_ENTRY_FORECAST_READINESS_WRITER" in body
     assert "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE" in body
     assert "ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS" in body
     assert "ready_to_flip" in body
-    # Test gate status must appear in summary so operator can see it
-    assert "test_activation_flag_combinations.py gate" in body
 
 
 def test_artifact_paths_are_dated_and_unique(tmp_path: Path):
@@ -321,12 +262,12 @@ def test_artifact_paths_are_dated_and_unique(tmp_path: Path):
     audit trail.
     """
 
-    verdict_a = scripts.produce_c3_writer_evidence(
+    verdict_a = scripts.produce_c1_rollout_gate_evidence(
         out_dir=tmp_path,
         promotion_evidence_path=tmp_path / "absent.json",
         as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
     )
-    verdict_b = scripts.produce_c3_writer_evidence(
+    verdict_b = scripts.produce_c1_rollout_gate_evidence(
         out_dir=tmp_path,
         promotion_evidence_path=tmp_path / "absent.json",
         as_of=datetime(2026, 5, 5, 12, tzinfo=UTC),

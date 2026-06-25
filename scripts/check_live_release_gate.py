@@ -57,7 +57,6 @@ FAIL = "FAIL"
 # only event-driven live mode). The deploy gate's live stage is now edli_live alone.
 LIVE_RELEASE_STAGES = (
     "legacy_cron",
-    "edli_submit_disabled_bridge",
     "edli_live",
 )
 
@@ -559,7 +558,7 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         _check_fresh_file("source_health", args.source_health_json, max_age_seconds=args.source_max_age_seconds, now=now),
         _check_fresh_file("status_summary", args.status_json, max_age_seconds=args.status_max_age_seconds, now=now),
     ]
-    if str(args.stage) in {"legacy_cron", "edli_submit_disabled_bridge"}:
+    if str(args.stage) == "legacy_cron":
         results.append(_check_paper_proof(args.paper_proof_json))
     if args.settings_json:
         results.append(_check_stage_settings(args.stage, args.settings_json))
@@ -592,7 +591,7 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
 
 def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
     stage = str(args.stage)
-    if stage not in {"edli_submit_disabled_bridge", "edli_live"}:
+    if stage != "edli_live":
         return []
     import src.main as main
 
@@ -610,15 +609,6 @@ def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
         status_json=str(args.status_json),
         max_age_seconds=min(int(args.source_max_age_seconds), int(args.status_max_age_seconds)),
     )
-    if stage == "edli_submit_disabled_bridge":
-        ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and not report.submit_allowed
-        return [
-            GateResult(
-                "edli_stage_readiness",
-                PASS if ok else FAIL,
-                f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
-            )
-        ]
     results = [
         GateResult(
             "edli_stage_readiness",
@@ -659,7 +649,6 @@ def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
 
 _REACTOR_MODE_BY_STAGE = {
     "legacy_cron": "disabled",
-    "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
     "edli_live": "live",
 }
 
@@ -685,15 +674,13 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
             errors.append("enabled=true")
         if bool(edli_cfg.get("real_order_submit_enabled", False)):
             errors.append("real_order_submit_enabled=true")
-    if stage in {"edli_submit_disabled_bridge", "edli_live"}:
+    if stage == "edli_live":
         if not bool(edli_cfg.get("enabled", False)):
             errors.append("enabled=false")
         if not bool(edli_cfg.get("market_channel_ingestor_enabled", False)):
             errors.append("market_channel_ingestor_enabled=false")
         if not bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
             errors.append("edli_user_channel_reconcile_enabled=false")
-    if stage == "edli_submit_disabled_bridge" and bool(edli_cfg.get("real_order_submit_enabled", False)):
-        errors.append("real_order_submit_enabled=true")
     if stage == "edli_live":
         # Wave-2 item 5/8: canary collapsed into edli_live; the live_canary_enabled and
         # taker_fok_fak_live_enabled flags were deleted (taker law is unconditional). The
@@ -755,10 +742,6 @@ def _stage_allowance(
         return False, False, False, basis
     if stage == "legacy_cron":
         return False, False, False, basis + ("legacy_cron_preservation",)
-    if stage == "edli_submit_disabled_bridge":
-        if _result_status(results, "edli_stage_readiness") != PASS:
-            return False, False, False, basis + ("submit_disabled", "edli_stage_readiness_required")
-        return False, False, False, basis + ("submit_disabled",)
     if stage == "edli_live":
         if _result_status(results, "edli_stage_readiness") != PASS:
             return False, False, False, basis + ("edli_stage_readiness_required", "scaleout_blocked")

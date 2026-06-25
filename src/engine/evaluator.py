@@ -3,7 +3,7 @@
 # Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 #   P0-3 (2026-05-23): period_extrema guard before remaining_member_extrema_for_day0 call.
-#   P0-D (2026-05-23): shadow sanity telemetry for non-day0 strategies.
+#   P0-D (2026-05-23): retired sanity telemetry for non-day0 strategies.
 #   D2 bias-family unify (2026-06-03): _resolve_unified_entry_bias_native + flag-gated
 #     bias-shift + identity-Platt on the FT entry sites. Authority basis: D2 bias-family
 #     unify / wiring verdict 2026-06-03.
@@ -65,21 +65,14 @@ from src.config import (
     get_mode,
     settings,
 )
-from src.control.entry_forecast_promotion_evidence_io import (
-    PromotionEvidenceCorruption,
-    read_promotion_evidence,
-)
 from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
 from src.data.calibration_transfer_policy import (
     MIN_TRANSFER_EVIDENCE_PAIRS,
     POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
-    evaluate_calibration_transfer_policy_with_evidence,
     source_platt_transfer_evidence_valid,
     target_transfer_cohort_evidence_valid,
 )
-from src.data.entry_readiness_writer import write_entry_readiness
 from src.data.executable_forecast_reader import read_executable_forecast
-from src.data.forecast_target_contract import ForecastTargetScope
 from src.contracts import (
     EntryMethod,
     EdgeContext,
@@ -1611,7 +1604,7 @@ def _size_at_execution_price_boundary(
 ) -> float:
     """Size a trade at the evaluator→Kelly boundary using typed entry cost.
 
-    P10E: shadow-off rollback path removed — fee-adjusted typed price is the
+    P10E: rollback path removed — fee-adjusted typed price is the
     only path. No feature flag; assert_kelly_safe() runs unconditionally.
 
     Per-trade safety-cap authority was removed 2026-05-04; per-cycle exposure
@@ -1720,7 +1713,7 @@ def _size_at_execution_price_boundary(
                 )
                 fee_adjusted_size = cap_usd
 
-    # P10E strict: shadow-off path removed. R10 requires fee-adjusted typed price.
+    # P10E strict: rollback path removed. R10 requires fee-adjusted typed price.
     return fee_adjusted_size
 
 
@@ -2243,7 +2236,6 @@ def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None
 
 
 ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
-ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG = "ZEUS_ENTRY_FORECAST_READINESS_WRITER"
 
 
 def _entry_forecast_rollout_gate_flag_on() -> bool:
@@ -2254,23 +2246,6 @@ def _entry_forecast_rollout_gate_flag_on() -> bool:
     """
 
     return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG, "1") != "0"
-
-
-def _entry_forecast_readiness_writer_flag_on() -> bool:
-    """Default OFF since 2026-05-04 (gate-purge fix-up per critic-opus PR #54).
-
-    The writer was the SECOND call site of evaluate_entry_forecast_rollout_gate
-    that Stage 1 missed. With rollout_mode='blocked' in config + missing
-    promotion-evidence, the writer would emit BLOCKED readiness_state rows
-    that the reader at evaluator.py:1658+ rejected, recreating the same
-    156-candidates-per-30min loop the rollout-blocker neutering was supposed
-    to eliminate.
-
-    Kill-switch semantics: set the env var to ``"1"`` to re-enable the
-    writer. Empty string and unset both keep the default-OFF behavior.
-    """
-
-    return os.environ.get(ZEUS_ENTRY_FORECAST_READINESS_WRITER_FLAG, "0") == "1"
 
 
 def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
@@ -2316,118 +2291,6 @@ def _entry_forecast_condition_id(support_outcomes: list[dict]) -> str:
             if value:
                 return value
     return ""
-
-
-def _write_entry_readiness_for_candidate(
-    conn,
-    *,
-    cfg: EntryForecastConfig,
-    city: City,
-    target_local_date: date,
-    temperature_metric: "MetricIdentity",
-    market_family: str,
-    condition_id: str,
-    decision_time: datetime,
-) -> None:
-    """Phase C-3 activation: when ``ZEUS_ENTRY_FORECAST_READINESS_WRITER=1``,
-    write the per-candidate ``readiness_state`` row with
-    ``strategy_key='entry_forecast'`` so the live evaluator path's
-    subsequent ``read_executable_forecast`` call can find it.
-
-    The writer enforces all three gates (rollout / calibration /
-    promotion-evidence) at write time. Default OFF preserves the
-    fail-closed-by-construction state where no daemon path writes
-    entry_readiness rows and the reader recurrently blocks on
-    ``ENTRY_READINESS_MISSING``.
-
-    The ``ForecastTargetScope`` constructed here uses placeholder
-    temporal fields (``source_cycle_time``, ``target_window_*``,
-    ``required_step_hours``). The writer ignores those — it only
-    consumes ``city_id``/``city_timezone``/``target_local_date``/
-    ``temperature_metric``/``data_version``. Loading the proper
-    temporal fields would require a DB lookup the writer does not
-    need; using placeholders is correct here. If a future caller
-    needs full scope semantics, refactor the writer to accept the raw
-    fields it actually uses (city/target/metric/data_version) and
-    drop the scope dataclass coupling.
-    """
-
-    if conn is None:
-        return
-    try:
-        evidence = read_promotion_evidence()
-    except PromotionEvidenceCorruption:
-        evidence = None
-
-    rollout_decision = evaluate_entry_forecast_rollout_gate(config=cfg, evidence=evidence)
-    track = track_for_metric(cfg, temperature_metric.temperature_metric)
-    data_version = data_version_for_track(track)
-    # Phase β: delegate to evidence-gated function.  When the feature flag is
-    # off (the default), this transparently falls back to the legacy string-
-    # mapping policy — behaviour is byte-identical.  When the flag flips on,
-    # the DB row becomes authority and live_promotion_approved is ignored.
-    #
-    # Same-domain semantics (PR #65 Codex P1 follow-up 2026-05-06):
-    # source_id == target_source_id == cfg.source_id ('ecmwf_open_data') and
-    # source_cycle == target_cycle is genuinely same-domain — NOT an OpenData
-    # → TIGGE cross-source transfer being silently approved. The policy_id
-    # 'ecmwf_open_data_uses_tigge_localday_cal_v1' is a naming convention for
-    # the calibration mechanism (loading the TIGGE-fit Platt via the static
-    # _TRANSFER_SOURCE_BY_OPENDATA_VERSION data_version map at calibration-
-    # load time), not a runtime cross-domain transfer. ECMWF Opendata IS
-    # the TIGGE ensemble — same physical IFS forecast, different release
-    # channels (TIGGE = +48h archive mirror). See
-    # architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §1, §2.
-    # The validated_calibration_transfers evidence-row is required only for
-    # genuinely cross-source transfers (e.g. GFS → ECMWF), which this writer
-    # never issues.
-    _dh = decision_time.hour
-    _derived_cycle = "12" if _dh < 6 or _dh >= 18 else "00"
-    calibration_decision = evaluate_calibration_transfer_policy_with_evidence(
-        config=cfg,
-        source_id=cfg.source_id,
-        target_source_id=cfg.source_id,
-        source_cycle=_derived_cycle,
-        target_cycle=_derived_cycle,
-        horizon_profile="full",
-        season=season_from_date(str(target_local_date), lat=city.lat),
-        cluster=city.cluster,
-        metric=temperature_metric.temperature_metric,
-        platt_model_key=None,
-        conn=conn,
-        now=decision_time,
-        # Rollout-gate was retired 2026-05-04 (gate-purge); live_promotion_approved
-        # is unconditionally True here. The legacy fallback honours the flag, and
-        # the evidence-gated path (flag ON) ignores it in favour of the DB row.
-        live_promotion_approved=True,
-    )
-
-    placeholder_scope = ForecastTargetScope(
-        city_id=_entry_forecast_city_id(city),
-        city_name=city.name,
-        city_timezone=city.timezone,
-        target_local_date=target_local_date,
-        temperature_metric=temperature_metric.temperature_metric,
-        source_cycle_time=decision_time,
-        data_version=data_version,
-        target_window_start_utc=decision_time,
-        target_window_end_utc=decision_time,
-        required_step_hours=(),
-        market_refs=(),
-    )
-
-    write_entry_readiness(
-        conn,
-        scope=placeholder_scope,
-        rollout_decision=rollout_decision,
-        calibration_decision=calibration_decision,
-        promotion_evidence=evidence,
-        config=cfg,
-        market_family=market_family,
-        condition_id=condition_id,
-        producer_readiness_id="entry-readiness-via-evaluator",
-        computed_at=decision_time,
-    )
 
 
 def _load_model_bias_reference(conn, *, city_name: str, season: str, forecast_source: str) -> dict:
@@ -5381,8 +5244,8 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.PROBABILITY_SANITY_GATE,
                 rejection_reason_detail=_san_reason,
             )]
-    # P0-D non-day0 HIGH validate_high_distribution SHADOW (log-only) DELETED 2026-06-14
-    # (gate-mass collapse: log-only shadow, no telemetry sink, no promotion path). Non-day0
+    # P0-D non-day0 HIGH validate_high_distribution log-only path DELETED 2026-06-14
+    # (gate-mass collapse: log-only path, no telemetry sink, no promotion path). Non-day0
     # HIGH is already covered by the per-edge probability_edge_bin_sanity gate below. The
     # day0 HIGH hard gate (above) is untouched.
 
@@ -5647,7 +5510,7 @@ def evaluate_candidate(
             ),
             rejection_reason_detail="; ".join(rejection_reasons),
         )
-        # LIVE-PROB-P0 schema-34: stamp tail evidence if gate fired in shadow mode.
+        # LIVE-PROB-P0 schema-34: stamp tail evidence if gate fired in log-only mode.
         if _tail_evidence is not None and _fdr_no_filtered_rej.prob_tail_mass_cal is None:
             _fdr_no_filtered_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
             _fdr_no_filtered_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
@@ -5880,7 +5743,7 @@ def evaluate_candidate(
         # probability_edge_bin_sanity fires only when edge bin is sub-floor, gap>=min_edge_gap,
         # ratio >= odds_ratio_threshold, AND settled_member_support < min_edge_bin_member_support.
         # CRITICAL SAFETY: strong member support (p_raw[bin] >= 0.05) → unconditional PASS.
-        # Mode ("hard"|"shadow") read from probability_edge_bin_sanity config block.
+        # probability_edge_bin_sanity is a hard gate when it fires.
         # day0 guard consistent with family-gate above.
         if not is_day0_mode:
             _eb_ok, _eb_reason, _eb_telemetry = probability_edge_bin_sanity(
@@ -5896,65 +5759,57 @@ def evaluate_candidate(
             )
             # Stamp §E telemetry onto a sentinel so it flows to all downstream decisions.
             _eb_telemetry_dict = _eb_telemetry  # always a dict, even on pass path
-            _eb_gate_mode = _eb_telemetry_dict.get("probability_sanity_mode", "hard")
             if not _eb_ok:
-                if _eb_gate_mode == "hard":
-                    # Determine specific NoTradeReason from reason code prefix
-                    _eb_reason_str = str(_eb_reason or "")
-                    if "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT" in _eb_reason_str:
-                        _eb_enum = NoTradeReason.PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT
-                    elif "PROBABILITY_EDGE_BIN_UNSUPPORTED" in _eb_reason_str:
-                        _eb_enum = NoTradeReason.PROBABILITY_EDGE_BIN_UNSUPPORTED
-                    elif "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in _eb_reason_str:
-                        _eb_enum = NoTradeReason.PROBABILITY_TAIL_SHAPE_ANOMALY_HARD
-                    else:
-                        _eb_enum = NoTradeReason.PROBABILITY_SANITY_GATE
-                    logger.warning(
-                        "[PROB_EDGE_BIN_SANITY_HARD] strategy=%s city=%s date=%s bin_idx=%s "
-                        "support=%.4f reason=%s",
-                        selected_method, city.name, target_date, bin_idx,
-                        _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
-                    )
-                    _eb_rej = EdgeDecision(
-                        False,
-                        edge=edge,
-                        decision_id=_decision_id(),
-                        rejection_stage="SIGNAL_QUALITY",
-                        rejection_reasons=[_eb_enum.value],
-                        selected_method=selected_method,
-                        applied_validations=[*decision_validations, "probability_edge_bin_sanity_gate"],
-                        decision_snapshot_id=snapshot_id,
-                        edge_source=edge_source,
-                        strategy_key=strategy_key,
-                        rejection_reason_enum=_eb_enum,
-                        rejection_reason_detail=_eb_reason,
-                    )
-                    if _tail_evidence is not None:
-                        _eb_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
-                        _eb_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
-                        _eb_rej.prob_tail_entropy = _tail_evidence.get("entropy")
-                    # Stamp §E telemetry columns
-                    _eb_rej.probability_sanity_mode = _eb_telemetry_dict.get("probability_sanity_mode")
-                    _eb_rej.probability_sanity_reason = _eb_telemetry_dict.get("probability_sanity_reason")
-                    _eb_rej.edge_bin_idx = _eb_telemetry_dict.get("edge_bin_idx")
-                    _eb_rej.edge_bin_label = _eb_telemetry_dict.get("edge_bin_label")
-                    _eb_rej.edge_bin_p_raw = _eb_telemetry_dict.get("edge_bin_p_raw")
-                    _eb_rej.edge_bin_p_cal = _eb_telemetry_dict.get("edge_bin_p_cal")
-                    _eb_rej.edge_bin_p_market = _eb_telemetry_dict.get("edge_bin_p_market")
-                    _eb_rej.edge_bin_member_support = _eb_telemetry_dict.get("edge_bin_member_support")
-                    _eb_rej.edge_bin_odds_ratio = _eb_telemetry_dict.get("edge_bin_odds_ratio")
-                    _eb_rej.near_tail_p_cal = _eb_telemetry_dict.get("near_tail_p_cal")
-                    _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
-                    decisions.append(_eb_rej)
-                    continue
-                # shadow mode = phantom detected but NON-blocking: the
-                # PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW reason is still stamped as
-                # probability_sanity_reason telemetry below (no EdgeDecision, no
-                # continue). Dead log-only else-branch removed 2026-06-14 (gate-mass
-                # collapse); the dead enum member rides the schema-enum wave.
+                # Determine specific NoTradeReason from reason code prefix
+                _eb_reason_str = str(_eb_reason or "")
+                if "PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT" in _eb_reason_str:
+                    _eb_enum = NoTradeReason.PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT
+                elif "PROBABILITY_EDGE_BIN_UNSUPPORTED" in _eb_reason_str:
+                    _eb_enum = NoTradeReason.PROBABILITY_EDGE_BIN_UNSUPPORTED
+                elif "PROBABILITY_TAIL_SHAPE_ANOMALY_HARD" in _eb_reason_str:
+                    _eb_enum = NoTradeReason.PROBABILITY_TAIL_SHAPE_ANOMALY_HARD
+                else:
+                    _eb_enum = NoTradeReason.PROBABILITY_SANITY_GATE
+                logger.warning(
+                    "[PROB_EDGE_BIN_SANITY_HARD] strategy=%s city=%s date=%s bin_idx=%s "
+                    "support=%.4f reason=%s",
+                    selected_method, city.name, target_date, bin_idx,
+                    _eb_telemetry_dict.get("edge_bin_member_support", 0.0), _eb_reason,
+                )
+                _eb_rej = EdgeDecision(
+                    False,
+                    edge=edge,
+                    decision_id=_decision_id(),
+                    rejection_stage="SIGNAL_QUALITY",
+                    rejection_reasons=[_eb_enum.value],
+                    selected_method=selected_method,
+                    applied_validations=[*decision_validations, "probability_edge_bin_sanity_gate"],
+                    decision_snapshot_id=snapshot_id,
+                    edge_source=edge_source,
+                    strategy_key=strategy_key,
+                    rejection_reason_enum=_eb_enum,
+                    rejection_reason_detail=_eb_reason,
+                )
+                if _tail_evidence is not None:
+                    _eb_rej.prob_tail_mass_cal = _tail_evidence.get("tail_cal")
+                    _eb_rej.prob_tail_mass_market = _tail_evidence.get("tail_mkt")
+                    _eb_rej.prob_tail_entropy = _tail_evidence.get("entropy")
+                # Stamp §E telemetry columns
+                _eb_rej.probability_sanity_mode = _eb_telemetry_dict.get("probability_sanity_mode")
+                _eb_rej.probability_sanity_reason = _eb_telemetry_dict.get("probability_sanity_reason")
+                _eb_rej.edge_bin_idx = _eb_telemetry_dict.get("edge_bin_idx")
+                _eb_rej.edge_bin_label = _eb_telemetry_dict.get("edge_bin_label")
+                _eb_rej.edge_bin_p_raw = _eb_telemetry_dict.get("edge_bin_p_raw")
+                _eb_rej.edge_bin_p_cal = _eb_telemetry_dict.get("edge_bin_p_cal")
+                _eb_rej.edge_bin_p_market = _eb_telemetry_dict.get("edge_bin_p_market")
+                _eb_rej.edge_bin_member_support = _eb_telemetry_dict.get("edge_bin_member_support")
+                _eb_rej.edge_bin_odds_ratio = _eb_telemetry_dict.get("edge_bin_odds_ratio")
+                _eb_rej.near_tail_p_cal = _eb_telemetry_dict.get("near_tail_p_cal")
+                _eb_rej.near_tail_p_market = _eb_telemetry_dict.get("near_tail_p_market")
+                decisions.append(_eb_rej)
+                continue
             # Carry telemetry dict forward so loop-at-exit can stamp it on all decisions
-            # (both rejection path above and pass-through path here reach this point
-            # only on shadow mode or pass — bind to local _edge_bin_telemetry).
+            # on pass-through decisions.
             _edge_bin_telemetry = _eb_telemetry_dict
         else:
             _edge_bin_telemetry = None
@@ -6652,8 +6507,8 @@ def evaluate_candidate(
     # LIVE-PROB-P0 (schema-34): stamp tail-mass evidence onto ALL returned decisions
     # so probability_trace_fact columns are populated regardless of gate mode.
     # Hard-reject path already stamps the single _rej decision (evaluator.py ~4708);
-    # the `is None` guard makes this idempotent. Shadow mode fires the gate but
-    # continues to analysis — without this loop, shadow-mode decisions get None for
+    # the `is None` guard makes this idempotent. Log-only mode fires the gate but
+    # continues to analysis — without this loop, log-only decisions get None for
     # all three columns because no hard-reject EdgeDecision is returned.
     if _tail_evidence is not None:
         for _d in decisions:
@@ -6664,7 +6519,7 @@ def evaluate_candidate(
 
     # LIVE-PROB-P0 §E: stamp edge-bin telemetry onto trade decisions.
     # Hard-reject decisions are stamped inline above. Trade decisions and
-    # shadow-mode pass-through decisions are stamped here using index ranges
+    # log-only pass-through decisions are stamped here using index ranges
     # recorded at each iteration's end (trade path only reaches loop-end).
     for _start, _end, _et in _edge_iter_telemetry_list:
         for _d in decisions[_start:_end]:

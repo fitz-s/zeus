@@ -1,6 +1,6 @@
 # Created: 2026-05-30
 # Last reused or audited: 2026-05-30
-# Authority basis: TOPOLOGY_CLOCK_MISSING live-shadow throughput gate.
+# Authority basis: TOPOLOGY_CLOCK_MISSING live-throughput gate.
 #   src/engine/event_reactor_adapter.py::_evidence_clock_from_topology_row reads
 #   market_events.created_at (among the discovered_at/captured_at/.../created_at
 #   key list) as the topology clock. Every existing market_events row has

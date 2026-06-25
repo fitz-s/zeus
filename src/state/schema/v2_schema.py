@@ -229,7 +229,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         "ALTER TABLE ensemble_snapshots ADD COLUMN step_horizon_hours REAL",
         # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
         # contract_version + boundary_min_value columns dropped in P7B (no live
-        # consumer; P8 will re-add if needed when shadow-activation consumers land).
+        # consumer; P8 will re-add if needed when activation consumers land).
         "ALTER TABLE ensemble_snapshots ADD COLUMN unit TEXT",
         # PLAN_v4 executable forecast-entry linkage. NULL means no live consumer.
         "ALTER TABLE ensemble_snapshots ADD COLUMN source_id TEXT",
@@ -674,7 +674,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # one row here. The UNIQUE index on (city, target_date, metric, source_cycle_time,
     # capturable_family_set) is the bound: a scope is re-enqueued AT MOST ONCE per
     # (cycle, capturable-family-superset) transition, so a still-missing 5th provider (gfs HTTP
-    # 400, jma off the 06Z single_runs cadence) can never loop the queue. SHADOW research surface
+    # 400, jma off the 06Z single_runs cadence) can never loop the queue. Audit trigger
     # only — never an order/training truth table.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fusion_upgrade_enqueues (
@@ -702,7 +702,8 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # (city, target_date, metric, target_cycle_time) is the bound: a scope is re-enqueued AT MOST
     # ONCE per (target-cycle) advance, so a still-unmaterialized seed (manifest not yet on disk,
     # day0 guard) can never loop the queue — it heals on the next tick once the seed drains, and
-    # the NEXT fresher cycle gets its own distinct marker. SHADOW research surface only.
+    # the NEXT fresher cycle gets its own distinct marker. Audit trigger only:
+    # never an order/training truth table.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cycle_advance_enqueues (
             enqueue_id INTEGER PRIMARY KEY AUTOINCREMENT,

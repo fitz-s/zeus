@@ -48,7 +48,7 @@ ForecastDegradationLevel = Literal[
 ]
 ForecastTradeAuthorityStatus = Literal[
     "LIVE_AUTHORITY",
-    "SHADOW_ONLY",
+    "BLOCKED",
     "COMPARATOR_ONLY",
     "DISABLED",
 ]
@@ -95,7 +95,7 @@ class ForecastSourceSpec:
 
 @dataclass(frozen=True)
 class ForecastProductSpec:
-    """Static forecast-product identity for shadow replacement candidates.
+    """Static forecast-product identity for blocked replacement candidates.
 
     This is product policy only. Membership here does not make a source
     fetchable, trainable, or live-tradeable; runtime activation still flows
@@ -218,7 +218,7 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         allowed_roles=("diagnostic",),
     ),
     # BAYES_PRECISION_FUSION-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6 F0/F1).
-    # diagnostic-only (SHADOW capture train): these feed the fixed-lead walk-forward history
+    # Fixed-lead history inputs: these feed the fixed-lead walk-forward history
     # for bayes_precision_fusion fusion, never a live serve path on their own.
     "gem_previous_runs": ForecastSourceSpec(
         source_id="gem_previous_runs",
@@ -289,7 +289,7 @@ SOURCES: dict[str, ForecastSourceSpec] = {
     # archive used for Platt training; raw GRIB2 with no third-party
     # interpolation; 4 cycles/day. Live eligibility is gated separately
     # by evaluate_calibration_transfer (Phase 2.5) — a forecast routed
-    # here can still be SHADOW_ONLY if no validated_transfers row exists
+    # here can still be BLOCKED if no validated_transfers row exists
     # for its (cycle, source, horizon, season) domain. Routing presence
     # ≠ live trading; the calibration transfer evaluator is the unlock
     # gate.
@@ -356,7 +356,7 @@ SOURCES: dict[str, ForecastSourceSpec] = {
     ),
     # ---- The Path BAYES_PRECISION_FUSION-Bayes fusion sources (F0) -------------------------------------
     # Authority: BAYES_PRECISION_FUSION_SPEC.md §6 F0 (source registry); BAYES_PRECISION_FUSION_PROOF_RESULT.md (core
-    # PROMOTE, regionals SHADOW-ONLY/DEFER). These are Open-Meteo previous-runs /
+    # PROMOTE, regionals DEFER). These are Open-Meteo previous-runs /
     # single-runs decorrelated globals + in-domain regional experts that feed the BAYES_PRECISION_FUSION
     # multi-model posterior. They are DISABLED plumbing rows until the BAYES_PRECISION_FUSION fusion flag
     # (replacement_0_1_bayes_precision_fusion_enabled, default-OFF) AND an ingest path activate them;
@@ -386,7 +386,7 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         allowed_roles=("diagnostic",),
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),
-    # Regional experts (conditional, in-domain only) — SHADOW-ONLY/DEFER per proof verdict.
+    # Regional experts (conditional, in-domain only) — DEFER per proof verdict.
     "openmeteo_icon_d2_eu": ForecastSourceSpec(
         source_id="openmeteo_icon_d2_eu",
         tier="disabled",
@@ -406,7 +406,7 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),
     # The fused derived posterior product (replaces the single-anchor center/spread when
-    # the BAYES_PRECISION_FUSION flag is ON; shadow-only until settlement evidence promotes it).
+    # the BAYES_PRECISION_FUSION flag is ON; blocked until settlement evidence promotes it).
     "the_path_bayes_precision_fusion": ForecastSourceSpec(
         source_id="the_path_bayes_precision_fusion",
         tier="disabled",
@@ -451,7 +451,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         high_data_version="ecmwf_ifs_ens_0p1_mx2t3_local_calendar_day_max",
         low_data_version="ecmwf_ifs_ens_0p1_mn2t3_local_calendar_day_min",
         expected_members=51,
-        trade_authority_status="SHADOW_ONLY",
+        trade_authority_status="BLOCKED",
         training_allowed=False,
     ),
     "R2": ForecastProductSpec(
@@ -472,7 +472,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
             "ecmwf_ifs_ens_0p1_mn2t_since_prev_postproc_local_calendar_day_min"
         ),
         expected_members=51,
-        trade_authority_status="SHADOW_ONLY",
+        trade_authority_status="BLOCKED",
         training_allowed=False,
     ),
     "C1": ForecastProductSpec(
@@ -506,7 +506,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         high_data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
         low_data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_min",
         expected_members=51,
-        trade_authority_status="SHADOW_ONLY",
+        trade_authority_status="BLOCKED",
         training_allowed=False,
     ),
     "Open-Meteo ECMWF ecmwf_ifs 9km/0.1 deterministic forecast soft spatial anchor": ForecastProductSpec(
@@ -526,7 +526,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         high_data_version="openmeteo_ecmwf_ifs9_anchor_localday_high",
         low_data_version="openmeteo_ecmwf_ifs9_anchor_localday_low",
         expected_members=None,
-        trade_authority_status="SHADOW_ONLY",
+        trade_authority_status="BLOCKED",
         training_allowed=False,
     ),
     "Open-Meteo ECMWF ecmwf_ifs 9km/0.1 deterministic forecast soft spatial anchor plus AIFS ENS sampled-2t posterior": ForecastProductSpec(
@@ -538,7 +538,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
         source_family="derived_posterior",
         model_name="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-        product_class="derived_shadow_posterior",
+        product_class="derived_blocked_posterior",
         stream="derived",
         product_type="soft_anchor_posterior",
         param="aifs_sampled_2t_posterior+openmeteo_ecmwf_ifs9_anchor",
@@ -546,7 +546,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         high_data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
         low_data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1",
         expected_members=None,
-        trade_authority_status="SHADOW_ONLY",
+        trade_authority_status="BLOCKED",
         training_allowed=False,
     ),
 }
@@ -603,7 +603,7 @@ _CALIBRATION_LOOKUP_SOURCE_ID_BY_FORECAST_SOURCE_ID: dict[str, str] = {
     # Calibration bucket axis routes through TIGGE Platt models (599+195 active,
     # source_id='tigge_mars' in platt_models). Identity-mapping this to
     # 'ecmwf_open_data' produces 0 hits at platt_models lookup → silent
-    # SHADOW_ONLY. Fixed 2026-05-10 (operator: 接线错误).
+    # BLOCKED. Fixed 2026-05-10 (operator: 接线错误).
     "ecmwf_open_data": "tigge_mars",
 }
 
@@ -660,7 +660,7 @@ def replacement_forecast_raw_ensemble_data_versions() -> frozenset[str]:
         and product.expected_members is not None
         and product.expected_members > 1
         and product.product_class in {"ifs_ens_direct_model_output", "ai_ensemble"}
-        and product.trade_authority_status == "SHADOW_ONLY"
+        and product.trade_authority_status == "BLOCKED"
         for data_version in product.data_versions
     )
 
@@ -701,8 +701,8 @@ def select_empirical_replacement_strategy(
         if product.trade_authority_status == "LIVE_AUTHORITY":
             blocked_reasons.add("BASELINE_NOT_REPLACEMENT_CANDIDATE")
             continue
-        if product.trade_authority_status not in {"SHADOW_ONLY", "COMPARATOR_ONLY"}:
-            blocked_reasons.add("PRODUCT_NOT_SHADOW_EVALUABLE")
+        if product.trade_authority_status not in {"BLOCKED", "COMPARATOR_ONLY"}:
+            blocked_reasons.add("PRODUCT_NOT_EVALUABLE")
             continue
         if row.settled_decisions < min_settled_decisions:
             blocked_reasons.add("INSUFFICIENT_SETTLED_DECISIONS")

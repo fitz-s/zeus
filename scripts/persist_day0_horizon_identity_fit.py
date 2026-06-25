@@ -52,7 +52,7 @@ EFFECT
 ------
 read_latest_platt_fit() returns non-None -> _maybe_write_day0_nowcast
 (monitor_refresh.py:1767) stops short-circuiting -> the Day0 nowcast lane writes
-day0_nowcast_runs rows carrying observation_available_at. This is SHADOW LOGGING
+day0_nowcast_runs rows carrying observation_available_at. This is audit logging
 (nowcast_runs is logged, NOT traded); the mainline executor / trading decision
 path is untouched. Starting the clock lets the obs-timing dataset accumulate so a
 real holdout fit (and the G-DAY0 ROI verdict) become measurable later.
@@ -210,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[live] read-back returned None -> lane would still short-circuit (FAILED).")
         return 2
     print(
-        "[live] OK -> Day0 horizon Platt fit persisted; nowcast lane will fire (shadow). "
+        "[live] OK -> Day0 horizon Platt fit persisted; nowcast lane will fire (audit). "
         f"fit_run_id={got.fit_run_id} alpha={got.alpha} n_obs={got.n_obs}"
     )
     return 0

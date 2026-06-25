@@ -8,8 +8,7 @@
 #   S7 (2026-06-08): the off-able selector gate is GONE. to_receipt_dict no longer
 #   reads a ``selector_enabled`` cache flag to decide whether to surface the
 #   recorded selection — it records the ΔU decision unconditionally. There is no
-#   runtime toggle that can silently null the live selection (operator directive:
-#   no flag, no shadow, no default-off switch).
+#   runtime toggle that can silently null the live selection.
 """In-memory opportunity book receipt evidence."""
 
 from __future__ import annotations

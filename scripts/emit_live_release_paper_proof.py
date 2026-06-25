@@ -172,7 +172,7 @@ def _probe_event_persistence(world: sqlite3.Connection, *, cutoff: datetime) -> 
     missing = [name for name in required if by_type.get(name, {}).get("count", 0) <= 0]
     return Probe(
         not missing,
-        "complete_recent_shadow_chain" if not missing else "missing_event_types:" + ",".join(missing),
+        "complete_recent_audit_chain" if not missing else "missing_event_types:" + ",".join(missing),
         {"event_types": by_type, "required": list(required)},
     )
 

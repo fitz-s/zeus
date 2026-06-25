@@ -470,7 +470,7 @@ def discover_replacement_forecast_materialization_seeds(
     computed_at: datetime | str | None = None,
     limit: int = 10,
 ) -> ReplacementForecastSeedDiscoveryReport:
-    """Write seed JSON for DB targets that have all shadow raw inputs available."""
+    """Write seed JSON for DB targets with all required raw inputs available."""
 
     if limit <= 0:
         raise ValueError("limit must be positive")
@@ -525,7 +525,7 @@ def discover_replacement_forecast_materialization_seeds(
             }
             # SEED-BUDGET STARVATION KILL (2026-06-11): two coupled defects froze the
             # tradeable scopes behind permanently-failing far-date targets.
-            #   1. Far-date-first: the plan's order put day-2 shadow scopes (06-13) ahead
+            #   1. Far-date-first: the plan's order put day-2 non-tradeable scopes ahead
             #      of the tradeable day0/day1 scopes. Nearest target date = the money —
             #      sort target_date ASC.
             #   2. Head-of-line budget burn: [:limit] sliced BEFORE the per-target

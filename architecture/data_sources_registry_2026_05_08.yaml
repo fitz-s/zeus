@@ -230,7 +230,7 @@ sources:
         requires paired equivalence evidence (see ecmwf_opendata_tigge_equivalence_2026_05_06.yaml).
       release_calendar_status: >
         config/source_release_calendar.yaml calendar_id=tigge_archive_backfill:
-        live_authorization=false, backfill_only=true, partial_policy=SHADOW_ONLY.
+        live_authorization=false, backfill_only=true, partial_policy=BLOCK_LIVE.
       failure_modes:
         - "MARS credentials missing/invalid: CRITICAL log + tigge_mars source paused"
         - "ECDS catalog gap: c12 2024-H1 confirmed absent from disk"
@@ -312,10 +312,10 @@ sources:
       - "architecture/source_rationale.yaml (src/data/openmeteo_client.py entry)"
 
   # ----------------------------------------------------------
-  # 4. Open-Meteo Previous Runs API (Shadow Forecast)
+  # 4. Open-Meteo Previous Runs API (Blocked Forecast)
   # ----------------------------------------------------------
   - id: openmeteo_previous_runs
-    display_name: "Open-Meteo Previous Runs API (shadow forecast)"
+    display_name: "Open-Meteo Previous Runs API (blocked forecast)"
     category: forecast
     publisher: "Open-Meteo (https://open-meteo.com)"
     authority_urls:
@@ -339,11 +339,11 @@ sources:
       ingest_path:
         - "live forecasts: src/data/forecasts_append.py (Open-Meteo previous-runs track) [INFERRED from dissemination_schedules.py]"
         - "shared client: src/data/openmeteo_client.py::fetch() [VERIFIED]"
-      live_authorization: false  # SHADOW_ONLY [VERIFIED] config/source_release_calendar.yaml:98
+      live_authorization: false  # BLOCK_LIVE [VERIFIED] config/source_release_calendar.yaml:98
       target_table: "forecasts (source='openmeteo_previous_runs')"
       release_calendar_status: >
         config/source_release_calendar.yaml calendar_id=openmeteo_previous_runs_best_match:
-        partial_policy=SHADOW_ONLY, live_authorization=false.
+        partial_policy=BLOCK_LIVE, live_authorization=false.
 
     related_authority_docs:
       - "config/source_release_calendar.yaml (openmeteo_previous_runs_best_match entry)"

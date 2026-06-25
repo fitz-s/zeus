@@ -5,7 +5,7 @@
 #   synthetic in-memory sqlite fixtures. No mocks of the functions under test.
 #   Authority: operator critique 2026-05-27 + brief
 #   /Users/leofitz/.claude/jobs/866db2ea/EXECUTOR_BRIEF_INVARIANT_AUDIT.md.
-# Reuse: Read this file + docs/operations/INVARIANT_SIGN_PROOF_2026-05-27.md
+# Reuse: Read this file + docs/archive/2026-Q2/operations_historical/INVARIANT_SIGN_PROOF_2026-05-27.md
 #   before reusing. Touches src/calibration/{ens_bias_model, ens_bias_repo,
 #   ens_error_model}.py and scripts/fit_full_transport_error_models.py call site.
 """Invariant audit: sign / window / transport for hierarchical bias correction.

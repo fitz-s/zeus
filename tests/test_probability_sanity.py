@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-D
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-D
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Purpose: Unit tests for probability_sanity.validate_high_distribution — all gate branches.
 # Reuse: Run when validate_high_distribution gates, bin logic, or sanity thresholds change.

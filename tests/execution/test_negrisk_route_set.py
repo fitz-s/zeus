@@ -6,7 +6,7 @@
 #   dominance 722-726, venue-primitive verification 728-732) reconciled against
 #   docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md (VENUE-PRIMITIVE VERDICT
 #   §7-19 BLOCKER: convert/merge/split ABSENT -> CONVERSION_SELL_BASKET /
-#   conversion_routes stay SHADOW; DIRECT_*/SYNTHETIC_*/*_ARB proceed live via
+#   conversion_routes omitted; DIRECT_*/SYNTHETIC_*/*_ARB proceed live via
 #   independent native submit(); GREENFIELD — new file only; RouteLeg drift-resolved as
 #   one independent native order).
 """RED-on-revert contract tests for the family route engine (Stage 7c negrisk_routes).
@@ -34,15 +34,12 @@ behavior the spec replaces:
     direct NO routes are still built; and that with the flag ON the synthetic basket
     reappears — so the flag genuinely gates the neg-risk surface.
 
-  * ``test_conversion_routes_stay_shadow_when_venue_primitive_absent`` — the
+  * ``test_conversion_routes_omitted_when_venue_primitive_absent`` — the
     venue-primitive BLOCKER (spec lines 728-732; drift-ledger §7-19): on-chain
     convert/merge/split is ABSENT, so a ``CONVERSION_SELL_BASKET`` route has no venue
-    primitive to execute and MUST be ``executable=False``. RED-on-revert: if a conversion
-    route is marked ``executable=True`` (wired to live submit as if the primitive
-    existed), or its reason dropped, this fails. The test asserts EVERY conversion route
-    is ``executable=False`` with a reason citing the absent convert/merge/split primitive
-    — AND re-runs the spec-mandated grep (spec line 730) to confirm the primitive is in
-    fact absent, so the shadow status is grounded in the live tree, not asserted blindly.
+    primitive to execute and is not emitted. RED-on-revert: if a conversion route is
+    emitted before the primitive exists, this fails. The test also re-runs the
+    spec-mandated grep (spec line 730) to confirm the primitive is in fact absent.
 """
 from __future__ import annotations
 
@@ -298,7 +295,7 @@ def test_negrisk_routes_disabled_when_flag_false():
     # killer for a "flag ignored" revert: the ON/OFF results must differ.
     on = build_negrisk_route_set(fb, shares=shares, enable_negrisk_routes=True)
     assert "b25" in on.synthetic_not_i, "flag ON: synthetic sibling-YES basket built"
-    assert len(on.conversion_routes) > 0, "flag ON: conversion routes enumerated (shadow)"
+    assert on.conversion_routes == (), "flag ON: conversion routes omitted until venue primitive exists"
     assert on.synthetic_not_i != off.synthetic_not_i, (
         "the flag must change the route set; if OFF and ON produce the same neg-risk "
         "surface, the flag is being ignored"
@@ -306,28 +303,12 @@ def test_negrisk_routes_disabled_when_flag_false():
 
 
 # ---------------------------------------------------------------------------
-# SPEC RED-on-revert #3: conversion routes are shadow because the venue
+# SPEC RED-on-revert #3: conversion routes are omitted because the venue
 # primitive is absent (spec lines 728-732; drift-ledger §7-19 BLOCKER).
 # ---------------------------------------------------------------------------
 
-def test_conversion_routes_stay_shadow_when_venue_primitive_absent():
-    """Every CONVERSION_SELL_BASKET route is ``executable=False`` (no venue primitive).
-
-    The venue-primitive BLOCKER (spec lines 728-732): on-chain neg-risk
-    convert/merge/split is ABSENT (only redeem/submit/cancel wired), so a conversion route
-    has no venue primitive to execute and MUST stay shadow. The other route types
-    (DIRECT_*/SYNTHETIC_*/*_ARB) go live via independent native submit() and require no
-    conversion.
-
-    RED-on-revert: if a conversion route is marked ``executable=True`` (wired to live
-    submit as if the convert/merge/split primitive existed), or its reason dropped, this
-    test fails.
-
-    The test also RE-RUNS the spec-mandated grep (spec line 730) to confirm the primitive
-    is in fact absent in the live tree — so the shadow status is grounded in ground truth,
-    not asserted blindly. Were a convert/merge/split method to land, the grep would hit and
-    this guard would flag that the conversion routes must be re-enabled.
-    """
+def test_conversion_routes_omitted_when_venue_primitive_absent():
+    """No CONVERSION_SELL_BASKET routes are emitted until the venue primitive exists."""
     space = _three_bin_space()
     markets = {
         "b25": _market_book("b25", neg_risk=True, yes_ask="0.50", no_ask="0.55"),
@@ -339,27 +320,14 @@ def test_conversion_routes_stay_shadow_when_venue_primitive_absent():
 
     routes = build_negrisk_route_set(fb, shares=shares)
 
-    # Conversion routes are enumerated (for shadow accounting) — one per neg-risk sibling.
-    assert len(routes.conversion_routes) == 3
-    for conv in routes.conversion_routes:
-        assert conv.route_type == "CONVERSION_SELL_BASKET"
-        # The load-bearing assertion: SHADOW. A revert wiring it live would set this True.
-        assert conv.executable is False, (
-            "a CONVERSION_SELL_BASKET route MUST be shadow — the on-chain "
-            "convert/merge/split venue primitive is absent"
-        )
-        assert conv.reason == CONVERSION_VENUE_PRIMITIVE_ABSENT
-        assert "convert/merge/split" in conv.reason
+    assert routes.conversion_routes == ()
 
-    # None of the OTHER route types are shadow-by-venue-primitive: direct/synthetic/arb
-    # go live via independent native submit() (they require no conversion). At least the
-    # direct routes here are executable.
+    # Direct/synthetic/arb routes use independent native submit() and require no conversion.
     assert all(r.executable for r in routes.direct_yes.values())
     assert all(r.executable for r in routes.direct_no.values())
 
     # GROUND TRUTH: re-run the spec-mandated grep (spec line 730). The convert/merge/split
-    # venue primitive must be ABSENT for the shadow status to be correct. ``grep`` exits 1
-    # (no match) when absent — that is the expected, route-keeping-shadow outcome.
+    # venue primitive must be ABSENT for the omitted route surface to be correct.
     proc = subprocess.run(
         [
             "grep",
@@ -374,9 +342,8 @@ def test_conversion_routes_stay_shadow_when_venue_primitive_absent():
     )
     assert proc.returncode == 1 and proc.stdout.strip() == "", (
         "convert/merge/split venue primitive appears to be WIRED now "
-        f"(grep hit:\n{proc.stdout}\n) — conversion routes can no longer be assumed "
-        "shadow; the venue-primitive BLOCKER must be re-evaluated and conversion routes "
-        "re-enabled to live via the new primitive."
+        f"(grep hit:\n{proc.stdout}\n) — the venue-primitive BLOCKER must be "
+        "re-evaluated and conversion routes re-enabled via the new primitive."
     )
 
 

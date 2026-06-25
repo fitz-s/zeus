@@ -620,7 +620,7 @@ def enqueue_cycle_advance_reseeds(
         report["freshest_materializable_cycle"] = freshest.isoformat()
 
         # PRIORITY ORDER: HELD families first (tier i), then nearest-target-first (mirrors the
-        # seed-budget K-decision — far-date shadow scopes must not starve the tradeable day0/day1
+        # seed-budget K-decision — far-date non-tradeable scopes must not starve the tradeable day0/day1
         # money scopes of the per-tick enqueue budget). A single sort key encodes both tiers.
         def _priority_key(r) -> tuple:
             scope = (str(r.city), str(r.target_date), str(r.temperature_metric))

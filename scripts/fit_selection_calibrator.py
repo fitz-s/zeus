@@ -441,7 +441,7 @@ def fit_eb_cells(
             "lower_bound": "BetaInvCDF(0.05, tau*p0+w_s, tau*(1-p0)+n_s-w_s) persisted (no runtime scipy)",
             "selection_policy_version": "pre_selection_calibrator_q_lcb_price_gate_v1",
             "source_query_hash": qhash,
-            "note": "STEP-1: no current-regime would-admit receipts -> selected=executed (fallback); shadow-log to accrue would-admit.",
+            "note": "STEP-1: no current-regime would-admit receipts -> selected=executed (fallback); audit-log to accrue would-admit.",
         },
         "cells": cells,
     }

@@ -14,7 +14,6 @@ from dataclasses import dataclass, replace
 
 
 LIVE_ELIGIBLE = "LIVE_ELIGIBLE"
-SHADOW_ONLY = "SHADOW_ONLY"
 BLOCKED = "BLOCKED"
 
 
@@ -47,7 +46,7 @@ def _evaluate_reference_readiness(
     strategy_key: str = "opening_inertia",
 ) -> ReadinessDecision:
     if strategy_key == "settlement_capture" and not facts.settlement_time_law_ready:
-        return ReadinessDecision(SHADOW_ONLY, ("SETTLEMENT_TIME_LAW_PENDING",))
+        return ReadinessDecision(BLOCKED, ("SETTLEMENT_TIME_LAW_PENDING",))
     if not facts.source_run_present:
         return ReadinessDecision(BLOCKED, ("SOURCE_RUN_MISSING",))
     if not facts.release_provenance_present:
@@ -61,7 +60,7 @@ def _evaluate_reference_readiness(
     if facts.data_coverage_status != "WRITTEN":
         return ReadinessDecision(BLOCKED, (f"DATA_COVERAGE_{facts.data_coverage_status}",))
     if facts.origin_mode != "SCHEDULED_LIVE" and not facts.causal_live_proof:
-        return ReadinessDecision(SHADOW_ONLY, ("BACKFILL_ONLY",))
+        return ReadinessDecision(BLOCKED, ("BACKFILL_ONLY",))
     if facts.active_hole:
         return ReadinessDecision(BLOCKED, ("DATA_COVERAGE_HOLE_ACTIVE",))
     if facts.source_contract_status != "MATCH":
@@ -133,12 +132,12 @@ def test_source_contract_mismatch_overwrites_green_scope() -> None:
     assert "SOURCE_CONTRACT_MISMATCH" in updated.reason_codes
 
 
-def test_backfill_origin_defaults_shadow_only_without_causal_proof() -> None:
+def test_backfill_origin_blocks_without_causal_proof() -> None:
     decision = _evaluate_reference_readiness(
         replace(DependencyFacts(), origin_mode="HOLE_BACKFILL", causal_live_proof=False),
     )
 
-    assert decision.status == SHADOW_ONLY
+    assert decision.status == BLOCKED
     assert "BACKFILL_ONLY" in decision.reason_codes
 
 
@@ -166,7 +165,7 @@ def test_quote_freshness_is_not_entry_readiness() -> None:
     assert stale_quote.reason_codes == ("QUOTE_NOT_APPLICABLE_AT_ENTRY",)
 
 
-def test_settlement_capture_shadow_only_until_settlement_time_law() -> None:
+def test_settlement_capture_blocked_until_settlement_time_law() -> None:
     pending = _evaluate_reference_readiness(
         DependencyFacts(),
         strategy_key="settlement_capture",
@@ -176,6 +175,6 @@ def test_settlement_capture_shadow_only_until_settlement_time_law() -> None:
         strategy_key="settlement_capture",
     )
 
-    assert pending.status == SHADOW_ONLY
+    assert pending.status == BLOCKED
     assert "SETTLEMENT_TIME_LAW_PENDING" in pending.reason_codes
     assert ready.status == LIVE_ELIGIBLE

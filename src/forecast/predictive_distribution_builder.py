@@ -385,7 +385,7 @@ class PredictiveDistributionBuilder:
         ineligibility_reason = sigma_decision.ineligibility_reason
         sigma_native = float(sigma_decision.sigma_native)
 
-        # --- RAW PROVENANCE FAIL-CLOSED (FINAL no-shadow execution flow §7) -------
+        # --- RAW PROVENANCE FAIL-CLOSED (single-serving-rule flow §7) ------------
         # Under the operator RAW no-de-bias law the served center MUST be RAW (zero
         # de-bias shift) — the spine injects _NoOpDebiasAuthority so debias_applied is
         # false and aggregate_shift_native == 0. If a live-eligible distribution ever

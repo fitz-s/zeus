@@ -248,7 +248,7 @@ def test_flip_mode_to_canary_from_shadow_ok(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _force_cfg_mode(monkeypatch, EntryForecastRolloutMode.SHADOW)
+    _force_cfg_mode(monkeypatch, EntryForecastRolloutMode.BLOCKED)
     # write evidence so the predicted decision under canary is CANARY_ELIGIBLE
     snapshot = LiveEntryForecastStatus(
         status="LIVE_ELIGIBLE",

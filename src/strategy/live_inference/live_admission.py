@@ -22,7 +22,7 @@ from src.calibration.settlement_backward_coverage import (
 
 # Operator objective: real participating trades must settle with stable win-rate
 # greater than 51% after costs. Positive-EV low-probability lottery legs remain
-# valid research/shadow evidence, but they are not live-money entries.
+# valid research evidence, but they are not live-money entries.
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
 
@@ -439,23 +439,3 @@ def city_skill_block_rejection_reason(
         return None
     except Exception:  # noqa: BLE001 — never break admission for the skill gate.
         return None
-
-
-def shadow_log_admission(*, path: str | None = None, **fields) -> bool:
-    """Record a would-admit candidate to the shadow log (accrual of the missing population).
-
-    DEFAULT OFF (``ZEUS_SHADOW_ADMIT_LOG`` unset) -> no-op (returns False). When ON: appends the
-    would-admit record. FAIL-SOFT: any error is swallowed (observability never breaks trading).
-    ``side`` is derived from ``direction`` for the underlying logger."""
-    try:
-        from src.decision.shadow_admit_logger import maybe_log_candidate
-        if "side" not in fields and "direction" in fields:
-            fields["side"] = "NO" if str(fields.pop("direction") or "").lower() == "buy_no" else "YES"
-        elif "direction" in fields:
-            fields.pop("direction")
-        # The underlying record uses ``q_lcb_side``; the live seam is called with ``q_lcb``.
-        if "q_lcb_side" not in fields and "q_lcb" in fields:
-            fields["q_lcb_side"] = fields.pop("q_lcb")
-        return bool(maybe_log_candidate(path=path, **fields))
-    except Exception:  # noqa: BLE001 — never break trading for a log write.
-        return False

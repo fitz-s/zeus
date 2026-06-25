@@ -1,14 +1,10 @@
-# Shadow-only: outputs are additive facts, not live blockers
 """Blocked out-of-sample calibration evaluation.
 
-Shadow-only evaluation surface. Fits Platt models on an earlier target date
-block and evaluates them on a later target date block without changing the
-active calibration routing. Metrics are returned in the report dict only.
+Fits Platt models on an earlier target-date block and evaluates them on a
+later target-date block. Metrics are returned in the report dict only.
 """
 
 from __future__ import annotations
-
-SHADOW_ONLY: bool = True  # ZDM-02: explicitly advisory-only; must never enter evaluator/control gate
 
 import hashlib
 import json
@@ -213,7 +209,6 @@ def evaluate_blocked_oos_calibration(
         "log_loss_calibrated": _mean(log_loss_calibrated),
     }
     report = {
-        "shadow_only": True,
         "run_id": run_id,
         "model_name": model_name,
         "model_version": model_artifact_id,
@@ -254,14 +249,13 @@ def recommend_calibration_promotion(
         blockers.append(f"fallback_rate:{fallback_rate:.3f}>{max_fallback_rate:.3f}")
 
     if blockers:
-        status = "shadow"
+        status = "blocked"
         decision_reason = ";".join(blockers)
     else:
         status = "candidate"
         decision_reason = "blocked_oos_passed"
 
     return {
-        "shadow_only": True,
         "promotion_id": f"promotion:{report.get('run_id')}",
         "model_name": report.get("model_name", "extended_platt"),
         "model_version": report.get("model_version", "blocked_oos"),

@@ -2,8 +2,8 @@
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Protect replacement forecast evidence from row-IID significance overclaims.
-# Reuse: Run before treating replacement shadow replay deltas as statistically meaningful.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# Reuse: Run before treating replacement blocked-candidate replay deltas as statistically meaningful.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked integration.
 """Replacement forecast block bootstrap diagnostics tests."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def test_block_bootstrap_keeps_correlated_rows_in_same_block() -> None:
 
     report = run_replacement_forecast_block_bootstrap(rows, iterations=200, seed=7, min_blocks=4)
 
-    assert report.status in {"DIAGNOSTIC_PASS", "SHADOW_ONLY"}
+    assert report.status in {"DIAGNOSTIC_PASS", "BLOCKED"}
     assert report.block_axes == ("target_date", "city", "temperature_metric", "guardrail_bucket")
     assert report.block_count == 4
     assert report.scored_rows == 5
@@ -69,7 +69,7 @@ def test_block_bootstrap_excludes_non_verified_or_non_scored_rows() -> None:
 
     report = run_replacement_forecast_block_bootstrap(rows, iterations=100, seed=11, min_blocks=4)
 
-    assert report.status == "SHADOW_ONLY"
+    assert report.status == "BLOCKED"
     assert report.total_rows == 6
     assert report.scored_rows == 4
     assert report.excluded_rows == 2

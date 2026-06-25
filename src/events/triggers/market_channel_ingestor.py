@@ -107,7 +107,7 @@ class MarketChannelIngestor:
         # connection (single-connection atomic cross-DB path, feasibility_conn=None or
         # the same conn), that connection is world-MAIN with zeus_trades.db ATTACHed as
         # 'trades', so the feasibility insert must be schema-qualified 'trades' to reach
-        # the runtime-read table and never the world shadow. Default "" (own trade
+        # the runtime-read table and never the world ghost copy. Default "" (own trade
         # connection, unqualified) preserves every other caller.
         self._feasibility_schema = feasibility_schema
         self._active_token_ids = active_token_ids
@@ -1150,7 +1150,7 @@ def assert_user_channel_fill_authority(*, source: str) -> None:
 # write runs on a world-MAIN connection with zeus_trades.db ATTACHed as 'trades'
 # (the price-channel atomic cross-DB path), the caller passes schema='trades' so
 # the row lands in the runtime-read trades.execution_feasibility_evidence and NEVER
-# the populated-but-not-read world shadow table. Allowlisted (never interpolate a
+# the populated-but-not-read world ghost table. Allowlisted (never interpolate a
 # caller string into SQL) and defaulted to "" = unqualified for all other callers.
 _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS = {"", "trades", "main"}
 

@@ -2,16 +2,16 @@
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + §3 Cross-Track Invariant 3 + 04_PHASE_3_SHOULDER.md §"Kelly + FDR + risk rules"
 # Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
-# Purpose: INV-3 probe — shoulder Kelly haircut clamp [0.05, 0.20] at phase_aware_kelly_multiplier; R-3 guard (live_status=shadow AND mult > 0.0)
+# Purpose: INV-3 probe — shoulder Kelly haircut clamp [0.05, 0.20] at phase_aware_kelly_multiplier; R-3 guard (live_status=blocked AND mult > 0.0)
 # Reuse: activated in T2 production pass; replaces SCAFFOLD xfail stubs
 
 """INV-3: shoulder Kelly haircut clamp [0.05, 0.20] at phase_aware_kelly_multiplier.
 
 Cross-Track Invariant 3 (plan §3):
-  "Kelly haircut [0.05, 0.20] per §7.5 (only when live_status=shadow AND
+  "Kelly haircut [0.05, 0.20] per §7.5 (only when live_status=blocked AND
   kelly_default_multiplier > 0.0; current 0.0 unchanged). Test test_inv_shoulder_kelly_haircut_clamp."
 
-R-3 note: clamp applies only when live_status=shadow AND mult > 0.0; current
+R-3 note: clamp applies only when live_status=blocked AND mult > 0.0; current
 shoulder_sell kelly_default_multiplier=0.0 means clamp is a no-op today.
 """
 
@@ -31,18 +31,17 @@ import src.strategy.strategy_profile as sp
 _SHOULDER_SELL_YAML = """\
 shoulder_sell:
   thesis: test entry — shoulder_sell with non-zero kelly for clamp probe
-  live_status: shadow
+  live_status: blocked
   allowed_market_phases: [pre_settlement_day, settlement_day]
   allowed_discovery_modes: [update_reaction]
   cycle_axis_dispatch_mode: update_reaction
   allowed_directions: [buy_no]
   allowed_bin_topology: [open_shoulder]
   metric_support:
-    high: shadow
+    high: blocked
     low: blocked
   kelly_default_multiplier: 0.15
   kelly_phase_overrides: {}
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: null
 """
@@ -58,7 +57,7 @@ def _restore_registry():
 def test_inv_shoulder_kelly_multiplier_within_5_to_20_pct(tmp_path: Path, monkeypatch):
     """INV-3: phase_aware_kelly_multiplier clamps shoulder paths to [0.05, 0.20].
 
-    With live_status=shadow and kelly_default_multiplier=0.15 (> 0), a raw
+    With live_status=blocked and kelly_default_multiplier=0.15 (> 0), a raw
     product > 0.20 must be clamped to 0.20 and a product < 0.05 must be
     clamped to 0.05.
     """
@@ -95,7 +94,7 @@ def test_inv_shoulder_kelly_multiplier_within_5_to_20_pct(tmp_path: Path, monkey
 
 
 def test_inv_shoulder_kelly_clamp_guard_conditions(tmp_path: Path, monkeypatch):
-    """INV-3 guard: clamp fires ONLY when live_status=shadow AND kelly_default_multiplier > 0.0.
+    """INV-3 guard: clamp fires ONLY when live_status=blocked AND kelly_default_multiplier > 0.0.
 
     R-3: current real registry has shoulder_sell mult=0.0 → clamp does NOT fire.
     With mult=0.0, phase_aware_kelly_multiplier short-circuits at m_strategy_phase <= 0.

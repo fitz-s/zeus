@@ -1067,10 +1067,9 @@ class Day0FastObsEmitter:
         budget and for observations without live authority (publication clock
         missing, etc.) — those may only advance the monotone kill memo (P0-3).
 
-        ``day0_is_tradeable`` (default True) flows to the trigger so day0 events
-        emitted under day0_shadow carry the lower PRIORITY_DAY0_SHADOW sub-sort
-        (2026-06-11 anti-starvation; the scope-aware claim tier in fetch_pending
-        is the cross-tier authority).
+        ``day0_is_tradeable`` (default True) flows to the trigger so non-tradeable
+        day0 events carry the lower sub-sort (2026-06-11 anti-starvation; the
+        scope-aware claim tier in fetch_pending is the cross-tier authority).
         """
         from src.events.event_writer import EventWriter
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger

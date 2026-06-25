@@ -27,7 +27,7 @@ execution loop - neither module is individually wrong, the relationship across
 the boundary is. Per Fitz §3 this is authored RED before implementation.
 
 RED->GREEN protocol (recorded for the opus critic):
-  * ``test_legacy_baseline_emits_three_independent_orders`` pins the CURRENT
+  * ``test_gate_disabled_emits_three_independent_orders`` pins the CURRENT
     (pre-gate / gate-disabled) behavior: family-wise FDR selects 3 bins ->
     3 should_trade=True. This is the RED state the gate must fix.
   * ``test_same_city_date_metric_...`` asserts the REQUIRED post-gate behavior:
@@ -180,7 +180,7 @@ def _count_trades(decisions: list[EdgeDecision]) -> int:
     return sum(1 for d in decisions if d.should_trade)
 
 
-def test_legacy_baseline_emits_three_independent_orders() -> None:
+def test_gate_disabled_emits_three_independent_orders() -> None:
     """RED baseline: gate OFF == legacy bug == 3 independent scalar orders.
 
     Pins the over-allocation bug so the GREEN test's delta (3 -> 1) is provably

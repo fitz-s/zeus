@@ -362,7 +362,7 @@ def test_within_city_freshness_order_is_preserved():
 
 def test_day_ahead_target_precedes_fresher_same_day_within_city():
     """ANTIBODY: a city holding a FRESH same-day-target FSR (decisions are
-    day0-scope => deterministic DAY0_SCOPE_SHADOW_ONLY under day0_shadow) and an
+    day0-scope => deterministic no-submit under unsupported scopes) and an
     OLDER day-ahead FSR must yield the day-ahead FIRST. target_date DESC dominates
     available_at DESC within (tier, city) — the same-day refresh churn cannot
     starve the live-eligible day-ahead candidate."""
@@ -401,7 +401,7 @@ def test_day_ahead_target_precedes_fresher_same_day_within_city():
 
 def test_fresh_day0_event_does_not_precede_older_day_ahead_fsr():
     """ANTIBODY (operator-specified shape): a city holding a FRESH day0 event and
-    an OLDER day-ahead FSR yields the day-ahead first under day0_shadow
+    an OLDER day-ahead FSR yields the day-ahead first under unsupported scopes
     (day0_is_tradeable=False => day0 is Tier 2, below the tradeable FSR Tier 1).
     Day0 events still process AFTER the live ones — never dropped (the shadow
     evaluation needs the receipts)."""

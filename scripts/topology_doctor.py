@@ -26,11 +26,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 try:
-    from topology_v_next.cli_integration_shim import maybe_shadow_compare
-except ModuleNotFoundError:  # pytest imports this as scripts.topology_doctor
-    from scripts.topology_v_next.cli_integration_shim import maybe_shadow_compare
-
-try:
     from _yaml_bootstrap import import_yaml
 except ModuleNotFoundError:  # pytest imports this as scripts.topology_doctor
     from scripts._yaml_bootstrap import import_yaml
@@ -1120,8 +1115,8 @@ def _check_root_and_state_classification(topology: dict[str, Any]) -> list[Topol
     return _registry_checks().check_root_and_state_classification(sys.modules[__name__], topology)
 
 
-def _check_shadow_authority_references() -> list[TopologyIssue]:
-    return _registry_checks().check_shadow_authority_references(sys.modules[__name__])
+def _check_runtime_auxiliary_authority_references() -> list[TopologyIssue]:
+    return _registry_checks().check_runtime_auxiliary_authority_references(sys.modules[__name__])
 
 
 def _check_wmo_gate() -> list[TopologyIssue]:
@@ -2736,7 +2731,6 @@ def run_navigation(
     artifact_target: str | None = None,
     merge_state: str | None = None,
     companion_loop_batch_cap: int | None = None,
-    v_next_shadow: bool = False,
 ) -> dict[str, Any]:
     checks = {
         "context_budget": run_context_budget(),
@@ -2880,11 +2874,6 @@ def run_navigation(
             "planning_review": "compatibility no-op",
         },
     }
-    if v_next_shadow:
-        payload = maybe_shadow_compare(
-            payload, task=task, files=requested_paths,
-            intent=intent, v_next_shadow=v_next_shadow,
-        )
     return payload
 
 

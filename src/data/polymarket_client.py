@@ -45,7 +45,7 @@ PRESUBMIT_JIT_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, max_c
 # on EVERY reactor cycle → hundreds of serial 15s-bounded calls → 10-30 min/cycle → fresh
 # families never finished capture to reach Kelly (0 receipts). Polymarket CLOB fees are
 # process-stable, so cache per-token fee details with a TTL: each token is fetched once per
-# window instead of per cycle. SHADOW-safe; cost-basis impact nil (fees stable). Cached
+# window instead of per cycle. Cost-basis impact nil (fees stable). Cached
 # value is the already-canonicalized details dict.
 _FEE_RATE_CACHE: dict[str, tuple[dict[str, Any], datetime]] = {}
 _FEE_RATE_TTL_SECONDS = 1800.0

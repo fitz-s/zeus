@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-22
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C
 # Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
 # Purpose: Regression antibody for Root C — high_so_far must be MAX(running_max) not latest row's value.
 # Reuse: Run when day0_observation_reader.read_day0_high_so_far or observation_instants schema changes.

@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-10
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K2.1
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K2.1
 # (rejection-reason taxonomy) + /tmp/funnel_autopsy.md (operator-ratified categories).
 """Typed registry for no_trade_regret_events.rejection_reason (K2.1).
 
@@ -31,7 +31,7 @@ Categories (operator-ratified framework, funnel autopsy 2026-06-10):
   source runs incomplete). Self-resolving on data cadence; actionable only if
   chronically dominant.
 - DESIGNED_GATE: a deliberate protection fired as designed (riskguard, Kelly,
-  FDR, direction law, shadow scopes, submit-time fail-closed aborts).
+  FDR, direction law, non-tradeable scopes, submit-time fail-closed aborts).
 - ARTIFICIAL_SUSPECT: pipeline-defect signal (build failures, missing proofs
   that the pipeline should have produced, connection/boundary errors, raw
   exception text). Every sustained ARTIFICIAL_SUSPECT stream is a bug hunt.
@@ -219,13 +219,6 @@ class RejectionReason(str, Enum):
         "FDR_FULL_FAMILY_PROOF_MISSING",
         RejectionCategory.DESIGNED_GATE,
         "FDR requires the full-family proof; absent proof fails closed.",
-    )
-    DAY0_SCOPE_SHADOW_ONLY = (
-        "DAY0_SCOPE_SHADOW_ONLY",
-        RejectionCategory.DESIGNED_GATE,
-        "day0-lane event under edli_live_scope=day0_shadow: full pipeline runs, "
-        "enriched no-submit receipt, NEVER submits. The shadow comparator's source "
-        "of truth.",
     )
     UNSUPPORTED_EDLI_LIVE_SCOPE = (
         "UNSUPPORTED_EDLI_LIVE_SCOPE",

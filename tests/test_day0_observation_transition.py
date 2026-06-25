@@ -1,7 +1,7 @@
 # Created: 2026-05-23
 # Last reused or audited: 2026-05-23
 # Authority basis: FIX-3 ruling (2026-05-23) — operator physical-law ruling
-#   + docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
+#   + docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §Physical law
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Physical-invariant tests for day0_blended_highs (FIX-3) — np.maximum floor
 #          ensures final_high >= cumulative_observed_max at all times.

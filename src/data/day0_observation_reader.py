@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-C;
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5
 """Day-0 observation extrema reader — semantics-correct high_so_far / low_so_far.
 

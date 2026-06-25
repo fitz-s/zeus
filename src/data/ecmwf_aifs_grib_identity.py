@@ -1,4 +1,4 @@
-"""AIFS ENS GRIB identity scanner for sampled-2t shadow artifacts."""
+"""AIFS ENS GRIB identity scanner for sampled-2t blocked candidate artifacts."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class AifsEnsGribIdentityDecision:
     source_id: str = SOURCE_ID
     product_id: str = PRODUCT_ID
     expected_members: int = EXPECTED_MEMBERS
-    trade_authority_status: str = "SHADOW_ONLY"
+    trade_authority_status: str = "BLOCKED"
     training_allowed: bool = False
 
 

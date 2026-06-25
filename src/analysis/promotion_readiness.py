@@ -35,7 +35,7 @@ from typing import Optional
 
 from src.analysis.evidence_report import EvidenceReport
 from src.analysis.live_readiness_tribunal import promotion_predicate
-from src.contracts.evidence_tier import EvidenceTier
+from src.contracts.evidence_tier import EvidenceTier, next_evidence_tier
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ class PromotionReadinessValidator:
 
         # Determine tier_target
         if all_pass and tier_current < self._tier_required_for_live:
-            tier_target = EvidenceTier(min(7, tier_current.value + 1))
+            tier_target = next_evidence_tier(tier_current)
         else:
             tier_target = tier_current
 

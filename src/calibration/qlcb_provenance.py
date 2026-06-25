@@ -66,11 +66,11 @@ class QlcbProvenance:
     # raw negative in a plain-float lcb_by_direction and the bin simply lost selection
     # while the FAMILY still formed. The K3 type is introduced UNCONDITIONALLY (not
     # flag-gated), so a raise here propagates to the family catch (event_reactor_adapter
-    # :732) -> LIVE_INFERENCE_INPUTS_MISSING and collapses the WHOLE family even with
-    # the shadow flag OFF. We therefore CLAMP (decision-equivalent: q_lcb=0.0 and
+    # :732) -> LIVE_INFERENCE_INPUTS_MISSING and collapses the WHOLE family. We
+    # therefore CLAMP (decision-equivalent: q_lcb=0.0 and
     # q_lcb<0 both yield a negative robust trade score so the bin loses selection
     # identically) and record that the clamp fired — restoring legacy family-formation
-    # under the merge safety contract (flag-OFF == legacy).
+    # under the merge safety contract.
     #
     # SELECTION BYTE-IDENTITY (MAJOR-1 adversarial finding): the clamped .q_lcb MUST
     # NOT flow into the _CandidateProof selection-ranking key. Legacy stored the raw

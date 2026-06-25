@@ -4,7 +4,7 @@
 # Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
 # Purpose: Executable 9-check ship-readiness gate for full_transport → live promotion (Zeus #64).
 # Reuse: All 9 checks must PASS before enabling full_transport_live_enabled. Run with prod DBs.
-# Authority basis: docs/operations/FT_SHIP_MASTER_SPEC_2026-05-25.md §Antibody
+# Authority basis: docs/archive/2026-Q2/operations_historical/FT_SHIP_MASTER_SPEC_2026-05-25.md §Antibody
 """Executable ship-readiness gate for the full_transport → live promotion.
 
 Prevents a research artifact from being mistaken for a promotable production

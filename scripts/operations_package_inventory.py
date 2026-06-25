@@ -10,7 +10,7 @@ CLASSIFICATION PRECEDENCE (highest wins):
      OR authority_status_registry CURRENT_LOAD_BEARING
   2. RUNTIME_GATING_EVIDENCE   — packet contains TIGGE ingest decision, live-gating evidence
   3. CURRENT_PACKAGE_INPUT     — modified in last 30 days (active window), or docs_registry active
-  4. MONITORING_SURFACE        — PLAN.md/README.md mentions observation/shadow/monitor keyword
+  4. MONITORING_SURFACE        — PLAN.md/README.md mentions observation/monitor keyword
   5. ARCHIVE_CANDIDATE         — modified 60+ days ago, no authority status, no inbound refs
   6. UNKNOWN_OPERATOR_DECISION — cannot classify without human input
 
@@ -68,7 +68,6 @@ RUNTIME_GATING_KEYWORDS = {
 # Keywords that signal MONITORING_SURFACE.
 MONITORING_KEYWORDS = {
     "observation",
-    "shadow",
     "monitor",
     "monitoring",
     "_observation/",
@@ -195,7 +194,7 @@ def classify(signals: SignalBundle) -> PacketRecord:
 
     # Check 4: MONITORING_SURFACE
     if signals.is_monitoring_surface:
-        reason = "PLAN.md/README.md contains observation/shadow/monitor keyword"
+        reason = "PLAN.md/README.md contains observation/monitor keyword"
         return PacketRecord(
             slug=slug,
             classification="MONITORING_SURFACE",

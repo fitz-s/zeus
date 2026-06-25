@@ -344,7 +344,6 @@ GRANDFATHER: frozenset[str] = frozenset(
         "wu_icao_daily_backfill_v2",
         "wu_icao_history_v1",
         "wu_icao_v1_2026",
-        "yes_family_devig_v1_shadow",
         "zeus_dual_track_refactor_package_v2_2026",
         "zeus_live_release_paper_proof_v1",
         "zeus_v2",

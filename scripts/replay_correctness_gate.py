@@ -143,35 +143,6 @@ def _extract_opportunity_events(conn: sqlite3.Connection, cutoff: str) -> list[d
     return events
 
 
-def _extract_shadow_signals(conn: sqlite3.Connection, cutoff: str) -> list[dict]:
-    """Pull shadow_signals (deterministic calibration output)."""
-    try:
-        rows = conn.execute(
-            "SELECT id, city, target_date, timestamp, "
-            "p_raw_json, p_cal_json, edges_json "
-            "FROM shadow_signals WHERE timestamp >= ? ORDER BY id",
-            (cutoff,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    events = []
-    for row in rows:
-        events.append(
-            {
-                "source": "shadow_signals",
-                "event_type": "shadow_signal_emitted",
-                "id": row[0],
-                "city": row[1],
-                "target_date": row[2],
-                "timestamp": row[3],
-                "p_raw": json.loads(row[4] or "{}"),
-                "p_cal": json.loads(row[5] or "{}"),
-                "edges": json.loads(row[6] or "{}"),
-            }
-        )
-    return events
-
-
 def _extract_decision_log(conn: sqlite3.Connection, cutoff: str) -> list[dict]:
     """Pull decision_log rows (deterministic mode/decision record)."""
     try:
@@ -212,12 +183,11 @@ def extract_seed_events(db_path: Path) -> tuple[list[dict], list[str]]:
     try:
         chronicle = _extract_chronicle_events(conn, cutoff)
         opportunities = _extract_opportunity_events(conn, cutoff)
-        shadows = _extract_shadow_signals(conn, cutoff)
         decisions = _extract_decision_log(conn, cutoff)
     finally:
         conn.close()
 
-    all_events = chronicle + opportunities + shadows + decisions
+    all_events = chronicle + opportunities + decisions
     excluded = sorted(NON_DETERMINISTIC_EVENT_TYPES)
     return all_events, excluded
 

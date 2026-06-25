@@ -375,7 +375,7 @@ surfaces:
   # ---- FC-09 topology sprawl boundary ----------------------------------
   topology_v_next:
     type: path
-    description: "topology_v_next package — stdlib shadow prevention (PR #306 dataclasses.py crash)"
+    description: "topology_v_next package — stdlib name-collision prevention (PR #306 dataclasses.py crash)"
     patterns:
       path_globs:
         - scripts/topology_v_next/**
@@ -392,8 +392,8 @@ surfaces:
       - path: tests/topology_v_next/test_admission_engine.py
         required_when_changed: true
     static_gates:
-      - id: stdlib_shadowing_gate
-        script: scripts/ci/check_stdlib_shadowing.py
+      - id: stdlib_name_collision_gate
+        script: scripts/ci/check_stdlib_name_collisions.py
         blocking: true
       - id: workflow_refs_exist
         script: scripts/ci/check_workflow_repo_refs.py

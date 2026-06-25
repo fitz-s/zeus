@@ -45,6 +45,7 @@ logger = logging.getLogger("zeus.ingest")
 # ---------------------------------------------------------------------------
 _scheduler: Any | None = None
 FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
+REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 
@@ -67,6 +68,28 @@ def _ingest_main_owns_opendata() -> bool:
     from src.data.source_job_registry import active_opendata_owner
 
     return active_opendata_owner(_forecast_live_owner()) == "ingest_main"
+
+
+def _replacement_availability_poll_seconds() -> int:
+    """Fast source-clock poll cadence for replacement raw-input downloads.
+
+    Open-Meteo model-update metadata is cheap and parallelized; keeping this at
+    one minute by default closes most of the public-availability alpha window
+    without turning the heavy downloader into a tight loop. The download body is
+    still max_instances=1/coalesced/idempotent, so long passes do not overlap.
+    """
+    raw = os.environ.get(REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "").strip()
+    if not raw:
+        return 60
+    try:
+        return max(15, int(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 60s replacement availability poll cadence",
+            REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV,
+            raw,
+        )
+        return 60
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -954,7 +977,7 @@ def _harvester_truth_writer_tick():
 
 @_scheduler_job("ingest_replacement_availability_poll")
 def _replacement_availability_poll_tick():
-    """Probe-resolved replacement raw-input fetch (OpenMeteo anchor + bayes_precision_fusion extras).
+    """Fast source-clock poll for replacement raw-input fetches.
 
     OPERATOR DIRECTIVE 2026-06-11 ("下载有自己的daemon"): weather downloading lives in
     the data-ingest daemon — ITS OWN download daemon — decoupled from forecast-live /
@@ -965,18 +988,41 @@ def _replacement_availability_poll_tick():
     is idempotent per persisted row/manifest.
     """
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
-        _replacement_cycle_availability_poll_if_needed,
+        _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
+        _enqueue_fusion_upgrade_reseeds_if_needed,
         _replacement_forecast_live_materialization_queue_config,
+    )
+    from src.data.source_clock_update_probe import (  # noqa: PLC0415
+        probe_openmeteo_source_clock_updates,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    report = _replacement_cycle_availability_poll_if_needed(cfg)
+    if not bool(cfg.get("download_current_targets_enabled", False)):
+        return None
+    source_clock_report = probe_openmeteo_source_clock_updates()
+    source_clock_payload = source_clock_report.as_dict()
+    if not source_clock_report.updated_sources:
+        logger.info("replacement source-clock poll current: %s", source_clock_payload)
+        return {
+            "status": "SOURCE_CLOCK_POLL_CURRENT",
+            "source_clock_status": source_clock_payload.get("status"),
+            "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
+            "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
+            "source_clock_error": source_clock_payload.get("error"),
+        }
+    logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
+    report = _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        cfg,
+        source_clock_report=source_clock_report,
+    )
     if report is None:
-        return
-    if report.get("status") == "AVAILABILITY_POLL_CURRENT":
-        logger.info("replacement availability poll current (extras=%s)", report.get("bayes_precision_fusion_extras_status"))
-    else:
-        logger.info("replacement availability poll report: %s", report)
+        return None
+    upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+    if upgrade_report is not None:
+        report["fusion_upgrade_status"] = upgrade_report.get("status")
+        report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+    logger.info("replacement source-clock scoped download report: %s", report)
+    return report
 
 
 @_scheduler_job("ingest_automation_analysis")
@@ -1714,6 +1760,7 @@ def _ingest_main_job_specs() -> list[tuple]:
     from datetime import datetime as _dt_now
 
     now = _dt_now.now()
+    replacement_availability_poll_seconds = _replacement_availability_poll_seconds()
     specs: list[tuple] = [
         (_k2_daily_obs_tick, "cron", dict(minute=0, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
@@ -1739,12 +1786,15 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
         (_automation_analysis_cycle, "cron", dict(hour=9, minute=0, id="ingest_automation_analysis",
             max_instances=1, coalesce=True)),
-        # OPERATOR DIRECTIVE 2026-06-11: downloads live in the data-ingest daemon, first
-        # fire IMMEDIATE at boot (next_run_time=now), then every 5 minutes — downloading
-        # never again waits on a daemon's first interval nor dies with trading restarts.
-        (_replacement_availability_poll_tick, "interval", dict(minutes=5,
+        # OPERATOR DIRECTIVE 2026-06-11 + source-clock upgrade 2026-06-25:
+        # downloads live in the data-ingest daemon, first fire IMMEDIATE at boot
+        # (next_run_time=now), then on a fast source-clock cadence. Downloading
+        # never waits on a daemon's first interval, never dies with trading
+        # restarts, and does not sit behind the old 5-minute publication poll.
+        (_replacement_availability_poll_tick, "interval", dict(seconds=replacement_availability_poll_seconds,
             id="ingest_replacement_availability_poll", max_instances=1, coalesce=True,
-            misfire_grace_time=240, next_run_time=now)),
+            misfire_grace_time=max(120, replacement_availability_poll_seconds * 2),
+            next_run_time=now)),
     ]
 
     # ECMWF Open Data daily live jobs — conditional on ingest_main owning OpenData (singleton).

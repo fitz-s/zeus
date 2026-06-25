@@ -778,8 +778,6 @@ class TestExecutor:
             def __init__(self):
                 raise AssertionError("legacy execute_intent must not reach venue client")
 
-        monkeypatch.delenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", raising=False)
-        monkeypatch.delenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", raising=False)
         monkeypatch.setattr("src.architecture.gate_runtime.check", lambda capability: gate_calls.append(capability))
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FailingClient)
 
@@ -788,7 +786,7 @@ class TestExecutor:
 
         assert gate_calls == []
 
-    def test_execute_intent_env_override_still_blocked_for_live(self, monkeypatch):
+    def test_execute_intent_still_blocked_for_live(self, monkeypatch):
         intent = ExecutionIntent(
             direction=Direction.YES,
             target_size_usd=5.0,
@@ -801,13 +799,11 @@ class TestExecutor:
             timeout_seconds=3600,
         )
 
-        monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
-        monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
         with pytest.raises(RuntimeError, match="LEGACY_EXECUTION_INTENT_LIVE_BLOCKED"):
             execute_intent(intent, edge_vwmp=0.50, label="legacy-live-blocked", conn=_TEST_CONN)
         assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
-    def test_execute_intent_paper_override_returns_order_result(self, monkeypatch):
+    def test_execute_intent_paper_override_has_no_execution_route(self, monkeypatch):
         intent = ExecutionIntent(
             direction=Direction.YES,
             target_size_usd=5.0,
@@ -821,16 +817,8 @@ class TestExecutor:
         )
 
         monkeypatch.setattr("src.config.get_mode", lambda: "paper")
-        monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
-        monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
-
-        result = execute_intent(intent, edge_vwmp=0.50, label="legacy-paper", conn=_TEST_CONN)
-
-        assert isinstance(result, OrderResult)
-        assert result.status == "shadow_filled"
-        assert result.order_id == "shadow:yes-token-legacy-paper"
-        assert result.shares == pytest.approx(10.0)
-        assert result.command_state is None
+        with pytest.raises(RuntimeError, match="LEGACY_EXECUTION_INTENT_BLOCKED"):
+            execute_intent(intent, edge_vwmp=0.50, label="legacy-paper", conn=_TEST_CONN)
         assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
     def test_execute_final_intent_allows_stricter_fok_when_a2_selected_resting_maker(self, monkeypatch):

@@ -76,6 +76,20 @@ _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
 
 
+def _substrate_clob_timeout_seconds() -> float:
+    """Short public-CLOB timeout for background substrate refresh.
+
+    This lane is a continuously retried producer. It must finish inside the
+    warm cadence; a missing orderbook is cheaper to retry next tick than to let
+    one slow public CLOB read starve every pending family.
+    """
+
+    return max(
+        1.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "1.5")),
+    )
+
+
 def _settings_section(name: str, default=None):
     """Mirror of src.main._settings_section (precedent: replacement_forecast_production)."""
     source = settings._data if hasattr(settings, "_data") else settings
@@ -1033,10 +1047,7 @@ def _refresh_pending_family_snapshots(
         #         tolerate_missing_book=True is already hardwired inside
         #         refresh_executable_market_substrate_snapshots, so illiquid bins
         #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
-        _clob_timeout = max(
-            1.0,
-            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-        )
+        _clob_timeout = _substrate_clob_timeout_seconds()
         markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
             _prune_fresh_market_outcomes_for_snapshot_refresh(
                 write_conn,
@@ -1190,10 +1201,7 @@ def _market_discovery_cycle() -> None:
         )
         conn = get_trade_connection(write_class="live")
         try:
-            _discovery_clob_timeout = max(
-                1.0,
-                float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-            )
+            _discovery_clob_timeout = _substrate_clob_timeout_seconds()
             with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
                 snapshot_summary = refresh_executable_market_substrate_snapshots(
                     conn,

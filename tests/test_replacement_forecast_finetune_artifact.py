@@ -80,12 +80,12 @@ def test_finetune_artifact_blocks_small_sample_from_refit_ready() -> None:
     )
 
     assert artifact.ready_for_refit is False
-    assert artifact.status == "FINE_TUNE_ARTIFACT_SHADOW_ONLY"
+    assert artifact.status == "FINE_TUNE_ARTIFACT_BLOCKED"
     assert "REPLACEMENT_FINETUNE_INSUFFICIENT_OFFICIAL_DAYS" in artifact.reason_codes
     assert "REPLACEMENT_FINETUNE_INSUFFICIENT_OFFICIAL_ROWS" in artifact.reason_codes
 
 
-def test_finetune_artifact_cli_writes_json_and_returns_nonzero_for_shadow_only(tmp_path: Path) -> None:
+def test_finetune_artifact_cli_writes_json_and_returns_nonzero_when_blocked(tmp_path: Path) -> None:
     ready_input = tmp_path / "ready_rows.json"
     ready_output = tmp_path / "ready_artifact.json"
     ready_input.write_text(json.dumps(_payload()), encoding="utf-8")
@@ -128,4 +128,4 @@ def test_finetune_artifact_cli_writes_json_and_returns_nonzero_for_shadow_only(t
     )
 
     assert small.returncode == 1
-    assert json.loads(small.stdout)["status"] == "FINE_TUNE_ARTIFACT_SHADOW_ONLY"
+    assert json.loads(small.stdout)["status"] == "FINE_TUNE_ARTIFACT_BLOCKED"

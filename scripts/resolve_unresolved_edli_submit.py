@@ -10,7 +10,7 @@
 # -------
 # Resolve a stuck EDLI live-order aggregate that is parked in PENDING_RECONCILE
 # with its $5 LIVE_CAP reservation still RESERVED, which fail-closes the
-# edli_live_canary boot readiness gate (EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN +
+# edli_live readiness gate (EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN +
 # EDLI_STAGE_LIVE_CAP_RESERVED) and crash-loops the daemon.
 #
 # This script is ONLY for aggregates that provably never reached the venue. A

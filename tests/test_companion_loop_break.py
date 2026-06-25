@@ -92,24 +92,24 @@ def _admitted_admission(admitted: list[str]) -> dict[str, Any]:
 def test_script_companion_auto_admitted_create_new() -> None:
     """F3 fix: new script + manifest companion + typed_intent=create_new → auto-admitted.
 
-    Agent includes both scripts/diagnose_x.py (new file, out-of-scope) and
+    Agent includes both scripts/audit_x.py (new file, out-of-scope) and
     architecture/script_manifest.yaml (companion) in --files with --intent create_new.
     The companion-loop-break must upgrade status to 'admitted'.
     """
     admission = _scope_expansion_admission(
-        out_of_scope=["scripts/diagnose_x.py"],
+        out_of_scope=["scripts/audit_x.py"],
         admitted=["architecture/script_manifest.yaml"],  # companion already admitted via profile
     )
-    requested = ["scripts/diagnose_x.py", "architecture/script_manifest.yaml"]
+    requested = ["scripts/audit_x.py", "architecture/script_manifest.yaml"]
 
     result = _apply_companion_loop_break(admission, requested, "create_new")
 
     assert result["status"] == "admitted", (
         f"Expected status='admitted' after companion-loop-break. Got: {result['status']!r}. "
-        "scripts/diagnose_x.py + architecture/script_manifest.yaml + create_new must auto-admit."
+        "scripts/audit_x.py + architecture/script_manifest.yaml + create_new must auto-admit."
     )
-    assert "scripts/diagnose_x.py" in result["admitted_files"], (
-        f"scripts/diagnose_x.py must be in admitted_files. Got: {result['admitted_files']}"
+    assert "scripts/audit_x.py" in result["admitted_files"], (
+        f"scripts/audit_x.py must be in admitted_files. Got: {result['admitted_files']}"
     )
     assert result["out_of_scope_files"] == [], (
         f"out_of_scope_files must be empty after full resolution. Got: {result['out_of_scope_files']}"
@@ -117,7 +117,7 @@ def test_script_companion_auto_admitted_create_new() -> None:
     assert result.get("companion_loop_break") is True, (
         "companion_loop_break flag must be True when auto-admit fires."
     )
-    assert "scripts/diagnose_x.py" in (result.get("auto_admitted") or []), (
+    assert "scripts/audit_x.py" in (result.get("auto_admitted") or []), (
         "auto_admitted list must contain the auto-admitted file."
     )
     # why log must mention companion_loop_break
@@ -134,14 +134,14 @@ def test_script_companion_auto_admitted_create_new() -> None:
 def test_companion_missing_emits_advisory_not_auto_admit() -> None:
     """When parent is in --files but companion is NOT in --files, emit advisory only.
 
-    Agent creates scripts/diagnose_x.py but does NOT include architecture/script_manifest.yaml
+    Agent creates scripts/audit_x.py but does NOT include architecture/script_manifest.yaml
     in --files. The loop-break must NOT auto-admit; must emit companion_missing advisory.
     """
     admission = _scope_expansion_admission(
-        out_of_scope=["scripts/diagnose_x.py"],
+        out_of_scope=["scripts/audit_x.py"],
     )
     # Companion is NOT in requested
-    requested = ["scripts/diagnose_x.py"]
+    requested = ["scripts/audit_x.py"]
 
     result = _apply_companion_loop_break(admission, requested, "create_new")
 
@@ -178,9 +178,9 @@ def test_no_auto_admit_for_modify_existing() -> None:
     (scope_expansion_required) must be preserved exactly.
     """
     admission = _scope_expansion_admission(
-        out_of_scope=["scripts/diagnose_x.py"],
+        out_of_scope=["scripts/audit_x.py"],
     )
-    requested = ["scripts/diagnose_x.py", "architecture/script_manifest.yaml"]
+    requested = ["scripts/audit_x.py", "architecture/script_manifest.yaml"]
 
     result = _apply_companion_loop_break(admission, requested, "modify_existing")
 
@@ -192,7 +192,7 @@ def test_no_auto_admit_for_modify_existing() -> None:
         "companion_loop_break must NOT be set for modify_existing intent."
     )
     # Admission dict must be unchanged (or reference-equal to input)
-    assert result["out_of_scope_files"] == ["scripts/diagnose_x.py"], (
+    assert result["out_of_scope_files"] == ["scripts/audit_x.py"], (
         f"out_of_scope_files must be unchanged for modify_existing. Got: {result['out_of_scope_files']}"
     )
 
@@ -251,7 +251,7 @@ def test_m4_batch_cap_advisory_at_51() -> None:
     The advisory is non-blocking — auto-admit still proceeds when conditions are met.
     """
     # Build 51 files: one is the parent script, one is the companion, rest are filler
-    parent = "scripts/diagnose_batch_test.py"
+    parent = "scripts/audit_batch_test.py"
     companion = "architecture/script_manifest.yaml"
     filler = [f"scripts/filler_{i}.py" for i in range(49)]
     requested = [parent, companion] + filler  # total = 51
@@ -280,7 +280,7 @@ def test_m4_batch_cap_advisory_at_51() -> None:
 
 def test_m4_batch_cap_no_advisory_at_50() -> None:
     """Exactly 50 files must NOT emit batch advisory (threshold is strictly >)."""
-    parent = "scripts/diagnose_at_cap.py"
+    parent = "scripts/audit_at_cap.py"
     companion = "architecture/script_manifest.yaml"
     filler = [f"scripts/filler_{i}.py" for i in range(48)]
     requested = [parent, companion] + filler  # total = 50
@@ -298,7 +298,7 @@ def test_m4_batch_cap_no_advisory_at_50() -> None:
 
 def test_m4_batch_cap_tunable() -> None:
     """batch_cap parameter must be tunable: cap=5 with 6 files fires advisory."""
-    parent = "scripts/diagnose_tunable.py"
+    parent = "scripts/audit_tunable.py"
     companion = "architecture/script_manifest.yaml"
     requested = [parent, companion] + ["scripts/x1.py", "scripts/x2.py", "scripts/x3.py", "scripts/x4.py"]
     assert len(requested) == 6

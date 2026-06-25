@@ -23,7 +23,6 @@ REPLACEMENT_TABLES = {
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
     "forecast_posteriors",
-    "replacement_shadow_decisions",
 }
 
 
@@ -82,11 +81,6 @@ def test_replacement_live_support_tables_are_forecast_class_only() -> None:
         forecast_conn,
         "raw_model_forecasts",
     )
-    assert {"market_snapshot_id", "allowed_direction", "allowed_q_lcb", "allowed_kelly_fraction", "veto_reason"} <= _columns(
-        forecast_conn,
-        "replacement_shadow_decisions",
-    )
-
     world_conn = sqlite3.connect(":memory:")
     apply_canonical_schema(world_conn, forecast_tables=False)
     assert REPLACEMENT_TABLES.isdisjoint(_tables(world_conn))
@@ -412,66 +406,5 @@ def test_replacement_posteriors_and_decisions_cannot_increase_authority_shape() 
                 '{"warm": 1.0}',
                 "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
                 "experiment",
-            ),
-        )
-
-    conn.execute(
-        """
-        INSERT INTO replacement_shadow_decisions (
-            posterior_id, market_snapshot_id, condition_id, token_id,
-            decision_time, baseline_direction, candidate_direction,
-            allowed_direction, baseline_q_lcb, candidate_q_lcb, allowed_q_lcb,
-            baseline_kelly_fraction, candidate_kelly_fraction,
-            allowed_kelly_fraction, veto, veto_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            posterior_id,
-            "snap-1",
-            "cond-1",
-            "token-yes",
-            "2026-06-06T02:10:00+00:00",
-            "buy_yes:warm",
-            "buy_yes:hot",
-            "buy_yes:warm",
-            0.62,
-            0.55,
-            0.55,
-            0.04,
-            0.01,
-            0.01,
-            1,
-            "SOFT_ANCHOR_LOWER_Q_LCB",
-        ),
-    )
-
-    with pytest.raises(sqlite3.OperationalError):
-        conn.execute(
-            """
-            INSERT INTO replacement_shadow_decisions (
-                posterior_id, market_snapshot_id, condition_id, token_id,
-                decision_time, baseline_direction, candidate_direction,
-                allowed_direction, baseline_q_lcb, candidate_q_lcb, allowed_q_lcb,
-                baseline_kelly_fraction, candidate_kelly_fraction,
-                allowed_kelly_fraction, veto, trade_authority_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                posterior_id,
-                "snap-2",
-                "cond-1",
-                "token-yes",
-                "2026-06-06T02:11:00+00:00",
-                "buy_yes:warm",
-                "buy_yes:hot",
-                "buy_yes:warm",
-                0.62,
-                0.55,
-                0.55,
-                0.04,
-                0.01,
-                0.01,
-                1,
-                "ENTRY_PRIMARY",
             ),
         )

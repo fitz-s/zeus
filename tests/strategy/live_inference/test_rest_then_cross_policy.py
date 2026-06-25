@@ -1,7 +1,7 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-20 (lifecycle conversion fix: no-identical-re-rest,
 #   shadow-gate collapse, double-submit-safety + first-rest-default acceptance tests)
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 # (operator escalation: taker-only execution root cause) +
 # docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md (KM measurement).
 """K4.0 REST-THEN-CROSS policy relationship tests (written RED-FIRST).

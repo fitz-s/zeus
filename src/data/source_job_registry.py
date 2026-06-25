@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-Role = Literal["live", "backfill", "shadow", "settlement", "derived", "diagnostic"]
+Role = Literal["live", "backfill", "settlement", "derived", "diagnostic"]
 Executor = Literal["default", "fast"]  # the CURRENT two APScheduler executors in ingest_main
 # How the daemon dispatches the job (PR #329 review B; advisor point 2). The user-WS ingestor is
 # NOT an add_job — it is a long-running thread. As of the process-topology refactor
@@ -137,14 +137,27 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="polymarket_gamma", callable_ref="_harvester_truth_writer_tick", family="settlement"),
     SourceJobSpec("ingest_automation_analysis", "ingest_main", "derived", "default", True,
                   callable_ref="_automation_analysis_cycle"),
+    SourceJobSpec("ingest_oracle_snapshot", "ingest_main", "diagnostic", "fast", False,
+                  callable_ref="_oracle_snapshot_tick", file_only=True, family="diagnostic",
+                  misfire_grace_time=600,
+                  notes="daily oracle shadow snapshot listener; file-only raw/oracle_shadow_snapshots output"),
+    SourceJobSpec("ingest_oracle_bridge", "ingest_main", "diagnostic", "fast", False,
+                  callable_ref="_bridge_oracle_tick", file_only=True, family="diagnostic",
+                  misfire_grace_time=600,
+                  notes="daily oracle-to-calibration artifact bridge; file-only oracle artifact outputs"),
+    SourceJobSpec("ingest_oracle_bridge_startup_catch_up", "ingest_main", "diagnostic", "fast", False,
+                  callable_ref="_bridge_oracle_startup_catch_up", file_only=True, family="diagnostic",
+                  dispatch_kind="startup",
+                  notes="boot catch-up for oracle bridge when snapshot artifacts are newer"),
     SourceJobSpec("ingest_replacement_availability_poll", "ingest_main", "live", "default", True,
                   source_ids=("ecmwf_open_data", "openmeteo_ecmwf_ifs_9km"),
                   callable_ref="_replacement_availability_poll_tick", family="forecast",
-                  misfire_grace_time=240,
+                  misfire_grace_time=120,
                   notes="operator directive 2026-06-11: weather downloading lives in ITS OWN "
                         "daemon (data-ingest), decoupled from forecast-live/trading restarts. "
                         "Probe-resolved anchor raw-input fetch + bayes_precision_fusion extras; first fire "
-                        "IMMEDIATE at boot (next_run_time=now), then every 5min."),
+                        "IMMEDIATE at boot (next_run_time=now), then on the fast source-clock cadence "
+                        "(default 60s; ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS override)."),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
                   misfire_grace_time=3600, family="forecast",
@@ -184,15 +197,6 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
                   callable_ref="_market_scan_tick", family="market_topology",
                   notes="multi-source: Gamma topology + CLOB snapshots"),
-    SourceJobSpec("ingest_oracle_snapshot", "ingest_main", "derived", "fast", False,
-                  callable_ref="_oracle_snapshot_tick", file_only=True,
-                  notes="writes raw/oracle_shadow_snapshots/{city}/{date}.json via WU/HKO API; "
-                        "promoted from crontab to scheduler 2026-06-09 (outage post-mortem)"),
-    SourceJobSpec("ingest_oracle_bridge", "ingest_main", "derived", "fast", False,
-                  callable_ref="_bridge_oracle_tick", file_only=True,
-                  notes="writes data/oracle_error_rates.json artifact; verify file-only (PR8)"),
-    SourceJobSpec("ingest_oracle_bridge_startup_catch_up", "ingest_main", "derived", "fast", False,
-                  callable_ref="_bridge_oracle_startup_catch_up", file_only=True),
     SourceJobSpec("ingest_calibration_auto_promote", "ingest_main", "derived", "default", True,
                   callable_ref="_calibration_auto_promote_tick"),
 )

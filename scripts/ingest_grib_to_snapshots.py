@@ -456,7 +456,7 @@ def _contract_evidence_fields(
     *,
     source_id: str | None,
 ) -> dict[str, Any]:
-    """Build shadow contract/bin/window evidence columns for a snapshot row.
+    """Build audit contract/bin/window evidence columns for a snapshot row.
 
     These fields are evidence only. They do not change ``training_allowed`` and
     therefore cannot relax LOW Law 1 by themselves.

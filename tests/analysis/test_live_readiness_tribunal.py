@@ -36,7 +36,7 @@ def world_conn() -> sqlite3.Connection:
 
 def _make_report(
     strategy_id: str = "shoulder_sell",
-    tier_observed: EvidenceTier = EvidenceTier.SHADOW_PASS,
+    tier_observed: EvidenceTier = EvidenceTier.REPLAY_PASS,
     n_settled: int = 0,
     n_wins: int = 0,
     ci_lower: float | None = None,
@@ -60,26 +60,26 @@ def _make_report(
 
 
 # ---------------------------------------------------------------------------
-# T4-1: HOLD for Tier-3 vs required LIVE_LIMITED_HAIRCUT (no evidence yet)
+# T4-1: HOLD for replay tier vs required LIVE_LIMITED_HAIRCUT (no evidence yet)
 # ---------------------------------------------------------------------------
 
-def test_t4_hold_tier3_vs_live_limited_haircut() -> None:
-    """Tier-3 (SHADOW_PASS) vs required LIVE_LIMITED_HAIRCUT → HOLD."""
+def test_t4_hold_replay_vs_live_limited_haircut() -> None:
+    """REPLAY_PASS vs required LIVE_LIMITED_HAIRCUT -> HOLD."""
     report = _make_report(
-        tier_observed=EvidenceTier.SHADOW_PASS,      # tier 3
+        tier_observed=EvidenceTier.REPLAY_PASS,
         n_settled=0,
         ci_lower=None,
     )
     verdict = adjudicate(report, EvidenceTier.LIVE_LIMITED_HAIRCUT)  # required = 6
     assert verdict.verdict == VerdictKind.HOLD
-    assert verdict.tier_target == EvidenceTier.SHADOW_PASS
-    assert "3" in verdict.verdict_reason or "SHADOW_PASS" in verdict.verdict_reason
+    assert verdict.tier_target == EvidenceTier.REPLAY_PASS
+    assert "REPLAY_PASS" in verdict.verdict_reason
 
 
-def test_t4_hold_tier3_ci_below_threshold(world_conn) -> None:
-    """ci_lower < breakeven → DEMOTE (not HOLD); SHADOW_PASS demotes to REPLAY_PASS."""
+def test_t4_hold_replay_ci_below_threshold(world_conn) -> None:
+    """ci_lower < breakeven -> DEMOTE to DETERMINISTIC_SEMANTICS."""
     report = _make_report(
-        tier_observed=EvidenceTier.SHADOW_PASS,
+        tier_observed=EvidenceTier.REPLAY_PASS,
         n_settled=50,
         n_wins=20,
         ci_lower=0.35,   # below breakeven 0.55 → DEMOTE
@@ -87,7 +87,7 @@ def test_t4_hold_tier3_ci_below_threshold(world_conn) -> None:
     )
     verdict = adjudicate(report, EvidenceTier.LIVE_LIMITED_HAIRCUT, conn=world_conn)
     assert verdict.verdict == VerdictKind.DEMOTE
-    assert verdict.tier_target == EvidenceTier.REPLAY_PASS  # 3 → 2
+    assert verdict.tier_target == EvidenceTier.DETERMINISTIC_SEMANTICS
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ def test_t4_hold_tier3_ci_below_threshold(world_conn) -> None:
 def test_t4_promote_when_ci_lower_above_breakeven(world_conn) -> None:
     """PROMOTE: ci_lower > breakeven + cost_of_capital."""
     report = _make_report(
-        tier_observed=EvidenceTier.SHADOW_PASS,   # tier 3 < required 6
+        tier_observed=EvidenceTier.REPLAY_PASS,
         n_settled=100,
         n_wins=65,
         ci_lower=0.58,    # > breakeven 0.55
@@ -106,7 +106,7 @@ def test_t4_promote_when_ci_lower_above_breakeven(world_conn) -> None:
     )
     verdict = adjudicate(report, EvidenceTier.LIVE_LIMITED_HAIRCUT, conn=world_conn)
     assert verdict.verdict == VerdictKind.PROMOTE
-    assert verdict.tier_target == EvidenceTier.PAPER_COHORT  # 3 → 4 (one step)
+    assert verdict.tier_target == EvidenceTier.PAPER_COHORT
 
 
 def test_t4_no_promote_when_already_at_required_tier() -> None:
@@ -147,7 +147,7 @@ def test_t4_demote_writes_row(world_conn) -> None:
     ).fetchone()
     assert row is not None
     assert row[0] == "shoulder_sell"
-    assert row[1] == int(EvidenceTier.SHADOW_PASS)  # demoted from 4 → 3
+    assert row[1] == int(EvidenceTier.REPLAY_PASS)
     assert row[2] is not None and len(row[2]) > 0
 
 
@@ -179,7 +179,7 @@ def test_t4_promote_writes_row(world_conn) -> None:
     ).fetchone()
     assert row is not None
     assert row[0] == "center_sell"
-    assert row[1] == int(EvidenceTier.SHADOW_PASS)  # 2 → 3
+    assert row[1] == int(EvidenceTier.PAPER_COHORT)
     assert row[2] is not None and len(row[2]) > 0
     assert row[3] == "op_test_ref"
 
@@ -213,7 +213,7 @@ def test_t4_promote_write_is_durable_before_return(tmp_path) -> None:
             ("center_sell",),
         ).fetchone()
         assert row is not None
-        assert row[0] == int(EvidenceTier.SHADOW_PASS)
+        assert row[0] == int(EvidenceTier.PAPER_COHORT)
         assert row[1] == "op_durable_test"
     finally:
         second.close()
@@ -264,7 +264,7 @@ def test_t4_init_schema_rebuilds_legacy_assignment_table() -> None:
         """,
         (
             "shoulder_sell",
-            int(EvidenceTier.SHADOW_PASS),
+            int(EvidenceTier.REPLAY_PASS),
             datetime.now(timezone.utc).isoformat(),
             "legacy",
             None,
@@ -276,7 +276,7 @@ def test_t4_init_schema_rebuilds_legacy_assignment_table() -> None:
     assert {"id", "schema_version", "assignment_source", "verdict_kind"} <= columns
     assignment = current_evidence_tier_assignment(conn, "shoulder_sell")
     assert assignment is not None
-    assert assignment.tier == EvidenceTier.SHADOW_PASS
+    assert assignment.tier == EvidenceTier.REPLAY_PASS
     assert assignment.assignment_source == "migration"
 
 
@@ -380,7 +380,7 @@ def test_t4_is_runtime_live_false_below_pilot_tiny() -> None:
     """StrategyProfile.is_runtime_live() False when tier < LIVE_PILOT_TINY."""
     from src.strategy.strategy_profile import get
     profile = get("shoulder_sell")
-    # shoulder_sell: live_status=shadow, evidence_tier=SHADOW_PASS → False
+    # shoulder_sell: live_status=blocked, evidence_tier=REPLAY_PASS -> False
     assert profile.is_runtime_live() is False
 
     profile_sc = get("settlement_capture")
@@ -482,7 +482,7 @@ def _insert_decision_events(
                 market_slug, temperature_metric, target_date, observation_time,
                 decision_seq, decision_event_id, decision_time, outcome, side, strategy_key,
                 observation_available_at, polymarket_end_anchor_source, schema_version, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"test-market-{strategy_key}",
@@ -528,15 +528,9 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
     Also verifies n_decisions == n_settled == 100 (decision_certificates denominator path, C2 fix).
     """
     from src.analysis.evidence_report import build_evidence_report
-    from src.state.shadow_experiment_registry import register_shadow_experiment
     from src.analysis.regret_decomposer import decompose_regret, write_regret_decomposition
-    from datetime import datetime, timezone
 
-    started_at = datetime(2026, 5, 1, tzinfo=timezone.utc)
-    exp_id = register_shadow_experiment(
-        "shoulder_sell", {"kelly": 0.5}, "winning_cohort",
-        started_at=started_at, conn=world_conn,
-    )
+    exp_id = "exp-winning-cohort"
     # Insert 80 winning trades (positive total_regret_usd = win)
     for i in range(80):
         components = decompose_regret(
@@ -550,7 +544,14 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
             realized_pnl_usd=0.12,
             counterfactual_pnl_usd=0.0,  # realized(0.12) > counterfactual(0) → WIN
         )
-        write_regret_decomposition(exp_id, f"evt_win_{i}", components, conn=world_conn)
+        write_regret_decomposition(
+            exp_id,
+            f"evt_win_{i}",
+            components,
+            strategy_id="shoulder_sell",
+            cohort_tag="winning_cohort",
+            conn=world_conn,
+        )
     # Insert 20 losing trades
     for i in range(20):
         components = decompose_regret(
@@ -564,7 +565,14 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
             realized_pnl_usd=-0.10,
             counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
         )
-        write_regret_decomposition(exp_id, f"evt_loss_{i}", components, conn=world_conn)
+        write_regret_decomposition(
+            exp_id,
+            f"evt_loss_{i}",
+            components,
+            strategy_id="shoulder_sell",
+            cohort_tag="winning_cohort",
+            conn=world_conn,
+        )
     # Insert matching decision_events + decision_certificates rows (n_decisions denominator, C2 fix)
     _insert_decision_events(
         world_conn, "shoulder_sell", 100,
@@ -572,7 +580,7 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
     )
 
     report = build_evidence_report(
-        "shoulder_sell", EvidenceTier.SHADOW_PASS,
+        "shoulder_sell", EvidenceTier.REPLAY_PASS,
         conn=world_conn, breakeven_win_rate=0.55,
     )
     assert report.n_settled == 100
@@ -586,7 +594,7 @@ def test_t4_winning_cohort_is_promote_eligible(world_conn) -> None:
         f"Winning cohort (80/100) should have ci_lower > breakeven 0.55; "
         f"got ci_lower={report.ci_lower:.4f}"
     )
-    # PROMOTE-eligible (tier 3 < required 6, ci_lower > breakeven)
+    # PROMOTE-eligible (replay tier < required 6, ci_lower > breakeven)
     verdict = adjudicate(
         report, EvidenceTier.LIVE_LIMITED_HAIRCUT,
         conn=world_conn, operator_ref="op_regression_test",
@@ -600,9 +608,8 @@ def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
         """
         INSERT INTO no_trade_events (
             market_slug, temperature_metric, target_date, observation_time,
-            decision_seq, reason, reason_detail, strategy_key, event_source,
-            shadow_runtime, observed_at, schema_version, schema_compatibility
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            decision_seq, reason, reason_detail, strategy_key, event_source, observed_at, schema_version, schema_compatibility
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "market-a",
@@ -613,8 +620,7 @@ def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
             "uncategorized",
             "structured",
             "shoulder_sell",
-            "shadow_decision",
-            1,
+            "offline_decision",
             "2026-05-01T12:00:00Z",
             26,
             "current",
@@ -624,9 +630,8 @@ def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
         """
         INSERT INTO no_trade_events (
             market_slug, temperature_metric, target_date, observation_time,
-            decision_seq, reason, reason_detail, strategy_key, event_source,
-            shadow_runtime, observed_at, schema_version, schema_compatibility
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            decision_seq, reason, reason_detail, strategy_key, event_source, observed_at, schema_version, schema_compatibility
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "market-b",
@@ -637,8 +642,7 @@ def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
             "uncategorized",
             "degraded compatibility",
             "shoulder_sell",
-            "shadow_decision",
-            1,
+            "offline_decision",
             "2026-05-01T13:00:00Z",
             26,
             "degraded",
@@ -646,7 +650,7 @@ def test_t4_evidence_report_counts_structured_no_trade_rows(world_conn) -> None:
     )
     report = build_evidence_report(
         "shoulder_sell",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         conn=world_conn,
         breakeven_win_rate=0.55,
     )
@@ -660,15 +664,9 @@ def test_t4_losing_cohort_is_demote(world_conn) -> None:
     correctly maps to n_wins=0, and a losing cohort is demoted.
     """
     from src.analysis.evidence_report import build_evidence_report
-    from src.state.shadow_experiment_registry import register_shadow_experiment
     from src.analysis.regret_decomposer import decompose_regret, write_regret_decomposition
-    from datetime import datetime, timezone
 
-    started_at = datetime(2026, 5, 2, tzinfo=timezone.utc)
-    exp_id = register_shadow_experiment(
-        "center_sell", {"kelly": 0.3}, "losing_cohort",
-        started_at=started_at, conn=world_conn,
-    )
+    exp_id = "exp-losing-cohort"
     # Insert 100 losing trades (negative total_regret_usd)
     for i in range(100):
         components = decompose_regret(
@@ -682,7 +680,14 @@ def test_t4_losing_cohort_is_demote(world_conn) -> None:
             realized_pnl_usd=-0.10,
             counterfactual_pnl_usd=0.0,  # realized < counterfactual → LOSS
         )
-        write_regret_decomposition(exp_id, f"evt_lose_{i}", components, conn=world_conn)
+        write_regret_decomposition(
+            exp_id,
+            f"evt_lose_{i}",
+            components,
+            strategy_id="center_sell",
+            cohort_tag="losing_cohort",
+            conn=world_conn,
+        )
     # Insert matching decision_events + decision_certificates rows (n_decisions denominator, C2 fix)
     _insert_decision_events(
         world_conn, "center_sell", 100,

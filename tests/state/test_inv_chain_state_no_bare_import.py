@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-refactor-part2-findings.md (Finding B2)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md (Finding B2)
 """Antibody invariants: production code MUST NOT import the bare `ChainState` name.
 
 Finding B2 (P2, Part-2 audit 2026-05-27): two enum classes named

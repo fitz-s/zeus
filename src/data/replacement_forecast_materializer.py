@@ -1023,6 +1023,9 @@ class _BayesPrecisionFusionFusionOverride:
     # their walk-forward VERIFIED settled obs count was below MIN_SETTLED_N.  Empty when
     # all models are mature (byte-identical to pre-guard in that case).
     cold_start_excluded_models: tuple[str, ...] = ()
+    # Source-clock vNext fixed city basket (2026-06-25): present when the per-city one-scheme
+    # artifact supplied the served center. This is the live replacement upgrade surface.
+    source_clock_one_scheme: Mapping[str, object] | None = None
 
 
 def _anchor_only_current_override(
@@ -1467,7 +1470,168 @@ def _replacement_bayes_precision_fusion_override(
             )
         )
 
-        used_models = tuple(fused.used_models)
+        _source_clock_payload: dict[str, object] | None = None
+        _source_clock_used_models: tuple[str, ...] | None = None
+        _source_clock_center_sigma_c: float | None = None
+        _source_clock_predictive_sigma_c: float | None = None
+        _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
+        _source_clock_dep_ids: set[int] = set()
+        try:
+            from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+                fixed_weight_center_from_values,
+                scheme_for_city,
+            )
+
+            _scheme = scheme_for_city(request.city)
+            if _scheme is not None:
+                _source_values: dict[str, float] = {
+                    _ANCHOR: float(anchor_value_corrected_c),
+                }
+                for _m, (_value, _rid) in persisted_current.items():
+                    try:
+                        _source_values[str(_m)] = float(_value)
+                    except (TypeError, ValueError):
+                        continue
+                _source_clock_center = fixed_weight_center_from_values(
+                    city=request.city,
+                    values_c_by_source=_source_values,
+                )
+                if _source_clock_center is not None:
+                    _source_clock_used_models = tuple(_source_clock_center.used_weights)
+                    _mu_diagonal = float(_source_clock_center.mu_c)
+                    _weights = dict(_source_clock_center.used_weights)
+                    for _m in _source_clock_used_models:
+                        _z_by_model[str(_m)] = float(_source_values[str(_m)])
+                        if _m not in _raw_m2_and_n:
+                            _raw_m2_and_n[str(_m)] = (None, 0)
+                    _source_clock_histories: dict[str, object] = {}
+                    try:
+                        _source_clock_histories = dict(
+                            history_provider(
+                                city=request.city,
+                                metric=metric,
+                                lead_days=lead_days,
+                                target_date=target_local_date,
+                                models=list(_source_clock_used_models),
+                            )
+                        )
+                    except Exception:
+                        _source_clock_histories = {}
+                    for _m in _source_clock_used_models:
+                        _hist = _source_clock_histories.get(str(_m))
+                        _residuals = tuple(getattr(_hist, "residuals", ()) or ())
+                        if _residuals:
+                            _m2 = sum(float(r) * float(r) for r in _residuals) / len(_residuals)
+                            _raw_m2_and_n[str(_m)] = (_m2, int(getattr(_hist, "n_train", len(_residuals)) or len(_residuals)))
+                    _precision_center_basis = {}
+                    for _m in _source_clock_used_models:
+                        _rm2, _rn = _raw_m2_and_n.get(str(_m), (None, 0))
+                        _precision_center_basis[str(_m)] = {
+                            "raw_m2": (float("nan") if _rm2 is None else float(_rm2)),
+                            "n": float(int(_rn)),
+                            "repr_m2": float(_sigma_repr_by_model.get(str(_m), 0.0)),
+                            "weight": float(_weights.get(str(_m), 0.0)),
+                        }
+                    _precision_basis_hash = _json_hash(
+                        {
+                            "unit": _serving_unit,
+                            "basis": {
+                                k: [v["raw_m2"], v["n"], v["repr_m2"], v["weight"]]
+                                for k, v in sorted(_precision_center_basis.items())
+                            },
+                            "source_clock_one_scheme": True,
+                        }
+                    )
+
+                    _model_sigmas: list[float] = []
+                    _residual_maps: dict[str, Mapping[str, float]] = {}
+                    for _m in _source_clock_used_models:
+                        _hist = _source_clock_histories.get(str(_m))
+                        _residuals = tuple(getattr(_hist, "residuals", ()) or ())
+                        if len(_residuals) >= 2:
+                            import statistics  # noqa: PLC0415
+
+                            try:
+                                _sigma_m = float(statistics.stdev(float(r) for r in _residuals))
+                            except statistics.StatisticsError:
+                                _sigma_m = 1.5
+                        else:
+                            _sigma_m = 1.5
+                        _model_sigmas.append(max(1.0, _sigma_m))
+                        _by_date = getattr(_hist, "residual_by_target_date", {}) or {}
+                        if _by_date:
+                            _residual_maps[str(_m)] = _by_date
+                    if _model_sigmas:
+                        _source_clock_center_sigma_c = max(
+                            0.25,
+                            math.sqrt(
+                                sum(
+                                    (float(_weights.get(_m, 0.0)) * _sig) ** 2
+                                    for _m, _sig in zip(_source_clock_used_models, _model_sigmas, strict=False)
+                                )
+                            ),
+                        )
+                    if _residual_maps:
+                        _common_dates = sorted(set.intersection(*(set(v) for v in _residual_maps.values())))
+                        if len(_common_dates) >= 5:
+                            import statistics  # noqa: PLC0415
+
+                            _weighted_residuals = [
+                                sum(
+                                    float(_weights.get(_m, 0.0)) * float(_residual_maps[_m][d])
+                                    for _m in _source_clock_used_models
+                                    if _m in _residual_maps and d in _residual_maps[_m]
+                                )
+                                for d in _common_dates
+                            ]
+                            try:
+                                _sigma_resid_sc = max(1.0, float(statistics.stdev(_weighted_residuals)))
+                            except statistics.StatisticsError:
+                                _sigma_resid_sc = 1.5
+                        else:
+                            _sigma_resid_sc = 1.5
+                    else:
+                        _sigma_resid_sc = 1.5
+                    if _source_clock_center_sigma_c is not None:
+                        _source_clock_predictive_sigma_c = max(
+                            1.0,
+                            math.sqrt(_source_clock_center_sigma_c ** 2 + _sigma_resid_sc ** 2),
+                        )
+                    for _m in _source_clock_used_models:
+                        if _m in served_current:
+                            _source_clock_current_value_serving[_m] = served_current[_m].as_provenance()  # type: ignore[union-attr]
+                            try:
+                                _source_clock_dep_ids.add(int(served_current[_m].raw_model_forecast_id))  # type: ignore[union-attr]
+                            except Exception:
+                                pass
+                    _source_clock_payload = {
+                        "artifact": "final_city_one_scheme_20260625",
+                        "configured_sources": list(_scheme.final_sources),
+                        "configured_weights": dict(_source_clock_center.configured_weights),
+                        "used_weights": dict(_source_clock_center.used_weights),
+                        "missing_sources": list(_source_clock_center.missing_sources),
+                        "renormalized": bool(_source_clock_center.renormalized),
+                        "one_scheme_status": _source_clock_center.one_scheme_status,
+                        "walkforward_pass": bool(_source_clock_center.walkforward_pass),
+                        "sample_n": int(_scheme.sample_n),
+                        "center_sigma_c": _source_clock_center_sigma_c,
+                        "predictive_sigma_c": _source_clock_predictive_sigma_c,
+                    }
+        except Exception as _source_clock_exc:  # fail-soft: legacy fusion remains available
+            try:
+                import logging  # noqa: PLC0415
+
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                    "source-clock one-scheme center skipped for %s %s %s: %s",
+                    request.city,
+                    metric,
+                    target_date,
+                    _source_clock_exc,
+                )
+            except Exception:
+                pass
+
+        used_models = _source_clock_used_models or tuple(fused.used_models)
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
         # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
@@ -1500,6 +1664,14 @@ def _replacement_bayes_precision_fusion_override(
         _decorrelated_expected = len(_expected_families)
         _decorrelated_served = len(_served_families & _expected_families)
         _decorrelated_complete = not _missing_providers
+        if _source_clock_payload is not None and _source_clock_used_models is not None:
+            _decorrelated_expected = len(_source_clock_payload.get("configured_sources", []) or [])
+            _decorrelated_served = len(_source_clock_used_models)
+            _decorrelated_complete = not bool(_source_clock_payload.get("missing_sources"))
+            _missing_providers = [
+                str(source)
+                for source in (_source_clock_payload.get("missing_sources", []) or [])
+            ]
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
@@ -1512,11 +1684,24 @@ def _replacement_bayes_precision_fusion_override(
                 )
             except Exception:
                 pass
-        model_set_hash = _json_hash(sorted(used_models))
+        model_set_hash = _json_hash(
+            {
+                "models": sorted(used_models),
+                "source_clock_weights": (
+                    None
+                    if _source_clock_payload is None
+                    else _source_clock_payload.get("used_weights")
+                ),
+            }
+        )
         # resolution_mix_hash captures which native grid resolutions entered the fused product
         # (anchor 0.1, globals ~0.25/seamless, regional 2km). Keyed by the deduped model set.
         resolution_mix_hash = _json_hash(
-            {"models": sorted(used_models), "regional": sorted(fused.regional_models)}
+            {
+                "models": sorted(used_models),
+                "regional": sorted(fused.regional_models),
+                "source_clock_one_scheme": _source_clock_payload is not None,
+            }
         )
 
         # BLOCKER 5: the raw_model_forecast_ids this q was fused from = the persisted current
@@ -1528,6 +1713,7 @@ def _replacement_bayes_precision_fusion_override(
         anchor_row = persisted_current.get(_ANCHOR)
         if anchor_row is not None:
             dep_ids.add(int(anchor_row[1]))
+        dep_ids.update(_source_clock_dep_ids)
         raw_model_forecast_ids = tuple(sorted(dep_ids))
 
         # BLOCKER 3: declare the ifs025->ifs9 anchor bridge provenance (applied when the anchor
@@ -1565,21 +1751,27 @@ def _replacement_bayes_precision_fusion_override(
                 except statistics.StatisticsError:
                     _sigma_resid = 1.5
         predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
+        if _source_clock_predictive_sigma_c is not None:
+            predictive_sigma_c = float(_source_clock_predictive_sigma_c)
 
         # Task #32 follow-up (brand law): per-instrument serving provenance for the FUSED set.
         # served_current is the single-authority serving map (read_current_instrument_values);
         # restricting to used_models keeps the record scoped to what actually entered the q. A
         # previous_runs substitution surfaces here as served_via="previous_runs" — never silent.
-        _current_value_serving = {
-            m: served_current[m].as_provenance()  # type: ignore[union-attr]
-            for m in used_models
-            if m in served_current
-        } or None
+        _current_value_serving = (
+            _source_clock_current_value_serving
+            if _source_clock_current_value_serving
+            else {
+                m: served_current[m].as_provenance()  # type: ignore[union-attr]
+                for m in used_models
+                if m in served_current
+            }
+        ) or None
 
         return _BayesPrecisionFusionFusionOverride(
             anchor_value_c=_mu_diagonal,
-            anchor_sigma_c=float(fused.sd),
-            method=fused.method,
+            anchor_sigma_c=float(_source_clock_center_sigma_c if _source_clock_center_sigma_c is not None else fused.sd),
+            method="SOURCE_CLOCK_FIXED_WEIGHT" if _source_clock_payload is not None else fused.method,
             used_models=used_models,
             model_set_hash=model_set_hash,
             resolution_mix_hash=resolution_mix_hash,
@@ -1597,6 +1789,7 @@ def _replacement_bayes_precision_fusion_override(
             precision_center_basis=_precision_center_basis or None,
             precision_basis_hash=_precision_basis_hash,
             cold_start_excluded_models=_cold_start_excluded,
+            source_clock_one_scheme=_source_clock_payload,
         )
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
@@ -2739,6 +2932,11 @@ def _compute_posterior_payload(
             "current_value_serving": (
                 {m: dict(v) for m, v in bayes_precision_fusion_override.current_value_serving.items()}
                 if bayes_precision_fusion_override.current_value_serving
+                else None
+            ),
+            "source_clock_one_scheme": (
+                dict(bayes_precision_fusion_override.source_clock_one_scheme)
+                if bayes_precision_fusion_override.source_clock_one_scheme
                 else None
             ),
             # Cold-start guard provenance (Finding 1, 2026-06-22): models excluded from the

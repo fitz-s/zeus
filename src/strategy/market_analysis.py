@@ -43,7 +43,6 @@ from src.signal.forecast_uncertainty import (
 from src.strategy.market_fusion import (
     LEGACY_POSTERIOR_MODE,
     MODEL_ONLY_POSTERIOR_MODE,
-    MarketPriorDistribution,
     PosteriorMode,
     compute_posterior,
 )
@@ -197,7 +196,6 @@ class MarketAnalysis:
         buy_no_quote_available: np.ndarray | None = None,
         executable_mask: np.ndarray | None = None,
         posterior_mode: PosteriorMode = MODEL_ONLY_POSTERIOR_MODE,
-        market_prior: MarketPriorDistribution | None = None,
         allow_legacy_quote_prior: bool = False,
         *,
         forecast_sharpness: "ForecastSharpnessEvidence | None" = None,  # Wave-1 2026-06-12: gate DELETED. Param retained as an inert provenance carrier (callers still pass exempt evidence); it no longer vetoes any edge. Sharpness, if ever wanted, belongs inside calibrated q — never as an emit veto.
@@ -234,7 +232,6 @@ class MarketAnalysis:
         self.market_complete = market_complete
         self._alpha = alpha
         self._posterior_mode = posterior_mode
-        self._market_prior = market_prior
         self._allow_legacy_quote_prior = allow_legacy_quote_prior
         self.p_posterior = self._compute_posterior(self.p_cal)
         self.vig = None if self.p_market is None else float(self.p_market.sum())
@@ -369,14 +366,14 @@ class MarketAnalysis:
 
     def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
         if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
-            market_prior = None
+            posterior_input = None
         elif self._posterior_mode == LEGACY_POSTERIOR_MODE:
-            market_prior = self.p_market
+            posterior_input = self.p_market
         else:
-            market_prior = self._market_prior
+            posterior_input = None
         return compute_posterior(
             p_cal,
-            market_prior,
+            posterior_input,
             self._alpha,
             bins=self.bins,
             posterior_mode=self._posterior_mode,

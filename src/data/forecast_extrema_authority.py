@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A;
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-A;
 #   PR #309 bundle-layer follow-up §2 (NULL fail-closed);
 #   p0-2-hardening-20260523: missing/unknown data_version now fail-closed (UNKNOWN), not legacy-passthrough.
 """Forecast extrema authority classifier.

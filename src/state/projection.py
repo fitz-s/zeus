@@ -5,7 +5,7 @@ import sqlite3
 from src.architecture.decorators import capability
 
 
-POSITION_EVENT_ENVS = ("live", "test", "replay", "backtest", "shadow")
+POSITION_EVENT_ENVS = ("live", "test", "replay", "backtest")
 
 
 CANONICAL_POSITION_CURRENT_COLUMNS = (
@@ -55,7 +55,7 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "fill_authority",
     "recovery_authority",
     "chain_shares",
-    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
     # economics on position_current so balance-only rescued positions
     # survive daemon restart with the right exposure on
     # `Position.effective_exposure()`. ALTER TABLE ADD COLUMN is additive

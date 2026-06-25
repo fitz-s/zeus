@@ -190,7 +190,7 @@ modules:
       - tests/strategy/live_inference/test_no_trade_regret.py
       - tests/analysis/test_event_opportunity_report.py
       - tests/money_path/test_edli_online_invariants.py
-      - tests/money_path/test_edli_live_canary.py
+      - tests/money_path/test_edli_live_readiness.py
       - tests/money_path/test_edli_order_lifecycle.py
       - tests/state/test_edli_table_ownership.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
@@ -217,6 +217,8 @@ modules:
       - src/data/release_calendar.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
+      - src/data/openmeteo_model_updates.py
+      - src/data/source_clock_update_probe.py
     public_entry_files:
       - src/data/daily_obs_append.py
       - src/data/daily_observation_writer.py
@@ -228,6 +230,8 @@ modules:
       - src/data/release_calendar.py
       - src/data/market_scanner.py
       - src/data/polymarket_client.py
+      - src/data/openmeteo_model_updates.py
+      - src/data/source_clock_update_probe.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/city_truth_contract.yaml
@@ -249,6 +253,7 @@ modules:
       - tests/test_hourly_clients_parse.py
       - tests/test_v2_adapter.py
       - tests/test_release_calendar.py
+      - tests/data/test_openmeteo_model_updates.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   execution:
@@ -440,13 +445,14 @@ modules:
       - src/strategy/market_fusion.py
       - src/strategy/selection_family.py
       - src/strategy/benchmark_suite.py
+      - src/strategy/live_inference/source_clock_vnext.py
+      - src/strategy/live_inference/source_clock_city_weights.py
     public_entry_files:
       - src/strategy/market_analysis.py
       - src/strategy/fdr_filter.py
       - src/strategy/kelly.py
       - src/strategy/benchmark_suite.py
       - src/strategy/data_lake.py
-      - src/strategy/candidates/__init__.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -457,6 +463,8 @@ modules:
       - tests/test_fdr.py
       - tests/test_kelly.py
       - tests/test_kelly_cascade_bounds.py
+      - tests/strategy/live_inference/test_source_clock_vnext.py
+      - tests/strategy/live_inference/test_source_clock_city_weights.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   riskguard:

@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (Finding 4, PR A scaffold; flipped by PR D)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (Finding 4, PR A scaffold; flipped by PR D)
 """Antibody invariants: `get_open_positions(chain_view=...)` is PURE.
 
 Finding 4 (P1 confirmed bug): src/state/portfolio.py:get_open_positions

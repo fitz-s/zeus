@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-06-13
 # Authority basis: docs/operations/task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md §2 + §6.P2 (v3 per §0.1); docs/operations/task_2026-05-21_live_release_proof_p0p3/task.md P2-1.
-# 2026-06-13 add: family_venue_closed (warm-lane venue-close skip authority) — docs/operations/live_inventory_warm_skip_2026-06-13.md.
+# 2026-06-13 add: family_venue_closed (warm-lane venue-close skip authority) — docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md.
 """``MarketPhase`` axis — market-time lifecycle of a Polymarket weather market.
 
 Per PLAN_v3 §2 (axis A), ``MarketPhase`` is computed from

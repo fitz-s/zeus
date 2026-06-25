@@ -49,7 +49,6 @@ def _make_profile(
         metric_support={},
         kelly_default_multiplier=0.0,
         kelly_phase_overrides={},
-        min_shadow_decisions=0,
         min_settled_decisions=0,
         promotion_evidence_ref=None,
         evidence_tier=evidence_tier,
@@ -110,9 +109,9 @@ def test_t1_is_runtime_live_limited_haircut() -> None:
     assert p.is_runtime_live() is True
 
 
-def test_t1_is_runtime_live_shadow_pass_blocked() -> None:
-    """live_status=live + SHADOW_PASS (tier 3 < 5) → is_runtime_live False."""
-    p = _make_profile("live", EvidenceTier.SHADOW_PASS)
+def test_t1_is_runtime_live_replay_pass_blocked() -> None:
+    """live_status=live + REPLAY_PASS (tier 2 < 5) -> is_runtime_live False."""
+    p = _make_profile("live", EvidenceTier.REPLAY_PASS)
     assert p.is_runtime_live() is False
 
 
@@ -122,15 +121,15 @@ def test_t1_is_runtime_live_idea_blocked() -> None:
     assert p.is_runtime_live() is False
 
 
-def test_t1_is_runtime_live_shadow_status_blocked() -> None:
-    """live_status=shadow + LIVE_NORMAL → is_runtime_live False (live_status gate)."""
-    p = _make_profile("shadow", EvidenceTier.LIVE_NORMAL)
+def test_t1_is_runtime_live_blocked_status_blocked() -> None:
+    """live_status=blocked + LIVE_NORMAL → is_runtime_live False (live_status gate)."""
+    p = _make_profile("blocked", EvidenceTier.LIVE_NORMAL)
     assert p.is_runtime_live() is False
 
 
-def test_t1_is_runtime_live_shadow_status_with_shadow_pass() -> None:
-    """live_status=shadow + SHADOW_PASS → is_runtime_live False."""
-    p = _make_profile("shadow", EvidenceTier.SHADOW_PASS)
+def test_t1_is_runtime_live_blocked_status_with_replay_pass() -> None:
+    """live_status=blocked + REPLAY_PASS -> is_runtime_live False."""
+    p = _make_profile("blocked", EvidenceTier.REPLAY_PASS)
     assert p.is_runtime_live() is False
 
 
@@ -149,7 +148,7 @@ def test_t1_loader_unknown_tier_raises(tmp_path) -> None:
     yaml_content = """\
 test_strategy:
   thesis: test
-  live_status: shadow
+  live_status: blocked
   evidence_tier: BOGUS_TIER
   evidence_tier_required_for_live: LIVE_PILOT_TINY
   promotion_blockers: []
@@ -163,7 +162,6 @@ test_strategy:
     low:  blocked
   kelly_default_multiplier: 0.0
   kelly_phase_overrides: {}
-  min_shadow_decisions: 0
   min_settled_decisions: 0
   promotion_evidence_ref: null
 """
@@ -184,7 +182,7 @@ def test_t1_live_registry_settlement_capture_live_normal() -> None:
     assert profile.is_runtime_live() is True
 
 
-def test_t1_live_registry_shoulder_sell_shadow_pass() -> None:
+def test_t1_live_registry_shoulder_sell_blocked() -> None:
     """D6 (2026-05-22): shoulder_sell REFUTED — evidence_tier demoted to IDEA,
     live_status=blocked, is_runtime_live=False."""
     profile = get("shoulder_sell")

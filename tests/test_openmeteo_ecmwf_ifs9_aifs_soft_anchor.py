@@ -1,10 +1,10 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect Open-Meteo ECMWF IFS 9km + AIFS sampled-2t soft-anchor posterior and shadow veto semantics.
+# Purpose: Protect Open-Meteo ECMWF IFS 9km + AIFS sampled-2t soft-anchor posterior semantics.
 # Reuse: Run before wiring or changing replacement soft-anchor posterior logic.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow integration.
-"""Soft-anchor posterior and guardrail tests."""
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked-candidate integration.
+"""Soft-anchor posterior tests."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from src.strategy.openmeteo_ecmwf_ifs9_aifs_soft_anchor import (
     ProbabilityBin,
     SoftAnchorConfig,
     anchor_sigma_to_celsius,
-    apply_shadow_veto_guardrail,
     build_source_disagreement_sigma_widening,
     build_soft_anchor_posterior,
     selected_bin,
@@ -41,7 +40,7 @@ def test_soft_anchor_posterior_uses_aifs_prior_and_anchor_likelihood() -> None:
 
     assert posterior.source_id == SOURCE_ID
     assert posterior.product_id == PRODUCT_ID
-    assert posterior.trade_authority_status == "SHADOW_ONLY"
+    assert posterior.trade_authority_status == "BLOCKED"
     assert posterior.training_allowed is False
     assert sum(posterior.probabilities.values()) == pytest.approx(1.0)
     assert posterior.anchor_likelihood["warm"] > posterior.anchor_likelihood["middle"] > posterior.anchor_likelihood["cold"]
@@ -142,40 +141,6 @@ def test_source_disagreement_zero_distance_does_not_tighten_anchor_sigma() -> No
     assert diagnostic.widened_anchor_sigma_c == pytest.approx(3.0)
     assert diagnostic.sigma_widened is False
     assert diagnostic.reason_codes == ("SOFT_ANCHOR_SOURCE_DISAGREEMENT_NO_WIDENING",)
-
-
-def test_shadow_guardrail_never_raises_q_lcb_kelly_or_flips_direction() -> None:
-    guardrail = apply_shadow_veto_guardrail(
-        baseline_direction="buy_yes:cold",
-        candidate_direction="buy_yes:warm",
-        baseline_q_lcb=0.62,
-        candidate_q_lcb=0.70,
-        baseline_kelly_fraction=0.04,
-        candidate_kelly_fraction=0.10,
-    )
-
-    assert guardrail.allowed_direction == "buy_yes:cold"
-    assert guardrail.allowed_q_lcb == pytest.approx(0.62)
-    assert guardrail.allowed_kelly_fraction == pytest.approx(0.04)
-    assert guardrail.veto is True
-    assert guardrail.reasons == ("SOFT_ANCHOR_DIRECTION_DISAGREEMENT",)
-
-
-def test_shadow_guardrail_reduces_confidence_when_candidate_is_weaker() -> None:
-    guardrail = apply_shadow_veto_guardrail(
-        baseline_direction="buy_yes:middle",
-        candidate_direction="buy_yes:middle",
-        baseline_q_lcb=0.66,
-        candidate_q_lcb=0.55,
-        baseline_kelly_fraction=0.06,
-        candidate_kelly_fraction=0.02,
-    )
-
-    assert guardrail.allowed_direction == "buy_yes:middle"
-    assert guardrail.allowed_q_lcb == pytest.approx(0.55)
-    assert guardrail.allowed_kelly_fraction == pytest.approx(0.02)
-    assert guardrail.veto is True
-    assert guardrail.reasons == ("SOFT_ANCHOR_LOWER_Q_LCB", "SOFT_ANCHOR_LOWER_KELLY")
 
 
 def test_soft_anchor_rejects_bad_inputs_and_transcript_shorthand() -> None:

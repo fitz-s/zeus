@@ -1,4 +1,4 @@
-"""Guardrail-bucket shadow reports for replacement forecast replay evidence."""
+"""Guardrail-bucket blocked reports for replacement forecast replay evidence."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def _bucket(axis: AxisName, value: str, rows: tuple[ReplacementForecastGuardrail
         reasons.append("REPLACEMENT_GUARDRAIL_BUCKET_INSUFFICIENT_ROWS")
     if net_delta < 0.0:
         reasons.append("REPLACEMENT_GUARDRAIL_BUCKET_NEGATIVE_AFTER_COST_DELTA")
-    status = "PASS" if not reasons else ("REGRESSION" if net_delta < 0.0 and scored else "SHADOW_ONLY")
+    status = "PASS" if not reasons else ("REGRESSION" if net_delta < 0.0 and scored else "BLOCKED")
     return ReplacementForecastGuardrailBucket(
         axis=axis,
         value=value,
@@ -139,7 +139,7 @@ def build_replacement_forecast_guardrail_report(
     axes: tuple[AxisName, ...] = DEFAULT_AXES,
     min_scored_rows_per_bucket: int = 2,
 ) -> ReplacementForecastGuardrailReport:
-    """Build a bucketed shadow report that cannot hide regression clusters."""
+    """Build a bucketed blocked report that cannot hide regression clusters."""
 
     if min_scored_rows_per_bucket <= 0:
         raise ValueError("min_scored_rows_per_bucket must be positive")
@@ -180,7 +180,7 @@ def build_replacement_forecast_guardrail_report(
         reasons.append("REPLACEMENT_GUARDRAIL_UNRESOLVED_REGRESSION_CLUSTERS")
     if not scored_rows:
         reasons.append("REPLACEMENT_GUARDRAIL_REPORT_NO_SCORED_ROWS")
-    status = "PASS" if not reasons else "SHADOW_ONLY"
+    status = "PASS" if not reasons else "BLOCKED"
     if not scored_rows:
         status = "BLOCKED"
     return ReplacementForecastGuardrailReport(

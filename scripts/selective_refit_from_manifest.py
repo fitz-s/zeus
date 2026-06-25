@@ -6,7 +6,7 @@
 # Authority basis: operator adjudication 2026-05-27/28 — selective (NOT full) rebuild
 #   driven by the row-action manifest. p_raw is cohort-local: only cohorts whose
 #   error-model params changed need MC regeneration. See
-#   docs/operations/FULL_TRANSPORT_DOMAIN_REVALIDATION_2026-05-27.md.
+#   docs/archive/2026-Q2/operations_historical/FULL_TRANSPORT_DOMAIN_REVALIDATION_2026-05-27.md.
 """Selective full_transport refit/regenerate driver (manifest-driven).
 
 Reads ``ROW_ACTION_MANIFEST_2026-05-27.csv`` (per-row action class A-E) and emits —
@@ -36,7 +36,7 @@ USAGE
 ─────
     # plan only (default)
     python scripts/selective_refit_from_manifest.py \
-        --manifest docs/operations/ROW_ACTION_MANIFEST_2026-05-27.csv \
+        --manifest docs/archive/2026-Q2/operations_historical/ROW_ACTION_MANIFEST_2026-05-27.csv \
         --db /tmp/scratch_refit.db
 
     # execute (frozen source + live paused)

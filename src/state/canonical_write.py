@@ -183,7 +183,7 @@ def transition_phase(
             "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
         }
         env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest", "shadow"}:
+        if env not in {"live", "test", "replay", "backtest"}:
             env = "live"
         event = {
             "event_id": f"{trade_id}:phase_transition:{sequence_no}",

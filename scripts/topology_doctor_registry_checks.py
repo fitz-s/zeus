@@ -360,7 +360,7 @@ def check_root_and_state_classification(api: Any, topology: dict[str, Any]) -> l
     return issues
 
 
-def check_shadow_authority_references(api: Any) -> list[Any]:
+def check_runtime_auxiliary_authority_references(api: Any) -> list[Any]:
     issues = []
     scan_roots = [api.ROOT / "AGENTS.md", api.ROOT / "workspace_map.md", api.ROOT / "docs"]
     for root in scan_roots:
@@ -378,9 +378,9 @@ def check_shadow_authority_references(api: Any) -> list[Any]:
                 ):
                     issues.append(
                         api._issue(
-                            "shadow_runtime_authority_reference",
+                            "runtime_authority_reference",
                             f"{rel}:{lineno}",
-                            "runtime/shadow path is referenced in an active-authority context",
+                            "runtime auxiliary path is referenced in an active-authority context",
                         )
                     )
     return issues
@@ -415,7 +415,7 @@ def run_strict(api: Any) -> Any:
     issues.extend(check_archive_interface(api, topology))
     issues.extend(api._check_hidden_docs(topology))
     issues.extend(api._check_root_and_state_classification(topology))
-    issues.extend(api._check_shadow_authority_references())
+    issues.extend(api._check_runtime_auxiliary_authority_references())
     issues.extend(api._check_wmo_gate())
     issues.extend(api.run_task_boot_profiles().issues)
     issues.extend(api.run_fatal_misreads().issues)
@@ -447,5 +447,5 @@ def run_docs(api: Any) -> Any:
     issues.extend(api._check_broken_internal_paths())
     issues.extend(api._check_active_operations_registry(topology))
     issues.extend(api._check_config_agents_volatile_facts())
-    issues.extend(api._check_shadow_authority_references())
+    issues.extend(api._check_runtime_auxiliary_authority_references())
     return api.StrictResult(ok=not issues, issues=issues)

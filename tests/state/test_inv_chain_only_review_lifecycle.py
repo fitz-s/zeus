@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-refactor-part2-findings.md (Finding D1)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md (Finding D1)
 """Antibody invariants: `ChainOnlyFact` carries a typed review lifecycle.
 
 Finding D1 (P1/P2, Part-2 audit 2026-05-27): PR C2/E2 in PR #347

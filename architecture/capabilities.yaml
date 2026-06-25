@@ -344,7 +344,7 @@ capabilities:
       blocked_when: []
     hard_kernel_paths:
       - docs/operations/AGENTS.md
-      - docs/operations/LIVE_LAUNCH_HANDOFF.md
+      - docs/archive/2026-Q2/operations_historical/LIVE_LAUNCH_HANDOFF.md
       - architecture/invariants.yaml
       - architecture/source_rationale.yaml
     original_intent:

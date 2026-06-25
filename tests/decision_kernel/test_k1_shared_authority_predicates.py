@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-10
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K1.3
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K1.3
 # (twin-authority elimination: maturity ALT tuple verifier L945 + compiler L582 must be
 # ONE shared constant + ONE shared predicate; divergent carve-out tuples caused 53/h
 # false rejects when FUSED_BOOTSTRAP was added to one side only — CERT BRIDGE 2026-06-10).

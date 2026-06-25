@@ -1249,6 +1249,55 @@ def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):
     assert summary["snapshot_capture_reserve_seconds"] == pytest.approx(BUDGET_SECONDS - 0.05)
 
 
+def test_batch_capable_warm_lane_defers_missing_books_without_per_token_fallback(monkeypatch):
+    """A partial/failed /books response must not degrade into serial /book reads.
+
+    Live root cause (2026-06-25): the warm lane had a tiny batch-prefetch window,
+    but missing batch entries still fell back to per-token ``GET /book`` inside
+    capture. A single slow/partial batch could therefore become dozens of blocking
+    HTTP calls and starve the next 100+ pending families. Batch-capable substrate
+    refresh now skips those missing books for this tick; the next scheduled tick
+    retries with fresh CLOB evidence.
+    """
+
+    market = _make_market("Shanghai", 1, metric="highest")
+
+    class _Clob:
+        def __init__(self):
+            self.book_get_calls = 0
+
+        def get_orderbook_snapshots(self, token_ids):
+            return {}
+
+        def get_orderbook_snapshot(self, token_id):
+            self.book_get_calls += 1
+            raise AssertionError("batch-capable warm lane must not fall back to per-token /book")
+
+    clob = _Clob()
+    conn = _make_in_memory_trade_db()
+    capture_calls: list[str] = []
+
+    def _capture(*_args, **_kwargs):
+        capture_calls.append("capture")
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=6.0,
+            max_outcomes=0,
+        )
+
+    assert capture_calls == []
+    assert clob.book_get_calls == 0
+    assert summary["attempted"] == 0
+    assert summary["prefetch_missing_skipped"] == summary["selected_executable_snapshot_count"]
+    assert summary["prefetch_missing_skipped"] > 0
+
+
 def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
     """PER-TOKEN STORM FIX boundary antibody: the FIRST POST /books chunk always
     fires (it replaces the per-token GET storm), while the SECOND-and-later chunks
@@ -1259,7 +1308,7 @@ def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
     gate INTO the chunk loop and exempts chunk 0, so:
       * no deadline                -> every chunk fires (unchanged)
       * deadline already in the past -> chunk 0 STILL fires (one POST, no storm);
-        chunks 1+ are skipped and their tokens fall back per-token inside capture.
+        chunks 1+ are skipped and retried by a later warm tick.
 
     Driven directly against ``_prefetch_selected_orderbooks`` with a tiny chunk
     size so a small token set spans multiple chunks. RED-on-revert: restoring the
@@ -1300,7 +1349,7 @@ def test_prefetch_first_chunk_always_fires_chunk2plus_budget_gated(monkeypatch):
         "first chunk MUST always fire (one POST /books replaces the per-token GET "
         f"storm); got {len(chunk_calls)} chunks"
     )
-    assert len(books) == 2  # only the first chunk's tokens; the rest fall back per-token
+    assert len(books) == 2  # only the first chunk's tokens; the rest retry later
 
 
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):

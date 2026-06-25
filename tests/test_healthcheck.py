@@ -879,9 +879,9 @@ def test_launchd_contracts_reject_live_trading_shadow_env(monkeypatch, tmp_path)
 
     assert result["ok"] is False
     live_item = next(item for item in result["items"] if item["label"] == "com.zeus.live-trading")
-    assert "live_trading_shadow_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW" in live_item["issues"]
+    assert "live_trading_non_submit_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW" in live_item["issues"]
     assert (
-        "loaded_live_trading_shadow_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW"
+        "loaded_live_trading_non_submit_env_present:ZEUS_OPPORTUNITY_BOOK_SHADOW"
         in live_item["issues"]
     )
 
@@ -988,11 +988,6 @@ def test_live_process_loaded_code_surface_includes_recovery_and_m5_paths():
     assert "src/execution/exchange_reconcile.py" in live_paths
     assert "src/strategy/selection_family.py" in live_paths
     assert "src/strategy/family_exclusive_dedup.py" in live_paths
-    assert "src/strategy/candidates/__init__.py" in live_paths
-    assert "src/strategy/candidates/liquidity_provision_with_heartbeat.py" in live_paths
-    assert "src/strategy/candidates/resolution_window_maker.py" in live_paths
-    assert "src/strategy/candidates/stale_quote_detector.py" in live_paths
-    assert "src/strategy/candidates/weather_event_arbitrage.py" in live_paths
 
 
 def test_settlement_truth_status_rejects_stale_settled_at(tmp_path):
@@ -1191,8 +1186,8 @@ def test_forecast_posteriors_schema_status_rejects_missing_runtime_layer(
         """
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED', 'BLOCKED'))
         )
         """
     )

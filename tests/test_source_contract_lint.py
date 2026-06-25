@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
-# Purpose: Tests for the 6 inter-registry coherence assertions incl. mx2t3/mx2t6 drift xfail.
+# Purpose: Tests for inter-registry coherence assertions incl. mx2t3/mx2t6 drift xfail.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
 # Last reused or audited: 2026-05-24
@@ -59,36 +59,6 @@ def test_calendar_in_data_sources_registry() -> None:
         "Expected lint to report 'tigge' (calendar) vs 'tigge_mars' (registry) drift, "
         f"but got findings: {findings}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Test 4: partial_policy=SHADOW_ONLY ⇒ live_authorization=false
-# (Assertion 3 in lint)
-# ---------------------------------------------------------------------------
-
-def test_shadow_partial_policy_implies_not_live_authorization() -> None:
-    """Relationship: calendar entries with partial_policy=SHADOW_ONLY must not
-    carry live_authorization=true. Verifies the lint detects violations.
-
-    Today's calendar is clean on this; this test asserts zero violations.
-    """
-    from scripts.source_contract_lint import run_assertion_3_shadow_implies_not_live
-
-    findings = run_assertion_3_shadow_implies_not_live()
-
-    # Verify no violations exist in current calendar
-    violations = [f for f in findings if f.get("level") == "violation"]
-    assert len(violations) == 0, (
-        f"Calendar has SHADOW_ONLY entries with live_authorization=true: {violations}"
-    )
-
-    # Structural: every SHADOW_ONLY entry in calendar must have live_authorization=false
-    entries = _load_calendar()
-    shadow_entries = [e for e in entries if e.get("partial_policy") == "SHADOW_ONLY"]
-    for entry in shadow_entries:
-        assert entry.get("live_authorization") is False or entry.get("live_authorization") == False, (
-            f"calendar_id={entry['calendar_id']!r}: SHADOW_ONLY must have live_authorization=false"
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 # Authority basis: OPERATOR LAW 2026-06-12 "没有一个人可以在没有数学支持下决定一个 hard coded value" —
 #   the σ-scale correction k (and the uniform-mixture weight w) must be FITTED by maximum likelihood,
 #   never operator-picked or hardcoded. Supersedes the settings key `replacement_sigma_scale_k_c`.
-#   Data + model basis: docs/operations/c3_sigma_calibration_surface_2026-06-12.md (the replacement
+#   Data + model basis: docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md (the replacement
 #   posterior is ~2.5x too peaked for C cities; a scaled Normal alone cannot fit all distances because
 #   realized frequency is nearly FLAT across d=0,1,2 — so we fit a Normal(σ·k) ⊕ Uniform(w) mixture).
 #   Precedent pattern: scripts/fit_settlement_sigma_floor.py (#20) — fit script is the artifact's ONLY

@@ -356,3 +356,27 @@ def test_refresh_budget_fits_inside_warm_interval(monkeypatch):
     assert interval_s <= 30.0, (
         f"warm interval {interval_s}s exceeds the 30s executable-price freshness window"
     )
+
+
+def test_substrate_clob_timeout_is_short_and_independent_of_discovery(monkeypatch):
+    """Background substrate refresh must not inherit the long discovery CLOB timeout.
+
+    The warm lane retries continuously and must stay inside its 20s cadence.
+    ``ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS`` is allowed to be longer for broad
+    discovery, but it must not make pending-family /books or targeted decision
+    refresh block most of a live cycle.
+    """
+
+    import src.data.substrate_observer as substrate_observer
+    import src.main as main_module
+
+    monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "9.0")
+    monkeypatch.delenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", raising=False)
+
+    assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(1.5)
+    assert main_module._substrate_clob_timeout_seconds() == pytest.approx(1.5)
+
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "2.25")
+
+    assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(2.25)
+    assert main_module._substrate_clob_timeout_seconds() == pytest.approx(2.25)

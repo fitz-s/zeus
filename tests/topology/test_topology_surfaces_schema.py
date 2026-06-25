@@ -163,7 +163,7 @@ def test_fc_coverage_minimum(surfaces: dict) -> None:
         "forecast_live_daemon",        # FC-06
         "day0_observation_reader",     # FC-07
         "db_schema_authority",         # FC-08
-        "topology_v_next",             # FC-09 (stdlib shadow)
+        "topology_v_next",             # FC-09 (stdlib name collision)
         "review_scope_collect",        # FC-10
     }
     missing = must_exist - set(surfaces["surfaces"])

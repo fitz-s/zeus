@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-refactor-part2-findings.md (Finding D2-wire)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-refactor-part2-findings.md (Finding D2-wire)
 """Antibody invariants: harvester learning writer joins position_current.fill_authority.
 
 Finding D2-wire (P2, Part-2 audit 2026-05-27): PR D2 in PR #347 shipped

@@ -1,6 +1,6 @@
 # Created: 2026-05-23
 # Last reused or audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Unit tests for extended quarantine functions (PR-E) and downstream
 #          exclusion filters in evidence_report + refit_platt.
@@ -563,7 +563,7 @@ def test_promotion_readiness_excludes_quarantined_decisions():
 # ---------------------------------------------------------------------------
 
 def _make_regret_db() -> sqlite3.Connection:
-    """In-memory DB with decision_events + shadow_experiments + regret_decompositions + quarantine."""
+    """In-memory DB with decision_events + regret_decompositions + quarantine."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -586,17 +586,11 @@ def _make_regret_db() -> sqlite3.Connection:
         )
     """)
     conn.execute("""
-        CREATE TABLE shadow_experiments (
-            experiment_id TEXT PRIMARY KEY,
-            strategy_id TEXT NOT NULL,
-            cohort_tag TEXT,
-            immutable INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-    conn.execute("""
         CREATE TABLE regret_decompositions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            experiment_id TEXT NOT NULL,
+            experiment_id TEXT,
+            strategy_id TEXT NOT NULL,
+            cohort_tag TEXT NOT NULL DEFAULT '',
             decision_event_id TEXT NOT NULL,
             total_regret_usd REAL NOT NULL,
             computed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -623,15 +617,12 @@ def test_regret_decomposition_excludes_quarantined_rows():
                VALUES (?, 'high', '2026-05-22', ?, ?, ?, 'strat-B')""",
             (f"mkt-{i}", now, i, f"rde-evt-{i}"),
         )
-    conn.execute(
-        "INSERT INTO shadow_experiments (experiment_id, strategy_id) VALUES ('exp-1', 'strat-B')"
-    )
     # Both decisions have settled regret.
     for i in range(1, 3):
         conn.execute(
             """INSERT INTO regret_decompositions
-               (experiment_id, decision_event_id, total_regret_usd)
-               VALUES ('exp-1', ?, 1.0)""",
+               (experiment_id, strategy_id, cohort_tag, decision_event_id, total_regret_usd)
+               VALUES ('exp-1', 'strat-B', '', ?, 1.0)""",
             (f"rde-evt-{i}",),
         )
     conn.commit()

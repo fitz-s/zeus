@@ -2,16 +2,14 @@
 # Last reused or audited: 2026-05-06
 # Authority basis: IMPLEMENTATION_PLAN §6 days 56-60 (Gate 2);
 #                  ULTIMATE_DESIGN §5 Gate 2 phantom-type subsection;
-#                  RISK_REGISTER R3 mitigation (ABC split + @untyped_for_compat)
+#                  RISK_REGISTER R3 mitigation (LiveAuthToken + @untyped_for_compat)
 
-"""Gate 2: Type-time live/shadow separation.
+"""Gate 2: live execution token boundary.
 
 sunset_date: 2026-08-04  (90 days from authoring per ANTI_DRIFT_CHARTER §5)
 
 LiveAuthToken is an OPAQUE phantom type -- only LiveExecutor subclasses can
-construct one (via the _mint_token classmethod).  ShadowExecutor lives in
-shadow_executor.py and has no submit signature that accepts a token, making
-it structurally impossible to confuse live and shadow paths at type-check time.
+construct one (via the _mint_token classmethod).
 
 ritual_signal is emitted on:
   - each phantom token construction (_mint_token)
@@ -114,8 +112,7 @@ class LiveAuthToken:
 
     mypy / pyright: the submit(order, token: LiveAuthToken) signature in
     LiveExecutor ABC will produce a type error at any call site that does not
-    pass a correctly-typed token.  ShadowExecutor.submit has no token parameter
-    by design, making cross-path confusion a compile-time error.
+    pass a correctly-typed token.
 
     Trust boundary (OD-K0-1b 2026-05-06):
         The phantom catches accidental misuse — forgetting to mint a token,
@@ -172,7 +169,7 @@ class LiveExecutor(ABC):
     def _mint_token(cls) -> LiveAuthToken:
         """Construct a LiveAuthToken after all gate checks pass.
 
-        This is the ONLY sanctioned factory.  ShadowExecutor does not call it.
+        This is the ONLY sanctioned factory.
         ritual_signal is emitted on each construction.
         """
         issued_at = datetime.now(timezone.utc).isoformat()

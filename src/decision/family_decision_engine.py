@@ -224,7 +224,7 @@ NO_TRADE_NO_EXECUTABLE_ROUTE = "NO_EXECUTABLE_ROUTE_CANDIDATE"
 NO_TRADE_NO_DIRECTION_LAW = "NO_DIRECTION_LAW_CANDIDATE"
 NO_TRADE_MARKET_INCOHERENT = "MARKET_INCOHERENT_BLOCK_LIVE"
 NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
-# q_lcb empirical reliability guard (FINAL no-shadow execution flow §6): every candidate's
+# q_lcb empirical reliability guard (single-serving-rule flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
 NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE = (
@@ -734,7 +734,7 @@ class FamilyDecisionEngine:
             for d in enumerated
         )
 
-        # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (FINAL no-shadow flow §6) -----
+        # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
         # The RAW-honest serving rule: deflate each candidate's served q_lcb to
         # q_safe = min(band_q_lcb, L_g) and ABSTAIN (force a non-positive edge) when the
         # candidate's reliability cell (metric, lead_bucket, bin_position, q_lcb_bucket)
@@ -1279,7 +1279,7 @@ class FamilyDecisionEngine:
     ) -> tuple[CandidateDecision, ...]:
         """Deflate each candidate's served q_lcb by the empirical OOF reliability guard.
 
-        FINAL no-shadow execution flow §6. The candidate's served q_lcb (the route's robust
+        Single-serving-rule flow §6. The candidate's served q_lcb (the route's robust
         lower bound) is ``q_lcb_route = economics.edge_lcb + cost`` (because
         ``edge_lcb = quantile(samples @ payoff) − cost``). The guard resolves the cell
         ``(metric, lead_bucket, side, bin_position, q_lcb_bucket)`` — ``side`` is the actual

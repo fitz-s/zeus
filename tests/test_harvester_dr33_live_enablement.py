@@ -500,7 +500,6 @@ def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
     monkeypatch.setattr(hv, "_snapshot_contexts_for_market",
                         lambda *a, **kw: ([], []))
     monkeypatch.setattr(hv, "_settle_positions", _fake_settle)
-    monkeypatch.setattr(hv, "query_legacy_settlement_records", lambda *a, **kw: [])
     monkeypatch.setattr(hv, "store_settlement_records", lambda *a, **kw: None)
     monkeypatch.setattr(hv, "get_tracker", lambda: None)
     monkeypatch.setattr(hv, "save_tracker", lambda *a, **kw: None)

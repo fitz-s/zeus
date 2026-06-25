@@ -10,7 +10,7 @@
 #   Kelly. Same artifact-gated, FAIL-CLOSED posture as the σ-floor and the OOF guard — but stricter:
 #   ABSENT is NOT inert here. A missing/malformed/stale/under-min-N artifact emits NO new entries
 #   (q_safe=0, trade=False), NEVER a raw center-bootstrap q_lcb fallback.
-"""Selection-aware settlement q_lcb calibrator — the runtime serving rule (no shadow, no de-bias).
+"""Selection-aware settlement q_lcb calibrator — the runtime serving rule.
 
 THE CRUX (settlement-graded, 2026-06-22): the live book is net-negative because the admission gate
 ``q_lcb_side > price`` adversely-selects exactly the bins where the model most under-estimates the
@@ -657,7 +657,7 @@ def apply_selection_calibrator(
 #     )
 #
 # It returns the calibrated lower bound when the calibrator LICENSES the cell and 0.0 (no-trade)
-# when it fails closed. There is no shadow/default-off alias in the live seam: the artifact was
+# when it fails closed. There is no default-off alias in the live seam: the artifact was
 # promoted to runtime and absence/staleness/thinness must block entries rather than silently falling
 # back to the raw center-bootstrap bound.
 

@@ -5442,7 +5442,7 @@ def _build_event_bound_taker_quality_proof(
         maker_expected_profit_usd * min_profit_ratio,
         maker_expected_profit_usd + min_incremental_profit,
     )
-    # SHADOW-GATE COLLAPSE (2026-06-20, operator law = NO CAPS). The taker that
+    # EXTRA-GATE COLLAPSE (2026-06-20, operator law = NO CAPS). The taker that
     # reaches here is ALREADY admissible only when the settlement-conservative
     # after-cost law holds (fresh ask + fee <= q_lcb, i.e. taker_edge_dec >= 0 — the
     # same FIX-B bound the policy enforces at select_rest_then_cross_mode). The
@@ -10703,7 +10703,7 @@ def _family_rest_state(
     # (2026-06-21 GAP-4 fix): when an escalation is ARMED and this open rest was
     # posted (created_at) STRICTLY AFTER the arming cancellation, it is a
     # redundant SERIAL re-rest (real chain: 2-5 sequential cancelled rests per
-    # family) — it must NOT shadow the armed cross. Dropping unexpired_rest for it
+    # family) — it must NOT preempt the armed cross. Dropping unexpired_rest for it
     # lets `select_rest_then_cross_mode` reach the TAKER_ESCALATED_AFTER_REST lane
     # (line ~571) instead of being pre-empted by the HOLD antibody (line ~561).
     #
@@ -10734,7 +10734,7 @@ def _family_rest_state(
             and created_at > escalation_arm_time
         )
         if is_redundant_rerest:
-            # Post-escalation serial re-rest: do NOT let it shadow the armed cross.
+            # Post-escalation serial re-rest: do NOT let it preempt the armed cross.
             continue
         unexpired_rest = True
     return (unexpired_rest, escalated)
@@ -12572,7 +12572,7 @@ def _live_yes_probabilities(
 ]:
     # 2026-05-30: canonical kernel reconstructed (snapshot fetch + MarketAnalysis assembly +
     # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
-    # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
+    # tests/engine/test_event_reactor_no_bypass.py.
     # EDLI_REDECISION_PENDING routes through the SAME replacement→canonical forecast dispatch
     # (it is a fresh-price re-decision of a forecast family; the snapshot binding is identical).
     if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
@@ -12672,7 +12672,7 @@ def _live_yes_probabilities(
 
 # FIX 1 (2026-06-09) — replacement q-mode live eligibility gate. The materializer derives an
 # explicit `replacement_q_mode` into provenance_json (FUSED_NORMAL_FULL/PARTIAL,
-# ANCHOR_ONLY_CURRENT, SOFT_ANCHOR_FALLBACK, BAYES_PRECISION_FUSION_CAPTURE_MISSING,
+# ANCHOR_ONLY_CURRENT, FUSED_CENTER_ONLY_NORMAL, BAYES_PRECISION_FUSION_CAPTURE_MISSING,
 # FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY for fused Normal carriers with certified
 # q_lcb/q_ucb; this excludes legacy member-vote and anchor-only fallback rows. Missing BPF
 # current inputs must heal through the capture lane, not continue as a live single-anchor
@@ -12756,13 +12756,11 @@ def _replacement_family_coverage_verdict(
     lcb_by_direction,
     coverage_cache: dict | None = None,
 ):
-    """Settlement-backward coverage VERDICT for the family scope (flag-INDEPENDENT read).
+    """Settlement-backward coverage VERDICT for the family scope.
 
     The credential needs to know whether the settled record evaluated this scope and what
-    it said. The K3 module docstring is explicit: the live SHRINK is flag-gated, but the
-    VERDICT is observability — the ARM gate reads it UNCONDITIONALLY. We mirror that here:
-    compute the verdict regardless of ``q_lcb_settlement_coverage_gate_enabled`` (we never
-    move the live q_lcb — that stays the shrink helper's job).
+    it said. The ARM gate reads it unconditionally, and the shrink helper applies the same
+    verdict to the live q_lcb when the settled record proves overconfidence.
 
     Returns the family-representative ``CoverageVerdict`` (the buy_yes leg of the first
     candidate whose q_lcb is present), or ``None`` when the check could not run / the scope
@@ -12771,17 +12769,13 @@ def _replacement_family_coverage_verdict(
     (pr408 #1). Only a non-structural inability to even set up the check returns None
     (→ UNEVALUATED → blocked).
 
-    STRUCTURAL FAULT (pr408 #1 CRITICAL): when the coverage SAFETY gate is ON, a
-    read/parse/schema fault in the observation build must NOT collapse into INSUFFICIENT_DATA
-    or a swallowed None — it raises ``QLCB_COVERAGE_AUTHORITY_FAULT`` and is allowed to
-    PROPAGATE (fail closed). The per-candidate ``except`` below catches only NON-fault errors
-    (e.g. a single malformed candidate) so the scan can try the next candidate; a coverage
-    authority fault is re-raised.
+    STRUCTURAL FAULT (pr408 #1 CRITICAL): a read/parse/schema fault in the observation
+    build must NOT collapse into INSUFFICIENT_DATA or a swallowed None — it raises
+    ``QLCB_COVERAGE_AUTHORITY_FAULT`` and is allowed to PROPAGATE (fail closed). The
+    per-candidate ``except`` below catches only NON-fault errors (e.g. a single malformed
+    candidate) so the scan can try the next candidate; a coverage authority fault is
+    re-raised.
     """
-    # The fault distinction is live only when the coverage SAFETY gate is ON (same gate the
-    # shrink helper uses). With the gate OFF the observation build keeps its inert fail-open
-    # default, so a read fault → INSUFFICIENT_DATA → admitted-by-default (byte-identical today).
-    fail_closed = _q_lcb_settlement_coverage_gate_enabled()
     try:
         from src.calibration.qlcb_provenance import _qlcb_float
         from src.calibration.settlement_backward_coverage import (
@@ -12813,7 +12807,7 @@ def _replacement_family_coverage_verdict(
                 bin=bin_obj,
                 direction="buy_yes",
                 claimed_q_lcb=claimed,
-                fail_closed_on_fault=fail_closed,
+                fail_closed_on_fault=True,
                 coverage_cache=coverage_cache,
             )
             verdict = settlement_backward_coverage_check(
@@ -12879,14 +12873,11 @@ def _build_replacement_calibration_credential(
             shrink = float(coverage_verdict.q_lcb_in) - float(coverage_verdict.q_lcb_out)
         except (TypeError, ValueError):
             shrink = None
-        # pr408 #1 CRITICAL: an UNLICENSED verdict only LICENSES the credential when the shrink
-        # was ACTUALLY applied to the live leg — i.e. the coverage gate flag is ON (the only
-        # condition under which _maybe_apply_settlement_coverage_to_lcb mutated lcb_by_direction
-        # above) AND the verdict produced a real downward shrink (q_lcb_out < q_lcb_in). With the
-        # flag OFF the unshrunk overconfident bound would serve live, so it must NOT license.
+        # pr408 #1 CRITICAL: an UNLICENSED verdict only LICENSES the credential when
+        # the verdict produced a real downward shrink (q_lcb_out < q_lcb_in). A
+        # no-op UNLICENSED verdict would leave an overconfident bound serving live.
         shrink_applied = bool(
-            _q_lcb_settlement_coverage_gate_enabled()
-            and str(coverage_verdict.status) == "UNLICENSED"
+            str(coverage_verdict.status) == "UNLICENSED"
             and shrink is not None
             and shrink > 0.0
         )
@@ -13014,23 +13005,6 @@ def _replacement_calibration_payload_from_credential(
         "n_samples": n_samples,
         "authority": authority,
     }
-
-
-def _q_lcb_settlement_coverage_gate_enabled() -> bool:
-    """The K3 settlement-coverage SHRINK flag — the SINGLE read shared by the shrink helper
-    (_maybe_apply_settlement_coverage_to_lcb) and the credential's shrink_applied fact.
-
-    pr408 #1: an UNLICENSED verdict only LICENSES the live credential when the shrink was
-    ACTUALLY applied to the live leg, which happens iff THIS flag is ON (it is the only gate
-    under which _maybe_apply_settlement_coverage_to_lcb mutates lcb_by_direction). Reading the
-    flag the same way here keeps the two seams in lockstep. A config read fault keeps the OFF
-    default (no shrink applied → UNLICENSED does not license), matching the helper's behavior.
-    """
-    try:
-        return bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False))
-    except Exception:
-        return False
-
 
 def _replacement_authority_enabled() -> bool:
     try:
@@ -16303,8 +16277,8 @@ def _maybe_apply_settlement_coverage_to_lcb(
     Only UNLICENSED moves the number; the shrink only ever LOWERS the LCB. The new entry's
     calibration_source becomes SETTLEMENT_ISOTONIC.
 
-    FINDING-C FIX (external review 2026-06-12): when the GATE IS ON (live coverage
-    licensing), this is a SAFETY gate (it can only LOWER an unlicensed bound). Two
+    FINDING-C FIX (external review 2026-06-12): this is a live SAFETY gate
+    (it can only LOWER an unlicensed bound). Two
     outcomes were previously conflated under one fail-OPEN swallow:
       (1) "no historical coverage data" — settlement_backward_coverage_check returns a
           typed INSUFFICIENT_DATA VERDICT (NOT an exception); apply_settlement_coverage
@@ -16313,24 +16287,16 @@ def _maybe_apply_settlement_coverage_to_lcb(
       (2) "coverage AUTHORITY threw" — a structural fault (DB read error, grade_receipt
           crash, import/season failure). The prior code swallowed this and kept the
           UNSHRUNK upstream q_lcb: a SAFETY GATE FAILING OPEN in live sizing.
-    With the gate ON, a structural exception now FAILS CLOSED with the typed TRANSIENT
-    reason QLCB_COVERAGE_AUTHORITY_FAULT (registered in TRANSIENT_MONEY_PATH_REASONS):
+    A structural exception FAILS CLOSED with the typed TRANSIENT reason
+    QLCB_COVERAGE_AUTHORITY_FAULT (registered in TRANSIENT_MONEY_PATH_REASONS):
     the candidate requeues (the read re-runs clean next cycle) rather than sizing on the
     unshrunk, unlicensed bound. Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
     """
     import logging as _logging
 
-    try:
-        if not bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False)):
-            return
-    except Exception:
-        # The flag READ itself is not the coverage authority; a config read fault keeps
-        # the OFF default (no-op) rather than fabricating a live-gate fault.
-        return
-
     log = _logging.getLogger("zeus.qlcb_settlement_coverage")
-    # GATE IS ON past this point: the coverage authority is a live SAFETY gate, so any
-    # structural fault in it must fail CLOSED (never proceed on the unshrunk bound).
+    # The coverage authority is a live SAFETY gate, so any structural fault in it
+    # must fail CLOSED (never proceed on the unshrunk bound).
     try:
         from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
         from src.calibration.settlement_backward_coverage import (
@@ -16359,8 +16325,8 @@ def _maybe_apply_settlement_coverage_to_lcb(
                 continue
             try:
                 claimed = _qlcb_float(lcb_by_direction[key])
-                # Gate is ON here → a structural read/schema fault in the observation build
-                # raises QLCB_COVERAGE_AUTHORITY_FAULT (it no longer silently degrades to an
+                # A structural read/schema fault in the observation build raises
+                # QLCB_COVERAGE_AUTHORITY_FAULT (it no longer silently degrades to an
                 # empty stream → INSUFFICIENT_DATA, which would mask a broken read as thin
                 # data and serve the UNSHRUNK bound). pr408 #1 makes FINDING-C's intent real.
                 obs = _settlement_coverage_observations(
@@ -16377,7 +16343,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     city=family.city, metric=metric, season=season,
                     q_lcb=claimed, observations=obs, min_n=30,
                 )
-                new_q = apply_settlement_coverage(q_lcb=claimed, verdict=verdict, enabled=True)
+                new_q = apply_settlement_coverage(q_lcb=claimed, verdict=verdict)
                 if new_q != claimed:
                     _set_qlcb_provenance(
                         lcb_by_direction, key, new_q,

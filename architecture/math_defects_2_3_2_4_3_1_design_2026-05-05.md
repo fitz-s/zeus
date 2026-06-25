@@ -66,7 +66,6 @@ Phase β depends on Issue 2.2 X.2 OOS evaluator row coverage.
 ## Issue 2.3 — LOW track + missing-OK (SCOPE SHRUNK)
 
 ### Current state (already partially fixed — critic earlier verdict was literal-but-incomplete)
-- `bridge_oracle_to_calibration.py:81` `AND temperature_metric='high'` ✓
 - `oracle_penalty.py:472-478`: LOW → `METRIC_UNSUPPORTED` with `block_reason="LOW oracle bridge not yet shipped"`. `_BASE_MULTIPLIER[METRIC_UNSUPPORTED]=0.0` (line 105). **LOW Kelly mult = 0.0 = fail-closed.**
 - Lines 455-498: 4-tier resolution (METRIC_UNSUPPORTED → MALFORMED → MISSING → record-classify). Missing→OK defect IS closed.
 
@@ -75,8 +74,7 @@ Phase β depends on Issue 2.2 X.2 OOS evaluator row coverage.
 - HKO `CLMMINT` semantics may differ from `CLMMAXT` rounding/timing — mirror-HIGH symmetry intuition is wrong without listener audit.
 - Live LOW execution = 0 today (mult=0.0). Daemon LOCKED. Zero production loss waiting.
 
-### Phase α (NOW): docstring + invariant
-- `bridge_oracle_to_calibration.py:81` add docstring citing LOW listener gap + pointing at `oracle_penalty.py:472` as load-bearing fail-closed gate
+### Phase α (NOW): invariant
 - Test: `get_oracle_info(any_city, "low").penalty_multiplier == 0.0`
 
 ### Cross-deps: none

@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-24
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: ENS full_transport_v1 REFIT task 2026-05-24
-#   (docs/operations/ENS_REFIT_PLAN_2026-05-24.md).
+#   (docs/archive/2026-Q2/operations_historical/ENS_REFIT_PLAN_2026-05-24.md).
 # Purpose: Drive refit_all() against an isolated staging DB; rebuild-complete
 #   sentinel gate preserved; supports --error-model flag.
 # Reuse: Run after run_offline_calibration_rebuild.py completes.

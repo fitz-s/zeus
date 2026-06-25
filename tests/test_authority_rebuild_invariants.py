@@ -86,7 +86,6 @@ from src.state.paths import (
     oracle_artifact_heartbeat_path,
     oracle_data_dir,
     oracle_error_rates_path,
-    oracle_snapshot_dir,
     storage_root,
 )
 from src.strategy import oracle_penalty, strategy_profile
@@ -423,7 +422,6 @@ def test_I8_storage_root_override_redirects_every_oracle_path(monkeypatch, tmp_p
         oracle_artifact_heartbeat_path()
         == tmp_path.resolve() / "data" / "oracle_error_rates.heartbeat.json"
     )
-    assert oracle_snapshot_dir() == tmp_path.resolve() / "raw" / "oracle_shadow_snapshots"
 
 
 def test_I8_oracle_penalty_picks_up_storage_root_override(monkeypatch, tmp_path):

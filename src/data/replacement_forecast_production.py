@@ -369,6 +369,130 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
+def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+    cfg: dict[str, object],
+    *,
+    source_clock_report: object,
+) -> dict[str, object] | None:
+    """Fast source-clock current capture for only updated sources and affected cities.
+
+    This is the latency path.  It writes the live current ``single_runs`` rows
+    needed by the source-clock q kernel, but leaves the slower full-history
+    healing pass to the normal BPF downloader.
+    """
+    try:
+        if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
+            return None
+    except Exception:
+        return None
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
+    try:
+        from datetime import date  # noqa: PLC0415
+
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BayesPrecisionFusionDownloadTarget,
+            download_bayes_precision_fusion_extra_raw_inputs,
+        )
+        from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+        from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
+        from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at  # noqa: PLC0415
+
+        payload = source_clock_report.as_dict()
+        updated_sources = tuple(
+            str(source).strip()
+            for source in (payload.get("updated_sources") or getattr(source_clock_report, "updated_sources", ()) or ())
+            if str(source).strip()
+        )
+        affected_cities = tuple(
+            str(city).strip()
+            for city in (payload.get("affected_cities") or getattr(source_clock_report, "affected_cities", ()) or ())
+            if str(city).strip()
+        )
+        if not updated_sources:
+            return {"status": "SOURCE_CLOCK_BPF_SCOPED_NO_UPDATED_SOURCES"}
+        if not affected_cities:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_NO_AFFECTED_CITIES",
+                "updated_sources": updated_sources,
+            }
+
+        now = datetime.now(timezone.utc)
+        run_candidates: list[datetime] = []
+        try:
+            updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
+            for update in read_model_updates_jsonl(updates_path):
+                if str(update.model) not in updated_sources:
+                    continue
+                run_clock = update.to_source_run_clock()
+                if now >= source_publicly_usable_at(run_clock):
+                    run_candidates.append(update.last_run_initialisation_time.astimezone(timezone.utc))
+        except Exception:
+            run_candidates = []
+        cycle = max(run_candidates) if run_candidates else _probe_resolved_bayes_precision_fusion_extras_cycle()
+        if cycle is None:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_SKIP",
+                "updated_sources": updated_sources,
+                "affected_cities": affected_cities,
+            }
+
+        affected = set(affected_cities)
+        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        targets: list[BayesPrecisionFusionDownloadTarget] = []
+        for row in plan.rows:
+            if row.city not in affected:
+                continue
+            city_cfg = cities_by_name.get(row.city)
+            if city_cfg is None:
+                continue
+            try:
+                lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
+            except Exception:
+                lead_days = 0
+            targets.append(BayesPrecisionFusionDownloadTarget(
+                city=row.city,
+                metric=row.temperature_metric,
+                target_date=row.target_date,
+                lead_days=lead_days,
+                latitude=float(city_cfg.lat),
+                longitude=float(city_cfg.lon),
+                timezone_name=str(city_cfg.timezone),
+            ))
+        if not targets:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
+                "cycle": cycle.isoformat(),
+                "updated_sources": updated_sources,
+                "affected_cities": affected_cities,
+            }
+
+        report = download_bayes_precision_fusion_extra_raw_inputs(
+            forecast_db=Path(str(forecast_db)),
+            cycle=cycle,
+            targets=targets,
+            models=updated_sources,
+            include_previous_runs=False,
+            prune_after=False,
+            release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+        )
+        report["status"] = f"SOURCE_CLOCK_SCOPED_{report.get('status')}"
+        report["updated_sources"] = updated_sources
+        report["affected_cities"] = affected_cities
+        return report
+    except Exception as exc:  # noqa: BLE001 - source-clock fast capture must fail soft
+        logger.warning("source-clock scoped BPF capture skipped (fail-soft): %s", exc)
+        return {
+            "status": "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED",
+            "error": str(exc),
+        }
+
+
 _EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
 
 
@@ -695,7 +819,11 @@ def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | N
         return None
 
 
-def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+def _replacement_cycle_availability_poll_if_needed(
+    cfg: dict[str, object],
+    *,
+    source_clock_report: object | None = None,
+) -> dict[str, object] | None:
     """PROBE-RESOLVED raw-input fetch (operator directive 2026-06-11: automatic, ahead of
     need, no guessed numbers — K4.0b(a) availability-poll organ).
 
@@ -748,6 +876,23 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
         "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
         "legs_fetched": [],
     }
+    source_clock_updated = False
+    try:
+        if source_clock_report is None:
+            from src.data.source_clock_update_probe import (  # noqa: PLC0415
+                probe_openmeteo_source_clock_updates,
+            )
+
+            source_clock_report = probe_openmeteo_source_clock_updates()
+        source_clock_payload = source_clock_report.as_dict()
+        report["source_clock_status"] = source_clock_payload.get("status")
+        report["source_clock_updated_sources"] = source_clock_payload.get("updated_sources", [])
+        report["source_clock_affected_cities"] = source_clock_payload.get("affected_cities", [])
+        report["source_clock_error"] = source_clock_payload.get("error")
+        source_clock_updated = bool(source_clock_report.updated_sources)
+    except Exception as exc:  # noqa: BLE001 - source-clock probe must not break anchor polling
+        report["source_clock_status"] = "SOURCE_CLOCK_PROBE_FAILSOFT_SKIPPED"
+        report["source_clock_error"] = str(exc)[:200]
     if fetch_anchor_cycle is None:
         # Legs current — but do NOT return yet: the extras lane below must still run.
         # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
@@ -802,7 +947,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # fan-out re-resolves internally for its OWN target build; momentary disagreement costs at
     # most one benign extra pass and self-corrects next tick.
     _extras_cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
-    _should_run_extras = _extras_cycle_incomplete(cfg, _extras_cycle)
+    _should_run_extras = source_clock_updated or _extras_cycle_incomplete(cfg, _extras_cycle)
     if _should_run_extras:
         bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
         if bayes_precision_fusion_report is not None:
@@ -988,6 +1133,15 @@ def _replacement_forecast_download_cycle() -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
     cfg = _replacement_forecast_live_materialization_queue_config()
+    try:
+        from src.data.source_clock_update_probe import (  # noqa: PLC0415
+            probe_openmeteo_source_clock_updates,
+        )
+
+        source_clock_report = probe_openmeteo_source_clock_updates()
+        logger.info("source-clock model update probe report: %s", source_clock_report.as_dict())
+    except Exception as exc:  # noqa: BLE001 - source-clock metadata cannot kill raw downloads
+        logger.warning("source-clock model update probe skipped (fail-soft): %s", exc)
     download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
     if download_report is not None:
         _dl_status = download_report.get("status")

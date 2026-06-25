@@ -4,12 +4,12 @@
 #   (zeus_problematic20_best_sources_v4.csv; reconciliation
 #   docs/evidence/source_truth/problematic20_v4_reconciliation.md). Singapore
 #   (settlement station WSSS Changi) gains NEA data.gov.sg real-time air
-#   temperature as a HIGH-FREQUENCY day0 SHADOW / observation-likelihood
-#   covariate — NEVER a settlement replacement. API shape verified live
+#   temperature as high-frequency day0 observation context, never a settlement
+#   replacement. API shape verified live
 #   2026-06-17 against api-open.data.gov.sg/v2/real-time/api/air-temperature
 #   (16 stations; readingUnit "deg C"; readings[0].data[] of {stationId, value};
 #   nearest station to WSSS = S24 "Upper Changi Road North" at 0.040 km).
-"""Singapore NEA real-time air-temperature day0 SHADOW observation source.
+"""Singapore NEA real-time air-temperature observation parser.
 
 First principles
 ----------------
@@ -19,16 +19,12 @@ The sensor nearest the WSSS Changi settlement station (S24 "Upper Changi Road
 North", ~0.04 km from the configured WSSS coords) is a VERY high-frequency
 day0 covariate.
 
-CRITICAL SEMANTIC — SHADOW ONLY (operator v4 constraint, enforced in code):
+Critical semantic
+-----------------
   NEA is a Changi-AREA station network, NOT the WSSS settlement station. Even
   the nearest sensor is a DIFFERENT physical instrument from WU/METAR's WSSS
-  ASOS. NEA therefore wires as a high-frequency SHADOW / observation-likelihood
-  covariate and NEVER as a settlement truth source:
+  ASOS. NEA therefore never acts as a settlement truth source:
     - is_settlement_faithful is hard-coded False on every NEA record;
-    - the source role is SHADOW_COVARIATE (a NEW role, distinct from the
-      settlement_truth / historical_hourly / fallback_evidence roles in
-      tier_resolver — NEA is deliberately NOT registered there, so it can never
-      be selected as a settlement or backfill source);
     - settlement for Singapore stays WU/METAR exact-WSSS (the existing
       wu_icao_history + ogimet METAR path is untouched by this module).
 
@@ -45,8 +41,8 @@ Integration point (NOT wired in this pass — documented hook only):
   ObsSourceReading records. nea_obs_to_fusion_reading() below adapts a
   NeaObsReading into that shape with is_settlement_faithful=False, so when the
   multi-source day0 observation fusion is wired for Singapore, NEA enters as a
-  correlated-but-distinct SHADOW source (its station_id differs from WSSS, so it
-  is treated as an independent station that down-weights via station-mismatch σ).
+  correlated-but-distinct source (its station_id differs from WSSS, so it is
+  treated as an independent station that down-weights via station-mismatch sigma).
   The immediate deliverable here is NEA being FETCHABLE + RESOLVABLE with correct
   provenance — full fusion wiring is a later step.
 
@@ -79,14 +75,10 @@ NEA_ENDPOINT_LEGACY = "https://api.data.gov.sg/v1/environment/air-temperature"
 #: Canonical source id carried in provenance on every NEA datum.
 NEA_SOURCE_ID = "nea_sg_air_temperature"
 
-#: Source role — a NEW role, deliberately NOT one of the tier_resolver settlement
-#: roles. NEA is a high-frequency shadow covariate, never settlement/backfill.
-NEA_SOURCE_ROLE = "shadow_covariate"
-
 #: NEA reports air temperature in degrees Celsius (readingUnit "deg C").
 NEA_NATIVE_UNIT = "C"
 
-#: City whose WSSS settlement station NEA shadows. Singleton today (operator v4
+#: City whose WSSS settlement station NEA can contextualize. Singleton today (operator v4
 #: lists Singapore as the only net-new free public source from the audit).
 NEA_CITY_NAME = "Singapore"
 
@@ -109,7 +101,7 @@ class NeaStation:
 class NeaObsReading:
     """A single NEA air-temperature reading with full station-identity provenance.
 
-    SHADOW invariant: ``is_settlement_faithful`` is ALWAYS False — NEA is a
+    Settlement invariant: ``is_settlement_faithful`` is ALWAYS False — NEA is a
     Changi-AREA sensor, never the WSSS settlement instrument. ``source_id``,
     ``station_id``, ``station_name`` and ``distance_km`` are carried on every
     datum (the v4/Zeus provenance law).
@@ -121,14 +113,14 @@ class NeaObsReading:
     distance_km: float
     value_c: float
     timestamp: datetime  # the reading's publication time (UTC)
-    is_settlement_faithful: bool = False  # SHADOW — never settlement truth
+    is_settlement_faithful: bool = False  # never settlement truth
 
     def __post_init__(self) -> None:
         # Hard guard: a NEA reading must NEVER be constructed as settlement-faithful.
         if self.is_settlement_faithful:
             raise ValueError(
                 "NeaObsReading.is_settlement_faithful must be False — NEA is a "
-                "Changi-area shadow covariate, never the WSSS settlement station."
+                "Changi-area source, never the WSSS settlement station."
             )
         if not math.isfinite(float(self.value_c)):
             raise ValueError("NeaObsReading.value_c must be finite")
@@ -256,7 +248,7 @@ def nearest_station(
 def parse_nea_payload(
     payload: object, *, settlement_lat: float, settlement_lon: float
 ) -> Optional[NeaObsReading]:
-    """Parse a NEA payload → the nearest-station SHADOW reading, or None.
+    """Parse a NEA payload into the nearest-station reading, or None.
 
     Selects the station nearest the WSSS settlement coords, reads its current
     value, and stamps source_id + station identity + distance_km provenance.
@@ -291,7 +283,7 @@ def fetch_nea_reading(
     endpoint: str = NEA_ENDPOINT,
     fallback_endpoint: str = NEA_ENDPOINT_LEGACY,
 ) -> Optional[NeaObsReading]:
-    """Fetch + parse the nearest-Changi NEA SHADOW reading. Fail-soft → None.
+    """Fetch + parse the nearest-Changi NEA reading. Fail-soft -> None.
 
     Tries the v2 endpoint first; on any HTTP/parse failure (incl. 404) falls
     over to the legacy v1 endpoint. Any error on BOTH returns None (the source
@@ -305,7 +297,7 @@ def fetch_nea_reading(
                 headers={"User-Agent": "zeus-nea-sg-obs/1.0"},
             )
             if resp.status_code != 200:
-                logger.warning("NEA_SHADOW_HTTP_%s url=%s", resp.status_code, url)
+                logger.warning("NEA_HTTP_%s url=%s", resp.status_code, url)
                 continue
             reading = parse_nea_payload(
                 resp.json(), settlement_lat=settlement_lat, settlement_lon=settlement_lon
@@ -314,58 +306,9 @@ def fetch_nea_reading(
                 return reading
         except (httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
             logger.warning(
-                "NEA_SHADOW_FETCH_FAILED url=%s exc=%s: %s", url, type(exc).__name__, exc
+                "NEA_FETCH_FAILED url=%s exc=%s: %s", url, type(exc).__name__, exc
             )
     return None
-
-
-@dataclass(frozen=True)
-class NeaShadowSource:
-    """Per-city NEA SHADOW source descriptor (the registry entry analogue).
-
-    Mirrors src.data.day0_fast_obs.FastObsSource, but ``authority`` is fixed to
-    the SHADOW class and ``is_settlement_faithful`` is False — this descriptor can
-    never authorize a settlement value. ``distance_km`` records the resolved
-    nearest-station gap from the WSSS settlement coords.
-    """
-
-    source_id: str
-    station_id: str
-    distance_km: float
-    authority: str = "SHADOW_AREA_STATION_COVARIATE"
-    is_settlement_faithful: bool = False
-    notes: str = ""
-
-
-def nea_shadow_source_for_city(city: Any) -> Optional[NeaShadowSource]:
-    """Resolve the NEA SHADOW source for a city, or None when NEA does not apply.
-
-    Registry policy (operator v4): NEA is wired ONLY for Singapore (WSSS Changi),
-    as an ADDITIONAL high-frequency shadow covariate — it does NOT replace the
-    existing wu_icao_history + ogimet METAR settlement path. Returns None for
-    every other city.
-
-    Resolves the nearest NEA station LIVE (one fail-soft fetch) so the descriptor
-    carries the real station_id + distance_km provenance. When the network is
-    unavailable the source is absent (None) — fail-soft, never a crash.
-    """
-    name = str(getattr(city, "name", "") or "").strip()
-    if name != NEA_CITY_NAME:
-        return None
-    lat = float(getattr(city, "lat"))
-    lon = float(getattr(city, "lon"))
-    reading = fetch_nea_reading(settlement_lat=lat, settlement_lon=lon)
-    if reading is None:
-        return None
-    return NeaShadowSource(
-        source_id=NEA_SOURCE_ID,
-        station_id=reading.station_id,
-        distance_km=reading.distance_km,
-        notes=(
-            f"NEA area station {reading.station_id} ({reading.station_name}) "
-            f"{reading.distance_km:.3f} km from WSSS; SHADOW covariate, never settlement"
-        ),
-    )
 
 
 def nea_obs_to_fusion_reading(reading: NeaObsReading) -> dict[str, Any]:
@@ -373,8 +316,8 @@ def nea_obs_to_fusion_reading(reading: NeaObsReading) -> dict[str, Any]:
     .ObsSourceReading (the documented fusion integration point).
 
     Returns a kwargs dict (not the dataclass — kept import-free here) with
-    is_settlement_faithful=False so the fusion treats NEA as a distinct,
-    down-weighted SHADOW station. ``value`` is the NEA Celsius reading; callers
+    is_settlement_faithful=False so the fusion treats NEA as distinct from the
+    settlement instrument. ``value`` is the NEA Celsius reading; callers
     that fuse against an F-settled city must convert first (Singapore settles in
     C, so for Singapore no conversion is needed).
     """

@@ -89,7 +89,6 @@ def test_zeus_status_classifier():
     # even under an economic-sounding stage name.
     assert zs.classify_block("TRADE_SCORE", "LIVE_INFERENCE_INPUTS_MISSING:q_ucb") == "transient"
     assert zs.classify_block("EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED") == "transient"
-    assert zs.classify_block("EXECUTOR_EXPRESSIBILITY", "DAY0_SCOPE_SHADOW_ONLY") == "transient"
     # Honest no-edge = economic.
     assert zs.classify_block("TRADE_SCORE", "TRADE_SCORE_NON_POSITIVE") == "economic"
 

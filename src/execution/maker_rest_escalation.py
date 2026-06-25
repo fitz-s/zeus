@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-11
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 # (operator escalation: REST-THEN-CROSS) +
 # docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md (KM deadline basis).
 # 2026-06-11 audit (dependency_db_locked antibody): VERDICT CURRENT_REUSABLE. Already

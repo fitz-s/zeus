@@ -81,7 +81,7 @@ truth_surfaces:
     - state/status_summary.json
   ingress_only:
     - state/control_plane.json
-  deprecated_shadow_surfaces:
+  deprecated_auxiliary_surfaces:
     - state/strategy_tracker.json
 
 write_authority:

@@ -94,7 +94,7 @@ entries:
     period_semantics: reconstructed previous-runs forecast availability
     expected_members: 1
     expected_step_rule: provider_previous_runs_default
-    partial_policy: SHADOW_ONLY
+    partial_policy: BLOCK_LIVE
     live_authorization: false
     authority_tier: RECONSTRUCTED
     authority_url: https://open-meteo.com/en/docs
@@ -113,7 +113,7 @@ entries:
     period_semantics: archive-only ensemble fetch without live-causal proof
     expected_members: 51
     expected_step_rule: archive_payload_manifest
-    partial_policy: SHADOW_ONLY
+    partial_policy: BLOCK_LIVE
     live_authorization: false
     authority_tier: RECONSTRUCTED
     authority_url: https://confluence.ecmwf.int/display/TIGGE

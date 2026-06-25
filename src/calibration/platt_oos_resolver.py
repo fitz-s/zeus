@@ -40,12 +40,10 @@ class PlattMode(enum.Enum):
     """Live Platt authority mode (§2.5 P0).
 
     identity : p_cal = p_raw (live fail-closed default)
-    shadow   : compute a candidate p_cal for the trace, but DO NOT use it for selection
     gated    : use the promoted candidate from the OOS decision table (if one matches)
     """
 
     IDENTITY = "identity"
-    SHADOW = "shadow"
     GATED = "gated"
 
     @classmethod
@@ -70,22 +68,17 @@ class PlattDecision:
     platt_decision  : 'identity_fallback' | 'promoted_candidate'
     platt_reason    : human/audit string (e.g. 'no_oos_full_chain_win')
     applied_candidate : the candidate name actually applied to SELECTION, or None for identity
-    shadow_p_cal    : the shadow candidate's p_cal vector (recorded for the trace,
-                      NOT applied to selection), or None when no shadow candidate exists
     """
 
     platt_decision: str
     platt_reason: str
     applied_candidate: Optional[str] = None
-    shadow_p_cal: Optional[np.ndarray] = None
 
 
 class PlattDecisionLookup(Protocol):
     """Read side of the OOS decision table (P6).
 
     ``promoted_for`` returns the PROMOTE candidate for a p_raw_domain_hash, or None.
-    ``shadow_candidate_for`` (optional) returns a shadow candidate to compute for the
-    trace; lookups that do not implement it simply have no shadow candidate.
     """
 
     def promoted_for(self, p_raw_domain_hash: str) -> Optional[PlattCandidate]:
@@ -150,7 +143,7 @@ def _calibrator_for(candidate: PlattCandidate) -> ExtendedPlattCalibrator:
     """Build a fitted ExtendedPlattCalibrator carrying the candidate's (A, B, C).
 
     We construct the calibrator directly rather than via ``fit`` so an arbitrary
-    candidate (A, B, C) — e.g. a clamped or shadow set — can be applied through the
+    candidate (A, B, C) can be applied through the
     SAME ``predict`` / ``calibrate_and_normalize`` code path the live layer uses.
     Input space is raw_probability (predict_for_bin returns predict() in that space).
     """
@@ -194,8 +187,6 @@ def resolve_p_cal(
     Returns ``(p_cal_for_selection, PlattDecision)``.
 
     - ``identity``: returns p_raw verbatim; never consults the decision table.
-    - ``shadow``  : returns p_raw for SELECTION; computes the shadow candidate's
-                    p_cal (if any) and records it on the decision for the trace.
     - ``gated``   : applies the PROMOTE candidate matching ``p_raw_domain_hash`` if
                     one exists; otherwise falls back to identity (fail-closed).
 
@@ -209,21 +200,6 @@ def resolve_p_cal(
             platt_decision="identity_fallback",
             platt_reason="mode_identity_live_default",
             applied_candidate=None,
-        )
-
-    if mode == PlattMode.SHADOW:
-        shadow_p_cal = None
-        if decision_lookup is not None and hasattr(decision_lookup, "shadow_candidate_for"):
-            shadow_cand = decision_lookup.shadow_candidate_for(p_raw_domain_hash)
-            if shadow_cand is not None:
-                shadow_p_cal = apply_candidate(
-                    p_raw, lead_days, shadow_cand, bin_widths=bin_widths
-                )
-        return p_raw.copy(), PlattDecision(
-            platt_decision="identity_fallback",
-            platt_reason="mode_shadow_selection_is_identity",
-            applied_candidate=None,
-            shadow_p_cal=shadow_p_cal,
         )
 
     # GATED

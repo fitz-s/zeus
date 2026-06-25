@@ -70,12 +70,12 @@ def test_map_contains_all_four_keys() -> None:
 
 # ---------------------------------------------------------------------------
 # Policy-level assertions: evaluate_calibration_transfer_policy resolves
-# SHADOW_ONLY (not BLOCKED) for both legacy versions, with correct
+# BLOCKED (not BLOCKED) for both legacy versions, with correct
 # calibration_data_version populated.
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_high_resolves_shadow_only_not_blocked() -> None:
+def test_legacy_high_resolves_blocked_not_blocked() -> None:
     """Legacy HIGH data_version does not return CALIBRATION_TRANSFER_DATA_VERSION_UNMAPPED."""
     cfg = entry_forecast_config()
     decision = evaluate_calibration_transfer_policy(
@@ -83,15 +83,15 @@ def test_legacy_high_resolves_shadow_only_not_blocked() -> None:
         source_id="ecmwf_open_data",
         forecast_data_version=_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY,
     )
-    assert decision.status == "SHADOW_ONLY", (
-        f"Expected SHADOW_ONLY, got {decision.status!r} "
+    assert decision.status == "BLOCKED", (
+        f"Expected BLOCKED, got {decision.status!r} "
         f"(reason_codes={decision.reason_codes})"
     )
     assert "CALIBRATION_TRANSFER_DATA_VERSION_UNMAPPED" not in decision.reason_codes
     assert decision.calibration_data_version == HIGH_LOCALDAY_MAX.data_version
 
 
-def test_legacy_low_resolves_shadow_only_not_blocked() -> None:
+def test_legacy_low_resolves_blocked_not_blocked() -> None:
     """Legacy LOW data_version does not return CALIBRATION_TRANSFER_DATA_VERSION_UNMAPPED."""
     cfg = entry_forecast_config()
     decision = evaluate_calibration_transfer_policy(
@@ -99,8 +99,8 @@ def test_legacy_low_resolves_shadow_only_not_blocked() -> None:
         source_id="ecmwf_open_data",
         forecast_data_version=_ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY,
     )
-    assert decision.status == "SHADOW_ONLY", (
-        f"Expected SHADOW_ONLY, got {decision.status!r} "
+    assert decision.status == "BLOCKED", (
+        f"Expected BLOCKED, got {decision.status!r} "
         f"(reason_codes={decision.reason_codes})"
     )
     assert "CALIBRATION_TRANSFER_DATA_VERSION_UNMAPPED" not in decision.reason_codes

@@ -38,8 +38,6 @@ def evaluate_entry_forecast_rollout_gate(
 ) -> EntryForecastRolloutDecision:
     if config.rollout_mode is EntryForecastRolloutMode.BLOCKED:
         return EntryForecastRolloutDecision("BLOCKED", ("ENTRY_FORECAST_ROLLOUT_BLOCKED",))
-    if config.rollout_mode is EntryForecastRolloutMode.SHADOW:
-        return EntryForecastRolloutDecision("SHADOW_ONLY", ("ENTRY_FORECAST_SHADOW_MODE",))
     if evidence is None:
         return EntryForecastRolloutDecision("BLOCKED", ("ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING",))
 

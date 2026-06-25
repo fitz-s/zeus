@@ -30,7 +30,6 @@ from src.events.reactor import (
 from src.engine.event_reactor_adapter import (
     SUBMIT_LANE_LIVE,
     SUBMIT_LANE_NO_SUBMIT_ADAPTER,
-    SUBMIT_LANE_SHADOW,
     SUBMIT_LANE_SUBMIT_DISABLED,
     _stamp_live_adapter_lane,
     _stamp_no_submit_adapter_lane,
@@ -200,7 +199,7 @@ def test_no_submit_adapter_lane_unconstructable_without_cause():
         _stamp_no_submit_adapter_lane(raw, degrade_cause="")
 
 
-def test_live_adapter_lane_stamps_live_submit_disabled_and_shadow():
+def test_live_adapter_lane_stamps_live_and_submit_disabled():
     event = _forecast_event()
     base = _full_pass_receipt(event, submit_lane=None, reason="SUBMITTED")
     assert (
@@ -210,11 +209,6 @@ def test_live_adapter_lane_stamps_live_submit_disabled_and_shadow():
     assert (
         _stamp_live_adapter_lane(base, real_order_submit_enabled=False).submit_lane
         == SUBMIT_LANE_SUBMIT_DISABLED
-    )
-    shadow = replace(base, reason="DAY0_SCOPE_SHADOW_ONLY", proof_accepted=False)
-    assert (
-        _stamp_live_adapter_lane(shadow, real_order_submit_enabled=True).submit_lane
-        == SUBMIT_LANE_SHADOW
     )
 
 

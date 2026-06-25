@@ -13,7 +13,7 @@
 ROOT that this test guards against (Blocker #56):
   - run_chain_sync + execute_monitoring_phase were only reachable through
     CycleRunner.run_cycle(), registered only under live_execution_mode=="legacy_cron".
-  - Daemon runs edli_shadow_no_submit → block skipped → chain_shares NULL (101/101),
+  - Daemon runs an EDLI event-driven mode → block skipped → chain_shares NULL (101/101),
     7 exit_pending_missing stuck, 1 Shanghai settled-but-active.
 
 This is a RELATIONSHIP test: it boots the scheduler (same path as the real daemon)
@@ -158,7 +158,7 @@ def test_exit_monitor_registered_in_edli_live(monkeypatch):
     job_ids = {job.id for job in scheduler.jobs}
     assert "exit_monitor" in job_ids, (
         "exit_monitor (the exit-SUBMIT phase that STAYS in P1 after the P4 chain-sync lift) "
-        "must be registered under edli_shadow_no_submit so exit monitoring runs in EDLI mode"
+        "must be registered under edli_live so exit monitoring runs in EDLI mode"
     )
     # And the bundled chain-sync job id must be GONE from the order daemon (chain-sync lifted).
     assert "chain_sync_and_exit_monitor" not in job_ids, (

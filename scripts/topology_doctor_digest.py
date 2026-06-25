@@ -247,7 +247,7 @@ def data_rebuild_digest(api: Any) -> dict[str, Any]:
             for name, spec in rows.items()
         },
         "replay_coverage_rule": topology.get("replay_coverage_rule", {}),
-        "diagnostic_non_promotion": topology.get("diagnostic_non_promotion", {}),
+        "offline_no_promotion": topology.get("offline_no_promotion", {}),
     }
 
 
@@ -1032,9 +1032,11 @@ def _operation_vector_resolution(
         ".gitignore",
         ".claude/CLAUDE.md",
         ".claude/settings.json",
-        ".claude/hooks/pre-commit-invariant-test.sh",
-        ".claude/hooks/pre-edit-architecture.sh",
-        ".claude/hooks/pre-merge-contamination-check.sh",
+        ".claude/hooks/dispatch.py",
+        ".claude/hooks/hook_common.py",
+        ".claude/hooks/pre-commit",
+        ".claude/hooks/pre-merge-commit",
+        ".claude/hooks/registry.yaml",
         "architecture/kernel_manifest.yaml",
         "architecture/inv_prototype.py",
         "architecture/ast_rules/semgrep_zeus.yml",

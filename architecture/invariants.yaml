@@ -652,14 +652,12 @@ invariants:
 
   - id: INV-33
     zones: [K2_runtime, K3_extension]
-    statement: Corrected posterior construction must consume calibrated model belief plus either no market input or a named complete MarketPriorDistribution; raw executable quote/VWMP vectors are legacy-only.
+    statement: Corrected posterior construction must consume calibrated model belief only; raw executable quote/VWMP vectors are legacy-only.
     why: Token quotes, VWMP, and held-side monitor prices are microstructure facts, not calibrated epistemic priors. Letting them enter corrected posterior computation silently changes the meaning of probability and corrupts edge attribution.
     enforced_by:
       negative_constraints: [NC-20]
       tests:
         - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_model_only_posterior_rejects_raw_market_quote_vector
-        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_rejects_raw_vwmp_vector
-        - tests/test_no_bare_float_seams.py::TestVigTreatmentSeam::test_corrected_prior_mode_requires_named_market_prior_identity
     capability_tags: []
     relationship_tests: []
     sunset_date: 2027-05-06

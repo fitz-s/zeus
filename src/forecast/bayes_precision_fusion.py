@@ -4,7 +4,7 @@
 #   §6 F5 (bayes_precision_fusion). PORTED VERBATIM from the proven proof engine
 #   /Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_bayes_precision_fusion.py
 #   (commit 658275e33b "BAYES_PRECISION_FUSION-Bayes forecast core: spec + settlement proof"). Verdict:
-#   BAYES_PRECISION_FUSION_PROOF_RESULT.md (core PROMOTE ~15% Brier; regional shadow-grade lead-1-only).
+#   BAYES_PRECISION_FUSION_PROOF_RESULT.md (core PROMOTE ~15% Brier; regional lead-1-only evidence).
 """BAYES_PRECISION_FUSION-Bayes settlement fusion — the production port of the proven C1 posterior.
 
 THE ONE FUSION. This module is the single production home of the BAYES_PRECISION_FUSION-Bayes math.

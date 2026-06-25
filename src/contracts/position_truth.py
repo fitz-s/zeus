@@ -1,6 +1,6 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-27
-# Authority basis: docs/plans/2026-05-27-chain-local-position-model-refactor.md (PR B — typed model scaffold; consumed by PR C/D)
+# Authority basis: docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md (PR B — typed model scaffold; consumed by PR C/D)
 """Typed objects for chain/local position truth.
 
 Source-of-truth law (audit § 1, target architecture):

@@ -107,7 +107,6 @@ SETTLEMENTS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
 SETTLEMENTS_METRIC_SCRIPT_SELECT_ENFORCED: frozenset[str] = frozenset({
     "scripts/backfill_ens.py",
     "scripts/backfill_observations_from_settlements.py",
-    "scripts/bridge_oracle_to_calibration.py",
     "scripts/etl_forecast_skill_from_forecasts.py",
     "scripts/etl_historical_forecasts.py",
     "scripts/investigate_ecmwf_bias.py",

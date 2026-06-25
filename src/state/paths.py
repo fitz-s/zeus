@@ -14,8 +14,7 @@ pattern (e.g. ``src/strategy/oracle_penalty.py``,
 ``scripts/bridge_oracle_to_calibration.py``,
 ``scripts/oracle_snapshot_listener.py``). The duplication is a known-bug
 class: when the listener writes to one path and the reader looks at another,
-the daemon silently sees stale (or empty) data — exactly the failure mode
-PR #40's emergency oracle-gate-removal is currently masking.
+the daemon silently sees stale or empty data.
 
 This module is the single locus for:
 
@@ -35,8 +34,7 @@ that bites global constants.
 Migration scope (this packet, A2): oracle_penalty + bridge + listener move
 to the path builders. The 5 private ``_atomic_write_json`` copies stay
 private for now — migrating them is doc-rot risk we'll batch when each
-caller's surface gets touched for substantive reasons (separate from this
-storage cutover).
+caller's surface gets touched for substantive reasons.
 """
 from __future__ import annotations
 

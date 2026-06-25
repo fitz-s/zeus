@@ -1,9 +1,9 @@
-"""Metric identity for replacement forecast shadow products.
+"""Metric identity for replacement forecast blocked products.
 
 This module keeps Open-Meteo ECMWF IFS 9km plus AIFS sampled-2t research
 identity out of the live ``MetricIdentity`` factories. Replacement products are
 not B0/TIGGE/OpenData calibration authorities, so they need an explicit product
-lineage map before they can be used by shadow reports, replay, or veto receipts.
+lineage map before they can be used by blocked reports, replay, or veto receipts.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ TemperatureMetric = Literal["high", "low"]
 
 @dataclass(frozen=True)
 class ReplacementForecastMetricIdentity:
-    """Product-scoped high/low identity for replacement shadow evidence."""
+    """Product-scoped high/low identity for replacement blocked evidence."""
 
     temperature_metric: TemperatureMetric
     observation_field: Literal["high_temp", "low_temp"]
@@ -71,7 +71,7 @@ def _physical_quantity_for_product(product: ForecastProductSpec, metric: Tempera
         return f"{base}_local_calendar_day_{suffix}"
     if product.product_class == "deterministic_spatial_anchor":
         return f"deterministic_2t_anchor_local_calendar_day_{suffix}"
-    if product.product_class == "derived_shadow_posterior":
+    if product.product_class == "derived_blocked_posterior":
         return f"aifs_sampled_2t_plus_openmeteo_ecmwf_ifs9_anchor_local_calendar_day_{suffix}"
     raise ValueError(f"unsupported replacement product_class {product.product_class!r}")
 
@@ -83,7 +83,7 @@ def _measurement_object_for_product(product: ForecastProductSpec) -> str:
         return "ifs_ens_member_period_extrema"
     if product.product_class == "deterministic_spatial_anchor":
         return "openmeteo_ecmwf_ifs9_deterministic_anchor"
-    if product.product_class == "derived_shadow_posterior":
+    if product.product_class == "derived_blocked_posterior":
         return "derived_aifs_sampled_2t_openmeteo_ecmwf_ifs9_soft_anchor_posterior"
     raise ValueError(f"unsupported replacement product_class {product.product_class!r}")
 

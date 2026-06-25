@@ -170,8 +170,6 @@ entries:
     delete_allowed: false
     replaced_by:
       - src/strategy/oracle_penalty.py
-      - scripts/bridge_oracle_to_calibration.py
-      - tests/test_bridge_oracle_to_calibration.py
     unique_remaining:
       - Data Density Discount design rationale
       - Mismatch versus DDD versus Platt-regime-absorption relationship

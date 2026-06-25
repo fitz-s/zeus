@@ -36,7 +36,7 @@ def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     assert edli["enabled"] is True
     assert edli["event_writer_enabled"] is True
     assert edli["forecast_snapshot_trigger_enabled"] is True
-    # Day0→live promotion 2026-06-12 (task #49): scope flipped day0_shadow →
+    # Day0 live promotion 2026-06-12 (task #49): scope moved to
     # forecast_plus_day0 once receipt-q persistence + obs fast lane landed.
     assert edli["edli_live_scope"] == "forecast_plus_day0"
     assert edli["day0_extreme_trigger_enabled"] is True
@@ -2147,7 +2147,7 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
     (DEPTH_INSUFFICIENT, raised before any venue call) must terminate the
     live-order aggregate AND release its LIVE_CAP reservation — leaving NO
     unresolved-submit and NO held cap. This is the EXACT state that crash-looped
-    the edli_live_canary boot readiness gate. Contrast with
+    the edli_live readiness gate. Contrast with
     test_live_adapter_records_timeout_unknown_fixture_response, which proves a
     GENUINE post-venue unknown still leaves cap RESERVED + pending_reconcile.
 

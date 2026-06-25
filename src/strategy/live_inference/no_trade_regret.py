@@ -220,9 +220,9 @@ class NoTradeRegretLedger:
                 INSERT OR IGNORE INTO no_trade_events (
                     market_slug, temperature_metric, target_date, observation_time,
                     decision_seq, reason, reason_detail, strategy_key, event_source,
-                    shadow_runtime, observed_at, schema_version, schema_compatibility
+                    observed_at, schema_version, schema_compatibility
                 ) VALUES (?, ?, ?, ?, ?, 'uncategorized', ?, 'edli_v1',
-                          'edli_event', 0, ?, 38, 'degraded')
+                          'edli_event', ?, 38, 'degraded')
                 """,
                 (
                     event.market_slug,

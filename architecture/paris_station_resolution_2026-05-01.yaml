@@ -138,8 +138,6 @@ paris_station_lfpb_canonical:
     - 2_hardcode_audit: Replace LFPG hardcodes in
         src/data/meteostat_bulk_client.py:94 (LFPG WMO mapping; remove or
           replace with LFPB once LFPB WMO id is verified)
-        scripts/oracle_snapshot_listener.py:71 (oracle shadow station map;
-          must follow cities.json or read from it dynamically)
       Document each hardcode that intentionally stays as legacy (e.g.,
       historical evidence packets in docs/archives/ MUST stay as LFPG —
       they record what happened, not what is current).

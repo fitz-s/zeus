@@ -165,15 +165,14 @@ def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
     # The deleted live_canary_enabled / taker_fok_fak_live_enabled flags are NOT emitted.
     reactor = {
         "legacy_cron": "disabled",
-        "edli_submit_disabled_bridge": "submit_disabled_live_bridge",
         "edli_live": "live",
     }[stage]
     edli = {
         "enabled": stage != "legacy_cron",
         "live_execution_mode": stage,
         "reactor_mode": reactor,
-        "market_channel_ingestor_enabled": stage in {"edli_submit_disabled_bridge", "edli_live"},
-        "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live"},
+        "market_channel_ingestor_enabled": stage == "edli_live",
+        "edli_user_channel_reconcile_enabled": stage == "edli_live",
         "real_order_submit_enabled": stage == "edli_live",
         "durable_submit_outbox_enabled": stage == "edli_live",
         "edli_live_operator_authorized": stage == "edli_live",
@@ -199,12 +198,9 @@ def test_release_gate_is_stage_aware_for_edli_modes(tmp_path: Path) -> None:
     bridge_root = tmp_path / "bridge"
     bridge_root.mkdir()
     bridge_args = _make_gate_args(bridge_root)
-    bridge_args.stage = "edli_submit_disabled_bridge"
-    bridge = evaluate_release_gate(bridge_args)
-    assert bridge.status == PASS
-    assert bridge.live_entries_allowed is False
-    assert bridge.submit_allowed is False
-    assert bridge.scaleout_allowed is False
+    bridge_args.stage = "unsupported_live_release_stage"
+    with pytest.raises(ValueError, match="UNSUPPORTED_LIVE_RELEASE_STAGE:unsupported_live_release_stage"):
+        evaluate_release_gate(bridge_args)
 
     # Wave-2 item 5: canary collapsed into edli_live. The single live mode requires the
     # verified promotion artifact for live entries; absent it, the gate fails closed.

@@ -151,7 +151,7 @@ def test_r1_ready_when_both_clauses_pass() -> None:
 
     report = _verifier(tier_required=EvidenceTier.LIVE_PILOT_TINY).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
         operator_ref="test-operator-ref-1",
     )
@@ -179,7 +179,7 @@ def test_r2_not_ready_clause1_fails_alone() -> None:
 
     report = _verifier(tolerance=Decimal("0.01")).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
     )
 
@@ -232,7 +232,7 @@ def test_r3_not_ready_clause2_fails_alone() -> None:
     # With tolerance=1.0 (wider than any mismatch here), clause 1 should pass.
     report = _verifier(tolerance=Decimal("1.0")).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
     )
 
@@ -250,7 +250,7 @@ def test_r3_not_ready_clause2_fails_alone() -> None:
     ]
     report = _verifier(tolerance=Decimal("1.0")).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records2,
     )
 
@@ -277,7 +277,7 @@ def test_r4_not_ready_both_clauses_fail() -> None:
 
     report = _verifier(tolerance=Decimal("0.01")).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
     )
 
@@ -299,7 +299,7 @@ def test_r5_not_ready_insufficient_records() -> None:
 
     report = _verifier(min_records=5).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
     )
 
@@ -317,10 +317,10 @@ def test_r6_operator_ref_required_for_live_tier() -> None:
     realized = _make_realized()
     records = [(decision, realized)]
 
-    # tier_current = SHADOW_PASS(3), tier_required = LIVE_PILOT_TINY(5)
+    # tier_current = REPLAY_PASS, tier_required = LIVE_PILOT_TINY
     # All pass → tier_target = PAPER_COHORT(4) < LIVE_PILOT_TINY → no error yet
     report = _verifier(tier_required=EvidenceTier.LIVE_PILOT_TINY).verify(
-        "settlement_capture", EvidenceTier.SHADOW_PASS, records
+        "settlement_capture", EvidenceTier.REPLAY_PASS, records
     )
     # PAPER_COHORT < LIVE_PILOT_TINY, so no ValueError
     assert report.tier_target == EvidenceTier.PAPER_COHORT
@@ -345,11 +345,11 @@ def test_r7_operator_ref_not_required_below_live() -> None:
     realized = _make_realized()
     records = [(decision, realized)]
 
-    # tier_current = SHADOW_PASS(3), tier_required = LIVE_PILOT_TINY(5)
+    # tier_current = REPLAY_PASS, tier_required = LIVE_PILOT_TINY
     # Passes → tier_target = PAPER_COHORT(4) — no operator_ref needed
     report = _verifier(tier_required=EvidenceTier.LIVE_PILOT_TINY).verify(
         "settlement_capture",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
         # No operator_ref — should be fine
     )
@@ -372,7 +372,7 @@ def test_r8_vector_decision_accepted() -> None:
 
     report = _verifier(tolerance=Decimal("0.1")).verify(
         "neg_risk_basket",
-        EvidenceTier.SHADOW_PASS,
+        EvidenceTier.REPLAY_PASS,
         records,
         operator_ref="test-operator-ref",
     )
@@ -391,7 +391,7 @@ def test_r9_wrong_pair_types_raise_type_error() -> None:
     records = [(decision, wrong_realized)]  # type: ignore[list-item]
 
     with pytest.raises(TypeError, match="DeterministicEdgeDecision must be paired with RealizedOutcome"):
-        _verifier().verify("settlement_capture", EvidenceTier.SHADOW_PASS, records)
+        _verifier().verify("settlement_capture", EvidenceTier.REPLAY_PASS, records)
 
 
 def test_r9b_vector_with_wrong_realized_type_raises() -> None:
@@ -401,7 +401,7 @@ def test_r9b_vector_with_wrong_realized_type_raises() -> None:
     records = [(decision, wrong_realized)]  # type: ignore[list-item]
 
     with pytest.raises(TypeError, match="VectorEdgeDecision must be paired with RealizedVectorOutcome"):
-        _verifier().verify("neg_risk_basket", EvidenceTier.SHADOW_PASS, records)
+        _verifier().verify("neg_risk_basket", EvidenceTier.REPLAY_PASS, records)
 
 
 # ===========================================================================

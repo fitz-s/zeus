@@ -1452,6 +1452,6 @@ def _bridge_env() -> str:
         mode = str(get_mode() or "").lower()
     except Exception:
         mode = ""
-    if mode in {"test", "replay", "backtest", "shadow", "live"}:
+    if mode in {"test", "replay", "backtest", "live"}:
         return mode
     return "live"

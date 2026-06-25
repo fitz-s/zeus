@@ -67,11 +67,6 @@ PROCESS_CODE_SURFACES = {
         "src/execution/harvester_pnl_resolver.py",
         "src/strategy/selection_family.py",
         "src/strategy/family_exclusive_dedup.py",
-        "src/strategy/candidates/__init__.py",
-        "src/strategy/candidates/liquidity_provision_with_heartbeat.py",
-        "src/strategy/candidates/resolution_window_maker.py",
-        "src/strategy/candidates/stale_quote_detector.py",
-        "src/strategy/candidates/weather_event_arbitrage.py",
     ),
     "data_ingest": (
         "src/ingest_main.py",
@@ -828,10 +823,10 @@ def _launchctl_loaded_contract(
     if environment.get("PYTHONPATH") != str(root_path):
         item["issues"].append("loaded_pythonpath_mismatch")
     if label == _launchd_label():
-        forbidden_shadow_env = _forbidden_live_shadow_env(environment)
-        if forbidden_shadow_env:
+        forbidden_non_submit_env = _forbidden_live_non_submit_env(environment)
+        if forbidden_non_submit_env:
             item["issues"].append(
-                "loaded_live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+                "loaded_live_trading_non_submit_env_present:" + ",".join(forbidden_non_submit_env)
             )
     if module != expected_module:
         item["issues"].append("loaded_program_module_mismatch")
@@ -846,13 +841,13 @@ def _launchctl_loaded_contract(
     return item
 
 
-def _forbidden_live_shadow_env(environment: dict) -> list[str]:
+def _forbidden_live_non_submit_env(environment: dict) -> list[str]:
     """Return env keys that contradict the live-trading launchd contract."""
     forbidden: list[str] = []
     for key, value in environment.items():
         key_text = str(key)
         value_text = str(value)
-        if "SHADOW" in key_text.upper() or value_text.lower() == "edli_shadow_no_submit":
+        if "SHADOW" in key_text.upper():
             forbidden.append(key_text)
     return sorted(forbidden)
 
@@ -931,10 +926,10 @@ def _launchd_contracts(
         if env.get("PYTHONPATH") != str(root_path):
             item["issues"].append("pythonpath_mismatch")
         if label == _launchd_label():
-            forbidden_shadow_env = _forbidden_live_shadow_env(env)
-            if forbidden_shadow_env:
+            forbidden_non_submit_env = _forbidden_live_non_submit_env(env)
+            if forbidden_non_submit_env:
                 item["issues"].append(
-                    "live_trading_shadow_env_present:" + ",".join(forbidden_shadow_env)
+                    "live_trading_non_submit_env_present:" + ",".join(forbidden_non_submit_env)
                 )
         if module != expected_module:
             item["issues"].append("program_module_mismatch")
@@ -1114,7 +1109,7 @@ def _heartbeat_freshness_status() -> dict:
     file is reported as a writer-specific issue but is GATED on the env
     flag `ZEUS_HEARTBEAT_FRESHNESS_PAGES=1` before participating in
     the top-level `healthy` predicate (default OFF preserves
-    shadow-run safety per the existing
+    no-submit-run safety per the existing
     `ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS` convention).
     """
     state_root = _status_path().parent
@@ -1541,7 +1536,7 @@ def check() -> dict:
     # WAVE-4 F91+F99+F100 — fold HB-1/HB-2/HB-3 staleness into healthcheck.
     # Always EVALUATED (so operators see the per-writer detail in the JSON
     # output) but only PAGES (participates in the `healthy` predicate) when
-    # ZEUS_HEARTBEAT_FRESHNESS_PAGES=1. Default OFF preserves shadow-run
+    # ZEUS_HEARTBEAT_FRESHNESS_PAGES=1. Default OFF preserves no-submit-run
     # safety; flip ON after the cron path is observed clean for at least
     # one Karachi window.
     result["heartbeat_freshness"] = _heartbeat_freshness_status()

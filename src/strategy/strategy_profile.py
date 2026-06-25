@@ -63,13 +63,12 @@ REGISTRY_PATH: Path = REPO_ROOT / "architecture" / "strategy_profile_registry.ya
 
 _VALID_LIVE_STATUSES: frozenset[str] = frozenset({
     "live",        # boot-OK + runtime-OK
-    "shadow",      # boot-OK + runtime-blocked (decisions logged for promotion)
     "blocked",     # boot-rejected + runtime-blocked
     "deprecated",  # synonym for blocked, kept for grep history
 })
 
 
-_VALID_METRIC_SUPPORTS: frozenset[str] = frozenset({"live", "shadow", "blocked"})
+_VALID_METRIC_SUPPORTS: frozenset[str] = frozenset({"live", "blocked"})
 
 
 # ── exceptions ─────────────────────────────────────────────────────── #
@@ -110,7 +109,6 @@ class StrategyProfile:
     metric_support: dict[str, str]
     kelly_default_multiplier: float
     kelly_phase_overrides: dict[str, float]
-    min_shadow_decisions: int
     min_settled_decisions: int
     promotion_evidence_ref: Optional[str]
     # Phase 6 T1: evidence ladder fields
@@ -143,10 +141,8 @@ class StrategyProfile:
     def is_boot_allowed(self) -> bool:
         """True iff the daemon may have this strategy enabled at boot.
 
-        Equivalent to the pre-A4 ``key in LIVE_SAFE_STRATEGIES``. Boot
-        status is broader than runtime: shadow strategies boot (collect
-        decision logs for promotion evidence) but never enter."""
-        return self.live_status in {"live", "shadow"}
+        Equivalent to the pre-A4 ``key in LIVE_SAFE_STRATEGIES``."""
+        return self.live_status == "live"
 
     def is_phase_allowed(self, market_phase: str) -> bool:
         """True iff the strategy is semantically valid in this market phase.
@@ -179,7 +175,7 @@ class StrategyProfile:
 
     def metric_is_live(self, temperature_metric: str) -> bool:
         """True iff entries on this metric reach the live order book.
-        ``shadow`` and ``blocked`` both return False."""
+        ``blocked`` returns False."""
         return self.metric_support.get(temperature_metric) == "live"
 
 
@@ -291,7 +287,6 @@ _REQUIRED_FIELDS = {
     "metric_support",
     "kelly_default_multiplier",
     "kelly_phase_overrides",
-    "min_shadow_decisions",
     "min_settled_decisions",
     "promotion_evidence_ref",
 }
@@ -451,7 +446,6 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         metric_support=_coerce_metric_support(raw["metric_support"], key=key),
         kelly_default_multiplier=float(kelly_default),
         kelly_phase_overrides=_coerce_phase_overrides(raw["kelly_phase_overrides"], key=key),
-        min_shadow_decisions=int(raw["min_shadow_decisions"]),
         min_settled_decisions=int(raw["min_settled_decisions"]),
         promotion_evidence_ref=(
             None if raw["promotion_evidence_ref"] in (None, "null", "")
@@ -533,8 +527,7 @@ def all_profiles() -> dict[str, StrategyProfile]:
 def live_safe_keys() -> frozenset[str]:
     """Strategies allowed at daemon boot — replaces
     ``LIVE_SAFE_STRATEGIES`` in control_plane. Includes every strategy
-    with ``live_status in {live, shadow}`` (shadow strategies boot to
-    collect decision logs but never enter)."""
+    with ``live_status == live``."""
     return frozenset(
         k for k, p in _ensure_loaded().items() if p.is_boot_allowed()
     )
@@ -601,8 +594,7 @@ def allowed_discovery_modes_inverse() -> dict[str, frozenset[str]]:
     whose family legitimately spans two discovery modes (e.g. ``opening_inertia``
     over both ``opening_hunt`` and ``imminent_open_capture``) but owns dispatch
     in only one was phase-mismatched in the other; and strategies with
-    ``cycle_axis_dispatch_mode: null`` (e.g. shadow ``day0_nowcast_entry``,
-    allowed in ``day0_capture``) were excluded from every mode's allowed set.
+    ``cycle_axis_dispatch_mode: null`` were excluded from every mode's allowed set.
 
     Strategies with an empty ``allowed_discovery_modes`` (blocked) contribute
     nothing, matching the prior fail-closed posture for blocked strategies.

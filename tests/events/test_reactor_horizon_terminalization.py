@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-19
 # Authority basis: operator law 2026-06-12 ("no caps of any kind"; "重试次数不是市场
 #   事实" — a retry count is not a market fact) + Wave 1 items 1 and 13 of
-#   docs/operations/overengineering_simplification_plan_2026-06-12.md + external
+#   docs/archive/2026-Q2/operations_historical/overengineering_simplification_plan_2026-06-12.md + external
 #   consult verdict (BLOCKER: the attempt-cap is a cap disguised as a safety check).
 #
 #   The reactor used to dead-letter a transient money-path block after

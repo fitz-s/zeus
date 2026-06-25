@@ -5,7 +5,7 @@
 # Last reused/audited: 2026-06-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
-#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 legacy execute_intent override.
+#                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
 Each test names the relationship it locks, not just the function.
@@ -46,8 +46,6 @@ def _cutover_guard_live_enabled(monkeypatch):
     """This file tests command-journal ordering, not cutover gating."""
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
 
-    monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
-    monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)

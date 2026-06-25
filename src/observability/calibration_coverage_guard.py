@@ -42,14 +42,14 @@ season-pin guard, but it covers a DIFFERENT layer (the EMOS-CI live-override's
 ``emos_calibration`` cells) with DIFFERENT severity semantics (it DROPS an
 uncovered city from the in-process EMOS license, fail-closed to the MC lcb).
 The bias + Platt substrates are a distinct concern with the inverted severity
-contract this antibody requires — WARN in shadow, RAISE when armed — so folding
+contract this antibody requires — WARN when unarmed, RAISE when armed — so folding
 them into the EMOS-CI license guard would conflate two unrelated fail modes.
 This module is the bias+Platt half of the #90 pattern; the EMOS-CI guard is the
 EMOS-CI half.  Both share the season-pin idiom.
 
 SEVERITY CONTRACT (critical — this is a DETECTOR, not a trading gate)
 --------------------------------------------------------------------
-  * SHADOW (real_order_submit_enabled == False): WARN ONLY.  Never blocks boot,
+  * UNARMED (real_order_submit_enabled == False): WARN ONLY.  Never blocks boot,
     never starves the reactor, never alters a trade decision.  Today's behaviour
     is byte-identical EXCEPT new warning log lines.  Calibration gaps must NOT
     become a no-trade (that violates the no-trade=fault mandate); they are fixed
@@ -57,8 +57,8 @@ SEVERITY CONTRACT (critical — this is a DETECTOR, not a trading gate)
   * ARMED (real_order_submit_enabled == True): a CovrageGap escalates to a HARD
     fail-closed RuntimeError.  You may NOT arm with silent partial calibration.
 
-The escalation is gated SOLELY on ``real_order_submit_enabled`` so the shadow
-daemon (the only mode running today) is unaffected.
+The escalation is gated SOLELY on ``real_order_submit_enabled`` so unarmed
+runtime checks remain observational.
 """
 
 from __future__ import annotations
@@ -422,7 +422,7 @@ def calibration_coverage_report(
                 # armed boot on its own DB-read failure).  So we catch the
                 # store-read error PER (city, metric), emit a WARN that coverage
                 # is UNVERIFIABLE for this cell, and continue WITHOUT appending a
-                # gap — in BOTH shadow and armed mode.
+                # gap — in BOTH unarmed and armed mode.
                 #
                 # Granularity: per-(city, metric) rather than a single global
                 # catch.  The missing-table case does fail for every city, so a
@@ -583,7 +583,7 @@ def assert_calibration_coverage(
 ) -> CoverageReport:
     """Boot / pre-arm coverage check.
 
-    SHADOW (armed=False): WARN per gap and continue — returns the report, never
+    UNARMED (armed=False): WARN per gap and continue — returns the report, never
     raises, never starves the reactor.
 
     ARMED (armed=True): if ANY gap exists, raise ``CalibrationCoverageError``
@@ -608,9 +608,9 @@ def assert_calibration_coverage(
             "bias/Platt fall-through. " + report.summary()
         )
 
-    # Shadow: LOUD warn-and-continue. One line per gap (enumerable), plus a
+    # Unarmed: LOUD warn-and-continue. One line per gap (enumerable), plus a
     # roll-up so the operator sees the count at a glance.
     for gap in report.gaps:
         logger.warning("CALIBRATION_COVERAGE_GAP: %s", gap.describe())
-    logger.warning("CALIBRATION_COVERAGE_PARTIAL (shadow, warn-only): %s", report.summary())
+    logger.warning("CALIBRATION_COVERAGE_PARTIAL (unarmed, warn-only): %s", report.summary())
     return report

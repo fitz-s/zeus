@@ -2208,7 +2208,7 @@ def test_chain_reconciliation_rescues_pending_tracked_fill(tmp_path):
     assert pos.entry_fill_verified is False
     assert pos.order_status == "pending"  # stays at input value for balance-only
     assert pos.entered_at != ""
-    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): balance-only rescue
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): balance-only rescue
     # preserves submitted entry economics; chain economics flow into
     # chain_* fields. Submitted defaults from _make_position were
     # entry_price=0.40, size_usd=10.0, shares=25.0, cost_basis_usd=10.0.
@@ -2488,7 +2488,7 @@ def test_chain_reconciliation_rescue_emits_exactly_one_stage_event(tmp_path):
     assert details["to_state"] == "entered"
     assert details["source"] == "chain_reconciliation"
     assert details["reason"] == "balance_only_recovery"
-    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): the event payload
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): the event payload
     # `shares` / `cost_basis_usd` / `size_usd` fields reflect submitted
     # entry economics (Position.shares / .cost_basis_usd / .size_usd at
     # emit time), NOT the chain aggregate. The chain aggregate lives on

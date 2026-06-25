@@ -1,6 +1,6 @@
 # Created: 2026-06-01
 # Last reused/audited: 2026-06-19
-# Authority basis (2026-06-13 add): docs/operations/live_inventory_warm_skip_2026-06-13.md —
+# Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (inline _refresh_pending_family_snapshots
 #   coupling) + _edli_bankroll_warm_cycle precedent (#45 follow-up, the decoupled-warm pattern) +

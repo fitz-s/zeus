@@ -12,7 +12,7 @@ Public API:
 
 Properties:
 - Append-only JSONL at state/companion_skip_token_log.jsonl.
-- Atomic write: write to .tmp then os.rename (same pattern as divergence_logger.py).
+- Atomic write: write to .tmp then os.rename.
 - agent_id resolved from environment at write time:
     OMC_AGENT_ID → CLAUDE_AGENT_ID → CODEX_AGENT_ID → "unknown"
 - session_id resolved from CLAUDE_SESSION_ID env var; null when absent.
@@ -180,7 +180,7 @@ def _atomic_append(log_path: Path, record_line: str) -> None:
     Atomically append *record_line* to *log_path*.
 
     Strategy: read existing content, append new line, write to .tmp, os.rename.
-    This mirrors the pattern used by divergence_logger.py for POSIX atomicity.
+    This uses a POSIX rename-based atomic write pattern.
 
     Note: True atomic append to JSONL requires a read-modify-write cycle on
     filesystems that don't support O_APPEND atomicity for multi-line content.

@@ -524,7 +524,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         try:
             if has_trade_fact:
-                # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): trade-verified
+                # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): trade-verified
                 # rescue is the verified entry-fill recovery — pending_entry →
                 # ACTIVE. Pass phase_after explicitly; the canonical projection's
                 # phase no longer reads pos.state/exit_state/chain_state strings.
@@ -570,7 +570,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
-            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): size-correction
+            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): size-correction
             # does NOT transition the canonical phase — pass the position's
             # *current* canonical phase explicitly.
             events, projection = build_chain_size_corrected_canonical_write(
@@ -808,7 +808,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
-            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): unresolved
+            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): unresolved
             # size mismatch always quarantines the position. Pass phase_after
             # explicitly so canonical position_current.phase is QUARANTINED
             # regardless of any prior runtime pos.state string mutation.
@@ -967,7 +967,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     f"void projection for {trade_id} resolved to {projection.get('phase')!r}"
                 )
             env = str(getattr(position, "env", "") or "live")
-            if env not in {"live", "test", "replay", "backtest", "shadow"}:
+            if env not in {"live", "test", "replay", "backtest"}:
                 env = "live"
             event = {
                 "event_id": f"{trade_id}:chain_void:{sequence_no}",
@@ -1268,7 +1268,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             rescued.chain_shares = chain.size
             rescued.chain_verified_at = now
             rescued.condition_id = rescued.condition_id or chain.condition_id
-            # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain
+            # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain
             # aggregate always lands on chain_* fields, regardless of rescue
             # authority. This is the canonical home for venue-observed
             # economics; the legacy `entry_price` / `cost_basis_usd` /

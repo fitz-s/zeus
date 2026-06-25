@@ -9,8 +9,6 @@ SCAFFOLD §5.2: "Partial (P1 single-call aspect only) — AdmissionDecision
 struct surfaces `issues` at top level; to_dict() always includes them.
 ok=True with non-empty issues is now a typed condition."
 
-Multi-call/aggregate detection requires P2 packet divergence_summary module.
-
 Tests:
 - admit() with non-empty issues → AdmissionDecision.issues populated even
   when ok=True (advisory-only issues)

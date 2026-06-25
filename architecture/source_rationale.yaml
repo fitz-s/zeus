@@ -48,7 +48,7 @@ write_routes:
   backtest_diagnostic_write:
     owner: src/engine/replay.py
     db: state/zeus_backtest.db
-    authority_scope: diagnostic_non_promotion
+    authority_scope: offline_no_promotion
   calibration_persistence_write:
     owner: src/calibration/store.py
     tables:
@@ -60,7 +60,7 @@ write_routes:
     tables:
     - calibration_decision_group
     - calibration_pairs
-    guardrail: Additive/shadow accounting only until promoted by a governance packet.
+    guardrail: Additive/blocked accounting only until promoted by a governance packet.
   decision_artifact_write:
     owner: src/state/decision_chain.py
     tables:
@@ -311,7 +311,7 @@ files:
   src/data/replacement_forecast_live_materialization_queue.py:
     zone: K2_runtime
     authority_role: replacement_live_materialization_queue
-    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Replaces retired src/data/replacement_forecast_shadow_materialization_queue.py so live production no longer imports a shadow-labeled implementation.
+    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Replaces retired blocked-materialization queue code so live production no longer imports a blocked-labeled implementation.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
@@ -757,7 +757,6 @@ files:
     - VENUS_CONTROL_ONLY
     downstream:
     - tests/test_entry_forecast_promotion_evidence_io.py
-    - tests/test_entry_forecast_chain_relationship.py
   src/riskguard/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1004,7 +1003,7 @@ files:
     why: >
       PR7 of data_temporal_kernel program. Declares REQUIRED_LIVE_PROVENANCE (source_id,
       source_run_id, source_issue_time, target_local_date, data_version, captured_at) + validator;
-      and can_authorize_live_readiness() (reconstructed/archive/shadow/backfill tiers can NEVER
+      and can_authorize_live_readiness() (reconstructed/archive/blocked/backfill tiers can NEVER
       authorize live). live_reader_requires_provenance() gated behind ZEUS_FRONTIER_READINESS_GATE
       (default off). Schema migration adding missing columns is operator-gated (forecast-class
       SCHEMA_FORECASTS_VERSION bump). NOT_DAEMON_WIRED.
@@ -1108,6 +1107,14 @@ files:
     - src/data/forecasts_append.py
     - src/data/hourly_instants_append.py
     - src/data/solar_append.py
+  src/data/openmeteo_model_updates.py:
+    zone: K2_runtime
+    authority_role: forecast_source_clock_metadata
+    why: Parses and fetches Open-Meteo model update metadata so replacement forecast production can bind source-clock reactions to last_run_availability_time plus the documented consistency wait. No settlement truth or venue authority.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/source_clock_update_probe.py
   src/data/openmeteo_quota.py:
     zone: K2_runtime
     authority_role: quota_guard
@@ -1116,6 +1123,15 @@ files:
     - src/data/ensemble_client.py
     - src/data/observation_client.py
     - src/data/openmeteo_client.py
+  src/data/source_clock_update_probe.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_source_clock_trigger
+    why: Production fail-soft probe for Open-Meteo model update clocks. Records cached metadata and advances the source-update cursor only after a changed run is publicly usable, then reports affected cities for replacement materialization/download work. It never places orders.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_production.py
+    - scripts/source_clock_live_replacement_cycle.py
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
@@ -1241,7 +1257,6 @@ files:
     downstream:
     - src/data/forecast_fetch_plan.py
     - src/data/executable_forecast_reader.py
-    - src/data/entry_forecast_shadow.py
     - tests/test_opendata_future_target_contract.py
   src/data/forecast_fetch_plan.py:
     zone: K2_runtime
@@ -1287,32 +1302,12 @@ files:
   src/data/calibration_transfer_policy.py:
     zone: K2_runtime
     authority_role: calibration_transfer_gate
-    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to SHADOW_ONLY; live promotion requires explicit live_calibration_promotion_approved evidence. PHASE C-3 wired into src/engine/evaluator.py via _write_entry_readiness_for_candidate behind ZEUS_ENTRY_FORECAST_READINESS_WRITER env flag (default OFF).
+    why: PR47 calibration-transfer policy gate (Open Data forecasts using TIGGE-trained Platt calibration). Defaults to BLOCKED; live promotion requires explicit live_calibration_promotion_approved evidence.
     hazards:
     - CALIBRATION_FAMILY_MIXING
     - VENUS_CONTROL_ONLY
     downstream:
-    - src/data/entry_forecast_shadow.py
     - tests/test_calibration_transfer_policy.py
-  src/data/entry_forecast_shadow.py:
-    zone: K2_runtime
-    authority_role: entry_forecast_shadow_evaluator
-    why: PR47 shadow→live boundary evaluator that combines producer readiness, calibration transfer policy, and rollout mode into a BLOCKED/SHADOW_ONLY/LIVE_ELIGIBLE decision. NOT YET INVOKED FROM DAEMON; Phase C activation per REMEDIATION_PLAN_2026-05-03.md.
-    hazards:
-    - SOURCE_TRUTH_PLANE_COLLAPSE
-    - CALIBRATION_FAMILY_MIXING
-    - VENUS_CONTROL_ONLY
-    downstream:
-    - tests/test_entry_forecast_shadow.py
-  src/data/entry_readiness_writer.py:
-    zone: K2_runtime
-    authority_role: entry_forecast_readiness_writer
-    why: Phase B3 pure writer that turns rollout + calibration + promotion-evidence verdicts into readiness_state rows with strategy_key='entry_forecast'. Refuses to land LIVE_ELIGIBLE unless every gate is aligned at write time. PHASE C-3 wired into src/engine/evaluator.py via _write_entry_readiness_for_candidate behind ZEUS_ENTRY_FORECAST_READINESS_WRITER env flag (default OFF). Operator activates by setting the env var.
-    hazards:
-    - VENUS_CONTROL_ONLY
-    downstream:
-    - tests/test_entry_readiness_writer.py
-    - tests/test_entry_forecast_chain_relationship.py
   src/engine/AGENTS.md:
     zone: docs
     authority_role: registry
@@ -1694,8 +1689,8 @@ files:
     - CALIBRATION_FAMILY_MIXING
   src/calibration/blocked_oos.py:
     zone: K3_extension
-    authority_role: shadow_calibration_eval
-    why: Blocked out-of-sample evaluation facts; shadow only.
+    authority_role: blocked_calibration_eval
+    why: Blocked out-of-sample evaluation facts; blocked only.
     hazards:
     - DERIVED_ONLY
   src/calibration/drift.py:
@@ -1827,11 +1822,28 @@ files:
   src/strategy/horse_race_kelly.py:
     zone: K3_extension
     authority_role: portfolio_sizing_law
-    why: Closed-form K-bin mutually-exclusive horse-race Kelly allocation (consult-3 Q2/P1, task #63). The portfolio-correct replacement for per-candidate edge>threshold sizing — within one event family the K YES bins COMPETE for capital and the cash threshold s* is ENDOGENOUS (water-fill), not a fixed per-candidate kelly_multiplier or edge gate. Pure functions (horse_race_allocation closed form + active-set fixed point; portfolio_qp_allocation P2 cross-family QP; dominance_lp_check P5 arbitrage pre-check). q input = q_lcb (conservative posterior, q_lcb+Kelly law). SHADOW-ONLY wiring this pass — the live sizing path is unchanged while replacement_horse_race_kelly_enabled is false. Authority docs/authority/exit_portfolio_execution_authority_2026-06-13.md P1-P2,P5.
+    why: Closed-form K-bin mutually-exclusive horse-race Kelly allocation (consult-3 Q2/P1, task #63). The portfolio-correct replacement for per-candidate edge>threshold sizing — within one event family the K YES bins COMPETE for capital and the cash threshold s* is ENDOGENOUS (water-fill), not a fixed per-candidate kelly_multiplier or edge gate. Pure functions (horse_race_allocation closed form + active-set fixed point; portfolio_qp_allocation P2 cross-family QP; dominance_lp_check P5 arbitrage pre-check). q input = q_lcb (conservative posterior, q_lcb+Kelly law). Blocked wiring this pass — the live sizing path is unchanged while replacement_horse_race_kelly_enabled is false. Authority docs/authority/exit_portfolio_execution_authority_2026-06-13.md P1-P2,P5.
     hazards:
     - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
     downstream:
     - src/engine/event_reactor_adapter.py
+  src/strategy/live_inference/source_clock_vnext.py:
+    zone: K3_extension
+    authority_role: source_clock_settlement_admission_law
+    why: Pure source-clock vNext primitives for availability+10m source gating, provider-family deduped settlement-weight selection, market-reaction q_exec_lcb tightening, NO-side lower bounds from YES UCB, and binary log-utility executable admission. No venue side effects or DB writes.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - scripts/replay/executable_q_lcb_replay.py
+  src/strategy/live_inference/source_clock_city_weights.py:
+    zone: K3_extension
+    authority_role: source_clock_city_profile_selection
+    why: Pure file-backed loader for the 2026-06-25 one-final-scheme-per-city artifact. Supplies fixed source weights to the live replacement materializer and source-update affected-city routing without creating a second strategy registry or DB write path.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - src/data/replacement_forecast_materializer.py
+    - src/data/source_clock_update_probe.py
   src/strategy/kelly.py:
     zone: K3_extension
     authority_role: sizing_law
@@ -2010,113 +2022,16 @@ files:
     downstream:
     - src/strategy/benchmark_suite.py
     - tests/test_strategy_benchmark.py
-  src/strategy/candidates/__init__.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_registry_stub
-    why: R3 A1 strategy candidate stub registry; advertises identities for benchmarking without executable alpha or live promotion authority.
-    downstream:
-    - tests/test_strategy_benchmark.py
-  src/strategy/candidates/weather_event_arbitrage.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/stale_quote_detector.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/resolution_window_maker.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/neg_risk_basket.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/cross_market_correlation_hedge.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/liquidity_provision_with_heartbeat.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: R3 A1 non-executable strategy candidate identity stub for benchmark registration.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/center_buy_calibrated_shadow.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — center-buy calibrated posterior shadow.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/center_sell_model_no.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — center-sell model-NO signal.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/center_sell_parity.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — center-sell parity.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/imminent_open_capture_posterior_collapse.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — imminent open posterior collapse.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/opening_inertia_relaxation.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — opening inertia relaxation signal.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/settlement_capture_shadow.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — settlement capture physical-interval shadow.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/shoulder_buy_evt.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — shoulder-buy EVT/conformal tail-underpricing.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/strategy/candidates/shoulder_impossible_tail_capture.py:
-    zone: K3_extension
-    authority_role: strategy_candidate_stub
-    why: Wave stochastic-datagated shadow candidate — shoulder impossible-tail capture.
-    downstream:
-    - src/strategy/candidates/__init__.py
-  src/engine/shadow_candidate_dispatch.py:
-    zone: K2_runtime
-    authority_role: shadow_pipeline_orchestrator
-    why: Wave stochastic-datagated capture pipeline — dispatches shadow candidates to world DB.
-    downstream:
-    - src/engine/cycle_runtime.py
-    - tests/test_l1_shadow_capture_hook.py
   src/analysis/promotion_proof_router.py:
     zone: K3_extension
-    authority_role: shadow_pipeline_router
-    why: Wave CI evidence routing — routes shadow strategy_keys to pipeline A/B for promotion proof.
+    authority_role: promotion_proof_router
+    why: Routes strategy keys to pipeline A/B for promotion proof.
     downstream:
     - tests/test_promotion_proof_router_wave.py
   src/cron/settlement_attribution.py:
     zone: K3_extension
-    authority_role: shadow_attribution_cron
-    why: Wave shadow PnL attribution cron — computes realized shadow PnL from WORLD.decision_events.
+    authority_role: receipt_attribution_cron
+    why: Receipt-driven settlement attribution cron over edli_no_submit_receipts.
     downstream:
     - tests/test_p1_findings_evidence_risk.py
   src/state/AGENTS.md:
@@ -2340,7 +2255,6 @@ files:
     - shoulder_exposure_ledger
     downstream:
     - src/strategy/shoulder_cluster_cap.py
-    - scripts/shoulder_shadow_readiness_report.py
   src/strategy/shoulder_cluster_cap.py:
     zone: K2_runtime
     authority_role: shoulder_cluster_cap_gate
@@ -2450,8 +2364,6 @@ files:
     downstream:
     - src/strategy/oracle_penalty.py
     - src/strategy/strategy_profile.py
-    - scripts/bridge_oracle_to_calibration.py
-    - scripts/oracle_snapshot_listener.py
   src/state/uma_resolution_listener.py:
     zone: K2_runtime
     authority_role: uma_onchain_resolution_listener
@@ -2587,7 +2499,7 @@ files:
       every live runtime city x metric, asserts the current-season VERIFIED
       edli_per_city_v1 bias row AND a non-borrowed/non-identity Platt exist;
       enumerates any city that would silently fall to RAW bias / borrow a foreign
-      cluster's Platt / fall to identity. SHADOW (real_order_submit_enabled=False)
+      cluster's Platt / fall to identity. UNARMED (real_order_submit_enabled=False)
       = WARN-only, never blocks boot or starves the reactor; ARMED
       (real_order_submit_enabled=True) = HARD fail-closed RuntimeError. Read-only
       (SELECT on world + ATTACHed forecasts); never writes, never alters trade flow.

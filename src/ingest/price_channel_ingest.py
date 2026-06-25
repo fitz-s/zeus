@@ -1602,7 +1602,7 @@ def _edli_refresh_held_position_quote_evidence(
     # committed separately. world.db is MAIN (so the EventStore's unqualified
     # opportunity_events + its sqlite_master guard resolve to the real world log)
     # and zeus_trades.db is ATTACHed as 'trades' (so the schema-qualified feasibility
-    # insert reaches the runtime-read trades table, never the world shadow). A single
+    # insert reaches the runtime-read trades table, never the world ghost copy). A single
     # conn.commit() on the ATTACHed connection is atomic across BOTH databases — the
     # same INV-37 atomic-commit shape the EDLI position bridge uses.
     from src.state.db import get_world_connection_with_trades_required
@@ -1716,7 +1716,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
 
     # INV-37 (PR415 B5, 2026-06-20): single connection + single atomic commit for the
     # world-event + trade-feasibility cross-DB pair (see the held-priority twin above
-    # for the full rationale + the shadow-table hazard this world-MAIN + ATTACHed
+    # for the full rationale + the ghost-table hazard this world-MAIN + ATTACHed
     # 'trades' + schema-qualified-feasibility shape avoids).
     from src.state.db import get_world_connection_with_trades_required
 
@@ -1917,7 +1917,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
         # commit is still atomic across both DBs (single connection) and serialized on
         # zeus-world.db by the world write mutex inside the service loop. The
         # feasibility insert is schema-qualified 'trades' (feasibility_schema below) so
-        # it reaches the runtime-read trades table, never the world shadow.
+        # it reaches the runtime-read trades table, never the world ghost copy.
         conn = get_world_connection_with_trades_required(write_class="live")
         world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
         feasibility_conn = conn

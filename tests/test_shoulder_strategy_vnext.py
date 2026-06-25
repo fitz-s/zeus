@@ -97,9 +97,9 @@ def test_p_3_3_shoulder_kelly_clamp_upper_bound():
     pass
 
 
-@pytest.mark.skip(reason="SCAFFOLD — T2 production pass adds clamp; verify applies only when live_status=shadow AND mult > 0.0")
-def test_p_3_3_shoulder_kelly_clamp_applies_only_when_shadow_and_positive():
-    """P-3-3: Kelly clamp [0.05, 0.20] applies only when live_status=shadow AND
+@pytest.mark.skip(reason="SCAFFOLD - T2 production pass adds clamp; verify applies only when blocked strategy and mult > 0.0")
+def test_p_3_3_shoulder_kelly_clamp_applies_only_when_blocked_and_positive():
+    """P-3-3: Kelly clamp [0.05, 0.20] applies only when blocked strategy and
     kelly_default_multiplier > 0.0 (R-3: current 0.0 unchanged)."""
     pass
 

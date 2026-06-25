@@ -46,7 +46,7 @@ from src.forecast.bayes_precision_fusion import (
     MIN_TRAIN,
     ModelInstrument,
 )
-# NOTE (FINAL no-shadow §4): ``eb_bias`` is deliberately NOT imported — the consumed
+# NOTE (single-serving-rule §4): ``eb_bias`` is deliberately NOT imported — the consumed
 # posterior center is RAW (z = x), so the EB shift primitive must never reach this path.
 from src.forecast.grid_representativeness_loader import (
     sigma_repr_sq_for as _sigma_repr_sq_for,
@@ -128,6 +128,17 @@ OPENMETEO_MODEL_IDS: dict[str, str] = {
     # snap cold. OM serves these single-runs ids directly.
     "gfs_hrrr": "gfs_hrrr",
     "gem_hrdps_continental": "gem_hrdps_continental",
+    # Source-clock vNext city one-scheme candidates (2026-06-25). These are not admitted by
+    # the legacy provider-family selector globally; they are downloaded so the materializer can
+    # serve the per-city fixed source basket selected by state/fusion_source_compare/final_city_one_scheme_20260625.
+    "dmi_harmonie_europe": "dmi_harmonie_arome_europe",
+    "knmi_harmonie_netherlands": "knmi_harmonie_arome_netherlands",
+    "kma_gdps": "kma_gdps",
+    "kma_ldps": "kma_ldps",
+    "met_nordic": "metno_nordic",
+    "italiameteo_icon_2i": "italia_meteo_arpae_icon_2i",
+    "jma_msm": "jma_msm",
+    "nam_conus": "ncep_nam_conus",
 }
 
 # BLOCKER 3: the OM product that actually serves the ANCHOR walk-forward history via the
@@ -309,16 +320,16 @@ class BayesPrecisionFusionCaptureResult:
 
 
 def _raw_instrument(model: str, raw_value: float, history: ModelHistory | None, parent_bias: float) -> tuple[float, int]:
-    """Return (z = raw_value, n_train) — RAW instrument, NO de-bias (FINAL no-shadow §4).
+    """Return (z = raw_value, n_train) — RAW instrument, NO de-bias (single-serving-rule §4).
 
-    2026-06-18 UNIFY (FINAL no-shadow execution flow §4): under the operator RAW
+    2026-06-18 UNIFY (single-serving-rule flow §4): under the operator RAW
     no-de-bias law the consumed-posterior instrument center is the RAW model value
     ``z = x`` — NOT the EB-corrected ``z = x − b̂``. This is the change that makes the
     materialized ``forecast_posteriors`` center the RAW diagonal center, so the EXIT
     (``position_belief``) and MONITOR (``monitor_refresh``) belief reads — both
     sourced from ``forecast_posteriors`` — match the spine ENTRY belief (which is
     already RAW via ``_NoOpDebiasAuthority``). It closes the #135 two-center split
-    (RAW-entry vs EB-exit) WITHOUT a shadow product: there is one RAW belief.
+    (RAW-entry vs EB-exit) WITHOUT a parallel product: there is one RAW belief.
 
     The walk-forward ``history`` is RETAINED but consumed ONLY for width / provenance
     (the residual std → anchor τ0, the cross-source disagreement var, the predictive
@@ -361,7 +372,7 @@ def capture_bayes_precision_instruments(
     pre-fusion honesty gate — an extra whose honest source_available_at is in the FUTURE relative to
     the decision instant could not have been possessed by then, so fusing it would let a
     faster/replacement source bias q before its real availability. Such a model is EXCLUDED here.
-    SHADOW-Q-STAGED: this guard CAN change q for a cell where a provider's honest availability is
+    ARRIVAL-AUTHORITY: this guard CAN change q for a cell where a provider's honest availability is
     future vs decision — that is the point; in current production it is expected to exclude ~0 (the
     extras' captured_at lands hours after the cycle, well before any decision). FAIL-OPEN: a model
     is admitted when its availability is NULL/missing, or when ``decision_utc`` is not supplied
@@ -398,7 +409,7 @@ def capture_bayes_precision_instruments(
             if _available_after_decision(_raw_avail, decision_utc, model_label=model):
                 _LOG.warning(
                     "BAYES_PRECISION_FUSION arrival guard excluded %s: honest source_available_at %s "
-                    "is after decision %s (not yet possessed; shadow-q-staged)",
+                    "is after decision %s (not yet possessed)",
                     model, _raw_avail, decision_utc.isoformat(),
                 )
                 dropped.append(model)
@@ -465,11 +476,11 @@ def capture_bayes_precision_instruments(
             return 0.0
         return _sigma_repr_sq_for(city, model_name)
 
-    # UNIFY (FINAL no-shadow §4): instruments enter RAW (z = x), NOT EB-corrected
+    # UNIFY (single-serving-rule §4): instruments enter RAW (z = x), NOT EB-corrected
     # (z = x − b̂). The walk-forward residual history is retained for width/provenance
     # (anchor τ0, disagreement var, σ_resid) but never shifts the center, so the fused
     # μ* the materializer writes to forecast_posteriors is the RAW diagonal center —
-    # the same RAW belief the spine entry path serves (one belief, no shadow).
+    # the same RAW belief the spine entry path serves (one belief).
     instruments: list[ModelInstrument] = []
     for m in selection.likelihood_globals:
         z, n = _raw_instrument(m, present_values[m], histories.get(m), parent_bias)

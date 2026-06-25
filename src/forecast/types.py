@@ -63,8 +63,8 @@ class RawModelMember:
     station mapping, raw artifact id, data version) so a member can be audited
     against the settlement station and product set in DebiasAuthority.
 
-    RAW SECOND-MOMENT PRECISION (2026-06-18 RAW diagonal fusion, FINAL no-shadow
-    execution flow §1-§2): ``walk_forward_raw_m2_native`` is the strictly-prior,
+    RAW SECOND-MOMENT PRECISION (2026-06-18 RAW diagonal fusion, single-serving-rule
+    flow §1-§2): ``walk_forward_raw_m2_native`` is the strictly-prior,
     date-aligned ``Ê[(x_raw − Y)²]`` for THIS model at the family's (city, metric,
     lead) — the RAW second moment of the residual (forecast minus settlement),
     SQUARED then averaged over settlements with target_date < decision date. It is
@@ -87,7 +87,7 @@ class RawModelMember:
     station_mapping_id: str
     raw_forecast_artifact_id: str
     data_version: str
-    # RAW diagonal precision basis (FINAL no-shadow execution flow §1-§2). The raw
+    # RAW diagonal precision basis (single-serving-rule flow §1-§2). The raw
     # second moment Ê[(x−Y)²] (bias² INCLUDED) and its walk-forward count. None/0 ⇒
     # no precision signal ⇒ equal 1/n for this member.
     walk_forward_raw_m2_native: float | None = None

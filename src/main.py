@@ -113,6 +113,15 @@ _SUBSTRATE_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 
 
+def _substrate_clob_timeout_seconds() -> float:
+    """Short public-CLOB timeout for background substrate refresh."""
+
+    return max(
+        1.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "1.5")),
+    )
+
+
 def _substrate_refresh_family_text_key(value: object) -> str:
     text = str(value or "").strip().lower()
     return " ".join(text.replace("-", " ").replace("_", " ").split())
@@ -165,15 +174,7 @@ def _substrate_refresh_family_key(
     )
 
 
-# Wave-2 item 5 (2026-06-12): the canary live mode is COLLAPSED. Canary
-# semantics (min-fill-count + promotion-artifact qualifying lane) were deleted
-# in 5e1e7efd76; "edli_live" is now the ONLY event-driven live mode. The old
-# "edli_live_canary" string is no longer an admissible config value — it is
-# mapped to "edli_live" at the read boundary (_live_execution_mode) so any
-# persisted rows/receipts carrying the historical string remain readable.
-_LEGACY_LIVE_EXECUTION_MODE_ALIASES = {
-    "edli_live_canary": "edli_live",
-}
+# Wave-2 item 5 (2026-06-12): "edli_live" is the only event-driven live mode.
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_live",
@@ -187,9 +188,8 @@ REACTOR_MODE_BY_LIVE_STAGE = {
     "disabled": "disabled",
     "edli_live": "live",
 }
-# Live production has one EDLI scope: forecast plus Day0. Forecast-only and
-# day0-shadow were staging scopes; keeping them in the live daemon makes the
-# execution layer understand non-live states.
+# Live production has one EDLI scope: forecast plus Day0. Historical staging
+# scopes stay out of the live daemon so the execution layer has one state.
 EDLI_LIVE_SCOPES = frozenset({"forecast_plus_day0"})
 EDLI_RUNTIME_FLAGS = (
     "enabled",
@@ -283,10 +283,6 @@ def _mark_held_position_monitor_complete() -> None:
 
 def _live_execution_mode(edli_cfg: dict) -> str:
     mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
-    # Wave-2 item 5: map the historical canary mode string to its collapsed
-    # successor so persisted config/receipt data carrying the old value remains
-    # readable instead of failing closed on UNSUPPORTED_LIVE_EXECUTION_MODE.
-    mode = _LEGACY_LIVE_EXECUTION_MODE_ALIASES.get(mode, mode)
     if mode not in LIVE_EXECUTION_MODES:
         raise ValueError(f"UNSUPPORTED_LIVE_EXECUTION_MODE:{mode}")
     return mode
@@ -302,7 +298,7 @@ def _harvester_should_register(live_execution_mode: str) -> bool:
     consume, and capital stayed stuck on-chain (memory #56 "settled-target-still-
     active", reproducing on Shanghai cca68b44).
 
-    The resolver is shadow-safe: ``resolve_pnl_for_settled_markets`` READS VERIFIED
+    The resolver is settlement-read-only: ``resolve_pnl_for_settled_markets`` READS VERIFIED
     settlement_outcomes (read-only) and writes only trade-side close + a durable
     REDEEM_INTENT_CREATED row. The actual on-chain redeem POST lives in the
     SEPARATELY-gated _redeem_submitter_cycle (already scheduled in all modes), whose
@@ -788,14 +784,6 @@ def evaluate_edli_stage_readiness(
 
     if reasons:
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_FAIL, live_entries_allowed=False, reasons=tuple(reasons))
-    if stage == "edli_submit_disabled_bridge":
-        return EdliStageReadiness(
-            stage=stage,
-            status=EDLI_STAGE_PASS,
-            live_entries_allowed=False,
-            submit_allowed=False,
-            scaleout_allowed=False,
-        )
     return EdliStageReadiness(
         stage=stage,
         status=EDLI_STAGE_PASS,
@@ -3595,10 +3583,7 @@ def _refresh_pending_family_snapshots(
         #         tolerate_missing_book=True is already hardwired inside
         #         refresh_executable_market_substrate_snapshots, so illiquid bins
         #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
-        _clob_timeout = max(
-            1.0,
-            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-        )
+        _clob_timeout = _substrate_clob_timeout_seconds()
         markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
             _prune_fresh_market_outcomes_for_snapshot_refresh(
                 write_conn,
@@ -5274,7 +5259,7 @@ def _edli_event_reactor_cycle() -> None:
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
         except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             logger.warning(
-                "EDLI reactor: portfolio snapshot load failed; shadow may observe "
+                "EDLI reactor: portfolio snapshot load failed; no-submit telemetry may observe "
                 "with single-asset sizing, but real-submit will fail closed: %r",
                 _portfolio_exc,
             )
@@ -8367,10 +8352,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             for trow in topology_rows
         ]
 
-        _clob_timeout = max(
-            1.0,
-            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
-        )
+        _clob_timeout = _substrate_clob_timeout_seconds()
         lock_timeout_s = max(
             0.0,
             float(os.environ.get("ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS", "2.0")),

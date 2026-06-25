@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-19
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
 """Relationship tests for the K4.0 maker-rest escalation job.
 
 The escalation job is the DEADLINE owner of the rest-then-cross plan: it cancels

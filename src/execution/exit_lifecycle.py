@@ -828,7 +828,7 @@ def _dual_write_canonical_economic_close_if_available(
         entry_snapshot.state = "entered"
         entry_snapshot.exit_state = ""
         try:
-            # F4 (docs/findings_2026_05_28.md §F4, 2026-05-28): backfill
+            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): backfill
             # synthesizes the canonical entry sequence for a legacy position
             # whose journey ended at exit. The snapshot is set to "entered"
             # (state=entered → phase ACTIVE) so we pass phase_after=ACTIVE
@@ -1349,7 +1349,7 @@ def _void_chain_confirmed_zero(
             projection["chain_state"] = "chain_confirmed_zero"
 
             env = str(getattr(voided, "env", "") or "live")
-            if env not in {"live", "test", "replay", "backtest", "shadow"}:
+            if env not in {"live", "test", "replay", "backtest"}:
                 env = "live"
 
             event = {
@@ -1632,7 +1632,7 @@ def _dual_write_canonical_admin_close_if_available(
             return False
         projection["updated_at"] = occurred_at
         env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest", "shadow"}:
+        if env not in {"live", "test", "replay", "backtest"}:
             env = "live"
         event = {
             "event_id": f"{trade_id}:admin_closed:{sequence_no}",

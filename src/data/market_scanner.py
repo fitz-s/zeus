@@ -3973,9 +3973,10 @@ def _prefetch_selected_orderbooks(
 ) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
-    Returns a ``{token_id: orderbook_dict}`` map.  Best-effort: if the batch
-    wrapper is unavailable or the call fails, returns an empty map so capture
-    falls back to per-token GET /book (back-compat / never aborts the cycle).
+    Returns a ``{token_id: orderbook_dict}`` map. Best-effort: if the batch
+    wrapper is unavailable or the call fails, returns an empty map. Batch-capable
+    warm callers should defer missing books to a later tick instead of degrading
+    into serial per-token GET /book.
     Chunked at ``_BATCH_ORDERBOOK_CHUNK`` tokens/request (the /books endpoint has
     no documented per-call token cap; we chunk conservatively).
     """
@@ -4010,8 +4011,8 @@ def _prefetch_selected_orderbooks(
     # same bound a single GET /book carries); the min-window/deadline gate applies
     # only to the SECOND-and-later chunks of a large multi-chunk warm cycle, where
     # deferring extra chunks to a later cycle is genuine budget protection. Per-bin
-    # fallback for tokens absent from the batch response is unchanged (capture's
-    # prefetched_orderbook=None branch, market_scanner.py:2822-2825).
+    # missing tokens from a batch-capable client are deferred by the caller; they
+    # do not fall back to per-token GET /book inside the warm lane.
     min_prefetch_window = _positive_float_env(
         "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS",
         0.75,
@@ -4021,8 +4022,7 @@ def _prefetch_selected_orderbooks(
     for chunk_index, start in enumerate(range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK)):
         # Budget gate applies to chunk 2+ ONLY: the first chunk is the one POST that
         # replaces the per-token GET storm, so it always runs. Later chunks of a
-        # multi-chunk cycle are deferred to a later cycle when the window is spent —
-        # the unfetched tokens fall back per-token inside capture, never abort.
+        # multi-chunk cycle are deferred to a later cycle when the window is spent.
         if chunk_index > 0 and deadline is not None:
             remaining_window = deadline - time.monotonic()
             if remaining_window < min_prefetch_window:
@@ -4250,17 +4250,19 @@ def refresh_executable_market_substrate_snapshots(
     # chunk (vs one GET /book per outcome).  This collapses the orderbook leg of
     # an 11-bin negRisk event from 11 sequential HTTP calls to 1, so the budget
     # gate captures every bin instead of starving 8 of 11 (root cause of
-    # EDGE_INSUFFICIENT).  Per-bin staleness must NOT abort the event: a token
-    # missing from the batch map simply falls back / skips that one outcome
-    # (operator directive: "market event constant, bin event should not block
-    # freshness").  market_info is synthetic for background substrate identity;
+    # EDGE_INSUFFICIENT). Per-bin staleness must NOT abort the event, but once a
+    # CLOB client supports batch /books, a missing batch entry is deferred to the
+    # next tick instead of falling back to serial /book reads. market_info is
+    # synthetic for background substrate identity;
     # fee_details are fetched once per family and reused only inside this
     # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
+    batch_orderbook_supported = callable(getattr(clob, "get_orderbook_snapshots", None))
     prefetched_books = _prefetch_selected_orderbooks(
         clob,
         selected_candidates,
         deadline=prefetch_deadline,
     )
+    prefetch_missing_skipped = 0
     clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}
     for index, (_recency, _priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
@@ -4275,7 +4277,6 @@ def refresh_executable_market_substrate_snapshots(
                 for _recency, _priority, _ordinal, remaining_market, _outcome, _condition_id, _direction in selected_candidates[index:]
             }
             break
-        attempted += 1
         decision = SimpleNamespace(
             edge=SimpleNamespace(direction=direction),
             tokens={
@@ -4285,11 +4286,18 @@ def refresh_executable_market_substrate_snapshots(
             },
         )
         # Resolve the token capture will actually read (direction -> yes/no) so
-        # we hand it the matching prefetched book.  When the batch did not return
-        # this token (partial response / offline bin) we pass None and capture
-        # falls back to a fresh per-token GET /book — never aborting the event.
+        # we hand it the matching prefetched book. In the background substrate
+        # lane, once the CLOB supports batch /books, a missing batch entry is
+        # deferred to the next tick. Falling back to per-token /book here is the
+        # live starvation mode: one slow or partial batch can become N blocking
+        # HTTP reads and overrun the warm cadence.
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
+        if batch_orderbook_supported and selected_token and prefetched_book is None:
+            skipped += 1
+            prefetch_missing_skipped += 1
+            continue
+        attempted += 1
         prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
         lock_retry_count = _snapshot_capture_sqlite_lock_retries()
         capture_attempt = 0
@@ -4394,6 +4402,7 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_budget_seconds": snapshot_budget_seconds,
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
+        "prefetch_missing_skipped": prefetch_missing_skipped,
     }
     if failures:
         summary["failure_samples"] = failures

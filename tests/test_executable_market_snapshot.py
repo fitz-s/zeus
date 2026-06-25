@@ -2196,7 +2196,7 @@ def test_final_execution_intent_requires_cost_basis_hash():
 # ---------------------------------------------------------------------------
 # FT-64 (2026-05-27): batch orderbook prefetch — additive, byte-identical path.
 # Lifecycle: created=2026-05-27
-# Authority basis: docs/operations/POLYMARKET_ORDERBOOK_FRESHNESS_PATTERN_2026-05-27.md
+# Authority basis: docs/archive/2026-Q2/operations_historical/POLYMARKET_ORDERBOOK_FRESHNESS_PATTERN_2026-05-27.md
 # Invariant guarded: prefetched orderbook path must produce a snapshot
 #   byte-identical to the per-token fetched path; per-bin staleness must not
 #   abort the event; the CLOB-archived fail-closed guard must still fire.

@@ -1,6 +1,6 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-10
-# Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K1.1/K1.2
+# Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K1.1/K1.2
 """K1 antibodies for the twin formulas that must stay equivalent or unified.
 
 K1.1 audit verdicts pinned here:

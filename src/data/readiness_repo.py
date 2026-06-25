@@ -16,7 +16,7 @@ from src.state.connection_pair import WorldConnection
 READINESS_STATUSES = frozenset({
     "READY",
     "LIVE_ELIGIBLE",
-    "SHADOW_ONLY",
+    "BLOCKED",
     "BLOCKED",
     "DEGRADED_LOG_ONLY",
     "UNKNOWN_BLOCKED",

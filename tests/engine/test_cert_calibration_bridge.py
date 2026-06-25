@@ -48,14 +48,6 @@ from src.engine.event_reactor_adapter import (
 from src.types.market import Bin
 
 
-@pytest.fixture
-def _coverage_gate_on(monkeypatch):
-    """Turn the K3 coverage SHRINK flag ON so an UNLICENSED verdict's shrink is 'applied'
-    (the credential licenses UNLICENSED only when the shrink actually moved the live leg)."""
-    edli = dict(settings._data["edli"])
-    edli["q_lcb_settlement_coverage_gate_enabled"] = True
-    monkeypatch.setitem(settings._data, "edli", edli)
-
 DECISION_TIME = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 _CITY = "Chicago"
 _METRIC = "high"
@@ -121,10 +113,10 @@ def _render_payload(credential):
 # ---------------------------------------------------------------------------
 # Q1 — replacement + bounds + an ADMITTING coverage verdict -> new authority
 #   LICENSED: admitted unconditionally.
-#   UNLICENSED-shrunk (flag on + q_lcb_out<q_lcb_in): admitted (the shrunk q_lcb is honest).
+#   UNLICENSED-shrunk (q_lcb_out<q_lcb_in): admitted (the shrunk q_lcb is honest).
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("status", ["LICENSED", "UNLICENSED"])
-def test_q1_replacement_with_bounds_and_coverage_is_admitted(status, _coverage_gate_on):
+def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
@@ -189,35 +181,12 @@ def test_q1_insufficient_data_is_admitted_by_default():
 
 
 def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):
-    """An UNLICENSED verdict whose shrink was NOT applied to the live leg is the unshrunk
-    overconfident bound serving live — it must BLOCK as UNEVALUATED, not license. Two
-    unshrunk shapes, both blocked: (1) the coverage gate is OFF (the shrink never reached
-    the leg) even with q_lcb_out<q_lcb_in; (2) the gate is ON but the verdict produced no
-    real shrink (q_lcb_out == q_lcb_in)."""
+    """An UNLICENSED verdict with no real shrink is an overconfident bound serving live."""
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
         q_mode="FUSED_NORMAL_FULL",
     )
-    # (1) gate OFF → shrink_applied False even though q_lcb_out < q_lcb_in.
-    edli_off = dict(settings._data["edli"])
-    edli_off["q_lcb_settlement_coverage_gate_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli", edli_off)
-    credential = _build_replacement_calibration_credential(
-        replacement_bundle=bundle,
-        q_mode="FUSED_NORMAL_FULL",
-        coverage_verdict=_coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66),
-        family=_family(),
-    )
-    cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
-    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
-        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
-
-    # (2) gate ON but the verdict produced no real shrink (q_lcb_out == q_lcb_in).
-    edli_on = dict(settings._data["edli"])
-    edli_on["q_lcb_settlement_coverage_gate_enabled"] = True
-    monkeypatch.setitem(settings._data, "edli", edli_on)
     credential2 = _build_replacement_calibration_credential(
         replacement_bundle=bundle,
         q_mode="FUSED_NORMAL_FULL",
@@ -237,7 +206,7 @@ def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):
         (None, "fused_center_bootstrap_p05", "FUSED_NORMAL_FULL"),          # q_lcb_json null
         ({}, "fused_center_bootstrap_p05", "FUSED_NORMAL_FULL"),            # empty bounds map
         ({"bin-a": 0.8}, "wilson_member_vote", "FUSED_NORMAL_FULL"),        # wrong basis
-        ({"bin-a": 0.8}, "fused_center_bootstrap_p05", "SOFT_ANCHOR_FALLBACK"),  # bounds-missing mode
+        ({"bin-a": 0.8}, "fused_center_bootstrap_p05", "FUSED_CENTER_ONLY_NORMAL"),
     ],
 )
 def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, q_mode):
@@ -447,13 +416,10 @@ def _family_one_yes_lcb():
 
 
 def test_structural_coverage_fault_raises_not_insufficient_data(monkeypatch):
-    """A structural settlement read/schema fault, with the coverage SAFETY gate ON, raises
+    """A structural settlement read/schema fault raises
     QLCB_COVERAGE_AUTHORITY_FAULT (fail closed) — it must NOT degrade to INSUFFICIENT_DATA
     (which would mask a broken read as thin data and admit-by-default an unverified bound).
     RED-on-revert: swallowing the fault to None/INSUFFICIENT_DATA removes the raise."""
-    edli_on = dict(settings._data["edli"])
-    edli_on["q_lcb_settlement_coverage_gate_enabled"] = True
-    monkeypatch.setitem(settings._data, "edli", edli_on)
     # claim history present so the path REACHES the settlement query (not short-circuited thin)
     monkeypatch.setattr(adapter, "_per_day_claimed_qlcb_by_date", lambda **kw: {_TARGET_DATE: 0.80})
     family, lcb = _family_one_yes_lcb()
@@ -462,20 +428,6 @@ def test_structural_coverage_fault_raises_not_insufficient_data(monkeypatch):
             family=family, forecast_conn=_SettlementQueryBoomConn(), lcb_by_direction=lcb
         )
 
-
-def test_structural_coverage_fault_inert_when_gate_off(monkeypatch):
-    """Gate OFF: a structural fault stays inert (the legacy fail-open default) — the verdict is
-    a non-blocking INSUFFICIENT_DATA, byte-identical to today. The fail-closed behavior is
-    scoped to the SAFETY gate being ON."""
-    edli_off = dict(settings._data["edli"])
-    edli_off["q_lcb_settlement_coverage_gate_enabled"] = False
-    monkeypatch.setitem(settings._data, "edli", edli_off)
-    monkeypatch.setattr(adapter, "_per_day_claimed_qlcb_by_date", lambda **kw: {_TARGET_DATE: 0.80})
-    family, lcb = _family_one_yes_lcb()
-    verdict = _replacement_family_coverage_verdict(
-        family=family, forecast_conn=_SettlementQueryBoomConn(), lcb_by_direction=lcb
-    )
-    assert verdict is not None and verdict.status == "INSUFFICIENT_DATA"
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ from src.forecast.model_selection import (
     REGIONAL_MODELS,
     regional_eligible,
 )
+from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
 
@@ -285,14 +286,26 @@ BAYES_PRECISION_FUSION_EXTRA_MODELS: tuple[str, ...] = (
 #   ukmo_uk_deterministic_2km    — UK-only, London MAE 0.919 vs 1.039 (n=112). Role candidate:
 #                                  London regional expert (icon_d2 pattern).
 # Domain gating: nbm + ukmo_uk have their own polygons (config/model_domain_polygons.yaml);
-# ukmo_global is worldwide. Promotion requires forward-shadow validation, never in-sample.
+# ukmo_global is worldwide. Promotion requires forward validation, never in-sample.
 # 2026-06-09 SAME-DAY PROMOTION (operator-directed): all three candidates were promoted into
 # the selection sets (model_selection.py — ukmo_global into DECORR_GLOBALS, ncep_nbm into
 # GLOBAL_LIKELIHOOD_MODELS via the NCEP family contest, ukmo_uk into REGIONAL_MODELS), so they
 # now ride BAYES_PRECISION_FUSION_EXTRA_MODELS automatically. The lane stays for FUTURE candidates; keep it empty
 # rather than deleting the mechanism (any model listed here must NOT also be in the selection
 # sets, or the download loop would fetch it twice).
-BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
+BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = (
+    # Source-clock vNext one-scheme inputs (2026-06-25). These accrue live current and fixed-lead
+    # history rows so the materializer can use the per-city final basket directly. They are not
+    # admitted by the legacy F4 selector unless already present in the legacy selection sets.
+    "dmi_harmonie_europe",
+    "knmi_harmonie_netherlands",
+    "kma_gdps",
+    "kma_ldps",
+    "met_nordic",
+    "italiameteo_icon_2i",
+    "jma_msm",
+    "nam_conus",
+)
 
 # K2 (2026-06-09, curl-verified): models the open-meteo single-runs API STRUCTURALLY cannot
 # serve. cmc_gem_gdps_15km returns modelRunUnavailable even for cadence-valid 00z/12z runs —
@@ -303,10 +316,11 @@ BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
 # gem exception in _read_persisted_current_capture. gem_seamless was REJECTED as a substitute:
 # it serves HRDPS/RDPS for North-American cities — a different physical product than the GDPS
 # history (the source-identity violation class of the EB-bias wrong-set bug ff7f33dd5b).
-# 2026-06-17: gem_global (the only member) was dropped from the fusion, so no fetched model is
-# single-runs-unservable any more — this list is now empty (the previous_runs-substitution path it
-# guarded is still exercised by the surviving providers).
-SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ()
+# 2026-06-25: KMA GDPS/LDPS remain available through forecast/previous-runs surfaces, but the
+# current single-runs API returns model-run-unavailable while KMA is migrating its upstream
+# distribution. Skip the known-dead current leg and let the generalized current-value serving
+# rule use the same natural-key previous_runs row when present.
+SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ("kma_gdps", "kma_ldps")
 
 # R3 — Per-model run cadence: the UTC init hours each provider actually publishes. Fetching a model
 # at a non-publishing cycle re-pulls the SAME underlying run under a wrong source_cycle_time.
@@ -318,6 +332,7 @@ SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ()
 MODEL_PUBLISH_CYCLE_HOURS: dict[str, frozenset[int]] = {
     "jma_seamless": frozenset({0, 12}),   # JMA GSM/seamless init 00/12Z only
     "gem_global":   frozenset({0, 12}),   # CMC GDPS 00/12Z only
+    "italiameteo_icon_2i": frozenset({0, 12}),
 }
 _ALL_CYCLES: frozenset[int] = frozenset({0, 6, 12, 18})
 
@@ -330,6 +345,48 @@ def _model_publishes_cycle(model: str, cycle_hour: int) -> bool:
     under a wrong source_cycle_time (R3 redundancy).
     """
     return cycle_hour in MODEL_PUBLISH_CYCLE_HOURS.get(model, _ALL_CYCLES)
+
+
+@dataclass(frozen=True)
+class _SourceClockSingleRunsRequest:
+    run: datetime
+    source_available_at: str
+
+
+def _read_source_clock_single_runs_requests(
+    *, decision_time: datetime
+) -> dict[str, _SourceClockSingleRunsRequest]:
+    """Latest Open-Meteo run per model that is publicly usable now.
+
+    This is a live download optimization and provenance fix.  The BPF fan-out is
+    often driven by the anchor cycle, but Open-Meteo publishes each model on its
+    own clock.  Requesting the anchor cycle for a model whose latest public run is
+    older produces repeated 400s and, worse, would stamp the wrong
+    source_cycle_time if it succeeded.  Cached model-update metadata is written
+    by the source-clock probe before this fan-out runs; if the cache is absent we
+    fail open to the historical fixed-cycle behavior.
+    """
+    try:
+        from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
+        from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
+
+        updates = read_model_updates_jsonl(DEFAULT_MODEL_UPDATES_JSONL)
+    except Exception:
+        return {}
+    out: dict[str, _SourceClockSingleRunsRequest] = {}
+    for update in updates:
+        try:
+            run_clock = update.to_source_run_clock()
+            if decision_time < source_publicly_usable_at(run_clock):
+                continue
+            run = update.last_run_initialisation_time.astimezone(UTC)
+            out[str(update.model)] = _SourceClockSingleRunsRequest(
+                run=run,
+                source_available_at=update.last_run_availability_time.astimezone(UTC).isoformat(),
+            )
+        except Exception:
+            continue
+    return out
 
 # Open-Meteo PREVIOUS-RUNS model ids keyed by the STORED model identity. The previous-runs API
 # model id can differ from both the stored identity AND the single-runs id: the anchor is stored
@@ -363,6 +420,18 @@ _DOMAIN_GATED_MODELS: frozenset[str] = (
     # Candidate-accrual models with limited physical domains (nbm: CONUS; ukmo_uk: UK).
     # ukmo_global_deterministic_10km is worldwide and intentionally NOT gated.
     | frozenset({"ncep_nbm_conus", "ukmo_uk_deterministic_2km"})
+    | frozenset(
+        {
+            "dmi_harmonie_europe",
+            "knmi_harmonie_netherlands",
+            "kma_gdps",
+            "kma_ldps",
+            "met_nordic",
+            "italiameteo_icon_2i",
+            "jma_msm",
+            "nam_conus",
+        }
+    )
 )
 
 
@@ -1005,6 +1074,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     forecast_db: Path,
     cycle: datetime,
     targets: Iterable[BayesPrecisionFusionDownloadTarget],
+    models: Sequence[str] | None = None,
+    include_previous_runs: bool = True,
+    prune_after: bool = True,
     single_runs_fetch: SingleRunsFetchFn | None = None,
     previous_runs_fetch: PreviousRunsFetchFn | None = None,
     release_lag_hours: float = 14.0,
@@ -1055,6 +1127,17 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     cutoff_iso = (captured_at - timedelta(days=int(retention_days))).isoformat()
 
     target_list = list(targets)
+    requested_models = tuple(
+        dict.fromkeys(
+            str(model).strip()
+            for model in (
+                models
+                if models is not None
+                else BAYES_PRECISION_FUSION_EXTRA_MODELS + BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS
+            )
+            if str(model).strip()
+        )
+    )
     rows: list[tuple] = []
     total_written = 0
     dropped: list[str] = []
@@ -1081,6 +1164,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
         _ro = _ro_connect(Path(forecast_db))
         try:
+            persisted_cycle_keys = {
+                tuple(r)
+                for r in _ro.execute(
+                    "SELECT model, city, target_date, metric, source_cycle_time, endpoint"
+                    " FROM raw_model_forecasts"
+                )
+            }
             persisted_keys = {
                 tuple(r)
                 for r in _ro.execute(
@@ -1100,6 +1190,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         finally:
             _ro.close()
     except Exception:
+        persisted_cycle_keys = set()
         persisted_keys = set()
         prev_runs_done = set()
     single_success_models: set[str] = {
@@ -1107,6 +1198,33 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         for model, _city, _target_date, _metric, endpoint in persisted_keys
         if endpoint == "single_runs"
     }
+    source_clock_single_runs = (
+        {}
+        if _use_legacy_per_model
+        else _read_source_clock_single_runs_requests(decision_time=captured_at)
+    )
+
+    def _single_runs_request_for_model(model: str) -> _SourceClockSingleRunsRequest:
+        return source_clock_single_runs.get(
+            model,
+            _SourceClockSingleRunsRequest(
+                run=cycle_utc,
+                source_available_at=source_available_iso,
+            ),
+        )
+
+    def _has_persisted_row(
+        *,
+        model: str,
+        city: str,
+        target_date: str,
+        metric: str,
+        source_cycle_time: str,
+        endpoint: str,
+    ) -> bool:
+        return (
+            model, city, target_date, metric, source_cycle_time, endpoint
+        ) in persisted_cycle_keys
 
     # De-duplicate targets by (city, target_date, lead_days) for the batched fetch path.
     # The metric dimension is NOT a fetch axis — both high and low come from one payload.
@@ -1128,7 +1246,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # LEGACY PATH: per-model per-metric fetchers (test injection compatibility).
             # Iterates the old per-model loop so injected stubs work unchanged.
             for t in city_targets:
-                for model in BAYES_PRECISION_FUSION_EXTRA_MODELS + BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS:
+                for model in requested_models:
                     if not _model_in_domain(model, lat=t.latitude, lon=t.longitude, lead_days=int(t.lead_days)):
                         key = f"{model}:{t.city}"
                         domain_excluded.append(key)
@@ -1167,7 +1285,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             **_bayes_precision_fusion_product_identity(model, "single_runs", t),
                         })
 
-                    if (model, t.city, t.target_date, t.metric, "previous_runs") in persisted_keys:
+                    if not include_previous_runs:
+                        pv = None
+                    elif (model, t.city, t.target_date, t.metric, "previous_runs") in persisted_keys:
                         pv = None
                     else:
                         try:
@@ -1193,10 +1313,12 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         else:
             # BATCHED PATH (R1+R2+R3): ONE single_runs call + ONE previous_runs call per
             # (city, target_date, cycle), covering all in-domain models and both metrics.
-            all_models = list(BAYES_PRECISION_FUSION_EXTRA_MODELS + BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS)
+            all_models = list(requested_models)
 
-            # Domain gate + R3 cycle-cadence gate for single_runs.
-            single_models: list[str] = []
+            # Domain gate + source-clock run selection for single_runs.  Models are grouped by
+            # their real public run so one Open-Meteo request never mixes 06Z and 12Z identities.
+            single_models_by_run: dict[datetime, list[str]] = defaultdict(list)
+            single_request_by_model: dict[str, _SourceClockSingleRunsRequest] = {}
             for model in all_models:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
                     domain_excluded.append(f"{model}:{city}")
@@ -1209,28 +1331,44 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if model in SINGLE_RUNS_UNSERVABLE_MODELS:
                     dropped.append(f"{model}:single_runs_unservable")
                     continue
-                # R3: skip models that don't publish at this cycle hour.
-                if not _model_publishes_cycle(model, cycle_hour):
+                request = _single_runs_request_for_model(model)
+                # R3: skip fixed-grid requests that don't match provider cadence.  When
+                # source-clock metadata provides an explicit run for this model, trust that
+                # run instead; several regional feeds publish outside the 00/06/12/18 grid.
+                if model not in source_clock_single_runs and not _model_publishes_cycle(model, request.run.hour):
                     _LOG.debug(
-                        "BAYES_PRECISION_FUSION R3 cadence skip: %s does not publish at %02dZ", model, cycle_hour
+                        "BAYES_PRECISION_FUSION R3 cadence skip: %s does not publish at %02dZ",
+                        model,
+                        request.run.hour,
                     )
                     continue
+                request_cycle_iso = request.run.isoformat()
                 # R1+R2 skip: check both metrics already persisted for this (model,city,date,cycle).
                 metrics_needed = [
                     met for met in ("high", "low")
-                    if (model, city, target_date, met, "single_runs") not in persisted_keys
+                    if not _has_persisted_row(
+                        model=model,
+                        city=city,
+                        target_date=target_date,
+                        metric=met,
+                        source_cycle_time=request_cycle_iso,
+                        endpoint="single_runs",
+                    )
                 ]
                 if metrics_needed:
-                    single_models.append(model)
+                    single_request_by_model[model] = request
+                    single_models_by_run[request.run].append(model)
+                else:
+                    single_success_models.add(model)
 
             # ONE batched single_runs fetch covers all in-domain models + both metrics.
-            if single_models:
+            for single_run, single_models in sorted(single_models_by_run.items()):
                 sv_map = _default_live_fetch_batched(
                     models=single_models,
                     latitude=ref.latitude,
                     longitude=ref.longitude,
                     timezone_name=ref.timezone_name,
-                    run=cycle_utc,
+                    run=single_run,
                     target_local_date=target_local_date,
                     forecast_hours=forecast_hours,
                 )
@@ -1248,20 +1386,29 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                         dropped.append(f"{model}:single_runs")
                         continue
                     high_c, low_c = hilo
+                    request = single_request_by_model.get(model) or _single_runs_request_for_model(model)
+                    request_cycle_iso = request.run.isoformat()
                     # Emit one row per metric × target (both metrics from the one payload).
                     for t in city_targets:
                         val = high_c if t.metric == "high" else low_c
                         if val is None:
                             dropped.append(f"{model}:single_runs")
                             continue
-                        if (model, t.city, t.target_date, t.metric, "single_runs") in persisted_keys:
+                        if _has_persisted_row(
+                            model=model,
+                            city=t.city,
+                            target_date=t.target_date,
+                            metric=t.metric,
+                            source_cycle_time=request_cycle_iso,
+                            endpoint="single_runs",
+                        ):
                             single_success_models.add(model)
                             continue
                         single_success_models.add(model)
                         rows.append({
                             "model": model, "city": t.city, "target_date": t.target_date,
-                            "metric": t.metric, "source_cycle_time": cycle_iso,
-                            "source_available_at": source_available_iso, "captured_at": captured_iso,
+                            "metric": t.metric, "source_cycle_time": request_cycle_iso,
+                            "source_available_at": request.source_available_at, "captured_at": captured_iso,
                             "lead_days": int(t.lead_days), "forecast_value_c": float(val),
                             "endpoint": "single_runs",
                             **_bayes_precision_fusion_product_identity(model, "single_runs", t),
@@ -1271,7 +1418,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # Domain gate applies; cadence gate does NOT apply (previous_runs values are
             # historical and valid regardless of which cycle issued the request).
             prev_models: list[str] = []
-            for model in all_models:
+            for model in all_models if include_previous_runs else []:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
                     continue  # domain_excluded already logged above
                 # R4a: check both metrics already in immutable history.
@@ -1331,7 +1478,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
     # ---- CHUNKED-DURABLE persist happened per city×date above; final pass prunes only ----
     written = total_written
-    _, pruned = _persist_chunk_with_lock_retry(forecast_db, (), cutoff_iso=cutoff_iso)
+    pruned = 0
+    if prune_after:
+        _, pruned = _persist_chunk_with_lock_retry(forecast_db, (), cutoff_iso=cutoff_iso)
 
     if domain_excluded:
         _LOG.info(
@@ -1346,7 +1495,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # (expected absence) so the operator can tell "complete global ensemble" from "degraded".
     global_models_expected = frozenset(
         m for m in BAYES_PRECISION_FUSION_EXTRA_MODELS
-        if m not in frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
+        if m in requested_models
+        and m not in frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
     )
     global_single_dropped_scoped = {
         d.split(":")[0] for d in dropped if d.endswith(":single_runs")

@@ -1,6 +1,6 @@
 # Created: 2026-06-11
 # Last reused or audited: 2026-06-11
-# Authority basis: docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4 STAGE 1, §5.2
+# Authority basis: docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4 STAGE 1, §5.2
 """K=1 STAGE 1 antibody tests — persist the fresh submit-time JIT book (R8) as a
 first-class ``executable_market_snapshots`` row tagged ``source=JIT_PRESUBMIT``,
 BEFORE it is consumed.  Pure additive persistence + provenance; the flag

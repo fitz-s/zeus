@@ -105,7 +105,7 @@ from src.strategy.risk_limits import RiskLimits
 logger = logging.getLogger(__name__)
 
 # Post-A4: KNOWN_STRATEGIES is derived from the StrategyProfile registry's
-# boot-allowed set (live_status in {"live", "shadow"}). The pre-A4 hardcoded
+# boot-allowed set (live_status == "live"). The pre-A4 hardcoded
 # set was a 4-entry literal that drifted independently of LIVE_SAFE_STRATEGIES
 # in control_plane (both nominally "boot allowlist", separate sources).
 # Resolved here by routing through the single registry source — see PLAN.md

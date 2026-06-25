@@ -69,9 +69,7 @@ to its bin's all-history frequency. Measuring the per-day claimed->realized curv
 a CALIBRATION test (P(realize | claimed X)), not a climatology test (P(bin | any day)).
 
 The SHRINK is HIGH risk (it moves the live decision). It is applied to the live
-LCB ONLY through ``apply_settlement_coverage(..., enabled=<flag>)`` with the flag
-``edli.q_lcb_settlement_coverage_gate_enabled``. With the flag OFF the verdict is
-computed but the LCB is byte-identical to today. The shrink is SHRINK-ONLY (one-sided,
+LCB through ``apply_settlement_coverage``. The shrink is SHRINK-ONLY (one-sided,
 only ever LOWERS): there is NO UP arm (P3_architecture.md KILL: N7 bidirectional rewrite).
 
 The ARM gate (``arm_gate_coverage_blocks``) reads the verdict UNCONDITIONALLY — you
@@ -167,8 +165,8 @@ class CoverageObservation:
 class CoverageVerdict:
     """The settlement-backward-coverage verdict for one (city, metric, season).
 
-    Frozen truth object. ``q_lcb_out`` is the shrink TARGET (only applied to the
-    live LCB when the shadow flag is ON, via ``apply_settlement_coverage``).
+    Frozen truth object. ``q_lcb_out`` is the shrink TARGET applied to the live
+    LCB by ``apply_settlement_coverage``.
     ``coverage_ratio`` = realized / claimed (None when INSUFFICIENT). The ARM gate
     reads ``status`` + ``coverage_ratio`` directly.
     """
@@ -301,20 +299,12 @@ def apply_settlement_coverage(
     *,
     q_lcb: float,
     verdict: CoverageVerdict,
-    enabled: bool,
 ) -> float:
-    """Apply the coverage verdict to a live q_lcb — gated by the shadow flag.
-
-    SHADOW SAFETY: when ``enabled`` is False the shrink is NOT applied; the input
-    q_lcb is returned unchanged (byte-identical to legacy) even on an UNLICENSED
-    verdict. The verdict is still computed and observable — it just does not move
-    the live decision. Only ``enabled=True`` + ``status == "UNLICENSED"`` shrinks.
+    """Apply the coverage verdict to a live q_lcb.
 
     The 1-arg verdict is trusted to be for THIS q_lcb (verdict.q_lcb_in == q_lcb);
     LICENSED / INSUFFICIENT_DATA are no-ops by construction (q_lcb_out == q_lcb_in).
     """
-    if not enabled:
-        return float(q_lcb)
     if verdict.status == "UNLICENSED":
         # Never widen: the shrink only ever LOWERS the LCB (one-sided honesty).
         return float(min(float(q_lcb), float(verdict.q_lcb_out)))

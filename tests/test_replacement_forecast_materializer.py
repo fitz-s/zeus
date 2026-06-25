@@ -369,11 +369,11 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
         """
         CREATE TABLE raw_forecast_artifacts (
             artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED'))
         );
         INSERT INTO raw_forecast_artifacts (artifact_id, trade_authority_status)
-        VALUES (1, 'SHADOW_ONLY');
+        VALUES (1, 'BLOCKED');
 
         CREATE TABLE deterministic_forecast_anchors (
             anchor_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -394,8 +394,8 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
             interpolation_method TEXT,
             contributing_times_json TEXT NOT NULL DEFAULT '[]',
             provenance_json TEXT NOT NULL DEFAULT '{}',
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -419,15 +419,15 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
             '2026-06-17T12:08:19+00:00',
             1,
             'ecmwf_ifs9',
-            'SHADOW_ONLY',
+            'BLOCKED',
             'anchor-hash'
         );
 
         CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
             openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
-            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
-                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY'))
+            trade_authority_status TEXT NOT NULL DEFAULT 'BLOCKED'
+                CHECK (trade_authority_status IN ('BLOCKED', 'BLOCKED'))
         );
         """
     )
@@ -448,8 +448,8 @@ def test_legacy_anchor_schema_migration_does_not_rewrite_legacy_status_columns()
         (1, LIVE_RUNTIME_LAYER),
     )
 
-    assert raw_status == "SHADOW_ONLY"
-    assert anchor_status == "SHADOW_ONLY"
+    assert raw_status == "BLOCKED"
+    assert anchor_status == "BLOCKED"
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

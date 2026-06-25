@@ -1,9 +1,9 @@
 # Created: 2026-06-06
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
-# Purpose: Protect AIFS ENS sampled-2t extrema to market-bin probability bridge for replacement shadow research.
+# Purpose: Protect AIFS ENS sampled-2t extrema to market-bin probability bridge for replacement blocked-candidate research.
 # Reuse: Run before changing AIFS q_aifs construction or soft-anchor posterior inputs.
-# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow integration.
+# Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t blocked-candidate integration.
 """AIFS sampled-2t bin probability bridge tests."""
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def test_aifs_extrema_members_become_high_bin_probabilities() -> None:
 
     assert result.data_version == HIGH_DATA_VERSION
     assert result.probability_source == "aifs_sampled_2t_member_frequency"
-    assert result.trade_authority_status == "SHADOW_ONLY"
+    assert result.trade_authority_status == "BLOCKED"
     assert result.training_allowed is False
     assert result.probabilities == pytest.approx({"cold": 0.25, "mild": 0.50, "hot": 0.25})
     assert result.member_assignments == {"cf": "mild", "pf001": "cold", "pf002": "hot", "pf003": "mild"}
@@ -131,7 +131,7 @@ def test_composed_research_result_uses_matching_openmeteo_anchor_metric() -> Non
     assert low_result.aifs_probabilities.data_version == LOW_DATA_VERSION
     assert selected_bin(high_result.posterior.probabilities) == "hot"
     assert selected_bin(low_result.posterior.probabilities) == "cold"
-    assert high_result.trade_authority_status == "SHADOW_ONLY"
+    assert high_result.trade_authority_status == "BLOCKED"
     assert high_result.training_allowed is False
 
 

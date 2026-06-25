@@ -1,6 +1,6 @@
 # Created: 2026-04-18
 # Last reused or audited: 2026-05-23
-# Authority basis: FIX-3 task brief + docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+# Authority basis: FIX-3 task brief + docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
 """Forecast-layer uncertainty policy seams.
 
 Phase-1 de-hardcode starts by centralizing where forecast/measurement sigma is

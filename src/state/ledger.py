@@ -205,7 +205,7 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         ("fill_authority", "TEXT"),
         ("recovery_authority", "TEXT"),
         ("chain_shares", "REAL"),
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics columns added so balance-only rescue persists venue
         # truth on chain_avg_price / chain_cost_basis_usd without
         # overwriting submitted entry_price / cost_basis_usd / size_usd.
@@ -452,7 +452,7 @@ def apply_architecture_kernel_schema(conn: sqlite3.Connection) -> None:
 
 
 def backfill_fill_authority(conn: sqlite3.Connection) -> dict:
-    """F3 (docs/findings_2026_05_28.md §F3, 2026-05-28): deterministic
+    """F3 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3, 2026-05-28): deterministic
     fill_authority backfill for legacy NULL rows in position_current.
 
     After migration adds the nullable fill_authority column, rows created

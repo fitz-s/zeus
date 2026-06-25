@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-23
-# Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
 
 """PR-E — Quarantine tooling for decisions backed by non-contributing forecast snapshots.
 
@@ -18,7 +18,6 @@ Tables quarantined (all via forecast-snapshot linkage):
 
 Tables intentionally SKIPPED (no forecast snapshot linkage):
   - no_trade_events    — composite PK only, no single row_id column usable as quarantine key
-  - shadow_experiments — no snapshot linkage of any kind
   - calibration_pairs  — legacy table, no snapshot_id column
 
 Design choices:

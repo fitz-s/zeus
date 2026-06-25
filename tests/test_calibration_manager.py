@@ -43,7 +43,7 @@ from src.calibration.effective_sample_size import (
     build_decision_group_for_key,
     build_decision_groups,
     summarize_bucket_health,
-    summarize_maturity_shadow,
+    summarize_maturity_report,
     write_decision_groups,
 )
 from src.calibration.blocked_oos import evaluate_blocked_oos_calibration, recommend_calibration_promotion
@@ -367,7 +367,6 @@ class TestDecisionGroupAccounting:
         assert all(group.n_positive_rows == 1 for group in groups)
         assert groups[0].winning_range_label == "bin_3"
         assert health == [{
-            "shadow_only": True,
             "bucket_key": "US-Northeast_DJF",
             "cluster": "US-Northeast",
             "season": "DJF",
@@ -542,8 +541,8 @@ class TestDecisionGroupAccounting:
         }
         assert mixed["n"] == 0
 
-    def test_maturity_shadow_exposes_pair_row_inflation(self, tmp_path):
-        conn = get_connection(tmp_path / "test_maturity_shadow.db")
+    def test_maturity_report_exposes_pair_row_inflation(self, tmp_path):
+        conn = get_connection(tmp_path / "test_maturity_report.db")
         init_schema(conn)
         apply_canonical_schema(conn)
         for group_idx in range(5):
@@ -573,11 +572,10 @@ class TestDecisionGroupAccounting:
                 )
         _ensure_auth_verified(conn)
         groups = build_decision_groups(conn)
-        shadow = summarize_maturity_shadow(groups)
+        maturity = summarize_maturity_report(groups)
         conn.close()
 
-        assert shadow == [{
-            "shadow_only": True,
+        assert maturity == [{
             "bucket_key": "US-Northeast_DJF",
             "cluster": "US-Northeast",
             "season": "DJF",
@@ -958,7 +956,7 @@ class TestBlockedOOSCalibration:
         assert passed["status"] == "candidate"
         assert passed["decision_reason"] == "blocked_oos_passed"
         assert passed["promotion_id"] == "promotion:run-1"
-        assert failed["status"] == "shadow"
+        assert failed["status"] == "blocked"
         assert "insufficient_test_groups" in failed["decision_reason"]
         assert "brier_improvement" in failed["decision_reason"]
         assert "fallback_rate" in failed["decision_reason"]

@@ -1,7 +1,6 @@
 """Order executor: limit-order-only execution engine. Spec §6.4.
 
-Gate 2 routing: routes to LiveExecutor (via venue_adapter) when ZEUS_MODE=live,
-else routes to ShadowExecutor for paper/replay/backtest paths.
+Live entry execution uses FinalExecutionIntent through the venue adapter.
 
 Key rules:
 - Limit orders ONLY (never market orders)
@@ -3060,33 +3059,9 @@ def execute_intent(
             "LEGACY_EXECUTION_INTENT_LIVE_BLOCKED: live entry must use "
             "FinalExecutionIntent via execute_final_intent"
         )
-    if not (
-        os.environ.get("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT") == "1"
-        and os.environ.get("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "").strip().lower()
-        == "paper"
-    ):
-        raise RuntimeError(
-            "LEGACY_EXECUTION_INTENT_NON_LIVE_BLOCKED: legacy ExecutionIntent "
-            "requires ZEUS_ALLOW_LEGACY_EXECUTION_INTENT=1 and "
-            "ZEUS_LEGACY_EXECUTION_INTENT_SCOPE=paper"
-        )
-    trade_id = str(uuid.uuid4())[:12]
-    shadow_result = submit_order(intent, mode="paper")
-    if not isinstance(shadow_result, dict):
-        return OrderResult(
-            trade_id=trade_id,
-            status="rejected",
-            reason=f"legacy_paper_executor_result_invalid:{type(shadow_result).__name__}",
-        )
-    return OrderResult(
-        trade_id=trade_id,
-        status=str(shadow_result.get("status") or "shadow_filled"),
-        order_id=str(shadow_result.get("order_id") or ""),
-        submitted_price=float(intent.limit_price),
-        shares=_entry_buy_submit_shares(intent.target_size_usd, intent.limit_price),
-        order_role="entry",
-        reason=None,
-        command_state=None,
+    raise RuntimeError(
+        "LEGACY_EXECUTION_INTENT_BLOCKED: legacy ExecutionIntent has no "
+        "production execution route; use FinalExecutionIntent via execute_final_intent"
     )
 
 
@@ -3119,29 +3094,6 @@ def create_exit_order_intent(
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
     )
-
-
-
-
-def submit_order(order: Any, *, mode: Optional[str] = None) -> Any:
-    """Gate 2 top-level router: live path uses VenueAdapterExecutor, shadow uses ShadowExecutorImpl.
-
-    C-4 shim: routes based on ZEUS_MODE env var (or explicit mode kwarg).
-    Live callers should prefer execute_final_intent / execute_intent directly;
-    this shim exists for backwards-compat call sites that cannot yet pass a token.
-
-    @untyped_for_compat is NOT applied here because this shim is new code, not
-    a legacy site.  Deprecated callers should migrate to the typed ABC paths.
-    """
-    from src.config import get_mode as _get_mode
-
-    resolved_mode = mode or _get_mode()
-    if resolved_mode == "live":
-        from src.execution.venue_adapter import VenueAdapterExecutor
-        return VenueAdapterExecutor().submit(order)
-    else:
-        from src.execution.shadow_executor import ShadowExecutorImpl
-        return ShadowExecutorImpl().submit(order)
 
 
 def place_sell_order(

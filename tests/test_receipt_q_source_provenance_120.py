@@ -104,13 +104,13 @@ def test_replacement_forecast_receipt_tag_is_hash_stable_when_absent_and_recorde
         _receipt_json(
             _receipt(
                 replacement_forecast={
-                    "status": "SHADOW_VETO_ONLY",
+                    "status": "BLOCKED",
                     "reason": "REPLACEMENT_FORECAST_ALLOWED",
                 }
             )
         )
     )
-    assert tagged["replacement_forecast"]["status"] == "SHADOW_VETO_ONLY"
+    assert tagged["replacement_forecast"]["status"] == "BLOCKED"
 
 
 def test_q_source_maze_value_recorded():

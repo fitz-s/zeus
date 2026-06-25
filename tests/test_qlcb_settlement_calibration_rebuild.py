@@ -63,7 +63,7 @@ def test_calibrated_forecast_is_licensed_and_unchanged():
         city="Singapore", metric="high", season="summer",
         q_lcb=0.5088, observations=obs, min_n=30,
     )
-    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict)
     blocked, _reason = arm_gate_coverage_blocks(verdict)
 
     assert verdict.status == "LICENSED"
@@ -87,7 +87,7 @@ def test_climatology_constant_claim_would_shrink_calibrated_forecast_RED():
         city="Singapore", metric="high", season="summer",
         q_lcb=0.5088, observations=constant_claim_climatology, min_n=30,
     )
-    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict)
     # This is the SUPPRESSION: a constant-claim (climatology) stream shrinks the real
     # forecast to base_rate - 0.01. The rebuilt OBSERVATION BUILDER never produces a
     # constant-claim stream (it carries per-day actual claims), so this degenerate input
@@ -109,7 +109,7 @@ def test_insufficient_data_is_inert_and_arm_not_blocked():
         city="Singapore", metric="high", season="summer",
         q_lcb=0.5088, observations=thin, min_n=30,
     )
-    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict)
     blocked, _reason = arm_gate_coverage_blocks(verdict)
 
     assert verdict.status == "INSUFFICIENT_DATA"
@@ -125,7 +125,7 @@ def test_absent_claim_history_is_insufficient_data():
         city="Singapore", metric="high", season="summer",
         q_lcb=0.5088, observations=[], min_n=30,
     )
-    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.5088, verdict=verdict)
     blocked, _reason = arm_gate_coverage_blocks(verdict)
     assert verdict.status == "INSUFFICIENT_DATA"
     assert out == pytest.approx(0.5088)
@@ -145,7 +145,7 @@ def test_proven_overconfident_is_unlicensed_shrunk_and_arm_blocks():
         city="X", metric="high", season="summer",
         q_lcb=0.90, observations=over, min_n=30,
     )
-    out = apply_settlement_coverage(q_lcb=0.90, verdict=verdict, enabled=True)
+    out = apply_settlement_coverage(q_lcb=0.90, verdict=verdict)
     blocked, reason = arm_gate_coverage_blocks(verdict)
 
     assert verdict.status == "UNLICENSED"

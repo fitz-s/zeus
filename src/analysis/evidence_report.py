@@ -4,9 +4,9 @@
 #                  + docs/operations/task_2026-05-21_mainline_completion_authority/07_PHASE_6_EVIDENCE_LADDER.md §Object model
 """EvidenceReport — per-strategy evidence aggregator.
 
-Aggregates decision_certificates, no_trade_events, regret_decompositions, and
-shadow_experiments data for a given strategy into a structured report consumed
-by the LiveReadinessTribunal.
+Aggregates decision_certificates, no_trade_events, and regret_decompositions
+data for a given strategy into a structured report consumed by the
+LiveReadinessTribunal.
 
 Bayesian Beta(2,2) credible interval
 --------------------------------------
@@ -46,7 +46,7 @@ class EvidenceReport:
     tier_observed:
         Current EvidenceTier from registry (what we have evidence for).
     n_decisions:
-        Total shadow/paper decisions logged for this strategy.
+        Total observed decisions logged for this strategy.
     n_wins:
         Decisions with positive realized edge (win-rate numerator).
     n_no_trades:
@@ -130,8 +130,8 @@ def build_evidence_report(
         strategy_key in payload_json).  decision_events was 0-row (C2 dead lane).
       - no_trade_events: structured strategy_key count, excluding degraded rows
       - regret_decompositions: n_settled, n_wins (total_regret_usd > 0 = WIN),
-        mean_regret, joined through decision_events to verify strategy_key+source match
-        (regret join through decision_events retained until regret path is also migrated)
+        mean_regret, scoped by strategy_id/cohort_tag/experiment_id directly and
+        optionally joined to decision_events for source filtering
 
     Optional scoping:
       - experiment_id: restrict regret analytics to a single experiment;
@@ -175,7 +175,7 @@ def build_evidence_report(
     #
     # The unqualified fallback (3) is intentionally LAST so that a ghost
     # decision_integrity_quarantine table in the world DB (e.g. from a mis-applied
-    # ensure_table call) never shadows the real trade table when the trade path is
+    # ensure_table call) never masks the real trade table when the trade path is
     # resolvable. Only a pure in-memory test DB with no trade path reaches branch 3.
     _quarantine_ref: str | None = None
     _trade_attached_here = False
@@ -217,33 +217,32 @@ def build_evidence_report(
     else:
         n_decisions = 0
 
-    # Win/regret analytics from regret_decompositions joined through decision_events
-    # to verify strategy_key AND source match the experiment's strategy.
-    # Finding 3 fix: join through decision_events.decision_event_id so cross-strategy
-    # contamination (a regret row sharing experiment_id with a different strategy_key)
-    # is excluded.
+    # Win/regret analytics from regret_decompositions. The regret row carries
+    # strategy_id directly, so no external experiment registry is required.
+    # When source is provided and decision_events exists, join by decision_event_id
+    # to scope the regret row to that decision provenance source.
     # Guarded on table presence: pre-Phase-6 DBs and partial fixtures lack these
     # tables; absence produces zeros rather than OperationalError.
     n_wins = 0
     mean_regret_usd = 0.0
     n_settled = 0
-    if "regret_decompositions" in tables and "shadow_experiments" in tables:
+    if "regret_decompositions" in tables:
         _rg_params: list = [strategy_id]
         _rg_join = ""
-        _rg_filter = "WHERE se.strategy_id = ?"
+        _rg_filter = "WHERE rd.strategy_id = ?"
         if "decision_events" in tables:
             _rg_join = """
             JOIN decision_events de
               ON de.decision_event_id = rd.decision_event_id
-             AND de.strategy_key = se.strategy_id"""
+             AND de.strategy_key = rd.strategy_id"""
             if source is not None:
                 _rg_filter += " AND de.source = ?"
                 _rg_params.append(source)
         if experiment_id is not None:
-            _rg_filter += " AND se.experiment_id = ?"
+            _rg_filter += " AND rd.experiment_id = ?"
             _rg_params.append(experiment_id)
         if cohort_tag is not None:
-            _rg_filter += " AND se.cohort_tag = ?"
+            _rg_filter += " AND rd.cohort_tag = ?"
             _rg_params.append(cohort_tag)
         # Exclude regret rows backed by quarantined decision_events
         # (non-contributing forecast extrema) from learning aggregates.
@@ -263,7 +262,6 @@ def build_evidence_report(
                 SUM(CASE WHEN rd.total_regret_usd > 0 THEN 1 ELSE 0 END) as n_wins,
                 AVG(rd.total_regret_usd) as mean_regret
             FROM regret_decompositions rd
-            JOIN shadow_experiments se ON rd.experiment_id = se.experiment_id
             {_rg_join}
             {_rg_filter}
             """,

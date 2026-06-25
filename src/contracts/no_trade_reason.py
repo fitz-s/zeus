@@ -132,13 +132,12 @@ class NoTradeReason(StrEnum):
     SHOULDER_NO_TRADE_GATE = auto()
     SHOULDER_CLUSTER_CAP_EXCEEDED = auto()
 
-    # ── Shadow-candidate strategy gates: REMOVED 2026-06-14 ───────────────────
+    # ── Retired candidate strategy gates: REMOVED 2026-06-14 ──────────────────
     # The Phase 4 T2/T3/T4 candidate gates + center_sell/shoulder_buy_evt/
     # shoulder_impossible_tail/imminent/settlement_capture/C1/C2 reason members
-    # (30 members) were emitted ONLY by the shadow-candidate research harness
-    # (src/strategy/candidates/*, src/engine/shadow_candidate_dispatch.py),
+    # (30 members) were emitted ONLY by the retired candidate research harness,
     # deleted in the same gate-mass-collapse wave. 0 live emitters, 0 DB rows.
-    # Authority: shadow-candidate framework removal (operator no-shadow law).
+    # Authority: retired candidate framework removal.
 
     # ── Probability sanity (day0 HIGH distribution gate) ─────────────────────
     PROBABILITY_SANITY_GATE = auto()            # validate_high_distribution failed before Kelly sizing
@@ -148,7 +147,6 @@ class NoTradeReason(StrEnum):
     # Four reason codes for probability_edge_bin_sanity predicate:
     PROBABILITY_EDGE_BIN_UNSUPPORTED = auto()          # edge bin has no settled-member support (p_raw[edge] < min_edge_bin_member_support) — phantom unsupported by ensemble
     PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT = auto()  # low-price edge bin: market disagrees AND member support absent — hard reject
-    PROBABILITY_TAIL_SHAPE_ANOMALY_SHADOW = auto()     # tail shape anomaly detected but gate in shadow mode — logged only
     PROBABILITY_TAIL_SHAPE_ANOMALY_HARD = auto()       # tail shape anomaly detected and gate in hard mode — hard reject
 
     # ── Fallback (§13) ────────────────────────────────────────────────────────

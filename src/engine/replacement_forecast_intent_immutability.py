@@ -1,4 +1,4 @@
-"""Order-intent immutability guard for replacement forecast shadow/veto output."""
+"""Order-intent immutability guard for replacement forecast output."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def validate_replacement_forecast_intent_immutability(
     baseline: ReplacementForecastIntentSurface,
     proposed: ReplacementForecastIntentSurface,
 ) -> ReplacementForecastIntentImmutabilityDecision:
-    """Ensure replacement shadow/veto output cannot reprice or retarget intent.
+    """Ensure replacement forecast output cannot reprice or retarget intent.
 
     The replacement path may reduce confidence before intent construction. Once
     an intent surface exists, the replacement artifact cannot change the native

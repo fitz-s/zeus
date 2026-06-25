@@ -815,8 +815,8 @@ def get_world_connection_with_trades_required(
     world.db is MAIN so the EventStore's UNQUALIFIED ``opportunity_events`` (and its
     ``sqlite_master`` table-presence guard) resolve to the REAL world log; the
     feasibility write is schema-qualified ``trades.`` by the caller so it reaches the
-    runtime-read trades table and never the world shadow (see
-    ``world_connection_with_trades_flocked`` for the full shadow-table rationale).
+    runtime-read trades table and never the world ghost copy (see
+    ``world_connection_with_trades_flocked`` for the full ghost-table rationale).
 
     Fail closed: if ``trades`` cannot be ATTACHed, close and raise.
 
@@ -854,17 +854,17 @@ def world_connection_with_trades_flocked(
     ``get_trade_connection``) and committed them SEPARATELY — a crash/busy/kill
     between the two commits left divergent state, violating INV-37.
 
-    SHADOW-TABLE HAZARD (why this helper is world-MAIN, not trade-MAIN, and why the
+    GHOST-TABLE HAZARD (why this helper is world-MAIN, not trade-MAIN, and why the
     feasibility write must be schema-QUALIFIED): BOTH databases physically contain
     BOTH tables. ``world.opportunity_events`` is the real ~9.5M-row log while
-    ``trades.opportunity_events`` is an empty shadow; conversely
+    ``trades.opportunity_events`` is an empty ghost copy; conversely
     ``trades.execution_feasibility_evidence`` is the real ~4.3M-row table the live
     runtime reads (via the trade connection) while ``world.execution_feasibility_
     evidence`` is a populated-but-not-read legacy table (~12.9M rows). So UNQUALIFIED
     name resolution on a single ATTACHed connection is AMBIGUOUS — it resolves to the
     MAIN schema's copy, and ``EventStore._require_world_event_tables`` queries plain
     ``sqlite_master`` (MAIN-only), so a trade-MAIN+world-ATTACHed connection would
-    silently write ``opportunity_events`` to the EMPTY trade shadow AND falsely pass
+    silently write ``opportunity_events`` to the EMPTY trade ghost copy AND falsely pass
     the presence guard. The repo's existing flocked helpers
     (``forecasts_connection_with_trades_flocked``) only work because the non-MAIN
     table is ABSENT from MAIN — which is FALSE here. This helper therefore:
@@ -875,7 +875,7 @@ def world_connection_with_trades_flocked(
       - ATTACHes zeus_trades.db as ``trades`` so the feasibility write can target
         ``trades.execution_feasibility_evidence`` EXPLICITLY (the caller passes the
         ``trades`` qualifier), reaching the runtime-read table and NEVER the world
-        shadow.
+        ghost copy.
 
     Single SAVEPOINT / single commit spanning both writes makes the pair
     all-or-nothing per INV-37.
@@ -1543,7 +1543,7 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
+SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
 
 
 def init_schema(
@@ -1786,19 +1786,6 @@ def init_schema(
             settlement_edge_usd REAL DEFAULT 0.0
         );
 
-        -- Shadow signals for pre-trading validation
-        CREATE TABLE IF NOT EXISTS shadow_signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            decision_snapshot_id TEXT,
-            p_raw_json TEXT NOT NULL,
-            p_cal_json TEXT,
-            edges_json TEXT,
-            lead_hours REAL NOT NULL
-        );
-
         -- Durable per-decision probability lineage.
         -- This is not portfolio/lifecycle authority; it records decision-time
         -- probability vectors and explicit completeness status for replay/audit.
@@ -2010,7 +1997,7 @@ def init_schema(
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
             schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
-            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'offline_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         );
         CREATE INDEX IF NOT EXISTS idx_decision_events_slug_date
@@ -2072,7 +2059,7 @@ def init_schema(
         -- data_version, provenance_json, running_min, identity-spine, +bounds CHECK)
         -- is now the ONLY definition of observation_instants and lives in
         -- src/state/schema/v2_schema.py (applied via apply_canonical_schema, called
-        -- from init_schema). Defining a subset here would shadow the superset under
+        -- from init_schema). Defining a subset here would mask the superset under
         -- CREATE TABLE IF NOT EXISTS (init_schema runs this executescript BEFORE
         -- apply_canonical_schema), so it MUST stay deleted. Indexes moved to
         -- v2_schema.py as well (idx_observation_instants_city_ts).
@@ -2333,7 +2320,7 @@ def init_schema(
                 'COMPLETE','PARTIAL','MISSING','HORIZON_OUT_OF_RANGE','NOT_RELEASED'
             )),
             readiness_status TEXT NOT NULL CHECK (readiness_status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','UNKNOWN_BLOCKED'
+                'LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_code TEXT,
             computed_at TEXT NOT NULL,
@@ -2374,7 +2361,7 @@ def init_schema(
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -2858,11 +2845,6 @@ def init_schema(
         except sqlite3.OperationalError:
             pass
 
-    try:
-        conn.execute("ALTER TABLE shadow_signals ADD COLUMN decision_snapshot_id TEXT;")
-    except sqlite3.OperationalError:
-        pass
-
     # calibration_pairs bare ALTER TABLE blocks removed in B3 (PR3):
     # bare calibration_pairs shell dropped; v2 schema owns the table.
 
@@ -3124,7 +3106,7 @@ def init_schema(
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
 
-    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
     # position_current. F1 added chain_avg_price / chain_cost_basis_usd to the canonical
     # column contract (src/state/projection.py CANONICAL_POSITION_CURRENT_COLUMNS) and the
     # Position dataclass, but the boot migration was never added — so live trade DBs lack
@@ -3225,7 +3207,7 @@ def init_schema(
     _ensure_edli_fill_bridge_dispositions_table(conn)
 
     # 2026-05-21 live authority follow-up: decision_events CHECK constraints
-    # must admit shadow_decision / unknown_legacy. CREATE TABLE IF NOT EXISTS
+    # must admit offline_decision / unknown_legacy. CREATE TABLE IF NOT EXISTS
     # cannot upgrade stale CHECKs.
     _migrate_decision_events_schema(conn)
     _migrate_world_strategy_key_checks(conn)
@@ -3242,7 +3224,7 @@ def init_schema(
     from src.state.schema.regime_correlation_cache_schema import ensure_table as _ensure_regime_correlation_cache_table
     _ensure_regime_correlation_cache_table(conn)
 
-    # Phase 6 T2+T3 (2026-05-21): shadow_experiments, evidence_tier_assignments,
+    # Phase 6 T2+T3 (2026-05-21): evidence_tier_assignments and
     # regret_decompositions tables (SCHEMA_VERSION 25/26).
     from src.state.schema.phase6_evidence_schema import ensure_tables as _ensure_phase6_evidence_tables
     _ensure_phase6_evidence_tables(conn)
@@ -3254,7 +3236,7 @@ def init_schema(
     # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens exists on every
     # init_schema target so monitor_refresh + evaluator can read FT models at runtime
     # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
-    # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
+    # Authority: docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
     from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
     _init_ens_bias_schema(conn)
 
@@ -3288,7 +3270,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
         return
     if (
         "unknown_legacy" in table_sql
-        and "shadow_decision" in table_sql
+        and "offline_decision" in table_sql
         and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28" in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
@@ -3330,7 +3312,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             clock_skew_estimate_ms_at_submit INTEGER,
             raw_orderbook_hash_transition_delta_ms INTEGER,
             schema_version INTEGER NOT NULL CHECK (schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
-            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'shadow_decision')),
+            source         TEXT NOT NULL CHECK (source IN ('phase0_backfill', 'live_decision', 'offline_decision')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
         )
         """
@@ -3370,7 +3352,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
                 ELSE 36
             END,
             CASE
-                WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
+                WHEN source IN ('phase0_backfill', 'live_decision', 'offline_decision')
                     THEN source
                 ELSE 'phase0_backfill'
             END
@@ -3729,7 +3711,7 @@ def _create_source_run_coverage(conn: sqlite3.Connection) -> None:
                 'COMPLETE','PARTIAL','MISSING','HORIZON_OUT_OF_RANGE','NOT_RELEASED'
             )),
             readiness_status TEXT NOT NULL CHECK (readiness_status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','UNKNOWN_BLOCKED'
+                'LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_code TEXT,
             computed_at TEXT NOT NULL,
@@ -3781,7 +3763,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -3829,11 +3811,10 @@ _FORECAST_TABLES = (
     "settlement_capture_verifications",
     # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 PR #329 D (2026-05-24)
     "source_time_frontier",
-    # Replacement forecast shadow/live-authority provenance (2026-06-07).
+    # Replacement forecast live-authority provenance (2026-06-07).
     "raw_forecast_artifacts",
     "deterministic_forecast_anchors",
     "forecast_posteriors",
-    "replacement_shadow_decisions",
 )
 
 
@@ -4535,7 +4516,7 @@ CREATE TABLE IF NOT EXISTS position_events (
     idempotency_key TEXT UNIQUE,
     venue_status TEXT,
     source_module TEXT NOT NULL,
-    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest','shadow')),
+    env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest')),
     payload_json TEXT NOT NULL,
     UNIQUE(position_id, sequence_no)
 );
@@ -4608,7 +4589,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     fill_authority TEXT,
     recovery_authority TEXT,
     chain_shares REAL,
-    -- F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+    -- F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
     -- economics columns so balance-only rescued positions persist
     -- venue truth without overwriting submitted entry economics. Additive
     -- on legacy DBs via _ensure_position_current_authority_columns.
@@ -5027,8 +5008,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     Ghost tables (Case C — production zeus_trades.db):
         Pre-PR-S4b, src/main.py:1747 called init_schema(trade_conn) which is the
         world-schema constructor. This polluted zeus_trades.db with 66 world-class
-        tables (including shadow_signals with 27k rows, probability_trace_fact with
-        33k rows, availability_fact with 24k rows). These ghost tables are NOT dropped
+        tables (including probability_trace_fact with 33k rows and availability_fact
+        with 24k rows). These ghost tables are NOT dropped
         here — they are declared ``legacy_archived`` in architecture/db_table_ownership.yaml
         (db: trade, §4 Path B). The INV-37 writer fix (PR-S4b §3) redirects all future
         writes to zeus-world.db. Data migration is deferred per dispatch guidance
@@ -5127,8 +5108,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     conn.commit()
 
     # NOTE: The 66 non-trade-class tables that pre-PR-S4b init_schema(trade_conn)
-    # created on zeus_trades.db (including shadow_signals with 27k rows,
-    # probability_trace_fact with 33k rows, availability_fact with 24k rows) are
+    # created on zeus_trades.db (including probability_trace_fact with 33k rows
+    # and availability_fact with 24k rows) are
     # declared as legacy_archived in architecture/db_table_ownership.yaml (db: trade)
     # per PR-S4b §4 (Path B). They are NOT dropped here — INV-37 writer fix
     # (PR-S4b §3) redirects future writes to zeus-world.db. Data migration deferred
@@ -5349,7 +5330,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             completed_at TEXT,
             status TEXT NOT NULL,
             authority_scope TEXT NOT NULL CHECK (
-                authority_scope = 'diagnostic_non_promotion'
+                authority_scope = 'offline_no_promotion'
             ),
             config_json TEXT NOT NULL,
             summary_json TEXT NOT NULL
@@ -5399,8 +5380,8 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             forecast_reference_id TEXT,
             evidence_json TEXT NOT NULL,
             missing_reason_json TEXT NOT NULL,
-            authority_scope TEXT NOT NULL DEFAULT 'diagnostic_non_promotion'
-                CHECK (authority_scope = 'diagnostic_non_promotion'),
+            authority_scope TEXT NOT NULL DEFAULT 'offline_no_promotion'
+                CHECK (authority_scope = 'offline_no_promotion'),
             created_at TEXT NOT NULL,
             FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id)
         );
@@ -5452,7 +5433,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             strategy_key TEXT,
             decision_time TEXT,
             point_in_time_provenance TEXT,
-            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- diagnostic_non_promotion until gates wired
+            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
             learning_eligible INTEGER
         );
 
@@ -5523,7 +5504,7 @@ def init_backtest_schema(conn: Optional[sqlite3.Connection] = None) -> None:
             reciprocal_rank REAL,
             group_integrity_status TEXT,
             group_exclusion_reason TEXT,
-            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- diagnostic_non_promotion until gates wired
+            promotion_authority INTEGER NOT NULL DEFAULT 0,  -- offline_no_promotion until gates wired
             learning_eligible INTEGER,
             limitations_json TEXT
         );
@@ -7269,44 +7250,6 @@ def log_rescue_event(
             occurred_at,
             exc,
         )
-
-
-def log_shadow_signal(
-    conn: sqlite3.Connection,  # Deprecated: ignored; function opens its own world connection (INV-37 fix, PR-S4b §3)
-    *,
-    city: str,
-    target_date: str,
-    timestamp: str,
-    decision_snapshot_id: str,
-    p_raw_json: str,
-    p_cal_json: str,
-    edges_json: str,
-    lead_hours: float,
-) -> None:
-    """Write one shadow signal row to zeus-world.db.
-
-    INV-37 fix (PR-S4b §3, 2026-05-18): opens its own world connection rather
-    than accepting an opaque conn from callers. Pre-fix, callers passed the
-    cycle trades-rooted conn (zeus_trades.db MAIN with world ATTACHed), causing
-    shadow_signals rows to land in zeus_trades.db instead of zeus-world.db.
-    The ``conn`` parameter is kept for backward compat but is no longer used.
-    """
-    _wconn = get_world_connection()
-    try:
-        _wconn.execute(
-            """
-            INSERT INTO shadow_signals
-            (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (city, target_date, timestamp, decision_snapshot_id, p_raw_json, p_cal_json, edges_json, lead_hours),
-        )
-        _wconn.commit()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Failed to log shadow signal: %s", e)
-    finally:
-        _wconn.close()
 
 
 def _bin_type_for_label(label: str) -> str:
@@ -9384,10 +9327,10 @@ def query_authoritative_settlement_rows(
     env: str | None = None,
     not_before: str | None = None,
 ) -> list[dict]:
-    """Prefer stage-level settlement events, then fall back to legacy decision_log blobs.
+    """Return stage-level settlement events only.
 
-    ``env`` gates both canonical ``position_events`` and legacy
-    ``decision_log`` rows. Missing canonical env is not live authority.
+    ``env`` gates canonical ``position_events`` rows. Missing canonical env is
+    not live authority.
     """
     stage_events = []
     if _table_exists(conn, "position_events") and _table_exists(conn, "position_current"):
@@ -9407,18 +9350,7 @@ def query_authoritative_settlement_rows(
     if normalized_stage:
         return normalized_stage[:limit] if limit is not None else normalized_stage
 
-    from src.state.decision_chain import query_legacy_settlement_records
-    if not _table_exists(conn, "decision_log"):
-        return []
-    legacy_rows = query_legacy_settlement_records(
-        conn,
-        limit=limit,
-        city=city,
-        target_date=target_date,
-        env=env,
-        not_before=not_before,
-    )
-    return legacy_rows[:limit] if limit is not None else legacy_rows
+    return []
 
 
 def query_authoritative_settlement_source(conn: sqlite3.Connection) -> str:
@@ -9999,7 +9931,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "fill_authority",
         "recovery_authority",
         "chain_shares",
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics columns round-trip through the loader.
         "chain_avg_price",
         "chain_cost_basis_usd",
@@ -10139,7 +10071,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "chain_seen_at": str(row["chain_seen_at"] or ""),
                 "chain_absence_at": str(row["chain_absence_at"] or ""),
                 "chain_shares": _finite_float_or_none(row["chain_shares"]) or 0.0,
-                # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28):
+                # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28):
                 # chain-observed economics round-trip into Position via
                 # _position_from_row (state/portfolio.py).
                 "chain_avg_price": _finite_float_or_none(row["chain_avg_price"]) or 0.0,
@@ -11432,7 +11364,7 @@ def log_pending_exit_recovery_event(
 
 
 # ---------------------------------------------------------------------------
-# F3 admin queries (docs/findings_2026_05_28.md §F3, 2026-05-28)
+# F3 admin queries (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F3, 2026-05-28)
 # ---------------------------------------------------------------------------
 
 

@@ -15,8 +15,8 @@ These tests pin the contracts that A4 ships:
 2. The pre-A4 LIVE_SAFE / _LIVE_ALLOWED divergence (Bug review §E:
    shoulder_sell in LIVE_SAFE but not _LIVE_ALLOWED) is RESOLVED by the
    live_status field. The current registry preserves the divergence
-   semantically (shoulder_sell is shadow → boots but doesn't enter)
-   but the two sets now derive from one source — un-driftable.
+   semantically (shoulder_sell is blocked) and the two sets now derive
+   from one source — un-driftable.
 
 3. Schema enforcement at load time. A typo in a constraint field
    (e.g., ``allowed_market_phazes``) raises RegistrySchemaError at
@@ -68,12 +68,12 @@ def test_all_registered_strategies():
         "shoulder_buy",
         "center_sell",
         "imminent_open_capture",  # added 2026-05-19: D+1 / re-opened market capture
-        # Phase 4 shadow candidates (T2/T3) — added 2026-05-21
+        # Phase 4 blocked candidates (T2/T3) — added 2026-05-21
         "stale_quote_detector",
         "resolution_window_maker",
         "liquidity_provision_with_heartbeat",
         "weather_event_arbitrage",
-        # Phase 4 shadow candidates (T4) — added 2026-05-21
+        # Phase 4 blocked candidates (T4) — added 2026-05-21
         "cross_market_correlation_hedge",
         "neg_risk_basket",
         # P1 architecture review (2026-05-22) — settlement-day upside strategy
@@ -112,7 +112,7 @@ def test_kelly_default_for_unknown_key_is_zero():
 
 def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
     """Pre-A4 LIVE_SAFE_STRATEGIES = {opening_inertia, center_buy,
-    settlement_capture, shoulder_sell}. Boot-allowable = live OR shadow.
+    settlement_capture, shoulder_sell}. Boot-allowable = live.
     imminent_open_capture added 2026-05-19 (live status → included here).
     """
     assert sp.live_safe_keys() == frozenset({
@@ -121,18 +121,6 @@ def test_live_safe_keys_match_pre_A4_LIVE_SAFE_STRATEGIES():
         "settlement_capture",
         # shoulder_sell removed: D6 (2026-05-22) set live_status=blocked (REFUTED)
         "imminent_open_capture",  # added 2026-05-19
-        # Phase 4 shadow candidates boot-allowed (live_status: shadow) — added 2026-05-21
-        "stale_quote_detector",
-        "resolution_window_maker",
-        "liquidity_provision_with_heartbeat",
-        "weather_event_arbitrage",
-        # Phase 4 shadow candidates (T4) — added 2026-05-21
-        "cross_market_correlation_hedge",
-        "neg_risk_basket",
-        # P1 architecture review (2026-05-22) — settlement-day upside strategy
-        "day0_nowcast_entry",
-        # D6 (2026-05-22) — shoulder_sell successor, live_status=shadow
-        "shoulder_impossible_tail_capture",
     })
 
 
@@ -161,8 +149,8 @@ def test_shoulder_sell_resolves_pre_A4_divergence():
     """Bug review §E: shoulder_sell was in LIVE_SAFE but not _LIVE_ALLOWED
     (a divergence between two hardcoded sets that nominally meant the
     same thing). Post-A4 the two sets derive from live_status; shoulder_sell
-    was ``shadow`` pre-D6. D6 (2026-05-22) refuted and retired it: live_status
-    is now ``blocked`` — not boot-allowed, routing disabled.
+    D6 (2026-05-22) refuted and retired it: live_status is now ``blocked`` —
+    not boot-allowed, routing disabled.
     """
     profile = sp.get("shoulder_sell")
     assert profile.live_status == "blocked"  # D6: REFUTED, tombstoned
@@ -207,10 +195,7 @@ def test_cycle_runner_KNOWN_STRATEGIES_matches_live_safe_keys():
 
 
 def test_is_strategy_enabled_blocks_shoulder_sell_runtime_entry():
-    """shoulder_sell is shadow → boots OK but runtime entry blocked.
-    The cutover preserves the pre-A4 ``shoulder_sell not in
-    _LIVE_ALLOWED_STRATEGIES`` semantics through is_strategy_enabled.
-    """
+    """shoulder_sell is blocked at runtime entry."""
     from src.control import control_plane
     control_plane._control_state["live_allowed_strategies"] = sp.live_allowed_keys()
     control_plane._control_state["live_allowed_strategies_status"] = "ok"
@@ -335,7 +320,6 @@ def test_schema_load_rejects_unknown_field(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -357,7 +341,6 @@ def test_schema_load_rejects_invalid_live_status(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -379,7 +362,6 @@ def test_schema_load_rejects_kelly_default_out_of_range(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.5\n"  # > 1.0
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -401,7 +383,6 @@ def test_schema_load_rejects_kelly_phase_override_out_of_range(tmp_path: Path):
         "  metric_support: {high: live, low: blocked}\n"
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {settlement_day: 2.0}\n"  # > 1.0
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )
@@ -423,7 +404,6 @@ def test_schema_load_rejects_invalid_metric_support(tmp_path: Path):
         "  metric_support: {high: maybe, low: blocked}\n"  # INVALID
         "  kelly_default_multiplier: 1.0\n"
         "  kelly_phase_overrides: {}\n"
-        "  min_shadow_decisions: 0\n"
         "  min_settled_decisions: 0\n"
         "  promotion_evidence_ref: null\n"
     )

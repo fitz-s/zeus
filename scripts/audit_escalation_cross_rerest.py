@@ -9,7 +9,7 @@ GAP-4 escalation-cross re-rest fix.
 WHY
 ---
 The fix changes `_family_rest_state` (src/engine/event_reactor_adapter.py) so an
-armed escalation (a prior cancelled-unfilled aged rest) is no longer SHADOWED by
+armed escalation (a prior cancelled-unfilled aged rest) is no longer masked by
 a just-posted serial re-rest. Because this changes when the engine places TAKER
 crosses (real capital), the coordinator must be able to audit, BEFORE any
 arming, exactly which live families flip from HOLD to the armed-cross lane — and

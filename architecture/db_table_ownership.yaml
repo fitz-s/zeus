@@ -252,7 +252,7 @@ tables:
       pre-fix SILENT INSERT-OR-IGNORE drop into a loud, forensically-attributable event
       (Fitz Constraint #3 immune system: an antibody, not an alert). The production
       download writes this audit on autocommit BEFORE its rollback-on-error BEGIN so the
-      trail survives the cycle ROLLBACK. SHADOW research/forensic surface only; lives
+      trail survives the cycle ROLLBACK. Audit/forensic surface only; lives
       ONLY on zeus-forecasts.db (INV-37 single-DB); never a settlement, calibration, or
       order truth table.
 
@@ -281,18 +281,6 @@ tables:
       provenance. Runtime readers must require runtime_layer='live',
       training_allowed=0, q_lcb/q_ucb coverage, and product-specific refit
       evidence before using rows in the event reactor.
-
-  - name: replacement_shadow_decisions
-    db: forecasts
-    schema_class: forecast_class
-    schema_version_owner: SCHEMA_FORECASTS_VERSION
-    created_by: apply_canonical_schema
-    pk_col: decision_id
-    notes: >
-      Replacement forecast event-reactor decision provenance table (2026-06-07).
-      Records baseline-vs-candidate q_lcb/Kelly/direction comparisons and veto
-      decisions at the same market snapshot. It is append-only audit evidence
-      for replacement authority behavior, not a venue command or fill record.
 
   - name: market_events
     db: forecasts
@@ -1048,7 +1036,7 @@ tables:
       - {name: mainstream_source, type: TEXT, nullable: true}
       - {name: mainstream_fetched_at_utc, type: TEXT, nullable: true}
       - {name: alpha_gap, type: REAL, nullable: true}
-      # C2 selection-shrinkage shadow columns (task #60, 2026-06-13): the
+      # C2 selection-shrinkage audit columns (task #60, 2026-06-13): the
       # writer INSERTs these on every adapter receipt (no_submit_receipts.py),
       # added to CREATE_TABLE + _ensure_column so a stale live DB FATALs at boot
       # rather than silently failing writes (same R4/#175 antibody intent).
@@ -1376,7 +1364,7 @@ tables:
       idempotent per position via UNIQUE(position_id)). NO daemon_writer field:
       the job runs in the trading daemon (src.main), not src.ingest_main, so it
       is out of assert_writer_jobs_registered's ingest-only scope (same posture
-      as settlement_guard_report / shadow_comparator). Append/upsert-only audit
+      as settlement_guard_report). Append/upsert-only audit
       evidence; never a venue command, order truth, settlement truth, or
       calibration training input.
 
@@ -1635,13 +1623,6 @@ tables:
       observation_authority_id (FK to this table) + day0_context_json (per-edge
       day0 truth classification), via kernel SQL + idempotent ALTER backfill.
 
-  - name: shadow_signals
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: init_schema
-    pk_col: null
-
   - name: solar_daily
     db: world
     schema_class: world_class
@@ -1793,7 +1774,7 @@ tables:
       instrumentation table for no-trade decisions. Columns per §5.2: market_slug,
       temperature_metric, target_date, observation_time, decision_seq, reason
       (NoTradeReason CHECK), reason_detail TEXT, observed_at, schema_version,
-      schema_compatibility, strategy_key, event_source, shadow_runtime.
+      schema_compatibility, strategy_key, event_source.
       PK matches decision_events natural key for FK-like joins.
       SCHEMA_VERSION 14→15 (production pass), 20 (live release proof P0-3
       compatibility marker), 22 (live release proof P1-3 settlement command
@@ -1900,20 +1881,6 @@ tables:
       fit(UNKNOWN) raises ValueError (Phase 3 R-1 antibody).
       SCHEMA_VERSION 23→24.
 
-  - name: shadow_experiments
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 26)"
-    pk_col: experiment_id
-    notes: >
-      Phase 6 T2 (2026-05-21): immutable shadow experiment registry. Columns:
-      experiment_id (TEXT PK, SHA-256 of strategy+config+started_at), strategy_id,
-      config_hash, started_at, closed_at, cohort_tag, immutable (INTEGER DEFAULT 1).
-      DDL owner: src/state/schema/phase6_evidence_schema.py.
-      Writer/reader: src/state/shadow_experiment_registry.py, INV-37 (caller-supplied conn).
-      SCHEMA_VERSION 24→25; v26 no table-shape change.
-
   - name: evidence_tier_assignments
     db: world
     schema_class: world_class
@@ -1940,7 +1907,7 @@ tables:
     pk_col: id
     notes: >
       Phase 6 T3 (2026-05-21): per-trade 7-component regret decomposition records.
-      Columns: id (AUTOINCREMENT PK), experiment_id (FK→shadow_experiments),
+      Columns: id (AUTOINCREMENT PK), experiment_id, strategy_id, cohort_tag,
       decision_event_id, forecast_error_usd, observation_error_usd, quote_error_usd,
       non_fill_error_usd, fee_error_usd, timing_error_usd,
       settlement_ambiguity_error_usd, total_regret_usd, computed_at.
@@ -2204,10 +2171,9 @@ tables:
   # which is the world-schema constructor. This created 66 world/misc tables
   # on zeus_trades.db that were never intended to be there.
   #
-  # Three of these tables (shadow_signals 27k rows, probability_trace_fact 33k
-  # rows, availability_fact 24k rows) accumulated rows because cycle_runtime
-  # passed the trade-rooted conn to INV-37-violating writers. Those writers are
-  # fixed in PR-S4b §3 to use get_world_connection() internally.
+  # probability_trace_fact and availability_fact accumulated rows because
+  # cycle_runtime passed the trade-rooted conn to INV-37-violating writers.
+  # Those writers are fixed in PR-S4b §3 to use get_world_connection() internally.
   #
   # All 66 are declared legacy_archived so assert_db_matches_registry(TRADE)
   # passes on the live zeus_trades.db without requiring a data migration.
@@ -2513,14 +2479,6 @@ tables:
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
-  - name: shadow_experiments
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
   - name: shoulder_exposure_ledger
     db: trade
     schema_class: legacy_archived
@@ -2613,7 +2571,7 @@ tables:
       src/state/decision_integrity_quarantine.py; CLI
       scripts/quarantine_bad_forecast_decisions.py (dry-run default). Co-located
       on trade DB; cross-DB read-join against forecasts.ensemble_snapshots.
-      Authority: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
+      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
 
   - name: exit_mutex_holdings
     db: trade
@@ -2858,17 +2816,6 @@ tables:
     created_by: init_schema_pre_pr_s4b
     pk_col: null
     notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
-
-  - name: shadow_signals
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: >
-      Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Contains
-      27k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
-      in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
 
   - name: solar_daily
     db: trade

@@ -104,13 +104,13 @@ def test_f5_bad_name_emits_advisory() -> None:
                 "do_not_use_when": "never",
                 "canonical_command": "python scripts/low_high_alignment_report.py",
                 "delete_policy": "never",
-                "authority_scope": "diagnostic_non_promotion",
+                "authority_scope": "offline_no_promotion",
                 "write_targets": ["stdout"],
             }
         },
         "allowed_lifecycles": ["long_lived", "packet_ephemeral", "promotion_candidate", "deprecated_fail_closed"],
         "long_lived_naming": {
-            "allowed_prefixes": ["refit_", "diagnose_", "run_", "build_", "export_"],
+            "allowed_prefixes": ["refit_", "run_", "build_", "export_"],
             "exceptions": {},
         },
     }
@@ -160,11 +160,11 @@ def test_f5_forbidden_write_target_emits_advisory() -> None:
 
     api = _make_minimal_api()
     # We call run_scripts() but mock out the filesystem-dependent parts
-    api._top_level_scripts = MagicMock(return_value={"diagnose_bad_target.py"})
+    api._top_level_scripts = MagicMock(return_value={"audit_bad_target.py"})
     api._check_script_lifecycle = MagicMock(return_value=[])
     api._effective_script_entry = MagicMock(return_value={
         "lifecycle": "long_lived",
-        "authority_scope": "diagnostic_non_promotion",
+        "authority_scope": "offline_no_promotion",
         "write_targets": ["docs/operations/low_high_alignment/output.json"],  # forbidden path
     })
     # Root must point somewhere that the script file does not exist (to skip read)
@@ -173,7 +173,7 @@ def test_f5_forbidden_write_target_emits_advisory() -> None:
     api.StrictResult = topology_doctor.StrictResult
 
     manifest = {
-        "scripts": {"diagnose_bad_target.py": {}},
+        "scripts": {"audit_bad_target.py": {}},
         "required_effective_fields": [],
         "diagnostic_allowed_write_targets": ["stdout", "temp", "docs/historical_evidence/**"],
         "canonical_db_targets": [],

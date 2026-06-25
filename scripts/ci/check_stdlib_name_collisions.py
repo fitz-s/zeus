@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Created: 2026-05-26
 # Last reused or audited: 2026-05-26
-# Authority basis: architecture/topology_enforcement.yaml#blocking_structural:stdlib_shadowing_gate
+# Authority basis: architecture/topology_enforcement.yaml#blocking_structural:stdlib_name_collision_gate
 #                  docs/operations/current/plans/ci_topology_refactor_refined.md Phase D
 """
 Prevent PR #306 recurrence: Python files inside imported packages must not
-shadow stdlib module names.
+collide with stdlib module names.
 
-PR #306 anchor: scripts/topology_v_next/dataclasses.py shadowed
+PR #306 anchor: scripts/topology_v_next/dataclasses.py collided
 `dataclasses` (stdlib). `from dataclasses import dataclass` inside that
 package resolved to the local file → ImportError on every import path
 that touched the package. The fix was renaming to topology_models.py.
@@ -20,8 +20,8 @@ Scoped to `scripts/**` by default (where the PR #306 hazard occurred).
 Pass --include-paths to broaden.
 
 Exit codes:
-    0 — no shadowing detected
-    1 — one or more shadowed names found
+    0 — no name collision detected
+    1 — one or more collided names found
     2 — IO error
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Common stdlib module names that have caused real breakage when shadowed.
+# Common stdlib module names that have caused real import collisions.
 # Curated rather than auto-detecting sys.stdlib_module_names so the rule
 # stays stable across Python versions and intentional new conflicts get
 # explicit review.
@@ -88,10 +88,10 @@ def _find_python_packages(root: Path) -> Iterable[Path]:
         yield init.parent
 
 
-def find_stdlib_shadowing(repo_root: Path, scoped_dirs: list[str]) -> list[dict]:
+def find_stdlib_name_collisions(repo_root: Path, scoped_dirs: list[str]) -> list[dict]:
     """
-    Walk each `scoped_dir` and yield shadowing findings.
-    Finding: {"path": str, "shadows": str}.
+    Walk each `scoped_dir` and yield name-collision findings.
+    Finding: {"path": str, "collides_with": str}.
     """
     findings: list[dict] = []
     for scope in scoped_dirs:
@@ -111,7 +111,7 @@ def find_stdlib_shadowing(repo_root: Path, scoped_dirs: list[str]) -> list[dict]
                     findings.append(
                         {
                             "path": str(child.relative_to(repo_root)),
-                            "shadows": stem,
+                            "collides_with": stem,
                         }
                     )
     return findings
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     repo = Path(args.repo_root)
-    findings = find_stdlib_shadowing(repo, args.include_paths)
+    findings = find_stdlib_name_collisions(repo, args.include_paths)
 
     if args.json:
         import json
@@ -141,13 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not findings:
             print(
-                "OK: no Python file inside an importable package shadows a "
+                "OK: no Python file inside an importable package collides with a "
                 "high-risk stdlib name."
             )
         else:
-            print(f"FAIL: {len(findings)} stdlib-shadowing file(s):")
+            print(f"FAIL: {len(findings)} stdlib-name-collision file(s):")
             for f in findings:
-                print(f"  {f['path']} shadows stdlib `{f['shadows']}`")
+                print(f"  {f['path']} collides with stdlib `{f['collides_with']}`")
             print()
             print(
                 "PR #306 reproduced this class of bug. Rename the file (e.g. "

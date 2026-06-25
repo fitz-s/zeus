@@ -211,28 +211,6 @@ class CandidateEvaluation:
     def city_skill_admissible(self) -> bool:
         return self.city_skill_block_reason is None
 
-    def shadow_log(self, *, path: str | None = None) -> bool:
-        """Record this candidate to the optional observational admit log."""
-        from src.strategy.live_inference.live_admission import shadow_log_admission
-
-        return shadow_log_admission(
-            path=path,
-            decision_time=str(self.decision_time or ""),
-            city=str(self.city or ""),
-            target_date=str(self.target_date or ""),
-            condition_id=str(self.condition_id or ""),
-            bin_id=str(self.bin_id or self.bin_label or ""),
-            direction=self.direction,
-            raw_side_prob=self._raw_side_prob,
-            q_lcb=float(self.q_lcb_5pct),
-            own_side_cost=float(self.execution_price) if self.execution_price is not None else 1.0,
-            native_quote_available=bool(self.native_quote_available),
-            quote_fresh=bool(self.quote_fresh),
-            posterior_version=str(self.posterior_version or ""),
-            city_skill_admit=self.city_skill_admissible,
-            selection_calibrator_q_safe=float(self.calibrated_admission_q_lcb),
-        )
-
     @property
     def admitted(self) -> bool:
         return (

@@ -1342,13 +1342,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     live_db_observed_rows = int(source_availability_mode_counts.get("observed", 0))
     downloaded_reconstructed_rows = int(source_availability_mode_counts.get("downloaded_observed", 0))
     if all_source_observed and live_db_observed_rows == len(rows):
-        evidence_grade = "shadow_economic_with_live_db_raw_artifact_source_time"
+        evidence_grade = "audit_economic_with_live_db_raw_artifact_source_time"
         promotion_blocker = "capital replay uses live DB raw artifact source time; live promotion still requires product-specific refit/EMOS and broader official cohort evidence"
     elif all_source_observed:
-        evidence_grade = "shadow_economic_with_reconstructed_downloaded_source_time"
+        evidence_grade = "audit_economic_with_reconstructed_downloaded_source_time"
         promotion_blocker = "capital replay uses reconstructed downloaded source time for some rows; live promotion still requires raw_forecast_artifacts/source_run evidence for current daemon materialization"
     else:
-        evidence_grade = "shadow_economic_with_assumed_source_time"
+        evidence_grade = "audit_economic_with_assumed_source_time"
         promotion_blocker = "source_available_at is assumed from decision cutoff, not reconstructed from live product availability logs"
     coverage = {
         "input_eval_json": str(args.eval_json),

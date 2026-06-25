@@ -1,7 +1,7 @@
 """Calibration transfer policy for Open Data live-entry forecasts.
 
 Houses ``evaluate_calibration_transfer_policy`` — the legacy string-mapping
-policy used by ``entry_forecast_shadow.py`` and ``evaluator.py`` to gate
+policy used by ``evaluator.py`` to gate
 OpenData live-entry decisions on operator opt-in
 (``live_promotion_approved=True``).
 
@@ -703,8 +703,8 @@ def evaluate_calibration_transfer_policy(
         )
     if not live_promotion_approved:
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
-            reason_codes=("CALIBRATION_TRANSFER_SHADOW_ONLY",),
+            status="BLOCKED",
+            reason_codes=("CALIBRATION_TRANSFER_BLOCKED",),
             policy_id=policy_id,
             forecast_data_version=forecast_data_version,
             calibration_data_version=calibration_data_version,
@@ -744,7 +744,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
 
     Same-domain fast-path: source_id==target_source_id AND cycles match → LIVE_ELIGIBLE.
     Otherwise queries validated_calibration_transfers for matching row.
-    Stale or missing → SHADOW_ONLY. status='TRANSFER_UNSAFE' → BLOCKED.
+    Stale or missing → BLOCKED. status='TRANSFER_UNSAFE' → BLOCKED.
     `live_promotion_approved` is threaded to the legacy fallback (flag OFF).
     When flag is ON, DB row is the authority and this parameter is unused.
 
@@ -764,9 +764,9 @@ def evaluate_calibration_transfer_policy_with_evidence(
         # Architecture intent: flag-off posture = "operator's blanket approval
         # via legacy static-mapping" — the TIGGE Platt IS the correct calibrator
         # for ECMWF Opendata (same physical IFS ensemble; TIGGE = +48h archive
-        # mirror). Callers (entry_forecast_shadow.py, evaluator.py) pass True
+        # mirror). Callers (evaluator.py) pass True
         # when the operator has approved live calibration promotion; the legacy
-        # function then returns LIVE_ELIGIBLE rather than SHADOW_ONLY.
+        # function then returns LIVE_ELIGIBLE rather than BLOCKED.
         # See architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml §4.
         _fallback_dv = (
             ECMWF_OPENDATA_HIGH_DATA_VERSION
@@ -797,7 +797,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
     # Guard: if route keys are None/empty (pre-forecast readiness write), the
     # equality comparison would spuriously fire the same-domain path for
     # unresolved routes. Reject unresolved route keys as INSUFFICIENT_INFO →
-    # SHADOW_ONLY so the readiness writer never marks them LIVE_ELIGIBLE.
+    # BLOCKED so the readiness writer never marks them LIVE_ELIGIBLE.
     if (
         source_id_s is None
         or target_source_id_s is None
@@ -805,7 +805,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
         or target_cycle_s is None
     ):
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_INSUFFICIENT_ROUTE_INFO",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -836,7 +836,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
         or platt_model_key_s is None
     ):
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_INSUFFICIENT_ROUTE_INFO",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -879,7 +879,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
 
     if row is None:
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_NO_EVIDENCE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -905,7 +905,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
         brier_diff_threshold=brier_diff_threshold,
     ):
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_INVALID_EVIDENCE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -932,7 +932,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
     evaluated_at = _parse_evidence_time(evaluated_at_str)
     if evaluated_at is None:
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_EVIDENCE_TIMESTAMP_UNPARSEABLE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -948,7 +948,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
 
     if evaluated_at > now:
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_FUTURE_EVIDENCE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -959,7 +959,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
 
     if (now - evaluated_at) > timedelta(days=staleness_days):
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_STALE_EVIDENCE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -981,7 +981,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
         evaluated_at=evaluated_at_str,
     ):
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_INVALID_SOURCE_MODEL_EVIDENCE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -1006,7 +1006,7 @@ def evaluate_calibration_transfer_policy_with_evidence(
         evaluated_at=evaluated_at_str,
     ):
         return CalibrationTransferDecision(
-            status="SHADOW_ONLY",
+            status="BLOCKED",
             reason_codes=("CALIBRATION_TRANSFER_INVALID_TARGET_COHORT_EVIDENCE",),
             policy_id=policy_id,
             forecast_data_version="",
@@ -1040,9 +1040,9 @@ def evaluate_calibration_transfer_policy_with_evidence(
             note="db_row_transfer_unsafe",
         )
 
-    # INSUFFICIENT_SAMPLE or same_domain_no_transfer treated as SHADOW_ONLY.
+    # INSUFFICIENT_SAMPLE or same_domain_no_transfer treated as BLOCKED.
     return CalibrationTransferDecision(
-        status="SHADOW_ONLY",
+        status="BLOCKED",
         reason_codes=("CALIBRATION_TRANSFER_INSUFFICIENT_SAMPLE",),
         policy_id=policy_id,
         forecast_data_version="",

@@ -479,7 +479,7 @@ def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, 
     source_cycle = _parse_source_cycle_time(payload.get("_edli_spine_source_cycle_time_utc"))
     if source_cycle is None:
         return None
-    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # RAW PRECISION (single-serving-rule §1-§2): the per-member raw second moment Ê[(x−Y)²]
     # + walk-forward n, threaded by the Stage-0 producer in the SAME index order as the
     # member arrays. Lifted here so build_fresh_model_set can attach it to each
     # RawModelMember and the spine's walk_forward_model_weights forms the RAW diagonal
@@ -594,7 +594,7 @@ def build_fresh_model_set(
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         arr = np.asarray([float(served["mu_native"])], dtype=float)
-    # RAW PRECISION (FINAL no-shadow §1-§2): the per-member raw second moment Ê[(x−Y)²]
+    # RAW PRECISION (single-serving-rule §1-§2): the per-member raw second moment Ê[(x−Y)²]
     # + walk-forward n, lifted by _served_predictive_inputs in the SAME index order as
     # the member array. Attached to each RawModelMember so build_center's
     # walk_forward_model_weights forms the RAW diagonal 1/E[r²] weight. When absent /

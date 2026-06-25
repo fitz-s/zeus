@@ -236,12 +236,9 @@ def test_inv_evaluator_callsite_count() -> None:
 # (src/strategy/candidates/* + shadow_candidate_dispatch.py removed), so they no
 # longer exist as enum members and are gone from this exempt set. The two
 # survivors below are live, non-evaluator-emitted reasons:
-#   - probability_tail_shape_anomaly_shadow: emitted in shadow mode by
-#     src/signal/probability_sanity.py (reason_code string), not via evaluator.
 #   - shoulder_no_trade_gate: emitted by src/contracts/shoulder_strategy_vnext.py
 #     (no_trade_reason=...), consumed by the backtest harness, not via evaluator.
 _SHADOW_CANDIDATE_REASONS: FrozenSet[str] = frozenset({
-    "probability_tail_shape_anomaly_shadow",
     "shoulder_no_trade_gate",
 })
 

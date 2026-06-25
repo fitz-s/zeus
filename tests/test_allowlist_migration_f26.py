@@ -66,7 +66,6 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
         "scripts/attribution_drift_weekly.py",
         "scripts/audit_divergence_exit_counterfactual.py",
         "scripts/audit_realtime_pnl.py",
-        "scripts/bridge_oracle_to_calibration.py",
         "scripts/build_correlation_matrix.py",
 
         "scripts/deep_heartbeat.py",
@@ -77,8 +76,6 @@ MIGRATED_ENTRIES: frozenset[str] = frozenset(
         "scripts/audit_observation_instants.py",
         "scripts/calibration_observation_weekly.py",
 
-        "scripts/diagnose_low_high_alignment.py",
-        "scripts/diagnose_truth_surfaces.py",
         "scripts/edge_observation_weekly.py",
         "scripts/generate_monthly_bounds.py",
         "scripts/learning_loop_observation_weekly.py",
@@ -172,7 +169,6 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/backfill_low_contract_window_evidence.py",
         "scripts/backfill_obs.py",
         "scripts/backfill_ogimet_metar.py",
-        "scripts/backfill_outcome_fact.py",
         "scripts/backfill_tigge_snapshot_p_raw.py",
         "scripts/backfill_wu_daily_all.py",
         "scripts/cleanup_ghost_positions.py",
@@ -194,8 +190,6 @@ F26_CLEANUP_PROMOTED: frozenset[str] = frozenset(
         "scripts/migrate_observations_k1.py",
         # retrofitted: db_writer_lock wrap added in F26 cleanup
         "scripts/migrate_backtest_runs_lane_constraint_2026_05_07.py",
-        # one-shot idempotent operator script
-        "scripts/reevaluate_readiness_2026_05_07.py",
         # QUARANTINED resolved: read_only (0 DML writes; all connects SELECT-only;
         # RISK_DB/DEFAULT_TRADE_DB/SHARED_DB switched to mode=ro URIs in F26 cleanup)
         "scripts/verify_truth_surfaces.py",

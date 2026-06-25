@@ -13,7 +13,6 @@ CRITICAL ANTI-SIDECAR PROPERTIES (SCAFFOLD §5.3 / §5.4):
 - hint flows ONLY into composition_rules.explain_rejected() and
   closest_rejected_profile; it CANNOT influence profile matching.
 - No call to topology_doctor_digest.build_digest() or any existing kernel.
-- No import of cli_integration_shim or divergence_logger (P2 packet).
 
 Codex-importable: stdlib + PyYAML only.
 """

@@ -155,8 +155,8 @@ class CenterEstimate:
 
 
 # ---------------------------------------------------------------------------
-# Walk-forward model weights — RAW DIAGONAL PRECISION (2026-06-18 FINAL no-shadow
-# execution flow §2). Basis = inverse RAW SECOND MOMENT 1/max(Ê[(x−Y)²], floor²),
+# Walk-forward model weights — RAW DIAGONAL PRECISION (2026-06-18 single-serving-rule
+# flow §2). Basis = inverse RAW SECOND MOMENT 1/max(Ê[(x−Y)²], floor²),
 # NOT the inverse demeaned variance. Reads RawModelMember.walk_forward_raw_m2_native.
 # Reuses ONLY the SIGMA_FLOOR / KAPPA / MIN_TRAIN / LOWN_INFLATE scalars from
 # bayes_precision_fusion — never shrink_cov / diag_cov / np.var / np.std (those
@@ -169,7 +169,7 @@ def walk_forward_model_weights(
 ) -> np.ndarray:
     """Non-negative model weights that sum to 1 — RAW diagonal precision basis.
 
-    RAW DIAGONAL PRECISION (2026-06-18 FINAL no-shadow execution flow §2; consult
+    RAW DIAGONAL PRECISION (2026-06-18 single-serving-rule flow §2; consult
     resolution ledger BLOCKER 3). Under the no-de-bias RAW law the optimal diagonal
     weighting is the inverse RAW SECOND MOMENT, NOT the inverse demeaned variance:
 
