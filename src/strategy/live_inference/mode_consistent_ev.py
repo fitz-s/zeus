@@ -57,6 +57,14 @@ from dataclasses import dataclass
 # spread, edge measured with an unlicensed tail q). Maker resting stays allowed.
 TAKER_MAX_RELATIVE_SPREAD = 0.25
 
+# Relative spread is the right kill-switch for genuinely wide books (for
+# example Milan 0.009/0.016: 7 ticks wide), but it misclassifies one-tick penny
+# books such as 0.001/0.002 as "66% wide" even though crossing pays exactly one
+# tick of spread. Keep the relative guard, but do not let it override a
+# one-tick absolute spread; the conservative all-in <= q_lcb/q_exec_lcb law below
+# still decides whether that cross is profitable enough to submit.
+TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS = 0.001
+
 # Conservative resting-fill prior for maker EV. PROVENANCE (2026-06-10 deep verify
 # /tmp/deep_verify_report.md Verification B): this 0.10 is an UNCONDITIONED point prior
 # (basis=GUESS), NOT a recalibrated bid+tick fill rate. The live resting facts are still too
@@ -213,6 +221,9 @@ def taker_spread_guard_reason(
     best_ask: float | None,
     *,
     max_relative_spread: float = TAKER_MAX_RELATIVE_SPREAD,
+    max_absolute_spread_for_cross: float | None = (
+        TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS
+    ),
 ) -> str | None:
     """Reason the TAKER lane is forbidden, or None when crossing is allowed.
 
@@ -223,6 +234,12 @@ def taker_spread_guard_reason(
     if spread is None:
         return f"{TAKER_SPREAD_GUARD_REASON}:spread=unmeasurable:max={max_relative_spread:.2f}"
     if spread > max_relative_spread:
+        bid = float(best_bid)
+        ask = float(best_ask)
+        absolute_spread = ask - bid
+        max_absolute = _finite(max_absolute_spread_for_cross)
+        if max_absolute is not None and absolute_spread <= max_absolute + 1e-12:
+            return None
         return f"{TAKER_SPREAD_GUARD_REASON}:spread={spread:.4f}:max={max_relative_spread:.2f}"
     return None
 

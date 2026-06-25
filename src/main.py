@@ -5781,8 +5781,8 @@ def _maker_rest_escalation_cycle() -> None:
     """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
 
     Cancels post_only GTC ENTRY rests older than the measured escalation
-    deadline (maker_rest_escalation_deadline, 2.0h MEASURED — KM hazard curve
-    on n=108 resting facts). GTC rests have NO other TTL owner. The job is
+    deadline (maker_rest_escalation_deadline, 20min derived from the measured
+    KM hazard curve on n=108 resting facts). GTC rests have NO other TTL owner. The job is
     deliberately dumb: cancel only. The next reactor cycle re-certifies the
     family through the FULL standard pipeline; _family_rest_state then sees the
     cancelled-unfilled >= deadline rest in venue truth and licenses the
@@ -9627,7 +9627,7 @@ def main():
             coalesce=True,
         )
         # K4.0 REST-THEN-CROSS deadline owner: cancels GTC maker entry rests older
-        # than the measured escalation deadline (2.0h). 5-min cadence is well inside
+        # than the measured escalation deadline (20min). 5-min cadence is well inside
         # the deadline's 60-min derivation slack (taker_immediate_event_end_floor
         # relation in the time-semantics registry). Cancel-only; never submits.
         scheduler.add_job(

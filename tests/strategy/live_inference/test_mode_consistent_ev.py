@@ -20,6 +20,7 @@ from src.strategy.live_inference.mode_consistent_ev import (
     MAKER_FILL_PROBABILITY_PRIOR,
     PLACEMENT_MAKER,
     PLACEMENT_TAKER,
+    TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS,
     TAKER_MAX_RELATIVE_SPREAD,
     maker_adverse_selection_haircut,
     maker_limit_price,
@@ -50,6 +51,20 @@ class TestSpreadGuard:
 
     def test_tight_spread_allows_taker(self):
         assert taker_spread_guard_reason(0.48, 0.50) is None
+
+    def test_one_tick_penny_spread_allows_taker_after_absolute_guard(self):
+        # Relative spread is 66.7%, but absolute spread is exactly one 0.001
+        # tick. This must not strand a high-confidence low-price edge as a
+        # permanent 0.001 maker rest.
+        assert relative_spread(0.001, 0.002) == pytest.approx(2.0 / 3.0)
+        assert taker_spread_guard_reason(0.001, 0.002) is None
+        assert TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS == pytest.approx(0.001)
+
+    def test_multi_tick_penny_spread_still_forbids_taker(self):
+        # 0.001 -> 0.004 is not a one-tick penny book; the Milan antibody still
+        # applies even though the notional price is small.
+        reason = taker_spread_guard_reason(0.001, 0.004)
+        assert reason is not None and reason.startswith("TAKER_FORBIDDEN_RELATIVE_SPREAD")
 
     def test_unmeasurable_book_forbids_taker(self):
         # No bid (extreme illiquidity) -> crossing forbidden, fail-closed.
@@ -149,6 +164,21 @@ class TestModeSelection:
         assert ev.taker_forbidden_reason is not None
         assert ev.chosen_mode == "MAKER"
         assert ev.maker_limit_price == pytest.approx(0.31)  # bid + tick
+
+    def test_one_tick_penny_edge_can_choose_taker(self):
+        ev = select_mode_consistent_ev(
+            q_lcb=0.03,
+            taker_all_in_cost=0.0021,
+            p_fill_taker=1.0,
+            best_bid=0.001,
+            best_ask=0.002,
+            tick_size=0.001,
+            reservation=0.03,
+            penalty=0.0,
+        )
+        assert ev.taker_forbidden_reason is None
+        assert ev.ev_taker is not None and ev.ev_taker > 0.0
+        assert ev.chosen_mode == "TAKER"
 
     def test_adverse_selection_haircut_is_half_spread(self):
         haircut = maker_adverse_selection_haircut(

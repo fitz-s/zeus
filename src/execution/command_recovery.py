@@ -10477,6 +10477,15 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
 
     if scope == "live_tick":
+        # Keep the high-cadence live tick light, but do not defer DB-only
+        # terminal-no-fill reducers. A confirmed CANCEL_ACKED zero-fill entry is
+        # already enough local truth to clear a 0-share pending_entry projection;
+        # waiting for the full sweep leaves stale duplicate-lock ghosts in the
+        # live money path.
+        _db_pass("cancel_ack_terminal_no_fill_facts",
+                 reconcile_cancel_ack_terminal_no_fill_facts,
+                 "cancel_ack_terminal_no_fill_facts")
+        _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
         summary["scope"] = "live_tick"
         summary["deferred_full_sweep"] = True
         return
