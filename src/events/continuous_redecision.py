@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -55,9 +56,10 @@ def _fee_at(price: float) -> float:
     return polymarket_fee(float(price))
 
 
-# Tick size (probability units). Polymarket's CLOB min_tick_size is 0.01 for weather markets
-# (executable_market_snapshots.min_tick_size). One tick is the smallest price increment a quote
-# can move, so it is the natural quantum for "a price move that actually changed the book".
+# Default tick size (probability units) used only when an older test/schema row
+# does not carry executable_market_snapshots.min_tick_size. Live screens must use
+# the per-book tick: current weather markets commonly quote at 0.001 near the
+# tails, and charging a fixed 0.01 tick makes cheap YES opportunities vanish.
 TICK_SIZE: float = 0.01
 # IMPROVE_DELTA economic basis: the smallest edge improvement worth re-deciding on. A re-decision
 # costs a full cert run + a potential cancel/replace round-trip; an improvement below the round-trip
@@ -133,6 +135,7 @@ _NO_VALUE_FORECAST_EVENT_TYPES = frozenset(
 class PriceQuote:
     price: float
     freshness_deadline: str  # ISO-8601 with offset
+    tick_size: float = TICK_SIZE
 
 
 @dataclass(frozen=True)
@@ -740,6 +743,7 @@ def enqueue_live_redecisions(
                     q_posterior=posterior_q,
                     q_lcb_5pct=float(conservative_q),
                     price=float(quote.price),
+                    tick_size=quote.tick_size,
                 )
                 if score < min_edge - _EPS:
                     continue
@@ -754,6 +758,7 @@ def enqueue_live_redecisions(
                     rejection,
                     current_execution_price=_all_in_cost(float(quote.price)),
                     current_q_lcb=float(conservative_q),
+                    improve_delta=_improve_delta_for_tick(quote.tick_size),
                 ):
                     continue
                 if rejection is not None:
@@ -778,7 +783,7 @@ def enqueue_live_redecisions(
                 if acted_state is not None:
                     acted_key: RedecisionScreenKey = stable_key or legacy_key
                     last = acted_state.get(acted_key)
-                    if last is not None and score <= last + IMPROVE_DELTA + _EPS:
+                    if last is not None and score <= last + _improve_delta_for_tick(quote.tick_size) + _EPS:
                         continue  # not materially improved → do not re-fire (anti price-noise)
                     acted_state[acted_key] = score
                 out.append(EnqueuedRedecision(belief.family_id, label, direction, score))
@@ -805,6 +810,7 @@ def _full_economics_reject_still_blocks(
     *,
     current_execution_price: float,
     current_q_lcb: float,
+    improve_delta: float = IMPROVE_DELTA,
 ) -> bool:
     reason = str(rejection.rejection_reason or "")
     execution_quality_reject = _is_execution_quality_rejection_reason(reason)
@@ -817,11 +823,11 @@ def _full_economics_reject_still_blocks(
         return False
     price_improved = (
         rejection.execution_price is not None
-        and current_execution_price <= float(rejection.execution_price) - IMPROVE_DELTA + _EPS
+        and current_execution_price <= float(rejection.execution_price) - float(improve_delta) + _EPS
     )
     belief_improved = (
         rejection.q_lcb_5pct is not None
-        and current_q_lcb >= float(rejection.q_lcb_5pct) + IMPROVE_DELTA - _EPS
+        and current_q_lcb >= float(rejection.q_lcb_5pct) + float(improve_delta) - _EPS
     )
     return not (price_improved or belief_improved)
 
@@ -897,7 +903,26 @@ def _all_in_cost(price: float) -> float:
     return float(price) + _fee_at(float(price))
 
 
-def _entry_screen_c95_cost(price: float) -> float:
+def _quote_tick_size(quote_or_tick: object = None) -> float:
+    try:
+        if isinstance(quote_or_tick, PriceQuote):
+            tick = float(quote_or_tick.tick_size)
+        elif quote_or_tick is None:
+            tick = TICK_SIZE
+        else:
+            tick = float(quote_or_tick)
+    except (TypeError, ValueError):
+        tick = TICK_SIZE
+    if not math.isfinite(tick) or tick <= 0.0:
+        return TICK_SIZE
+    return tick
+
+
+def _improve_delta_for_tick(tick_size: object = None) -> float:
+    return 2.0 * _quote_tick_size(tick_size)
+
+
+def _entry_screen_c95_cost(price: float, *, tick_size: object = None) -> float:
     """Conservative screen-side approximation of the final gate's c_cost_95pct.
 
     The final EDLI submit gate scores on ``c_cost_95pct`` rather than the raw
@@ -907,7 +932,7 @@ def _entry_screen_c95_cost(price: float) -> float:
     prevents deterministic TRADE_SCORE_NON_POSITIVE redecision admissions.
     """
 
-    return min(0.999999, _all_in_cost(float(price)) + TICK_SIZE)
+    return min(0.999999, _all_in_cost(float(price)) + _quote_tick_size(tick_size))
 
 
 def _entry_screen_robust_trade_score(
@@ -915,6 +940,7 @@ def _entry_screen_robust_trade_score(
     q_posterior: float,
     q_lcb_5pct: float,
     price: float,
+    tick_size: object = None,
 ) -> float:
     """Screen with the same robust-cost sign contract as final submission.
 
@@ -924,7 +950,7 @@ def _entry_screen_robust_trade_score(
     side-specific fill LCB from the full snapshot before any order can submit.
     """
 
-    c95 = _entry_screen_c95_cost(float(price))
+    c95 = _entry_screen_c95_cost(float(price), tick_size=tick_size)
     return min(float(q_lcb_5pct) - c95, float(q_posterior) - c95)
 
 
@@ -1268,6 +1294,7 @@ def read_freshest_executable_prices(
                 out[(cid, side)] = PriceQuote(
                     price=book["ask"],
                     freshness_deadline=str(book["freshness_deadline"]),
+                    tick_size=float(book.get("tick_size", TICK_SIZE)),
                 )
     return out
 
@@ -1310,6 +1337,7 @@ def read_freshest_resting_best_bids(
                 out[(cid, side)] = PriceQuote(
                     price=book["bid"],
                     freshness_deadline=str(book["freshness_deadline"]),
+                    tick_size=float(book.get("tick_size", TICK_SIZE)),
                 )
     return out
 
@@ -1335,6 +1363,7 @@ def _freshest_executable_price_rows_by_condition(
     except sqlite3.Error:
         return rows
     outcome_select = "outcome_label" if "outcome_label" in cols else "NULL AS outcome_label"
+    tick_select = "min_tick_size" if "min_tick_size" in cols else f"{TICK_SIZE!r} AS min_tick_size"
     seen: set[str] = set()
     for raw_condition_id in sorted(condition_ids):
         condition_id = str(raw_condition_id or "").strip()
@@ -1360,12 +1389,17 @@ def _freshest_executable_price_rows_by_condition(
                    selected_outcome_token_id,
                    yes_token_id,
                    no_token_id,
-                   {outcome_select}
+                   {outcome_select},
+                   {tick_select}
               FROM executable_market_snapshots
              WHERE {where_clause}
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 12
-            """.format(outcome_select=outcome_select, where_clause=where_clause),
+            """.format(
+                outcome_select=outcome_select,
+                tick_select=tick_select,
+                where_clause=where_clause,
+            ),
             (condition_id,),
         ).fetchall()
         rows.extend(condition_rows)
@@ -1399,6 +1433,10 @@ def _valid_book(bid: float, ask: float) -> bool:
     return 0.0 < bid < ask < 1.0
 
 
+def _row_tick_size(row: sqlite3.Row | tuple) -> float:
+    return _quote_tick_size(_row_cell(row, 8, "min_tick_size"))
+
+
 def _side_books_by_condition(
     rows: list[sqlite3.Row | tuple],
 ) -> dict[str, dict[str, dict[str, float | str]]]:
@@ -1419,7 +1457,11 @@ def _side_books_by_condition(
             continue
         if not _valid_book(bid, ask):
             continue
-        native.setdefault((cid, side), {"bid": bid, "ask": ask, "freshness_deadline": deadline})
+        tick = _row_tick_size(row)
+        native.setdefault(
+            (cid, side),
+            {"bid": bid, "ask": ask, "freshness_deadline": deadline, "tick_size": tick},
+        )
         opposite = _OPPOSITE_SIDE[side]
         inferred_bid = one_minus(ask)
         inferred_ask = one_minus(bid)
@@ -1430,6 +1472,7 @@ def _side_books_by_condition(
                     "bid": inferred_bid,
                     "ask": inferred_ask,
                     "freshness_deadline": deadline,
+                    "tick_size": tick,
                 },
             )
 
@@ -1739,7 +1782,7 @@ def screen_resting_orders(
                 # fair-value protection on NEW evidence is unchanged.
                 # (2026-06-23 entry fill-lane diagnosis.)
                 if (
-                    drift >= REST_BOOK_DRIFT_TICKS * TICK_SIZE - _EPS
+                    drift >= REST_BOOK_DRIFT_TICKS * _quote_tick_size(bid.tick_size) - _EPS
                     and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0
                 ):
                     decision = RepriceDecision(

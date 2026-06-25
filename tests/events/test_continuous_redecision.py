@@ -222,6 +222,50 @@ def test_executable_price_reader_ignores_closed_or_non_active_snapshot_rows():
     assert quotes[("cid-1", "buy_yes")].price == 0.60
 
 
+def test_executable_price_reader_preserves_native_min_tick_size():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            orderbook_top_bid REAL,
+            orderbook_top_ask REAL,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            outcome_label TEXT,
+            min_tick_size TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, selected_outcome_token_id,
+            yes_token_id, no_token_id, outcome_label, min_tick_size,
+            enable_orderbook, active, closed, accepting_orders
+        ) VALUES ('tail-yes', 'cid-1', 0.001, 0.002,
+                  '2026-06-01T14:00:00+00:00',
+                  '2026-06-01T13:00:00+00:00', 'yes-1',
+                  'yes-1', 'no-1', 'YES', '0.001', 1, 1, 0, 1)
+        """
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
+
+    assert quotes[("cid-1", "buy_yes")].price == 0.002
+    assert quotes[("cid-1", "buy_yes")].tick_size == pytest.approx(0.001)
+
+
 # ---------------------------------------------------------------------------
 # R1 — entry: cached belief + open market + FRESH price, edge > min → enqueue
 # ---------------------------------------------------------------------------
@@ -665,6 +709,45 @@ def test_entry_screen_requires_robust_c95_value_not_raw_top_quote_edge():
         price_lookup=price_lookup,
         min_edge=0.01,
     )
+
+
+def test_entry_screen_uses_native_tick_for_low_price_yes_tail():
+    conn = _mem_world()
+    cr.cache_belief(
+        conn,
+        family_id="Kuala Lumpur|2026-06-26|high",
+        city="Kuala Lumpur",
+        target_date="2026-06-26",
+        snapshot_id="tail-snap",
+        calibrator_model_hash="identity",
+        bin_labels=["28C"],
+        p_posterior_vec=[0.006],
+        q_lcb_yes_vec=[0.006],
+        q_lcb_no_vec=[0.994],
+        recorded_at="2026-06-25T11:30:00+00:00",
+    )
+    price_lookup = {
+        ("Kuala Lumpur|2026-06-26|high", "28C", "buy_yes"): cr.PriceQuote(
+            price=0.002,
+            freshness_deadline="2026-06-25T11:45:00+00:00",
+            tick_size=0.001,
+        ),
+    }
+
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-25T11:35:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.002,
+    )
+
+    assert [(e.bin_label, e.direction) for e in enqueued] == [("28C", "buy_yes")]
+    assert cr._entry_screen_robust_trade_score(
+        q_posterior=0.006,
+        q_lcb_5pct=0.006,
+        price=0.002,
+        tick_size=0.01,
+    ) < 0.0
 
 
 def test_latest_beliefs_dedupe_dynamic_family_hash_by_stable_market_identity():
