@@ -632,26 +632,27 @@ class ForecastSnapshotReadyTrigger:
             # raw_model_forecasts; the FSR members never feed belief on this lane), but the event's
             # member counters must still describe that same raw-model carrier instead of falling back
             # to legacy 51-member ensemble telemetry.
+            #
+            # Live-cadence fix (2026-06-25): choose the latest live posterior
+            # families BEFORE counting raw_model_forecasts. The former CTE
+            # grouped the full raw history every reactor cycle, so a 600k-row
+            # raw table could spend minutes before emitting any candidate. This
+            # preserves the one latest posterior per family law while bounding
+            # the carrier count to the currently-emittable family/cycle set.
             # The market_filter references c.* columns; re-alias onto the posterior row p.*.
             _posterior_market_filter = (
                 market_filter.replace("c.city", "p.city")
                 .replace("c.target_local_date", "p.target_date")
                 .replace("c.temperature_metric", "p.temperature_metric")
             )
+            _posterior_columns = _table_columns(forecasts_conn, "forecast_posteriors")
+            _posterior_runtime_filter = (
+                " AND fp.runtime_layer = 'live'"
+                if "runtime_layer" in _posterior_columns
+                else ""
+            )
             _select_sql_base = f"""
-                WITH raw_model_counts AS (
-                    SELECT
-                        rmf.city,
-                        rmf.target_date,
-                        rmf.metric,
-                        date(rmf.source_cycle_time) AS source_cycle_date,
-                        COUNT(DISTINCT rmf.model) AS raw_model_member_count
-                      FROM raw_model_forecasts rmf
-                     WHERE rmf.source_available_at <= ?
-                       AND rmf.forecast_value_c IS NOT NULL
-                     GROUP BY rmf.city, rmf.target_date, rmf.metric, date(rmf.source_cycle_time)
-                ),
-                ranked_posterior AS (
+                WITH ranked_posterior AS (
                     SELECT
                         fp.*,
                         ROW_NUMBER() OVER (
@@ -660,8 +661,33 @@ class ForecastSnapshotReadyTrigger:
                         ) AS _family_rank
                       FROM forecast_posteriors fp
                      WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
+                       {_posterior_runtime_filter}
                        AND (fp.source_available_at IS NULL OR fp.source_available_at <= ?)
                        AND (fp.computed_at IS NULL OR fp.computed_at <= ?)
+                ),
+                latest_posterior AS (
+                    SELECT *
+                      FROM ranked_posterior p
+                     WHERE p._family_rank = 1
+                       AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
+                       AND (p.computed_at IS NULL OR p.computed_at <= ?){_posterior_market_filter}
+                ),
+                raw_model_counts AS (
+                    SELECT
+                        rmf.city,
+                        rmf.target_date,
+                        rmf.metric,
+                        date(rmf.source_cycle_time) AS source_cycle_date,
+                        COUNT(DISTINCT rmf.model) AS raw_model_member_count
+                      FROM raw_model_forecasts rmf
+                      JOIN latest_posterior p
+                        ON p.city = rmf.city
+                       AND p.target_date = rmf.target_date
+                       AND p.temperature_metric = rmf.metric
+                       AND date(rmf.source_cycle_time) = date(p.source_cycle_time)
+                     WHERE rmf.source_available_at <= ?
+                       AND rmf.forecast_value_c IS NOT NULL
+                     GROUP BY rmf.city, rmf.target_date, rmf.metric, date(rmf.source_cycle_time)
                 )
                 SELECT
                     p.posterior_id AS coverage_id,
@@ -708,16 +734,13 @@ class ForecastSnapshotReadyTrigger:
                     p.computed_at AS snapshot_fetch_time,
                     p.posterior_identity_hash AS snapshot_manifest_hash,
                     NULL AS snapshot_members_json
-                FROM ranked_posterior p
+                FROM latest_posterior p
                 JOIN raw_model_counts rmc
                   ON rmc.city = p.city
                  AND rmc.target_date = p.target_date
                  AND rmc.metric = p.temperature_metric
                  AND rmc.source_cycle_date = date(p.source_cycle_time)
-                WHERE p._family_rank = 1
-                  AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
-                  AND (p.computed_at IS NULL OR p.computed_at <= ?)
-                  AND rmc.raw_model_member_count >= 3{_posterior_market_filter}
+                WHERE rmc.raw_model_member_count >= 3
                 ORDER BY p.source_cycle_time DESC, p.computed_at DESC
                 """
             rows = _dict_rows(

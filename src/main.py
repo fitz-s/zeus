@@ -4967,6 +4967,16 @@ def _edli_event_reactor_cycle() -> None:
     try:
         from src.state.db import world_write_mutex as _world_write_mutex
 
+        _stage_started = time.monotonic()
+
+        def _log_stage(stage: str) -> None:
+            nonlocal _stage_started
+            _now_mono = time.monotonic()
+            _elapsed = _now_mono - _stage_started
+            if _elapsed >= 1.0:
+                logger.info("EDLI reactor stage completed: %s elapsed_s=%.3f", stage, _elapsed)
+            _stage_started = _now_mono
+
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         forecast_emit_limit = _edli_positive_int_or_unbounded(
@@ -5011,6 +5021,7 @@ def _edli_event_reactor_cycle() -> None:
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
+        _log_stage("day0_prefetch")
         # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
@@ -5052,6 +5063,7 @@ def _edli_event_reactor_cycle() -> None:
                         source=_fair_source,
                         already_pending_keys=_fsr_pending,
                     )
+                    _log_stage("forecast_snapshot_emit")
                 except sqlite3.OperationalError as _emit_lock_exc:
                     if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
                         logger.warning(
@@ -5089,6 +5101,7 @@ def _edli_event_reactor_cycle() -> None:
                                 str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
                             ),
                         )
+                        _log_stage("day0_emit")
                     except sqlite3.OperationalError as _day0_emit_lock_exc:
                         if _edli_is_sqlite_lock_error(_day0_emit_lock_exc):
                             logger.warning(
@@ -5105,6 +5118,7 @@ def _edli_event_reactor_cycle() -> None:
             # released by the COMMIT before any other writer (ingestor / collateral
             # heartbeat) can interleave. No HTTP/venue work runs inside this block.
             conn.commit()
+            _log_stage("emit_commit")
         finally:
             _emit_mutex.release()
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
@@ -5362,7 +5376,9 @@ def _edli_event_reactor_cycle() -> None:
                 edli_live_operator_authorized=_edli_live_operator_authorized,
             ),
         )
+        _log_stage("reactor_construct")
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
+        _log_stage("process_pending")
         _rejection_counts = dict(Counter(_rr.rejection_reasons))
         _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
         # FIX-4 (P2): read the per-cycle live-submit and venue-ack counters from
