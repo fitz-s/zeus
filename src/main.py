@@ -8596,14 +8596,13 @@ def _edli_boot_fill_bridge_recovery() -> None:
 
 
 def _edli_boot_settlement_redeem_recovery() -> None:
-    """守護 (2026-06-03): drain already-stuck settled-but-active positions AT BOOT.
+    """守護 (2026-06-03): queue stuck settled-but-active recovery during boot.
 
     The harvester now runs hourly in EDLI modes, but on restart we should not wait
     up to an hour to clear positions whose target_date already has a VERIFIED
     settlement_outcomes row yet still sit phase=active (memory #56, Shanghai
-    cca68b44). One synchronous _harvester_cycle() pass at boot consumes that truth
-    immediately: marks the positions settled and enqueues their REDEEM_INTENT_CREATED
-    so the redeem pollers can pick them up on their first tick.
+    cca68b44). Queue one background _harvester_cycle() pass at boot so the scheduler
+    is never blocked by portfolio scans while the recovery still runs promptly.
 
     Shadow-safe: _harvester_cycle does no on-chain work (the on-chain redeem POST is
     the separately-gated _redeem_submitter_cycle), and resolve_pnl_for_settled_markets
@@ -8620,12 +8619,28 @@ def _edli_boot_settlement_redeem_recovery() -> None:
             return
         if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and not edli_cfg.get("enabled"):
             return
-        from src.execution.post_trade_capital import _harvester_cycle
+        def _runner() -> None:
+            try:
+                from src.execution.post_trade_capital import _harvester_cycle
 
-        _harvester_cycle()
+                _harvester_cycle()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "守護 boot settlement-redeem background recovery failed "
+                    "(non-fatal; hourly harvester retries): %s",
+                    exc,
+                    exc_info=True,
+                )
+
+        thread = threading.Thread(
+            target=_runner,
+            name="boot-settlement-redeem-recovery",
+            daemon=True,
+        )
+        thread.start()
         logger.info(
-            "守護 boot settlement-redeem recovery: ran one harvester pass before "
-            "entering the trading loop (mode=%s)",
+            "守護 boot settlement-redeem recovery: queued one background harvester "
+            "pass before entering the trading loop (mode=%s)",
             live_execution_mode,
         )
     except Exception as exc:  # noqa: BLE001
@@ -9186,11 +9201,10 @@ def main():
     # blocks boot); the per-cycle durable scan is the continuous safety net.
     _edli_boot_fill_bridge_recovery()
 
-    # 守護 (2026-06-03): immediately consume any VERIFIED settlement truth that is
-    # already on disk for FILLED positions still sitting phase=active (memory #56,
-    # Shanghai cca68b44), instead of waiting up to an hour for the scheduled
-    # harvester. Runs AFTER the fill-bridge recovery (so freshly-bridged positions
-    # are visible) and BEFORE the trading loop. Fail-open; no on-chain side effect.
+    # 守護 (2026-06-03): queue a non-blocking recovery pass for VERIFIED settlement
+    # truth already on disk for FILLED positions still sitting phase=active.
+    # Runs AFTER fill-bridge recovery so freshly-bridged positions are visible;
+    # never blocks scheduler startup. Fail-open; no on-chain side effect.
     _edli_boot_settlement_redeem_recovery()
 
     if once:
