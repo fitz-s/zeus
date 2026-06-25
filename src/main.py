@@ -7024,9 +7024,11 @@ def _edli_expire_unadmitted_redecision_pending(
 ) -> int:
     """Expire redecision rows no longer backed by entry edge or rest reprice value.
 
-    Pending rows are always safe to expire. Processing rows are eligible only
-    after the EventStore claim lease has expired; an in-flight reactor event
-    must not be terminalized by the screen job that emitted it.
+    Fresh pending rows are not safe to expire immediately: the screen may emit a
+    row seconds before the next reactor claim cycle. Pending rows must survive a
+    claim grace window; processing rows are eligible only after the EventStore
+    claim lease has expired. An in-flight reactor event must not be terminalized
+    by the screen job that emitted it.
     """
 
     from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
@@ -7036,8 +7038,10 @@ def _edli_expire_unadmitted_redecision_pending(
         if decision_dt.tzinfo is None:
             decision_dt = decision_dt.replace(tzinfo=timezone.utc)
         stale_processing_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
+        pending_admission_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
     except Exception:  # noqa: BLE001
         stale_processing_cutoff = ""
+        pending_admission_cutoff = ""
 
     try:
         rows = world_conn.execute(
@@ -7050,7 +7054,12 @@ def _edli_expire_unadmitted_redecision_pending(
               JOIN opportunity_events e ON e.event_id = p.event_id
              WHERE p.consumer_name = 'edli_reactor_v1'
                AND (
-                    p.processing_status = 'pending'
+                    (
+                        p.processing_status = 'pending'
+                        AND ? != ''
+                        AND e.created_at <= ?
+                        AND e.received_at <= ?
+                    )
                  OR (
                     p.processing_status = 'processing'
                     AND p.claimed_at IS NOT NULL
@@ -7060,7 +7069,14 @@ def _edli_expire_unadmitted_redecision_pending(
                )
                AND e.event_type = ?
             """,
-            (stale_processing_cutoff, stale_processing_cutoff, _REDECISION_EVENT_TYPE),
+            (
+                pending_admission_cutoff,
+                pending_admission_cutoff,
+                pending_admission_cutoff,
+                stale_processing_cutoff,
+                stale_processing_cutoff,
+                _REDECISION_EVENT_TYPE,
+            ),
         ).fetchall()
     except Exception:  # noqa: BLE001
         return 0

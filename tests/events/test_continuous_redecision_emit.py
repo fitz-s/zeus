@@ -690,6 +690,51 @@ def test_unadmitted_redecision_pending_is_expired():
     assert statuses[fsr.entity_key] == "pending"
 
 
+def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
+    """A just-emitted redecision must get a reactor claim window before expiry."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    fresh = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Berlin|2026-06-19|high|run-fresh",
+        source="cycle-fresh",
+        observed_at="2026-06-17T15:59:00+00:00",
+        available_at="2026-06-17T15:59:00+00:00",
+        received_at="2026-06-17T15:59:00+00:00",
+        causal_snapshot_id="snap-fresh",
+        payload=_ready_payload(
+            city="Berlin",
+            target_date="2026-06-19",
+            metric="high",
+            source_run_id="run-fresh",
+            snapshot_id="snap-fresh",
+        ),
+        priority=50,
+    )
+    store.insert_or_ignore(fresh)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (fresh.entity_key,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("pending", None)
+
+
 def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
     """Stale processing redecisions must not survive admission expiry forever."""
 
