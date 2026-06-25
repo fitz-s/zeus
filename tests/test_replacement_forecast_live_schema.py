@@ -40,6 +40,10 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def _indexes(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA index_list({table})").fetchall()}
+
+
 def test_replacement_live_support_tables_are_forecast_class_only() -> None:
     forecast_conn = sqlite3.connect(":memory:")
     apply_canonical_schema(forecast_conn, forecast_tables=True)
@@ -66,6 +70,14 @@ def test_replacement_live_support_tables_are_forecast_class_only() -> None:
     )
     assert "runtime_layer" in _columns(forecast_conn, "forecast_posteriors")
     assert "trade_authority_status" not in _columns(forecast_conn, "forecast_posteriors")
+    assert "idx_forecast_posteriors_live_family_cycle" in _indexes(
+        forecast_conn,
+        "forecast_posteriors",
+    )
+    assert "idx_raw_model_forecasts_current_family_cycle_members" in _indexes(
+        forecast_conn,
+        "raw_model_forecasts",
+    )
     assert {"market_snapshot_id", "allowed_direction", "allowed_q_lcb", "allowed_kelly_fraction", "veto_reason"} <= _columns(
         forecast_conn,
         "replacement_shadow_decisions",

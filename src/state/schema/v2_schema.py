@@ -455,6 +455,12 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
             ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
     """)
     conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_live_family_cycle
+            ON forecast_posteriors(product_id, city, target_date, temperature_metric,
+                                   source_cycle_time, computed_at, posterior_id)
+            WHERE runtime_layer = 'live'
+    """)
+    conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
             ON forecast_posteriors(posterior_identity_hash)
             WHERE posterior_identity_hash IS NOT NULL
@@ -623,6 +629,12 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_product_identity
             ON raw_model_forecasts(city, metric, lead_days, endpoint, model_domain_hash, target_date)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_current_family_cycle_members
+            ON raw_model_forecasts(city, target_date, metric, source_cycle_time,
+                                   source_available_at, model)
+            WHERE endpoint = 'single_runs' AND forecast_value_c IS NOT NULL
+    """)
     # BLOCKER 4 (operator-sharpened) — forward-only widened uniqueness for PRE-EXISTING DBs.
     # SQLite cannot ALTER the table-level UNIQUE constraint of an already-created table without a
     # full table rebuild; a CREATE UNIQUE INDEX IF NOT EXISTS adds the SAME widened uniqueness
@@ -643,7 +655,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # RawModelForecastRequestConflict AND writes one row here, recording BOTH the existing and the
     # incoming request identity. This converts the pre-fix SILENT INSERT-OR-IGNORE drop into a
     # loud, forensically-attributable event (Fitz Constraint #3 immune system: an antibody, not an
-    # alert). SHADOW research surface only — never an order/training truth table.
+    # alert). This is a non-execution audit ledger, never an order/training truth table.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_model_forecast_request_conflicts (
             conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,

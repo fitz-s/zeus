@@ -7118,6 +7118,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
                 SELECT city, target_date, temperature_metric, source_cycle_time
                   FROM forecast_posteriors
                  WHERE product_id = ?
+                   AND runtime_layer = 'live'
                    AND (source_available_at IS NULL OR source_available_at <= ?)
                    AND (computed_at IS NULL OR computed_at <= ?)
                    AND ({key_predicate})
@@ -7161,10 +7162,11 @@ def _edli_expire_unready_forecast_snapshot_pending(
                 count_rows = forecasts_conn.execute(
                     f"""
                     SELECT city, target_date, metric, COUNT(DISTINCT model)
-                      FROM raw_model_forecasts
+                     FROM raw_model_forecasts
                      WHERE source_cycle_time >= ?
                        AND source_cycle_time < ?
                        AND source_available_at <= ?
+                       AND endpoint = 'single_runs'
                        AND forecast_value_c IS NOT NULL
                        AND ({key_predicate})
                      GROUP BY city, target_date, metric
