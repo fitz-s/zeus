@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -42,6 +42,7 @@ from src.engine.position_belief import (
     ReplacementBelief,
     load_replacement_belief,
 )
+from src.types.metric_identity import MetricIdentity
 
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
@@ -700,6 +701,131 @@ class TestMonitorPrimaryAuthority:
         )
         assert "day0_observation_remaining_window" in refresh_pos.applied_validations
         assert is_fresh is True
+
+    def test_noaa_target_day_uses_day0_observation_lane(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(
+            pb,
+            "load_replacement_belief",
+            lambda **kw: (_ for _ in ()).throw(
+                AssertionError("NOAA Day0 monitor must not start from replacement belief")
+            ),
+        )
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.68, ["day0_observation"]
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        pos = self._pos()
+        pos.city = "Moscow"
+        pos.state = "day0_window"
+        pos.target_date = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Europe/Moscow", "settlement_source_type": "noaa"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Europe/Moscow")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.68)
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert is_fresh is True
+
+    def test_noaa_day0_observation_reads_canonical_ogimet_surface(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE observation_instants (
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                utc_timestamp TEXT NOT NULL,
+                temp_current REAL,
+                running_max REAL,
+                running_min REAL,
+                authority TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, utc_timestamp,
+                temp_current, running_max, running_min, authority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
+                    "Europe/Moscow", "2026-06-25T00:00:00+00:00",
+                    None, 16.0, 14.0, "VERIFIED",
+                ),
+                (
+                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
+                    "Europe/Moscow", "2026-06-25T01:00:00+00:00",
+                    None, 18.0, 13.0, "VERIFIED",
+                ),
+                (
+                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
+                    "Europe/Moscow", "2026-06-25T02:00:00+00:00",
+                    None, 17.0, 13.5, "VERIFIED",
+                ),
+            ],
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: conn,
+        )
+        city = type(
+            "City",
+            (),
+            {
+                "name": "Moscow",
+                "timezone": "Europe/Moscow",
+                "settlement_unit": "C",
+                "settlement_source_type": "noaa",
+            },
+        )()
+
+        obs = mr._fetch_day0_observation(city, date(2026, 6, 25))
+
+        assert obs.source == "ogimet_metar_uuww"
+        assert obs.high_so_far == pytest.approx(18.0)
+        assert obs.low_so_far == pytest.approx(13.0)
+        assert obs.current_temp != obs.current_temp
+        assert obs.observation_time == "2026-06-25T02:00:00+00:00"
+        assert obs.coverage_status == "LOW_COVERAGE"
+        assert mr._day0_observation_source_rejection_reason(
+            city,
+            obs,
+            consumer_label="held-position monitor refresh",
+        ) is None
+        assert mr._day0_observation_quality_rejection_reason(
+            city,
+            obs,
+            MetricIdentity.from_raw("high"),
+            decision_time=datetime(2026, 6, 25, 2, 10, tzinfo=timezone.utc),
+            allow_incomplete_window_bound=True,
+        ) is None
 
     def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):
         import src.engine.monitor_refresh as mr

@@ -665,7 +665,7 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         yr = route_set.direct_yes.get(t)
         if yr is not None and yr.executable:
             sizing[(t, "YES")] = _yes_sizing(
-                space, t, q_point=float(qb), q_lcb=max(float(qb) - 0.03, 0.001),
+                space, t, q_point=float(qb), q_lcb=max(float(qb) - 0.03, 0.0),
                 price=str(round(float(yr.avg_cost.value), 3)),
             )
 
@@ -811,6 +811,75 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
 
     assert reason is None
     assert selected is low_cost
+
+
+def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
+    """Shanghai correction mirror: an inferior selected NO yields to dominant center YES."""
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.80),
+        edge_lcb=0.04,
+        optimal_delta_u=0.05,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("50"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.08,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, center_yes],
+        forecast_bin="b25",
+    )
+
+    assert selected is center_yes
+
+
+def test_symmetric_center_yes_dominance_does_not_force_weaker_yes():
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.40),
+        edge_lcb=0.12,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.50,
+        optimal_stake_usd=Decimal("5"),
+    )
+    weak_center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.02,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, weak_center_yes],
+        forecast_bin="b25",
+    )
+
+    assert selected is selected_no
 
 
 def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):

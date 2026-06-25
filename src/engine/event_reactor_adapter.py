@@ -12461,9 +12461,10 @@ def _live_yes_probabilities(
 # FIX 1 (2026-06-09) — replacement q-mode live eligibility gate. The materializer derives an
 # explicit `replacement_q_mode` into provenance_json (FUSED_NORMAL_FULL/PARTIAL,
 # ANCHOR_ONLY_CURRENT, SOFT_ANCHOR_FALLBACK, BAYES_PRECISION_FUSION_CAPTURE_MISSING,
-# FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY for live Normal carriers with certified
-# q_lcb/q_ucb; this excludes legacy member-vote fallback while letting current-anchor rows keep
-# redecision live when extras are temporarily unavailable.
+# FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY for fused Normal carriers with certified
+# q_lcb/q_ucb; this excludes legacy member-vote and anchor-only fallback rows. Missing BPF
+# current inputs must heal through the capture lane, not continue as a live single-anchor
+# surrogate.
 # This kills the silent-degradation category: a row that fell back to the legacy member-vote
 # soft-anchor q (or had no fusion at all) must NOT size live Kelly under the wrong probability
 # regime just because all flags were on.
@@ -12474,7 +12475,6 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
     {
         _REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
         _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL,
-        _REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT,
     }
 )
 
@@ -12482,8 +12482,8 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
 def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
     """Return (live_eligible, mode) for a replacement posterior bundle. Fail-closed.
 
-    Reads provenance_json.replacement_q_mode. Eligible only for live Normal carrier modes
-    (FUSED_NORMAL_FULL / FUSED_NORMAL_PARTIAL / ANCHOR_ONLY_CURRENT). No grandfather clause.
+    Reads provenance_json.replacement_q_mode. Eligible only for live fused Normal carrier modes
+    (FUSED_NORMAL_FULL / FUSED_NORMAL_PARTIAL). No grandfather clause.
 
     GRANDFATHER REVOKED (operator directive 2026-06-10 P0): the former q_shape=="fused_normal_direct"
     grandfather branch that returned (True, "FUSED_NORMAL_GRANDFATHERED") has been DELETED. Old DB

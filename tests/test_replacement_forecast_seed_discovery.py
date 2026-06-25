@@ -491,6 +491,101 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
     assert seed["target_date"] == "2026-06-08"
 
 
+def test_seed_discovery_prioritizes_held_position_family_before_alphabetical_targets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM market_events")
+        conn.execute("DELETE FROM source_run_coverage")
+        for city, run_id, tz in (
+            ("Amsterdam", "amsterdam-baseline-run", "Europe/Amsterdam"),
+            ("Tokyo", "tokyo-baseline-run", "Asia/Tokyo"),
+        ):
+            for label, low, high in (("69°F or below", None, 69.0), ("70-71°F", 70.0, 71.0)):
+                conn.execute(
+                    """
+                    INSERT INTO market_events
+                      (market_slug, city, target_date, temperature_metric, token_id, range_label, range_low, range_high)
+                    VALUES (?, ?, '2026-06-08', 'high', ?, ?, ?, ?)
+                    """,
+                    (f"slug-{city}", city, f"{city}-{label}", label, low, high),
+                )
+            conn.execute(
+                """
+                INSERT INTO source_run_coverage
+                  (coverage_id, source_run_id, source_id, city_id, city, city_timezone, target_local_date,
+                   temperature_metric, data_version, completeness_status, readiness_status, computed_at)
+                VALUES (?, ?, 'ecmwf_open_data', ?, ?, ?,
+                   '2026-06-08', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                   'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
+                """,
+                (f"coverage-{city}", run_id, city, city, tz),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    for city in ("Amsterdam", "Tokyo"):
+        _write_file(raw_dir / f"precision_{city}.json", {"city": city})
+        _write_manifest(
+            raw_dir,
+            name=f"openmeteo_{city}",
+            source_id="openmeteo_ecmwf_ifs_9km",
+            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            metadata={
+                "openmeteo_payload_json": f"openmeteo_{city}.json",
+                "precision_metadata_json": f"precision_{city}.json",
+                "city": city,
+                "target_date": "2026-06-08",
+            },
+        )
+    trade_conn = sqlite3.connect(trade_db)
+    try:
+        trade_conn.execute(
+            """
+            CREATE TABLE position_current (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                phase TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current
+              (city, target_date, temperature_metric, phase)
+        VALUES ('Tokyo', '2026-06-08', 'high', 'active')
+            """
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._zeus_trade_db_path",
+        lambda: trade_db,
+    )
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T04:00:00+00:00",
+        limit=1,
+    )
+
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["city"] == "Tokyo"
+
+
 def test_seed_discovery_does_not_seed_after_local_target_day_starts(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"

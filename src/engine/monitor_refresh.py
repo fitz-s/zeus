@@ -54,7 +54,7 @@ from src.data.executable_forecast_reader import read_executable_forecast
 from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.data.forecast_source_registry import calibration_source_id_for_lookup
 from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, get_sibling_outcomes
-from src.data.observation_client import get_current_observation
+from src.data.observation_client import Day0ObservationContext, get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
     DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE,
@@ -1855,10 +1855,98 @@ def _city_supports_executable_day0_observation(city) -> bool:
 
 def _fetch_day0_observation(city: Position | object, target_d: date):
     reference_time = datetime.now(timezone.utc)
+    if str(getattr(city, "settlement_source_type", "") or "").strip() == "noaa":
+        canonical = _fetch_canonical_day0_observation_from_instants(
+            city,
+            target_d,
+            reference_time=reference_time,
+        )
+        if canonical is not None:
+            return canonical
+        raise ObservationUnavailableError(
+            f"Canonical Day0 observation unavailable for "
+            f"{getattr(city, 'name', '?')}/noaa/{target_d.isoformat()}"
+        )
     try:
         return get_current_observation(city, target_date=target_d, reference_time=reference_time)
     except TypeError:
         return get_current_observation(city)
+
+
+def _fetch_canonical_day0_observation_from_instants(
+    city: object,
+    target_d: date,
+    *,
+    reference_time: datetime,
+) -> Day0ObservationContext | None:
+    """Build an executable Day0 observation from canonical observation_instants.
+
+    NOAA-settled cities do not have an observation_client live fetcher, but their
+    settlement-station METAR rows are already persisted in the same canonical
+    surface used by hard-fact Day0 triggers. This adapter feeds that source into
+    the normal Day0Router math instead of falling back to stale replacement
+    posteriors.
+    """
+
+    try:
+        from src.data.day0_observation_reader import (
+            COVERAGE_NONE,
+            read_day0_observed_extrema,
+        )
+        from src.state.db import get_world_connection_read_only
+    except Exception:
+        return None
+
+    city_name = str(getattr(city, "name", "") or "")
+    timezone_name = str(getattr(city, "timezone", "") or "")
+    unit = str(getattr(city, "settlement_unit", "C") or "C")
+    if not city_name or not timezone_name:
+        return None
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        result = read_day0_observed_extrema(
+            conn,
+            city=city_name,
+            target_date=target_d.isoformat(),
+            timezone_name=timezone_name,
+            decision_time_utc=reference_time,
+        )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if result.coverage_status == COVERAGE_NONE or result.chosen_source is None:
+        return None
+    if result.high_so_far is None or result.low_so_far is None:
+        return None
+    observation_time = result.last_observation_time_utc
+    if not observation_time:
+        return None
+    current_temp = (
+        float(result.current_temp)
+        if result.current_temp is not None
+        else float("nan")
+    )
+    return Day0ObservationContext(
+        current_temp=current_temp,
+        high_so_far=float(result.high_so_far),
+        low_so_far=float(result.low_so_far),
+        source=str(result.chosen_source),
+        observation_time=observation_time,
+        unit=unit,
+        station_id=str(result.provenance.get("chosen_source") or result.chosen_source),
+        sample_count=int(result.row_count),
+        last_sample_time=observation_time,
+        coverage_status=str(result.coverage_status),
+        observation_available_at=str(result.decision_time_utc),
+        provider_reported_time="canonical_observation_instants",
+    )
 
 
 def _temperature_native_value_to_c(value: float, *, unit: str) -> float:
@@ -2436,6 +2524,9 @@ def _refresh_day0_observation(
     observed_high_so_far = _finite_day0_observation_float(obs, "high_so_far")
     observed_low_so_far = _finite_day0_observation_float(obs, "low_so_far")
     current_temp = _finite_day0_observation_float(obs, "current_temp")
+    observation_source_for_value = str(_day0_observation_field(obs, "source", "") or "")
+    if current_temp is None and observation_source_for_value.startswith("ogimet_metar_"):
+        current_temp = float("nan")
     if current_temp is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [

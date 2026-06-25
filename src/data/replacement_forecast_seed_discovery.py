@@ -19,7 +19,7 @@ from src.data.replacement_forecast_materialization_seed_builder import (
     write_seed,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
-from src.state.db import _connect
+from src.state.db import _connect, _zeus_trade_db_path
 
 
 UTC = timezone.utc
@@ -29,6 +29,14 @@ _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 # filtered by tradeable_grade_coverage_sql. Keep this explicit import so this
 # third coverage site cannot drift from the plan/queue helper silently.
 _TRADEABLE_GRADE_COVERAGE_AUTHORITY = tradeable_grade_coverage_sql
+_OPEN_POSITION_PHASES = frozenset(
+    {
+        "pending_entry",
+        "active",
+        "day0_window",
+        "pending_exit",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -404,6 +412,56 @@ def _seed_name(target: Mapping[str, object], *, computed_at: datetime) -> str:
     return f"{city}.{target_date}.{metric}.{stamp}.json"
 
 
+def _held_position_family_priorities() -> dict[tuple[str, str, str], int]:
+    """Return live held-family priority from canonical position_current.
+
+    Forecast materialization is both an entry input and the held-position
+    redecision input. When a fresh cycle arrives, held families must not wait
+    behind alphabetical market discovery; stale beliefs directly affect exit,
+    hold, and shift decisions.
+    """
+
+    path = _zeus_trade_db_path()
+    if not path.exists():
+        return {}
+    try:
+        conn = _connect(path, write_class=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            tables = _table_names(conn)
+            if "position_current" not in tables:
+                return {}
+            cols = _columns(conn, "position_current")
+            required = {"city", "target_date", "temperature_metric", "phase"}
+            if not required.issubset(cols):
+                return {}
+            rows = conn.execute(
+                """
+                SELECT city, target_date, temperature_metric, phase
+                FROM position_current
+                WHERE city IS NOT NULL AND city != ''
+                  AND target_date IS NOT NULL AND target_date != ''
+                  AND temperature_metric IS NOT NULL AND temperature_metric != ''
+                  AND phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    priorities: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        phase = str(row["phase"] or "")
+        key = (
+            str(row["city"]),
+            str(row["target_date"]),
+            str(row["temperature_metric"]),
+        )
+        priorities[key] = 0 if phase in {"day0_window", "pending_exit"} else 1
+    return priorities
+
+
 def discover_replacement_forecast_materialization_seeds(
     *,
     forecast_db: Path | str,
@@ -457,6 +515,7 @@ def discover_replacement_forecast_materialization_seeds(
                 skipped_count=0,
                 failed_count=0,
             )
+        held_family_priority = _held_position_family_priorities()
         targets = tuple(
             {
                 "city": row.city,
@@ -481,6 +540,10 @@ def discover_replacement_forecast_materialization_seeds(
             for row in sorted(
                 (row for row in target_plan.rows if row.can_seed),
                 key=lambda row: (
+                    held_family_priority.get(
+                        (str(row.city), str(row.target_date), str(row.temperature_metric)),
+                        2,
+                    ),
                     str(row.target_date),
                     str(row.city),
                     str(row.temperature_metric),

@@ -581,6 +581,13 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     _existing_rmf_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(raw_model_forecasts)").fetchall()
     }
+    if "trade_authority_status" in _existing_rmf_cols:
+        # raw_model_forecasts is a raw current/history input table, not a posterior authority table.
+        # Old live DBs carried a DIAGNOSTIC_ONLY-only column that made live production rows look
+        # experimental and invited downstream authority confusion. The executable authority lives
+        # on forecast_posteriors.runtime_layer/q_mode; raw rows keep training_allowed=0.
+        conn.execute("ALTER TABLE raw_model_forecasts DROP COLUMN trade_authority_status")
+        _existing_rmf_cols.remove("trade_authority_status")
     _rmf_product_identity_alters = (
         ("source_id", "TEXT"),
         ("source_family", "TEXT"),

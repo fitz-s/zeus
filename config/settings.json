@@ -282,9 +282,9 @@
     "download_anchor_sigma_c": 3.0,
     "disable_legacy_opendata_forecast_live_jobs": false,
     "materialization_interval_min": 5,
-    "seed_discovery_limit_per_cycle": 10,
-    "seed_limit_per_cycle": 10,
-    "materialization_limit_per_cycle": 10,
+    "seed_discovery_limit_per_cycle": 80,
+    "seed_limit_per_cycle": 80,
+    "materialization_limit_per_cycle": 40,
     "promotion_evidence_path": "state/replacement_forecast_live/promotion_evidence.json"
   }
 }

@@ -802,6 +802,12 @@ class FamilyDecisionEngine:
         #   direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
         # The scalar robust_trade_score is NOT one of the conditions.
         selected_decision, no_trade_reason = self._select(scored)
+        if selected_decision is not None:
+            selected_decision = self._apply_symmetric_center_yes_dominance(
+                selected_decision=selected_decision,
+                scored=scored,
+                forecast_bin=forecast_bin,
+            )
         portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = ()
         if selected_decision is not None:
             portfolio_comparisons = self._portfolio_comparisons(
@@ -1010,6 +1016,90 @@ class FamilyDecisionEngine:
         )
 
     # ------------------------------------------------ portfolio comparison
+    def _direction_admitted(self, d: CandidateDecision) -> bool:
+        return d.direction_law_ok or (
+            d.economics.edge_lcb > 0.0
+            and d.economics.optimal_delta_u > 0.0
+            and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
+            and not d.q_lcb_guard_abstained
+        )
+
+    def _utility_density(self, d: CandidateDecision) -> float:
+        try:
+            stake = float(d.economics.optimal_stake_usd)
+        except Exception:  # noqa: BLE001
+            stake = 0.0
+        stake = max(stake, 1e-9)
+        return float(d.economics.optimal_delta_u) / stake
+
+    def _live_selectable_candidate(self, d: CandidateDecision) -> bool:
+        return (
+            d.route.route_cost.executable
+            and self._direction_admitted(d)
+            and d.coherence_allows
+            and d.economics.edge_lcb > 0.0
+            and d.economics.optimal_delta_u > 0.0
+            and live_candidate_passes(
+                d.economics,
+                d.route,
+                direction_law_proof_present=self._direction_admitted(d),
+                market_coherence_accepted=d.coherence_allows,
+            )
+        )
+
+    def _apply_symmetric_center_yes_dominance(
+        self,
+        *,
+        selected_decision: CandidateDecision,
+        scored: Sequence[CandidateDecision],
+        forecast_bin: str,
+    ) -> CandidateDecision:
+        """Replace an inferior selected NO with a strictly superior center YES.
+
+        The older portfolio comparator protected a selected center YES against a
+        superior adjacent-NO portfolio but had no mirror invariant for selected
+        NO routes. Shanghai-style families then could express the same settlement
+        exposure with higher capital cost and lower return density. This guard is
+        intentionally strict: YES must already be live-selectable and must
+        dominate the selected NO on guarded utility density plus both edge and
+        point EV per dollar. Otherwise the selected NO remains authoritative.
+        """
+
+        if selected_decision.route.side != "NO":
+            return selected_decision
+        center_yes = next(
+            (
+                d
+                for d in scored
+                if d.route.side == "YES"
+                and d.route.bin_id == forecast_bin
+                and self._live_selectable_candidate(d)
+            ),
+            None,
+        )
+        if center_yes is None:
+            return selected_decision
+        selected_cost = float(selected_decision.economics.cost.value)
+        center_cost = float(center_yes.economics.cost.value)
+        if not (
+            np.isfinite(selected_cost)
+            and selected_cost > 0.0
+            and np.isfinite(center_cost)
+            and center_cost > 0.0
+        ):
+            return selected_decision
+        selected_edge_density = selected_decision.economics.edge_lcb / selected_cost
+        center_edge_density = center_yes.economics.edge_lcb / center_cost
+        selected_point_density = selected_decision.economics.point_ev / selected_cost
+        center_point_density = center_yes.economics.point_ev / center_cost
+        if (
+            self._utility_density(center_yes) > self._utility_density(selected_decision)
+            and center_edge_density > selected_edge_density
+            and center_point_density > selected_point_density
+        ):
+            return center_yes
+        return selected_decision
+
     def _portfolio_comparisons(
         self,
         *,
@@ -1282,15 +1372,7 @@ class FamilyDecisionEngine:
         # non-abstaining OOF verdict plus positive edge and positive ΔU. Bare positive edge from
         # an INERT/missing guard is never enough. This lets the family optimizer choose the best
         # executable expression instead of hard-biasing the survivor set toward NO.
-        def _direction_admitted(d):
-            return d.direction_law_ok or (
-                d.economics.edge_lcb > 0.0
-                and d.economics.optimal_delta_u > 0.0
-                and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
-                and not d.q_lcb_guard_abstained
-            )
-
-        after_direction = [d for d in after_executable if _direction_admitted(d)]
+        after_direction = [d for d in after_executable if self._direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW
 
@@ -1312,12 +1394,7 @@ class FamilyDecisionEngine:
         survivors = [
             d
             for d in edge_survivors
-            if live_candidate_passes(
-                d.economics,
-                d.route,
-                direction_law_proof_present=_direction_admitted(d),
-                market_coherence_accepted=d.coherence_allows,
-            )
+            if self._live_selectable_candidate(d)
         ]
         if not survivors:
             # READ-ONLY per-gate attribution diag (2026-06-15). The spine no-trade diag
@@ -1340,7 +1417,7 @@ class FamilyDecisionEngine:
                 )[:4]
                 _rows = "; ".join(
                     f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
-                    f"adm={int(_direction_admitted(d))} coh={int(d.coherence_allows)} "
+                    f"adm={int(self._direction_admitted(d))} coh={int(d.coherence_allows)} "
                     f"exec={int(d.route.route_cost.executable)} "
                     f"e={d.economics.edge_lcb:+.4f} dU={d.economics.optimal_delta_u:+.5f} "
                     f"dUmin={d.economics.delta_u_at_min:+.5f}"
@@ -1360,14 +1437,6 @@ class FamilyDecisionEngine:
                 pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
-        def _utility_density(d: CandidateDecision) -> float:
-            try:
-                stake = float(d.economics.optimal_stake_usd)
-            except Exception:  # noqa: BLE001
-                stake = 0.0
-            stake = max(stake, 1e-9)
-            return float(d.economics.optimal_delta_u) / stake
-
         # SELECT: live defaults to the best robust utility density over the survivors.
         # Total ΔU remains a secondary ordering signal, so a high-capital low-density NO
         # cannot dominate a lower-capital higher-density YES just because it ties up more
@@ -1378,7 +1447,7 @@ class FamilyDecisionEngine:
                 survivors,
                 key=lambda d: (
                     d.economics.optimal_delta_u,
-                    _utility_density(d),
+                    self._utility_density(d),
                     d.economics.edge_lcb,
                     -float(d.economics.cost.value),
                 ),
@@ -1387,7 +1456,7 @@ class FamilyDecisionEngine:
             selected = max(
                 survivors,
                 key=lambda d: (
-                    _utility_density(d),
+                    self._utility_density(d),
                     d.economics.optimal_delta_u,
                     d.economics.edge_lcb,
                     -float(d.economics.cost.value),

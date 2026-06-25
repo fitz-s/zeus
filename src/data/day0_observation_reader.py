@@ -4,17 +4,13 @@
 #   docs/operations/task_2026-05-22_forecast_bundle_layer_fix/SPEC.md §5
 """Day-0 observation extrema reader — semantics-correct high_so_far / low_so_far.
 
-WIRING STATUS (P0 follow-up §5, verdict 2026-05-23): DEFENSIVE HELPER ONLY — NOT
-WIRED into production.  ``read_day0_observed_extrema`` has zero callers outside
-this module.  The LIVE production observed-so-far path is
-``src.data.observation_client`` (get_current_observation), which computes
-``high_so_far = max(...)`` over the selected WU rows (already MAX-correct, reading
-the live Weather Underground API rather than ``observation_instants.running_max``).
-A repo-wide grep confirms NO production reader performs the
-``ORDER BY utc_timestamp DESC LIMIT 1`` + ``running_max`` anti-pattern this helper
-guards against.  Therefore Root C is NOT a production code path today; this reader
-is retained as a correct, tested fallback for any future consumer that reads from
-``observation_instants`` directly.  Do NOT claim Root C covers production.
+LIVE WIRING STATUS (2026-06-24): ``read_day0_observed_extrema`` is the canonical
+held-position Day0 monitor source for settlement stations whose executable
+observation evidence is already materialized in ``observation_instants`` rather
+than served by ``src.data.observation_client`` live fetchers. That includes
+NOAA-settled Ogimet METAR stations such as Moscow/UUWW and Tel Aviv/LLBG. WU and
+HKO fetch paths remain in ``observation_client``; this reader is the DB-backed
+canonical observation surface for the monitor path, not an experimental helper.
 
 Root C fix: observation_instants.running_max is a PER-HOUR BUCKET maximum
 (non-monotonic across the day).  The live writer stores the hourly max for that
@@ -94,6 +90,10 @@ class Day0ObservedExtrema:
         MUST NOT be used to bound or lower the future max.
     row_count:
         Number of qualifying rows for the chosen source.
+    last_observation_time_utc:
+        Latest qualifying observation timestamp for the chosen source. This is
+        the freshness clock consumed by live monitor gates; it is never
+        synthesized from decision_time_utc.
     coverage_status:
         'OK' (>=6 rows), 'LOW_COVERAGE' (1–5 rows), or 'NO_DATA' (0 rows).
     decision_time_utc:
@@ -111,6 +111,7 @@ class Day0ObservedExtrema:
     row_count: int
     coverage_status: str
     decision_time_utc: str
+    last_observation_time_utc: Optional[str] = None
     provenance: dict = field(default_factory=dict, compare=False)
 
 
@@ -122,7 +123,8 @@ _EXTREMA_SQL = """
     SELECT
         MAX(running_max) AS agg_high,
         MIN(running_min) AS agg_low,
-        COUNT(*) AS n_rows
+        COUNT(*) AS n_rows,
+        MAX(utc_timestamp) AS last_observation_time_utc
     FROM observation_instants
     WHERE city = ?
       AND target_date = ?
@@ -220,6 +222,7 @@ def read_day0_observed_extrema(
     agg_high: Optional[float] = None
     agg_low: Optional[float] = None
     n_rows: int = 0
+    last_observation_time_utc: Optional[str] = None
 
     for source in source_priority:
         row = conn.execute(
@@ -233,6 +236,7 @@ def read_day0_observed_extrema(
         agg_high = row[0]  # may be None if all running_max were NULL
         agg_low = row[1]   # may be None if all running_min were NULL
         n_rows = int(row[2])
+        last_observation_time_utc = str(row[3]) if row[3] is not None else None
         break
 
     # Fetch latest temp_current for the chosen source (diagnostic only).
@@ -262,6 +266,7 @@ def read_day0_observed_extrema(
         "chosen_source": chosen_source,
         "row_count": n_rows,
         "coverage_status": coverage_status,
+        "last_observation_time_utc": last_observation_time_utc,
         "reader": "src.data.day0_observation_reader.read_day0_observed_extrema",
     }
 
@@ -275,5 +280,6 @@ def read_day0_observed_extrema(
         row_count=n_rows,
         coverage_status=coverage_status,
         decision_time_utc=decision_str,
+        last_observation_time_utc=last_observation_time_utc,
         provenance=provenance,
     )

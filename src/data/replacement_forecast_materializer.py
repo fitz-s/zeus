@@ -12,7 +12,9 @@
 #   symmetry): the soft-anchor (CAPTURE_MISSING) fallback can compute a GENUINE Wilson UPPER bound
 #   alongside its lower twin (same inputs/z), but non-live carriers must not enter
 #   forecast_posteriors. Only fused-Normal rows with certified bootstrap bounds and a live runtime
-#   policy are materialized as execution-authority posterior rows.
+#   policy are materialized as execution-authority posterior rows. 2026-06-24: ANCHOR_ONLY_CURRENT
+#   is no longer a live carrier; missing BPF current inputs block materialization instead of
+#   trading a single-anchor surrogate.
 """
 
 from __future__ import annotations
@@ -72,9 +74,10 @@ UTC = timezone.utc
 # and recorded in provenance_json. The live gate (event_reactor_adapter) admits ONLY the two
 # fused-Normal modes; every other mode is a deterministic no-submit. This kills the silent
 # degradation category: with all flags on, a row that fell back to the legacy member-vote
-# soft-anchor q (fusion None / fused-q build failed / flag off) used to differ ONLY by a
-# WARNING log + a q_shape string — live EDLI could size Kelly under a different probability
-# regime than the release evidence assumes. The mode is a fail-closed data-class label.
+# soft-anchor q, anchor-only current surrogate, fused-q build failure, or flag-off path used
+# to differ ONLY by a WARNING log + a q_shape string — live EDLI could size Kelly under a
+# different probability regime than the release evidence assumes. The mode is a fail-closed
+# data-class label.
 # ---------------------------------------------------------------------------
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
@@ -232,7 +235,6 @@ def _replacement_is_live_layer(
         replacement_q_mode in {
             REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
             REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL,
-            REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT,
         }
         and q_lcb_map is not None
         and q_ucb_map is not None
@@ -1282,21 +1284,17 @@ def _replacement_bayes_precision_fusion_override(
         injected_live_fetch = getattr(_replacement_bayes_precision_fusion_override, "_live_fetch", None)
 
         if conn is not None and not persisted_current:
-            # Missing current capture on the live path -> explicit anchor-only current carrier +
-            # logged reason. NEVER a network fetch in the q path (the persisted download is the
-            # sole q source). This is not the legacy soft-anchor/member-vote fallback.
+            # Missing current capture on the live path -> explicit block + logged reason.
+            # NEVER a network fetch in the q path (the persisted download is the sole q source),
+            # and no anchor-only surrogate is written as a live posterior.
             import logging  # noqa: PLC0415
             logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                 "replacement_0_1 BAYES_PRECISION_FUSION fusion: persisted current single_runs capture MISSING for "
-                "%s %s %s lead=%s cycle=%s -> ANCHOR_ONLY_CURRENT live carrier "
-                "(no network fetch in q path)",
+                "%s %s %s lead=%s cycle=%s -> live posterior blocked "
+                "(no network fetch and no anchor-only live surrogate in q path)",
                 request.city, metric, target_date, lead_days, source_cycle_iso,
             )
-            return _anchor_only_current_override(
-                request,
-                metric=metric,
-                anchor_value_corrected_c=anchor_value_corrected_c,
-            )
+            return None
 
         # ARRIVAL GUARD inputs (C1-AVAIL-CLOCK, 2026-06-16): the honest per-model availability is
         # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer

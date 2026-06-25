@@ -1,19 +1,18 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 5 — a missing persisted current capture must produce a logged reason and single-anchor path, never a silent network fetch inside the q path.
+# Purpose: BLOCKER 5 — a missing persisted current capture must produce a logged reason and no live posterior, never a silent network fetch or anchor-only live surrogate.
 # Reuse: Run with pytest; update if the missing-capture handling or logging contract in the BAYES_PRECISION_FUSION fusion override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: BLOCKER 5 — if the persisted CURRENT capture is missing, the q path must NOT
-#   silently network-fetch. It must fall back to the single-anchor path (override returns None ->
-#   byte-identical) WITH a logged reason, so a missing capture is observable, never papered over.
+#   silently network-fetch. It must block live posterior materialization WITH a logged reason,
+#   so a missing capture is observable, never papered over or laundered into live authority.
 #   Fitz Constraint #3 (immune system: a missing dependency surfaces as a reason, not silence).
-"""BLOCKER 5 — a missing persisted BPF extras capture serves current-anchor Normal WITH a reason.
+"""BLOCKER 5 — a missing persisted BPF extras capture blocks live posterior materialization.
 
 When raw_model_forecasts has NO current single_runs rows for this cycle (the download did not
-run / failed), the override must NOT network-fetch in the q path. It serves the current OM9
-anchor through the same settlement-preimage Normal + bootstrap-q_lcb carrier used by fused rows,
-with explicit ANCHOR_ONLY_CURRENT provenance. This proves the q is never built from un-persisted
-network values, while redecision still advances to the latest anchor cycle.
+run / failed), the override must NOT network-fetch in the q path and must NOT write an
+anchor-only live posterior. This proves the q is never built from un-persisted network values
+or from a degraded single-anchor surrogate.
 """
 from __future__ import annotations
 
@@ -37,7 +36,7 @@ from tests.test_bayes_precision_fusion_history_provider_materializer_wiring impo
 from tests.test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network import CURRENT_MODELS
 
 
-def test_missing_current_capture_writes_anchor_only_current_with_reason(monkeypatch, caplog) -> None:
+def test_missing_current_capture_blocks_live_posterior_with_reason(monkeypatch, caplog) -> None:
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     conn = _conn()
@@ -55,28 +54,18 @@ def test_missing_current_capture_writes_anchor_only_current_with_reason(monkeypa
     with caplog.at_level(logging.WARNING, logger="zeus.replacement_bayes_precision_fusion"):
         pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
 
-    # Current-anchor path: explicitly live-carried and auditable, not legacy member-vote fallback.
-    prov = json.loads(_row(conn, pid)["provenance_json"])
-    assert prov["replacement_q_mode"] == "ANCHOR_ONLY_CURRENT"
-    assert prov["capture_status"] == "ANCHOR_ONLY_CURRENT"
-    assert prov["q_shape"] == "fused_normal_direct"
-    assert prov["q_lcb_basis"] == "fused_center_bootstrap_p05"
-    assert prov["bayes_precision_fusion"]["method"] == "anchor_only_current"
+    assert pid is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
     # The reason is logged (observable, not silent).
     msgs = " ".join(rec.getMessage().lower() for rec in caplog.records)
-    assert "current" in msgs and "anchor_only_current" in msgs and ("missing" in msgs or "capture" in msgs), (
+    assert "current" in msgs and "blocked" in msgs and ("missing" in msgs or "capture" in msgs), (
         f"a missing-current-capture reason must be logged; got: {msgs!r}"
     )
 
 
-def test_anchor_only_current_requires_fusion_on_and_writes_bounded_live_carrier(monkeypatch) -> None:
-    """The missing-capture path must not silently degrade to a flag-off single-anchor product.
-
-    Flag-off no longer writes a live posterior. With fusion ON, the same missing-capture case
-    should publish a bounded current-anchor posterior so the 12Z cycle can flow into live
-    redecision while preserving provenance that BPF extras were unavailable.
-    """
+def test_missing_current_capture_blocks_with_fusion_on_or_off(monkeypatch) -> None:
+    """Fusion ON does not license an anchor-only surrogate when persisted current inputs are absent."""
     _disable_other_layers(monkeypatch)
 
     # Baseline: fusion OFF is not a live product.
@@ -84,13 +73,9 @@ def test_anchor_only_current_requires_fusion_on_and_writes_bounded_live_carrier(
     conn_base = _conn()
     assert mod._insert_posterior(conn_base, _request(), metric="high", anchor_id=1) is None
 
-    # Fusion ON but current capture missing -> distinct live carrier at the same anchor cycle.
+    # Fusion ON but current capture missing -> still no live posterior.
     _enable_fusion(monkeypatch)
     conn = _conn()
     _seed_history(conn, decision=date(2026, 6, 7), models=CURRENT_MODELS)
-    got = _row(conn, mod._insert_posterior(conn, _request(), metric="high", anchor_id=1))
-
-    got_prov = json.loads(got["provenance_json"])
-    assert got_prov["replacement_q_mode"] == "ANCHOR_ONLY_CURRENT"
-    assert got["q_lcb_json"] is not None
-    assert got["q_ucb_json"] is not None
+    assert mod._insert_posterior(conn, _request(), metric="high", anchor_id=1) is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
