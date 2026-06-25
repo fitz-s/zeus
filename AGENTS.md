@@ -12,7 +12,7 @@ Primary money path:
 
 `contract/source/settlement truth -> forecast posterior -> q over Ω -> conservative q band -> family book -> native-side route/payoff vector -> direction/coherence/edge/utility gates -> sizing/risk -> execution intent -> venue command -> fill/position lifecycle -> monitor/exit -> settlement/redeem -> learning`
 
-Every non-trivial change must state which part of this path it touches and which upstream truth it consumes. A downstream optimization that guesses contract, source, settlement, q, executable cost, native side, or lifecycle truth is a money-path bug.
+Every non-trivial change must state which part of this path it touches and which upstream truth it consumes. A downstream optimization that guesses contract, source, settlement, q, executable cost, native side, DB truth, or lifecycle truth is a money-path bug.
 
 ---
 
@@ -24,7 +24,7 @@ Use the narrowest surface that can prove the claim.
 |---|---|---|---|
 | 1 | executable code, tests, migrations, DB/event/projection truth, launchd/operator receipts | actual behavior and ownership | prose cannot create behavior |
 | 2 | `architecture/**` machine manifests | machine-checkable law, registries, topology, invariants | manifests are not historical lore |
-| 3 | `docs/authority/zeus_current_architecture.md`, `docs/authority/zeus_current_delivery.md` | durable architecture and delivery law | dated authority-history docs are not current law |
+| 3 | active `docs/authority/**` | durable architecture, delivery, DB, fusion, docs-plane law | dated authority-history docs are not current law |
 | 4 | `docs/reference/**` canonical references | durable explanation for agents | reference does not authorize runtime state |
 | 5 | `docs/operations/current_state.md`, `current_data_state.md`, `current_source_validity.md` | expiry-bound current fact pointers | current facts expire and fail closed |
 | 6 | `docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**`, closed packets | history/evidence only | never default-read as present-tense law |
@@ -42,9 +42,12 @@ For every non-trivial task:
 3. Read scoped `AGENTS.md` for every subtree you will touch.
 4. Read `docs/authority/zeus_current_architecture.md` for runtime/strategy/settlement/execution/lifecycle/data work.
 5. Read `docs/authority/zeus_current_delivery.md` for docs, governance, router, registry, demotion, packet, or architecture-boundary work.
-6. Read `docs/reference/AGENTS.md`, then the canonical reference named for the task.
-7. Read relevant machine manifests in `architecture/**` before editing code or docs that they route.
-8. Read current-fact pointers only when the task needs present operational state and the pointer is fresh/evidence-backed.
+6. Read `docs/authority/zeus_database_runtime_authority.md` for DB/WAL/lock/schema runtime work.
+7. Read `docs/authority/zeus_forecast_fusion_authority.md` for forecast source/model/fusion work.
+8. Read `docs/authority/zeus_docs_classification_authority.md` and `docs/authority/zeus_runtime_artifact_authority.md` for docs plane or runtime artifact placement work.
+9. Read `docs/reference/AGENTS.md`, then the canonical reference named for the task.
+10. Read relevant machine manifests in `architecture/**` before editing code or docs that they route.
+11. Read current-fact pointers only when the task needs present operational state and the pointer is fresh/evidence-backed.
 
 Default boot must not recursively read `docs/operations/current/**`, `docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**`, or closed `docs/operations/task_*` packages. Read those only for explicit evidence/history work and never as current law.
 
@@ -86,7 +89,7 @@ Runtime entry surfaces:
 | execution boundary | `src/execution/executor.py`, `src/venue/**`, `src/state/venue_command_repo.py` |
 | lifecycle/monitor/exit/settlement | `src/state/lifecycle_manager.py`, `src/engine/monitor_refresh.py`, `src/execution/exit_lifecycle.py`, `src/execution/harvester.py` |
 
-Canonical DB topology is declared by `architecture/db_table_ownership.yaml`: `state/zeus-world.db`, `state/zeus-forecasts.db`, and `state/zeus_trades.db`. Table ownership is `(table, db)`, not table name alone.
+Canonical DB topology is declared by `architecture/db_table_ownership.yaml` and `architecture/db_runtime_manifest.yaml`: `state/zeus-world.db`, `state/zeus-forecasts.db`, and `state/zeus_trades.db`. Table ownership is `(table, db)`, not table name alone.
 
 Durable invariants:
 
@@ -100,7 +103,7 @@ Durable invariants:
 - Lifecycle phases are enum-backed: `pending_entry`, `active`, `day0_window`, `pending_exit`, `economically_closed`, `settled`, `voided`, `quarantined`, `admin_closed`, with `unknown` only where code declares recovery/sentinel semantics.
 - Exit intent is not closure. Settlement is not exit. Chain/CLOB truth outranks local cache.
 - Backtest/shadow evidence cannot promote live behavior without parity evidence, operator approval, and rollback.
-- Current facts expire; archive/history is evidence only.
+- Runtime artifacts belong in operations, not authority/reference.
 
 ---
 
@@ -113,18 +116,7 @@ Stop and plan before touching:
 - schema/migrations/DB ownership;
 - `src/state/**`, `src/execution/**`, `src/engine/event_reactor_adapter.py`, `src/decision/**`, `src/probability/**`, `src/riskguard/**`, `src/risk_allocator/**`, `src/venue/**`;
 - settlement/source/contract semantics;
-- any live-money side effect, lifecycle truth, control-plane, risk, or q authority;
+- any live-money side effect, lifecycle truth, control-plane, risk, q authority, DB runtime, or forecast fusion authority;
 - cross-zone edits or more than four files.
 
 Do not create root-level coordination, scratch, plan, or handoff files unless explicitly requested.
-
----
-
-## 6. Docs And Packet Hygiene
-
-`docs/authority/**` is durable law only.  
-`docs/reference/**` is durable concept/reference only.  
-`docs/operations/current*.md` is expiry-bound current fact/pointer only.  
-`docs/evidence/**`, `docs/reports/**`, `docs/archive/**`, `docs/rebuild/**`, and closed packets are non-default evidence/history.
-
-At completion, summarize what was promoted to durable authority/reference, what was demoted/archived/quarantined, which routers/registries changed, and which validation checks passed/failed/unavailable. Separate changed-surface failures from pre-existing repo drift.
