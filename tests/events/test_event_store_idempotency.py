@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import sqlite3
 
@@ -286,6 +287,12 @@ def test_archive_orphan_processing_rows_expires_only_rows_without_event_provenan
     assert rows[live_event.event_id] == "pending:"
     assert rows["missing-event-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
     assert rows["missing-processing-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
+
+
+def test_archive_orphan_processing_rows_avoids_live_antijoin_scan():
+    src = inspect.getsource(EventStore.archive_orphan_processing_rows)
+    assert "LEFT JOIN opportunity_events" not in src
+    assert "WHERE event_id IN" in src
 
 
 def test_world_conn_required_for_event_tables():

@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -88,6 +89,7 @@ REST_VALUE_REFRESH_MIN_AGE_SECONDS: float = 5.0 * 60.0
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
+_DEFAULT_LATEST_BELIEF_SCAN_LIMIT: int = 5_000
 EntryScreenKey = tuple[str, str, str]
 StableEntryScreenKey = tuple[str, str, str, str, str]
 FamilyRedecisionScreenKey = tuple[str, str, str, str]
@@ -631,6 +633,7 @@ def _all_latest_beliefs(
     conn: sqlite3.Connection,
     *,
     decision_time: str | datetime | None = None,
+    scan_limit: int | None = None,
 ) -> list[CachedBelief]:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
@@ -641,12 +644,28 @@ def _all_latest_beliefs(
         cols += ", q_lcb_yes_json"
     if _has_column(conn, "probability_trace_fact", "q_lcb_no_json"):
         cols += ", q_lcb_no_json"
+    if scan_limit is None:
+        try:
+            scan_limit = int(
+                os.environ.get(
+                    "ZEUS_REDECISION_BELIEF_SCAN_LIMIT",
+                    str(_DEFAULT_LATEST_BELIEF_SCAN_LIMIT),
+                )
+            )
+        except (TypeError, ValueError):
+            scan_limit = _DEFAULT_LATEST_BELIEF_SCAN_LIMIT
+    scan_limit = max(1, int(scan_limit))
     rows = conn.execute(
-        f"SELECT {cols} FROM probability_trace_fact "
-        "WHERE decision_id >= ? AND decision_id < ?",
-        (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX)),
+        f"""
+        SELECT {cols}
+          FROM probability_trace_fact
+         WHERE decision_id >= ?
+           AND decision_id < ?
+         ORDER BY recorded_at DESC, decision_id DESC
+         LIMIT ?
+        """,
+        (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
     ).fetchall()
-    rows = sorted(rows, key=lambda row: str(row["recorded_at"] or ""), reverse=True)
     decision_time_utc = _decision_time_utc(decision_time)
     seen: set[RedecisionScreenKey] = set()
     out: list[CachedBelief] = []

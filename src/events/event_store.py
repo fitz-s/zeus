@@ -540,28 +540,44 @@ class EventStore:
         """
 
         self._require_world_event_tables()
-        rows = self.conn.execute(
+        candidate_rows = self.conn.execute(
             """
             SELECT p.event_id
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              LEFT JOIN opportunity_events e
-                ON e.event_id = p.event_id
              WHERE p.consumer_name = ?
                AND p.processing_status IN ('pending', 'processing')
-               AND e.event_id IS NULL
              ORDER BY p.updated_at ASC, p.event_id ASC
              LIMIT ?
             """,
             (self.consumer_name, batch_limit),
         ).fetchall()
-        event_ids = [str(row[0]) for row in rows]
-        if not event_ids:
+        candidate_ids = [str(row[0]) for row in candidate_rows]
+        if not candidate_ids:
+            return 0
+
+        missing_ids: list[str] = []
+        _CHUNK = 500
+        for chunk_start in range(0, len(candidate_ids), _CHUNK):
+            chunk = candidate_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            existing = {
+                str(row[0])
+                for row in self.conn.execute(
+                    f"""
+                    SELECT event_id
+                      FROM opportunity_events
+                     WHERE event_id IN ({placeholders})
+                    """,
+                    tuple(chunk),
+                ).fetchall()
+            }
+            missing_ids.extend(event_id for event_id in chunk if event_id not in existing)
+        if not missing_ids:
             return 0
 
         now = _utc_now()
-        _CHUNK = 500
-        for chunk_start in range(0, len(event_ids), _CHUNK):
-            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+        for chunk_start in range(0, len(missing_ids), _CHUNK):
+            chunk = missing_ids[chunk_start : chunk_start + _CHUNK]
             placeholders = ",".join("?" * len(chunk))
             self.conn.execute(
                 f"""
@@ -576,7 +592,7 @@ class EventStore:
                 """,
                 (now, now, self.consumer_name, *chunk),
             )
-        return len(event_ids)
+        return len(missing_ids)
 
     # Channel event types that carry a per-token price-update stream and are
     # subject to the superseded-keep-latest sweep. NEW_MARKET_DISCOVERED is

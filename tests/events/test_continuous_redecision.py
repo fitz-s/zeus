@@ -20,6 +20,7 @@ src.events.continuous_redecision is authored.
 from __future__ import annotations
 
 import sqlite3
+import inspect
 from datetime import datetime
 
 import pytest
@@ -121,6 +122,31 @@ def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapsho
         p_posterior_vec=[0.001, p_posterior_yes],
         recorded_at=recorded_at,
     )
+
+
+def test_latest_belief_reader_uses_bounded_sql_latest_window():
+    conn = _mem_world()
+    _cache_yes_belief(
+        conn,
+        p_posterior_yes=0.10,
+        recorded_at="2026-06-01T11:00:00+00:00",
+        snapshot_id="old-snap",
+    )
+    _cache_yes_belief(
+        conn,
+        p_posterior_yes=0.90,
+        recorded_at="2026-06-01T11:30:00+00:00",
+        snapshot_id="new-snap",
+    )
+
+    beliefs = cr._all_latest_beliefs(conn, scan_limit=1)
+
+    assert len(beliefs) == 1
+    assert beliefs[0].snapshot_id == "new-snap"
+    src = inspect.getsource(cr._all_latest_beliefs)
+    assert "ORDER BY recorded_at DESC" in src
+    assert "LIMIT ?" in src
+    assert "sorted(" not in src
 
 
 def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
