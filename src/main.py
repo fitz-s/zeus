@@ -7162,7 +7162,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
                 count_rows = forecasts_conn.execute(
                     f"""
                     SELECT city, target_date, metric, COUNT(DISTINCT model)
-                     FROM raw_model_forecasts
+                      FROM raw_model_forecasts INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members
                      WHERE source_cycle_time >= ?
                        AND source_cycle_time < ?
                        AND source_available_at <= ?

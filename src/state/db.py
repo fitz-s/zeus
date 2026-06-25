@@ -5112,7 +5112,7 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 _FORECASTS_LIVE_REQUIRED_INDEXES: frozenset[str] = frozenset(
     {
         "idx_forecast_posteriors_live_family_cycle",
-        "idx_raw_model_forecasts_current_family_cycle_members",
+        "idx_raw_model_forecasts_endpoint_family_cycle_members",
     }
 )
 

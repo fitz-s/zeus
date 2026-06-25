@@ -78,6 +78,10 @@ def test_replacement_live_support_tables_are_forecast_class_only() -> None:
         forecast_conn,
         "raw_model_forecasts",
     )
+    assert "idx_raw_model_forecasts_endpoint_family_cycle_members" in _indexes(
+        forecast_conn,
+        "raw_model_forecasts",
+    )
     assert {"market_snapshot_id", "allowed_direction", "allowed_q_lcb", "allowed_kelly_fraction", "veto_reason"} <= _columns(
         forecast_conn,
         "replacement_shadow_decisions",

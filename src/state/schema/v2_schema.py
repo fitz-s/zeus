@@ -635,6 +635,11 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
                                    source_available_at, model)
             WHERE endpoint = 'single_runs' AND forecast_value_c IS NOT NULL
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_endpoint_family_cycle_members
+            ON raw_model_forecasts(endpoint, city, target_date, metric, source_cycle_time,
+                                   source_available_at, model)
+    """)
     # BLOCKER 4 (operator-sharpened) — forward-only widened uniqueness for PRE-EXISTING DBs.
     # SQLite cannot ALTER the table-level UNIQUE constraint of an already-created table without a
     # full table rebuild; a CREATE UNIQUE INDEX IF NOT EXISTS adds the SAME widened uniqueness

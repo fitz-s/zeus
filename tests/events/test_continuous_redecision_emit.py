@@ -1059,6 +1059,7 @@ def test_unready_replacement_sweep_batches_forecast_reads():
     assert "date(source_cycle_time)" not in src
     assert "runtime_layer = 'live'" in src
     assert "endpoint = 'single_runs'" in src
+    assert "INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members" in src
     assert "latest_cycle_by_family" in src
     assert "member_count_by_family_cycle" in src
     assert "COUNT(DISTINCT model)" in src

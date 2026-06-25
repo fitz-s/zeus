@@ -95,7 +95,7 @@ _FORECAST_BOOT_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
 _FORECAST_BOOT_REQUIRED_INDEXES: frozenset[str] = frozenset(
     {
         "idx_forecast_posteriors_live_family_cycle",
-        "idx_raw_model_forecasts_current_family_cycle_members",
+        "idx_raw_model_forecasts_endpoint_family_cycle_members",
     }
 )
 

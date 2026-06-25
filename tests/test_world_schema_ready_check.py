@@ -185,7 +185,7 @@ class TestWorldSchemaReadyCheck:
                 "ON forecast_posteriors(city)"
             )
             conn.execute(
-                "CREATE INDEX idx_raw_model_forecasts_current_family_cycle_members "
+                "CREATE INDEX idx_raw_model_forecasts_endpoint_family_cycle_members "
                 "ON raw_model_forecasts(city)"
             )
         monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db)

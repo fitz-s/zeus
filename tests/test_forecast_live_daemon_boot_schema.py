@@ -44,7 +44,7 @@ def test_forecast_live_boot_schema_fast_check_rejects_missing_required_column() 
 def test_forecast_live_boot_schema_fast_check_rejects_missing_live_index() -> None:
     conn = _conn_with_required_schema()
     try:
-        conn.execute("DROP INDEX idx_raw_model_forecasts_current_family_cycle_members")
+        conn.execute("DROP INDEX idx_raw_model_forecasts_endpoint_family_cycle_members")
         assert _forecast_boot_schema_ready(conn) is False
     finally:
         conn.close()
