@@ -15,7 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from src.state.db import get_connection, init_schema, init_schema_forecasts
+from src.state.db import (
+    get_connection,
+    get_forecasts_connection_read_only,
+    init_schema,
+    init_schema_forecasts,
+)
 
 
 def _create_opportunity_fact_table(conn):
@@ -102,6 +107,35 @@ def _create_execution_fact_table(conn):
         """
     )
     conn.commit()
+
+
+def test_forecasts_read_only_connection_enforces_query_only(tmp_path, monkeypatch):
+    import src.state.db as db_module
+
+    db_path = tmp_path / "zeus-forecasts.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+
+    conn = get_forecasts_connection_read_only()
+    try:
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO probe (id) VALUES (1)")
+    finally:
+        conn.close()
+
+
+def test_forecasts_read_only_connection_does_not_create_missing_db(tmp_path, monkeypatch):
+    import src.state.db as db_module
+
+    db_path = tmp_path / "missing-forecasts.db"
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+
+    with pytest.raises(sqlite3.OperationalError):
+        get_forecasts_connection_read_only()
+    assert not db_path.exists()
 
 
 def _create_outcome_fact_table(conn):

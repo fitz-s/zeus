@@ -262,6 +262,32 @@ def _connect(
     return conn
 
 
+def _connect_read_only(db_path: Path) -> sqlite3.Connection:
+    """Low-level read-only SQLite connection with bounded lock wait.
+
+    Read-only helpers must not create the DB, run write-oriented pragmas, inherit
+    the live writer timeout, or permit accidental mutation through a misleading
+    connection name.
+    """
+
+    timeout_ms = int(os.environ.get("ZEUS_DB_READ_BUSY_TIMEOUT_MS", "1000"))
+    conn = sqlite3.connect(
+        f"file:{db_path.resolve()}?mode=ro",
+        uri=True,
+        timeout=max(0.001, timeout_ms / 1000.0),
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute("PRAGMA foreign_keys=ON")
+    cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
+    conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+    mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
+    conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+    _install_connection_functions(conn)
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+    return conn
+
+
 def get_trade_connection(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:
@@ -271,7 +297,7 @@ def get_trade_connection(
 
 def get_trade_connection_read_only() -> sqlite3.Connection:
     """Read-only trade DB connection (write_class=None)."""
-    return get_trade_connection(write_class=None)
+    return _connect_read_only(_zeus_trade_db_path())
 
 
 def get_world_connection(
@@ -303,7 +329,7 @@ def get_world_connection_read_only() -> sqlite3.Connection:
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return get_world_connection(write_class=None)
+    return _connect_read_only(ZEUS_WORLD_DB_PATH)
 
 
 def get_forecasts_connection_read_only() -> sqlite3.Connection:
@@ -311,7 +337,7 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return get_forecasts_connection(write_class=None)
+    return _connect_read_only(ZEUS_FORECASTS_DB_PATH)
 
 
 # --------------------------------------------------------------------------
