@@ -4349,18 +4349,21 @@ def _startup_world_db_schema_ready_check() -> str:
     conn = sqlite3.connect(
         f"file:{ZEUS_WORLD_DB_PATH.resolve()}?mode=ro",
         uri=True,
-        timeout=5.0,
+        timeout=1.0,
     )
     try:
         conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 1000")
         assert_schema_current(conn)
-        present = frozenset(
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        )
-        missing = _CANONICAL_WORLD_TABLES - present
+        missing = {
+            table
+            for table in _CANONICAL_WORLD_TABLES
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table,),
+            ).fetchone()
+            is None
+        }
         if missing:
             raise RuntimeError(
                 f"world DB missing canonical tables: {sorted(missing)}"
@@ -4371,12 +4374,13 @@ def _startup_world_db_schema_ready_check() -> str:
 
 
 def _startup_world_db_schema_prepare() -> str:
-    """Idempotently run init_schema() on the world DB before read-only boot proof.
+    """Operator-only world schema repair hook, intentionally unused by live boot.
 
-    Runs the idempotent init_schema() unconditionally so that ensure_table
-    migrations added without a version bump are always executed on live DBs.
-    Missing DBs still fail closed. B2 (2026-05-28) cancelled the schema-version
-    counter mechanism entirely.
+    Live startup must not run idempotent DDL on the 60GB canonical world DB. A
+    trading daemon restart is a runtime liveness operation, not a migration
+    window; schema repair belongs to explicit deployment tooling before the live
+    process is armed. Keeping this helper preserves old import compatibility
+    while making accidental runtime use visible in code review.
     """
     import src.state.db as db_module
 
@@ -4388,7 +4392,7 @@ def _startup_world_db_schema_prepare() -> str:
     try:
         db_module.init_schema(conn)
         conn.commit()
-        logger.info("world DB schema prepared at live boot: init_schema complete")
+        logger.info("world DB schema prepared by explicit operator repair: init_schema complete")
         return "prepared"
     finally:
         conn.close()
@@ -4416,18 +4420,21 @@ def _startup_forecasts_schema_ready_check() -> str:
     conn = sqlite3.connect(
         f"file:{ZEUS_FORECASTS_DB_PATH.resolve()}?mode=ro",
         uri=True,
-        timeout=5.0,
+        timeout=1.0,
     )
     try:
         conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 1000")
         assert_schema_current_forecasts(conn)
-        present = frozenset(
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        )
-        missing = _CANONICAL_FORECASTS_TABLES - present
+        missing = {
+            table
+            for table in _CANONICAL_FORECASTS_TABLES
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table,),
+            ).fetchone()
+            is None
+        }
         if missing:
             raise RuntimeError(
                 f"forecasts DB missing canonical tables: {sorted(missing)}"
@@ -4441,9 +4448,10 @@ def _startup_db_schema_ready_check() -> None:
     """K1 split: directly verify world and forecast DB schema currency.
 
     Replaces _startup_world_schema_ready_check (retained above as a thin shim).
-    Schema currency is verified directly against zeus-world.db and
+    Schema currency is verified directly and read-only against zeus-world.db and
     zeus-forecasts.db. This avoids binding live startup to stale JSON sentinels
-    from retired or split data-daemon processes.
+    from retired or split data-daemon processes, and it avoids running DDL from
+    the trading daemon during a restart.
 
     Retry pattern: 30 × 10s = 5 min (mirrors _startup_freshness_check).
     """
@@ -4453,8 +4461,6 @@ def _startup_db_schema_ready_check() -> None:
     for attempt in range(1, BOOT_RETRY_MAX_ATTEMPTS + 1):
         missing = []
         try:
-            _startup_world_db_schema_prepare()
-            logger.info("world DB schema prepared (init_schema complete)")
             _startup_world_db_schema_ready_check()
             logger.info("world DB schema structural check: ready")
         except Exception as exc:

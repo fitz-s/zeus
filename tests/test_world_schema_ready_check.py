@@ -6,6 +6,8 @@
 Design §4.2: trading daemon must validate schema readiness at boot:
 - World DB schema currency failure after 5-min retry → SystemExit (FATAL)
 - Forecast DB schema currency failure after 5-min retry → SystemExit (FATAL)
+- Live boot is read-only against canonical DB schemas; explicit deployment
+  tooling owns schema repair/migration.
 - Stale legacy JSON sentinels no longer gate live startup after forecast-live split
 """
 
@@ -198,8 +200,8 @@ class TestWorldSchemaReadyCheck:
             "conn = get_world_connection()"
         )
 
-    def test_world_schema_prepare_runs_before_structural_proof(self, monkeypatch):
-        """Live boot must run init_schema prepare step before read-only structural proof."""
+    def test_live_boot_uses_read_only_schema_proof_without_prepare(self, monkeypatch):
+        """Live boot must not run schema DDL repair before read-only structural proof."""
         import src.control.freshness_gate as fg_module
         import src.main as main_module
 
@@ -220,7 +222,7 @@ class TestWorldSchemaReadyCheck:
 
         main_module._startup_db_schema_ready_check()
 
-        assert calls == ["prepare", "read_only_proof"]
+        assert calls == ["read_only_proof"]
 
     def test_world_schema_prepare_runs_init_schema_unconditionally(self, tmp_path, monkeypatch):
         """init_schema runs unconditionally — no version gating; returns 'prepared'."""
@@ -327,12 +329,8 @@ class TestWorldSchemaReadyCheck:
             conn.close()
 
 
-def test_world_db_schema_prepare_calls_init_schema_unconditionally(monkeypatch, tmp_path):
-    """Antibody (2026-06-13): init_schema runs UNCONDITIONALLY at every boot — no version
-    gating. The old early-return on user_version==43 made every ensure_table migration
-    added without a version bump UNREACHABLE on live DBs (the nullable-disposition rebuild
-    never executed -> fill-bridge retry storm). B2 design: no version counter; pure idempotent
-    init_schema on every prepare call. Return value is always 'prepared'."""
+def test_world_db_schema_prepare_remains_explicit_operator_repair(monkeypatch, tmp_path):
+    """The repair helper may run init_schema, but live boot must not call it."""
     import sqlite3
 
     import src.main as main_module
@@ -352,9 +350,8 @@ def test_world_db_schema_prepare_calls_init_schema_unconditionally(monkeypatch, 
 
     result = main_module._startup_world_db_schema_prepare()
     assert result == "prepared", (
-        "_startup_world_db_schema_prepare must return 'prepared' (no version counter)"
+        "_startup_world_db_schema_prepare must return 'prepared' for explicit repair"
     )
     assert calls == ["init"], (
-        "init_schema must run unconditionally — no version gating; "
-        "idempotent ensure_table migrations must always execute"
+        "explicit schema repair still runs init_schema; live boot guards separately"
     )
