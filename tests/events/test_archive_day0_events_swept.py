@@ -475,8 +475,8 @@ def test_day0_supersession_candidate_query_uses_processing_status_index():
     )
 
 
-def test_day0_supersession_keeper_query_uses_day0_family_index():
-    """Live-perf antibody: keeper lookup must be family-indexed, not target-date-only."""
+def test_day0_supersession_keeper_query_scans_active_processing_set_once():
+    """Live-perf antibody: keeper lookup must not index historical event JSON at boot."""
     conn = _world_conn(factory=CaptureConnection)
     store = EventStore(conn)
     for fam in range(15):
@@ -497,12 +497,12 @@ def test_day0_supersession_keeper_query_uses_day0_family_index():
     keeper_sql, keeper_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "INDEXED BY idx_opportunity_events_day0_family" in sql
+        if "extreme_value" in sql
+        and "INDEXED BY idx_opportunity_event_processing_status" in sql
         and "e.event_type = 'DAY0_EXTREME_UPDATED'" in sql
-        and "json_extract(e.payload_json, '$.city') = ?" in sql
-        and "json_extract(e.payload_json, '$.metric') = ?" in sql
     )
     plan = _plan_text(conn, keeper_sql, keeper_params)
-    assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY" in plan, (
-        f"day0 keeper query must use day0 family index, got: {plan!r}"
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan, (
+        f"day0 keeper query must scan active processing set by status index, got: {plan!r}"
     )
+    assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY" not in plan

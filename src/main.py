@@ -4056,7 +4056,6 @@ def _startup_world_db_schema_ready_check() -> str:
         "trade_decisions",
     })
     _LIVE_REQUIRED_WORLD_INDEXES = frozenset({
-        "idx_opportunity_events_day0_family",
         "idx_opportunity_event_processing_pending_retry_floor",
         "idx_opportunity_event_processing_stale_claim",
         "idx_opportunity_event_processing_status",
@@ -4143,7 +4142,6 @@ def _startup_world_db_hot_index_prepare() -> str:
         CREATE_STALE_CLAIM_INDEX_SQL,
         CREATE_STATUS_INDEX_SQL,
     )
-    from src.state.schema.opportunity_events_schema import CREATE_DAY0_FAMILY_INDEX_SQL
 
     path = db_module.ZEUS_WORLD_DB_PATH
     if not path.exists():
@@ -4155,7 +4153,6 @@ def _startup_world_db_hot_index_prepare() -> str:
             CREATE_STATUS_INDEX_SQL,
             CREATE_PENDING_RETRY_FLOOR_INDEX_SQL,
             CREATE_STALE_CLAIM_INDEX_SQL,
-            CREATE_DAY0_FAMILY_INDEX_SQL,
         ):
             conn.execute(sql)
             conn.commit()

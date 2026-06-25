@@ -825,64 +825,71 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        # Step 2: per family key in the candidate batch, find the absorbing keeper(s).
-        # The keeper may be outside the batch or already terminal from the older
-        # latest-by-clock rule; in that case active regressed rows are still expired so
-        # the queue cannot keep reprocessing a lower high / higher low as "latest".
+        # Step 2: compute absorbing keeper(s) from the active Day0 working set.
+        # Do not probe immutable opportunity_events once per family: the live table
+        # is append-only and can be huge, while the decision-relevant surface is the
+        # active processing rows. Scanning active Day0 rows once via the processing
+        # status index preserves keepers outside this candidate batch without a
+        # target-date JSON expression index over historical event bodies.
         candidate_keys = {
             (str(row[1]), str(row[2]), str(row[3]))
             for row in candidate_rows
             if row[1] is not None and row[2] is not None and row[3] is not None
         }
-        keeper_ids: set[str] = set()
-        for city, target_date, metric in candidate_keys:
-            agg = "MAX" if metric == "high" else "MIN"
-            value_expr = (
-                "CAST(COALESCE("
-                "json_extract(e.payload_json, '$.rounded_value'), "
-                "json_extract(e.payload_json, '$.high_so_far'), "
-                "json_extract(e.payload_json, '$.low_so_far')"
-                ") AS REAL)"
-            )
-            extreme_row = self.conn.execute(
-                """
-                SELECT {agg}({value_expr})
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                   AND json_extract(e.payload_json, '$.target_date') = ?
-                   AND json_extract(e.payload_json, '$.city') = ?
-                   AND json_extract(e.payload_json, '$.metric') = ?
-                   AND {value_expr} IS NOT NULL
-                """.format(agg=agg, value_expr=value_expr),
-                (self.consumer_name, target_date, city, metric),
-            ).fetchone()
-            if extreme_row is None or extreme_row[0] is None:
+        value_expr = (
+            "CAST(COALESCE("
+            "json_extract(e.payload_json, '$.rounded_value'), "
+            "json_extract(e.payload_json, '$.high_so_far'), "
+            "json_extract(e.payload_json, '$.low_so_far')"
+            ") AS REAL)"
+        )
+        active_rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city')        AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric')      AS metric,
+                   {value_expr}                                 AS extreme_value
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e
+              ON e.event_id = p.event_id
+            WHERE p.consumer_name = ?
+              AND p.processing_status IN ('pending', 'processing')
+              AND e.event_type = 'DAY0_EXTREME_UPDATED'
+              AND json_extract(e.payload_json, '$.city') IS NOT NULL
+              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+              AND json_extract(e.payload_json, '$.metric') IS NOT NULL
+              AND {value_expr} IS NOT NULL
+            """.format(value_expr=value_expr),
+            (self.consumer_name,),
+        ).fetchall()
+        extreme_by_key: dict[tuple[str, str, str], float] = {}
+        for row in active_rows:
+            key = (str(row[1]), str(row[2]), str(row[3]))
+            if key not in candidate_keys:
                 continue
-            extreme_value = float(extreme_row[0])
-            keeper_rows = self.conn.execute(
-                """
-                SELECT e.event_id
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_day0_family
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                   AND json_extract(e.payload_json, '$.target_date') = ?
-                   AND json_extract(e.payload_json, '$.city') = ?
-                   AND json_extract(e.payload_json, '$.metric') = ?
-                   AND CAST(COALESCE(
-                         json_extract(e.payload_json, '$.rounded_value'),
-                         json_extract(e.payload_json, '$.high_so_far'),
-                         json_extract(e.payload_json, '$.low_so_far')
-                       ) AS REAL) = ?
-                   AND p.processing_status IN ('pending', 'processing')
-                """,
-                (self.consumer_name, target_date, city, metric, extreme_value),
-            ).fetchall()
-            keeper_ids.update(str(row[0]) for row in keeper_rows)
+            try:
+                value = float(row[4])
+            except (TypeError, ValueError):
+                continue
+            previous = extreme_by_key.get(key)
+            if previous is None:
+                extreme_by_key[key] = value
+            elif key[2] == "high":
+                extreme_by_key[key] = max(previous, value)
+            else:
+                extreme_by_key[key] = min(previous, value)
+        keeper_ids: set[str] = set()
+        for row in active_rows:
+            key = (str(row[1]), str(row[2]), str(row[3]))
+            if key not in extreme_by_key:
+                continue
+            try:
+                value = float(row[4])
+            except (TypeError, ValueError):
+                continue
+            if value == extreme_by_key[key]:
+                keeper_ids.add(str(row[0]))
 
         superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
 
