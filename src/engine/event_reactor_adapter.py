@@ -18,7 +18,7 @@
 #   first-class JIT_PRESUBMIT executable_market_snapshots row before consume. Wave-1
 #   2026-06-12 deleted the edli.k1_persist_presubmit_snapshot_enabled flag — persist is
 #   now UNCONDITIONAL fail-soft (provenance substrate, not a throttle) —
-#   docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4)
+#   docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4)
 # Last reused or audited: 2026-06-10 (P0 mode-authority, operator review 2026-06-10):
 #   the FINAL command builder no longer re-selects maker/taker mode. The selected proof's
 #   PROVEN execution_mode_intent + maker_limit_price are first-class receipt fields that
@@ -453,7 +453,7 @@ class PreSubmitAuthorityWitness:
     max_quote_age_ms: int = 1000
 
 
-# K=1 STAGE 1 (docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4):
+# K=1 STAGE 1 (docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4):
 # the fresh submit-time JIT /book fetch (R8) is today ephemeral (witness only).
 # Stage 1 gives it a durable, first-class executable_market_snapshots identity so
 # the receipt can prove the economics it submitted under. Pure additive
@@ -1567,6 +1567,10 @@ def _valid_qkernel_execution_economics_payload(
     if edge_lcb <= 0.0 or optimal_delta_u <= 0.0 or optimal_stake <= 0.0:
         return None
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
+        return None
+    if cert.get("direction_law_ok") is not True:
+        return None
+    if cert.get("coherence_allows") is not True:
         return None
     return cert
 
@@ -9040,6 +9044,8 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
         "optimal_delta_u",
         "cost",
         "false_edge_rate",
+        "direction_law_ok",
+        "coherence_allows",
     }
 )
 

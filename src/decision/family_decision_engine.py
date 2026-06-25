@@ -498,14 +498,13 @@ def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
 
     * ``YES_i`` is structurally clean when ``i`` IS the forecast bin — buying the forecast
       bin, the ONE bin the predictive distribution most favors. A non-forecast YES is not
-      direction-law-clean, but it may still be admitted later by the side-aware OOF reliability
-      license when its own empirical, edge, ΔU, and coherence evidence survives.
+      direction-law-clean and cannot be made live-selectable by q_lcb reliability evidence.
     * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
       wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
 
     This function stays purely structural: ``point_q`` and empirical reliability are not read
-    here. The selector combines this receipt flag with the side-aware OOF license; doing that in
-    one place prevents a hard-coded all-NO bias while preserving auditable direction-law status.
+    here. The q_lcb reliability guard can make a lower bound honest and can license market
+    coherence for an otherwise direction-clean candidate; it cannot replace this direction law.
     """
     if route.side == "YES":
         return route.bin_id == forecast_bin
@@ -1017,12 +1016,7 @@ class FamilyDecisionEngine:
 
     # ------------------------------------------------ portfolio comparison
     def _direction_admitted(self, d: CandidateDecision) -> bool:
-        return d.direction_law_ok or (
-            d.economics.edge_lcb > 0.0
-            and d.economics.optimal_delta_u > 0.0
-            and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
-            and not d.q_lcb_guard_abstained
-        )
+        return d.direction_law_ok
 
     def _utility_density(self, d: CandidateDecision) -> float:
         try:
@@ -1440,12 +1434,11 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # Direction law is structural, but the q_lcb reliability guard is the empirical
-        # settlement evidence that can license an otherwise non-directional Arrow claim.
-        # The license is side-aware and symmetric: YES and NO both need their own active,
-        # non-abstaining OOF verdict plus positive edge and positive ΔU. Bare positive edge from
-        # an INERT/missing guard is never enough. This lets the family optimizer choose the best
-        # executable expression instead of hard-biasing the survivor set toward NO.
+        # Direction law is structural. The q_lcb reliability guard is empirical settlement
+        # evidence that makes the candidate's served lower bound honest and may license market
+        # coherence for a direction-clean model/market disagreement, but it must not replace the
+        # direction law itself. Tokyo 22C LOW YES at 0.5c showed the old substitution path could
+        # turn a non-modal lottery-like YES into a live order on a coarse OOF cell.
         after_direction = [d for d in after_executable if self._direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW

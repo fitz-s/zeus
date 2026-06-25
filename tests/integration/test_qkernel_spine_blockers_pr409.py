@@ -916,6 +916,40 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
 
 
+def test_qkernel_execution_economics_requires_direction_law_and_coherence():
+    """Tokyo-class regression: positive qkernel edge is not enough without live structural proofs."""
+
+    cert = {
+        "source": "qkernel_spine",
+        "candidate_id": "YES:b24:DIRECT_YES:b24@proof",
+        "route_id": "DIRECT_YES:b24@proof",
+        "side": "YES",
+        "bin_id": "b24",
+        "payoff_q_lcb": 0.137,
+        "edge_lcb": 0.132,
+        "delta_u_at_min": 0.001,
+        "optimal_stake_usd": "1.50",
+        "optimal_delta_u": 0.02,
+        "cost": 0.005,
+        "false_edge_rate": 0.05,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "low|L2_3|YES|nonmodal|qb2|coarse_global",
+        "direction_law_ok": False,
+        "coherence_allows": True,
+    }
+
+    assert era._valid_qkernel_execution_economics_payload(cert, direction="buy_yes") is None
+    assert era._valid_qkernel_execution_economics_payload(
+        {**cert, "direction_law_ok": True},
+        direction="buy_yes",
+    ) is not None
+    assert era._valid_qkernel_execution_economics_payload(
+        {**cert, "direction_law_ok": True, "coherence_allows": False},
+        direction="buy_yes",
+    ) is None
+
+
 def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
     """A spine-positive selected proof must not remain a legacy-rejected loser.
 

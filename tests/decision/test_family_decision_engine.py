@@ -559,6 +559,11 @@ def _hand_decision(
     delta_u_at_min: float,
     robust_trade_score: float,
     optimal_stake_usd: Decimal = Decimal("5"),
+    direction_law_ok: bool = True,
+    coherence_allows: bool = True,
+    q_lcb_guard_basis: str = "",
+    q_lcb_guard_abstained: bool = False,
+    q_lcb_guard_cell_key: str = "",
 ) -> CandidateDecision:
     """A hand-built CandidateDecision (direction-law-legal + coherent) for the _select test."""
     economics = CandidateEconomics(
@@ -575,9 +580,12 @@ def _hand_decision(
     return CandidateDecision(
         route=route,
         economics=economics,
-        direction_law_ok=True,
-        coherence_allows=True,
+        direction_law_ok=direction_law_ok,
+        coherence_allows=coherence_allows,
         robust_trade_score=robust_trade_score,
+        q_lcb_guard_basis=q_lcb_guard_basis,
+        q_lcb_guard_abstained=q_lcb_guard_abstained,
+        q_lcb_guard_cell_key=q_lcb_guard_cell_key,
     )
 
 
@@ -811,6 +819,45 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
 
     assert reason is None
     assert selected is low_cost
+
+
+def test_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(monkeypatch):
+    """Tokyo-class regression: a coarse OOF cell cannot make non-modal YES live-selectable."""
+    case = _case(metric="low")
+    space = _outcome_space(case)
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.20),
+        edge_lcb=-0.01,
+        optimal_delta_u=0.0,
+        delta_u_at_min=-0.01,
+        robust_trade_score=0.0,
+        direction_law_ok=True,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_cell_key="low|L2_3|YES|modal|qb2|coarse_global",
+    )
+    nonmodal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b24", cost=0.005),
+        edge_lcb=0.13,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.001,
+        robust_trade_score=0.13,
+        direction_law_ok=False,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="low|L2_3|YES|nonmodal|qb2|coarse_global",
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([modal_yes, nonmodal_yes])
+
+    assert selected is None
+    assert reason == NO_TRADE_NO_POSITIVE_EDGE
+    assert nonmodal_yes.direction_law_ok is False
+    assert engine._direction_admitted(nonmodal_yes) is False
 
 
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():

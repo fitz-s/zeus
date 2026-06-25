@@ -98,6 +98,38 @@ def _insert_edli_event(
     )
 
 
+def _insert_decision_certificate(
+    conn: sqlite3.Connection,
+    *,
+    certificate_id: str,
+    certificate_type: str,
+    certificate_hash: str,
+    payload: dict,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version,
+            canonicalization_version, semantic_key, claim_type, mode,
+            decision_time, authority_id, authority_version, algorithm_id,
+            algorithm_version, payload_json, payload_hash, certificate_hash,
+            verifier_status, created_at
+        ) VALUES (?, ?, 1, 'v1', ?, 'actionable_trade', 'LIVE',
+                  '2026-06-01T11:59:59+00:00', 'test-authority', 'v1',
+                  'test-algorithm', 'v1', ?, ?, ?, 'VERIFIED',
+                  '2026-06-01T12:00:00+00:00')
+        """,
+        (
+            certificate_id,
+            certificate_type,
+            f"sk:{certificate_id}",
+            json.dumps(payload, sort_keys=True, default=str),
+            f"ph:{certificate_id}",
+            certificate_hash,
+        ),
+    )
+
+
 def _seed_confirmed_buy_no_aggregate(
     conn: sqlite3.Connection,
     aggregate_id: str = "agg-edli-buyno-1",
@@ -315,6 +347,62 @@ def test_green_bridge_buy_yes_places_token_on_token_id(conn):
     assert row["token_id"] == ELECTED_YES_TOKEN
     assert (row["no_token_id"] or "") == ""
     assert row["strategy_key"] == "center_buy"
+
+
+def test_bridge_projects_qkernel_authority_into_position_current(conn):
+    aggregate_id = "agg-edli-qkernel-buyyes-1"
+    actionable_hash = "hash-actionable-qkernel-1"
+    _insert_decision_certificate(
+        conn,
+        certificate_id="cert-actionable-qkernel-1",
+        certificate_type="ActionableTradeCertificate",
+        certificate_hash=actionable_hash,
+        payload={
+            "q_live": 0.0,
+            "q_lcb_5pct": 0.0,
+            "qkernel_execution_economics": {
+                "side": "YES",
+                "q_dot_payoff": 0.1507234,
+                "payoff_q_lcb": 0.1374248,
+                "edge_lcb": 0.1311266,
+                "optimal_delta_u": 0.0209995,
+            },
+        },
+    )
+    pre_submit = {
+        "event_id": EVENT_ID,
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "final_intent_id": FINAL_INTENT_ID,
+        "strategy_key": "center_buy",
+        "condition_id": CONDITION_ID,
+        "token_id": ELECTED_YES_TOKEN,
+        "side": "BUY",
+        "direction": "buy_yes",
+        "native_token_side": "YES",
+        "outcome_label": "YES",
+        "city": "Tokyo",
+        "target_date": "2026-06-26",
+        "bin_label": "22C",
+        "metric": "low",
+        "unit": "C",
+        "q_live": 0.0,
+        "expected_edge_source_certificate_hash": actionable_hash,
+    }
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=2, event_type="ExecutionCommandCreated",
+                       payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "execution_command_id": EXECUTION_COMMAND_ID})
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=3, event_type="UserTradeObserved",
+                       payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "trade_status": "CONFIRMED",
+                                "fill_authority_state": "FILL_CONFIRMED", "venue_order_id": VENUE_ORDER_ID,
+                                "filled_size": 314.8, "avg_fill_price": 0.005, "fees": 0.0}, source_authority="user_channel")
+
+    materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    row = _position_current_rows(conn)[0]
+    assert row["direction"] == "buy_yes"
+    assert row["entry_method"] == "qkernel_spine"
+    assert row["p_posterior"] == pytest.approx(0.1507234)
+    assert row["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
 
 def test_bridge_allows_day0_buy_no_settlement_capture(conn):

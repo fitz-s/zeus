@@ -3,6 +3,7 @@
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -222,6 +223,47 @@ def test_partial_40_members_no_live_trade_evidence_only():
     )
     assert result.completeness_status == "PARTIAL_ALLOWED"
     assert result.live_eligible is False
+
+
+def test_replacement_posterior_event_member_floor_uses_model_count_unit():
+    source_run = {
+        **_source_run(),
+        "source_id": "openmeteo_ecmwf_ifs9_bayes_fusion",
+        "track": "replacement_0_1_openmeteo_bayes_fusion",
+        "expected_members": 3,
+        "observed_members": 3,
+    }
+    coverage = {
+        **_coverage(),
+        "source_id": "openmeteo_ecmwf_ifs9_bayes_fusion",
+        "track": "replacement_0_1_openmeteo_bayes_fusion",
+        "source_transport": "raw_model_forecasts.multimodel",
+        "data_version": "raw_model_forecasts.multimodel",
+        "expected_members": 3,
+        "observed_members": 3,
+    }
+    snapshot = {
+        **_snapshot(),
+        "data_version": "raw_model_forecasts.multimodel",
+        "member_count": 0,
+        "members_json": [],
+    }
+
+    event = build_forecast_snapshot_ready_event(
+        source_run=source_run,
+        coverage=coverage,
+        snapshot=snapshot,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+        min_members_floor=40,
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    payload = json.loads(event.payload_json)
+
+    assert payload["member_count"] == 3
+    assert payload["expected_members"] == 3
+    assert payload["min_members_floor"] == 3
+    assert payload["coverage_readiness_status"] == "LIVE_ELIGIBLE"
 
 
 def test_missing_required_steps_partial_blocked():

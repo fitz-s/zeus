@@ -229,7 +229,7 @@ def _entry_authority_from_certificates(
     conn: sqlite3.Connection,
     *,
     actionable_certificate_hash: str,
-) -> tuple[Any | None, float | None, float]:
+) -> tuple[Any | None, float | None, float, str | None]:
     """Recover entry DecisionEvidence and belief CI from persisted certificates.
 
     This never fabricates authority: if the Actionable/Belief/FDR certificate
@@ -237,13 +237,26 @@ def _entry_authority_from_certificates(
     the D4 exit gate fail-closed.
     """
     if not actionable_certificate_hash:
-        return None, None, 0.0
+        return None, None, 0.0, None
     actionable = _certificate_by_hash(conn, actionable_certificate_hash)
     if actionable is None:
-        return None, None, 0.0
+        return None, None, 0.0, None
     actionable_payload = actionable["payload"]
+    entry_method: str | None = None
     q_live = _float_or_none(actionable_payload.get("q_live"))
     q_lcb = _float_or_none(actionable_payload.get("q_lcb_5pct"))
+    qkernel_payload = actionable_payload.get("qkernel_execution_economics")
+    if isinstance(qkernel_payload, dict):
+        qkernel_point = _float_or_none(qkernel_payload.get("q_dot_payoff"))
+        qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
+        if (
+            qkernel_point is not None
+            and qkernel_lcb is not None
+            and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+        ):
+            q_live = qkernel_point
+            q_lcb = qkernel_lcb
+            entry_method = "qkernel_spine"
     ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
@@ -252,16 +265,16 @@ def _entry_authority_from_certificates(
     belief = _certificate_by_hash(conn, parents.get("belief", ""))
     fdr = _certificate_by_hash(conn, parents.get("fdr", ""))
     if belief is None or fdr is None:
-        return None, q_live, ci_width
+        return None, q_live, ci_width, entry_method
     belief_payload = belief["payload"]
     fdr_payload = fdr["payload"]
     bootstrap_n = _float_or_none(
         belief_payload.get("bootstrap_n") or fdr_payload.get("edge_bootstrap_n")
     )
     if bootstrap_n is None or bootstrap_n < 1:
-        return None, q_live, ci_width
+        return None, q_live, ci_width, entry_method
     if fdr_payload.get("passed") is not True:
-        return None, q_live, ci_width
+        return None, q_live, ci_width, entry_method
 
     from src.contracts.decision_evidence import DecisionEvidence
     from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
@@ -277,6 +290,7 @@ def _entry_authority_from_certificates(
         ),
         q_live,
         ci_width,
+        entry_method,
     )
 
 
@@ -568,7 +582,7 @@ def _build_bridge_position(
         cost_basis_usd=cost_basis,
         condition_id=identity["condition_id"],
         decision_snapshot_id=identity["decision_snapshot_id"],
-        entry_method="ens_member_counting",
+        entry_method=str(identity.get("entry_method") or "ens_member_counting"),
         strategy_key=str(identity["strategy_key"]),
         order_id=identity.get("venue_order_id") or identity.get("execution_command_id") or "",
         order_status="filled",
@@ -1208,6 +1222,7 @@ def materialize_position_current_from_edli_fill(
         decision_evidence,
         certificate_q_live,
         certificate_entry_ci_width,
+        certificate_entry_method,
     ) = _entry_authority_from_certificates(
         conn,
         actionable_certificate_hash=str(identity.get("actionable_certificate_hash") or ""),
@@ -1216,6 +1231,8 @@ def materialize_position_current_from_edli_fill(
         identity["p_posterior"] = certificate_q_live
     if certificate_entry_ci_width > 0.0:
         identity["entry_ci_width"] = certificate_entry_ci_width
+    if certificate_entry_method:
+        identity["entry_method"] = certificate_entry_method
     fill_payloads = _confirmed_fill_payloads(events)
     filled_size, avg_fill_price, fees = _aggregate_fill_economics(fill_payloads)
     if filled_size <= 0 or avg_fill_price <= 0:
