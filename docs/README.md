@@ -33,6 +33,7 @@ Reference files are not authority. They explain authority, code, and manifests.
 | `authority/zeus_database_runtime_authority.md` | DB topology, WAL, busy-timeout, lock, and bulk/live writer law |
 | `authority/zeus_forecast_fusion_authority.md` | forecast-fusion model-selection and city-profile law |
 | `authority/zeus_docs_classification_authority.md` | docs plane/class/default-read law |
+| `authority/zeus_runtime_artifact_authority.md` | runtime artifact placement law |
 | `authority/ARCHIVAL_RULES.md` | archive/evidence isolation law |
 | `authority/zeus_change_control_constitution.md` | deep governance constitution, non-default |
 
@@ -44,9 +45,9 @@ Reference files are not authority. They explain authority, code, and manifests.
 |---|---|---|---|
 | `authority/` | authority | durable docs law | routed active files |
 | `reference/` | persistent special | durable explanation | by task route; not authority |
-| `operations/` | operations | current pointers and active work homes | pointer files only |
+| `operations/` | operations | current pointers, runtime artifacts, active work homes | pointer files only |
 | `runbooks/` | persistent special | procedures | only for operation task |
-| `evidence/` | persistent special | raw receipts | no |
+| `evidence/` | persistent special | retained evidence | no |
 | `reports/` | persistent special | reports/history | no |
 | `archive/` | persistent special | cold history | no |
 | `rebuild/` | persistent special | rebuild/consult history | no |
@@ -67,6 +68,7 @@ A zero-context docs/money-path agent may enter these, in order, when relevant:
 - `authority/zeus_database_runtime_authority.md` for DB/WAL/lock work;
 - `authority/zeus_forecast_fusion_authority.md` for forecast fusion/source/model-selection work;
 - `authority/zeus_docs_classification_authority.md` for docs classification/default-read work;
+- `authority/zeus_runtime_artifact_authority.md` for runtime artifact placement work;
 - `authority/ARCHIVAL_RULES.md` for demotion/archive work;
 - `reference/AGENTS.md`;
 - `reference/zeus_prediction_market_quant_reference.md`;
