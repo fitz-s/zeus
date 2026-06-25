@@ -1,109 +1,35 @@
-schema_version: 2
+schema_version: 3
 project: zeus
 metadata:
   updated: '2026-06-23'
   owner: docs authority isolation rebuild
-  purpose: >
-    Kernel semantic atom and principal-authority registry. This manifest names the
-    frozen money-path atoms and active authority stack. It must not route agents
-    to packet evidence, consults, dated reports, rebuild notes, or runtime snapshots.
+  purpose: Kernel authority registry for Zeus semantic atoms, active law, and machine manifests.
 
 principal_authority:
   architecture_law: docs/authority/zeus_current_architecture.md
   delivery_law: docs/authority/zeus_current_delivery.md
+  forecast_fusion_law: docs/authority/zeus_forecast_fusion_authority.md
+  docs_classification_law: docs/authority/zeus_docs_classification_authority.md
   archival_law: docs/authority/ARCHIVAL_RULES.md
   deep_governance_constitution: docs/authority/zeus_change_control_constitution.md
   canonical_reference: docs/reference/zeus_prediction_market_quant_reference.md
   docs_registry: architecture/docs_registry.yaml
-  historical_references:
-    - architecture/history_lore.yaml
-    - docs/archive_registry.md
-  forbidden_as_authority:
-    - docs/evidence/**
-    - docs/reports/**
-    - docs/archive/**
-    - docs/rebuild/**
-    - docs/operations/task_*/**
-    - docs/operations/current/**
+  forecast_fusion_manifest: architecture/forecast_fusion_manifest.yaml
+  historical_references: [architecture/history_lore.yaml, docs/archive_registry.md]
+  forbidden_as_authority: [docs/evidence/**, docs/reports/**, docs/archive/**, docs/rebuild/**, docs/operations/task_*/**, docs/operations/current/**]
 
 semantic_atoms:
-  unit:
-    frozen: true
-    allowed: [F, C]
-    rationale: Temperature semantics must never silently collapse to bare floats with implicit unit assumptions.
-  metric:
-    frozen: true
-    allowed: [high, low]
-    rationale: HIGH and LOW are distinct settlement/calibration/replay identities, not display labels.
-  native_side:
-    frozen: true
-    allowed: [YES, NO]
-    rationale: Polymarket YES/NO tokens have native quote/depth/payoff semantics; NO is not a casual complement shortcut.
-  direction:
-    frozen: true
-    allowed: [buy_yes, buy_no, unknown]
-    rationale: Direction is lifecycle-bearing and side-bearing state, not display metadata.
-  probability_space:
-    frozen: true
-    allowed: [yes_side, no_side, held_side, native_side, payoff_space]
-    rationale: Probability-space semantics must be explicit across q, payoff, sizing, and execution boundaries.
-  q_band:
-    frozen: true
-    allowed: [q, q_lcb, q_ucb, q_exec_lcb]
-    rationale: Conservative bounds must name their random variable and may not invert point estimates.
-  strategy_key:
-    frozen: true
-    allowed:
-      - settlement_capture
-      - shoulder_sell
-      - center_buy
-      - opening_inertia
-    rationale: Sole governance key for risk, allocation, and performance policy unless a future governed migration expands it.
-  phase:
-    frozen: true
-    allowed:
-      - pending_entry
-      - active
-      - day0_window
-      - pending_exit
-      - economically_closed
-      - settled
-      - voided
-      - quarantined
-      - admin_closed
-      - unknown
-    rationale: Authoritative lifecycle grammar; unknown is a recovery/sentinel state where code declares it, not a normal phase.
-  truth_surface_kind:
-    frozen: true
-    allowed:
-      - canonical_event
-      - canonical_projection
-      - derived_export
-      - ingress_command
-      - experimental
-      - current_fact_pointer
-      - historical_evidence
-  event_type:
-    frozen: true
-    allowed:
-      - POSITION_OPEN_INTENT
-      - ENTRY_ORDER_POSTED
-      - ENTRY_ORDER_FILLED
-      - ENTRY_ORDER_VOIDED
-      - ENTRY_ORDER_REJECTED
-      - DAY0_WINDOW_ENTERED
-      - CHAIN_SYNCED
-      - CHAIN_SIZE_CORRECTED
-      - CHAIN_QUARANTINED
-      - MONITOR_REFRESHED
-      - EXIT_INTENT
-      - EXIT_ORDER_POSTED
-      - EXIT_ORDER_FILLED
-      - EXIT_ORDER_VOIDED
-      - EXIT_ORDER_REJECTED
-      - SETTLED
-      - ADMIN_VOIDED
-      - MANUAL_OVERRIDE_APPLIED
+  unit: {frozen: true, allowed: [F, C]}
+  metric: {frozen: true, allowed: [high, low]}
+  native_side: {frozen: true, allowed: [YES, NO]}
+  direction: {frozen: true, allowed: [buy_yes, buy_no, unknown]}
+  probability_space: {frozen: true, allowed: [yes_side, no_side, held_side, native_side, payoff_space]}
+  q_band: {frozen: true, allowed: [q, q_lcb, q_ucb, q_exec_lcb]}
+  forecast_fusion_profile: {frozen: true, manifest: architecture/forecast_fusion_manifest.yaml}
+  docs_class: {frozen: true, manifest: architecture/docs_registry.yaml}
+  strategy_key: {frozen: true, allowed: [settlement_capture, shoulder_sell, center_buy, opening_inertia]}
+  phase: {frozen: true, allowed: [pending_entry, active, day0_window, pending_exit, economically_closed, settled, voided, quarantined, admin_closed, unknown]}
+  truth_surface_kind: {frozen: true, allowed: [canonical_event, canonical_projection, derived_export, ingress_command, experimental, current_fact_pointer, historical_evidence]}
 
 truth_surfaces:
   canonical:
@@ -111,43 +37,18 @@ truth_surfaces:
     projection_table: position_current
     authority_kind: canonical_event_plus_projection
     db_owner_manifest: architecture/db_table_ownership.yaml
-  derived:
-    - state/positions.json
-    - state/status_summary.json
-  ingress_only:
-    - state/control_plane.json
-  current_fact_pointers:
-    - docs/operations/current_state.md
-    - docs/operations/current_data_state.md
-    - docs/operations/current_source_validity.md
-  historical_evidence_only:
-    - docs/evidence/**
-    - docs/reports/**
-    - docs/archive/**
-    - docs/rebuild/**
-  deprecated_shadow_surfaces:
-    - state/strategy_tracker.json
+  current_fact_pointers: [docs/operations/current_state.md, docs/operations/current_data_state.md, docs/operations/current_source_validity.md]
+  historical_evidence_only: [docs/evidence/**, docs/reports/**, docs/archive/**, docs/rebuild/**]
+  deprecated_shadow_surfaces: [state/strategy_tracker.json]
 
 write_authority:
-  canonical_append_modules:
-    - src.state.ledger
-  canonical_projection_modules:
-    - src.state.projection
-    - src.state.lifecycle_manager
-  canonical_policy_emitters:
-    - src.riskguard.riskguard
-    - src.riskguard.policy
-    - src.risk_allocator.governor
-  canonical_policy_consumers:
-    - src.engine.evaluator
-    - src.engine.cycle_runner
-    - src.engine.event_reactor_adapter
-    - src.execution.executor
-  venue_command_owner:
-    - src.state.venue_command_repo
-  qkernel_decision_owner:
-    - src.engine.qkernel_spine_bridge
-    - src.decision.family_decision_engine
+  canonical_append_modules: [src.state.ledger]
+  canonical_projection_modules: [src.state.projection, src.state.lifecycle_manager]
+  canonical_policy_emitters: [src.riskguard.riskguard, src.riskguard.policy, src.risk_allocator.governor]
+  canonical_policy_consumers: [src.engine.evaluator, src.engine.cycle_runner, src.engine.event_reactor_adapter, src.execution.executor]
+  venue_command_owner: [src.state.venue_command_repo]
+  qkernel_decision_owner: [src.engine.qkernel_spine_bridge, src.decision.family_decision_engine]
+  forecast_fusion_owner: [src.forecast.model_selection, src.forecast.bayes_precision_fusion, src.data.bayes_precision_fusion_capture]
 
 machine_gate_inputs:
   manifests:
@@ -159,21 +60,9 @@ machine_gate_inputs:
     - architecture/docs_registry.yaml
     - architecture/reference_replacement.yaml
     - architecture/module_manifest.yaml
+    - architecture/forecast_fusion_manifest.yaml
     - architecture/money_path_objects.yaml
     - architecture/runtime_modes.yaml
     - architecture/runtime_posture.yaml
-  schema:
-    - architecture/2026_04_02_architecture_kernel.sql
-  ast_rules:
-    - architecture/ast_rules/semgrep_zeus.yml
-  scripts:
-    - scripts/check_kernel_manifests.py
-    - scripts/check_module_boundaries.py
-    - scripts/check_work_packets.py
-    - scripts/replay_parity.py
-    - scripts/topology_doctor.py
-  tests:
-    - tests/test_cross_module_invariants.py
-    - tests/test_architecture_contracts.py
-    - tests/test_no_bare_float_seams.py
-    - tests/integration/test_qkernel_spine_routing.py
+  scripts: [scripts/check_kernel_manifests.py, scripts/check_module_boundaries.py, scripts/check_work_packets.py, scripts/replay_parity.py, scripts/topology_doctor.py]
+  tests: [tests/test_cross_module_invariants.py, tests/test_architecture_contracts.py, tests/test_no_bare_float_seams.py, tests/integration/test_qkernel_spine_routing.py, tests/test_bayes_precision_fusion_model_selection_gate.py]
