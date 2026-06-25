@@ -1,0 +1,37 @@
+schema_version: 1
+metadata:
+  created: '2026-06-23'
+  owner: docs authority isolation rebuild
+  authority_status: machine_authority
+  purpose: Forecast fusion city profile manifest. Runtime row availability remains current fact.
+
+model_sets:
+  anchor: ecmwf_ifs
+  provider_families:
+    icon_dwd: [icon_d2, icon_eu, icon_global]
+    ncep_noaa: [gfs_hrrr, ncep_nbm_conus]
+    ukmo: [ukmo_uk_deterministic_2km, ukmo_global_deterministic_10km]
+    cmc_gem: [gem_hrdps_continental]
+
+selection_law:
+  - one provider family contributes at most one representative
+  - regional products require configured polygon and lead eligibility
+  - runtime missing rows are current facts, not prose fallbacks
+
+profile_definitions:
+  global_base: ecmwf_ifs + icon_global + ukmo_global_deterministic_10km
+  icon_eu: lead0-3 ecmwf_ifs + icon_eu + ukmo_global_deterministic_10km; lead4+ global_base
+  icon_d2: lead0-1 ecmwf_ifs + icon_d2 + ukmo_global_deterministic_10km; lead2-3 icon_eu; lead4+ global_base
+  icon_d2_arome: lead0-1 ecmwf_ifs + icon_d2 + meteofrance_arome_france_hd + ukmo_global_deterministic_10km; lead2-3 icon_eu; lead4+ global_base
+  london_uk_icon_d2_ukmo: lead0-1 ecmwf_ifs + icon_d2 + ukmo_uk_deterministic_2km; lead2 ecmwf_ifs + icon_eu + ukmo_uk_deterministic_2km; lead3 icon_eu; lead4+ global_base
+  conus_highres: lead0-2 ecmwf_ifs + icon_global + gfs_hrrr + gem_hrdps_continental + ukmo_global_deterministic_10km; lead3 ecmwf_ifs + icon_global + ncep_nbm_conus + ukmo_global_deterministic_10km; lead4+ global_base
+  north_america_gem_only: lead0-2 ecmwf_ifs + icon_global + gem_hrdps_continental + ukmo_global_deterministic_10km; lead3+ global_base
+
+city_profile_groups:
+  global_base: [Auckland, Beijing, Buenos Aires, Busan, Cape Town, Chengdu, Chongqing, Guangzhou, Hong Kong, Jinan, Jakarta, Jeddah, Karachi, Kuala Lumpur, Lagos, Lucknow, Manila, Panama City, Qingdao, Sao Paulo, Seoul, Shanghai, Shenzhen, Singapore, Taipei, Tokyo, Wellington, Wuhan, Zhengzhou]
+  icon_eu: [Ankara, Helsinki, Istanbul, Madrid, Moscow, Tel Aviv, Warsaw]
+  icon_d2: [Amsterdam, Munich]
+  icon_d2_arome: [Milan, Paris]
+  london_uk_icon_d2_ukmo: [London]
+  conus_highres: [Atlanta, Austin, Chicago, Dallas, Denver, Houston, Los Angeles, Miami, NYC, San Francisco, Seattle, Toronto]
+  north_america_gem_only: [Mexico City]
