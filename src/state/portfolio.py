@@ -108,7 +108,6 @@ class ExitDecision:
 
 _CI_SEP_EPS: float = 1e-9
 
-
 def _ci_intervals_separated(
     a: Optional[tuple], b: Optional[tuple]
 ) -> Optional[bool]:
@@ -879,6 +878,18 @@ class Position:
             )
         return shares * executable_bid > hold_value.net_value
 
+    def _near_settlement_hold_is_confirmed_win(
+        self,
+        *,
+        current_p_posterior: float,
+        best_bid: Optional[float],
+    ) -> bool:
+        """Return whether near-settle hold is a confirmed-win posture, not generic EV drift."""
+
+        if not ExitContext._is_finite(best_bid):
+            return False
+        return float(best_bid) >= 0.95 and float(current_p_posterior) >= 0.95
+
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
 
@@ -1056,8 +1067,52 @@ class Position:
             # loop forever in day0_window.
             applied = list(day0_decision.applied_validations or applied)
 
-        # Settlement imminent
+        # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
+        # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
+        # confirmed-win NO at 99.9c was force-sold). Route the decision through the SAME EV(hold)
+        # vs EV(sell) authority the rest of the exit path uses — HoldValue net of exit costs vs
+        # shares×bid — rather than any hardcoded "confirmed" price/belief threshold. HOLD only when
+        # holding genuinely beats selling now; a physics REVERSAL the market has not priced (fresh
+        # belief low) OR a market overpaying our fresh belief both SELL ("sell before the market
+        # notices"); an unprovable EV (no executable bid / no shares -> None) keeps the conservative
+        # force-sell. Freshness of fresh_prob is already gated by the missing-authority check above,
+        # so a stale belief cannot drive this branch.
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
+            if self._near_settlement_hold_is_confirmed_win(
+                current_p_posterior=float(exit_context.fresh_prob),
+                best_bid=exit_context.best_bid,
+            ):
+                # Confirmed-win hold: do NOT blanket force-sell at 99c+ and do NOT let
+                # model-divergence telemetry rename the decision into a panic exit.
+                applied.append("near_settlement_confirmed_win_hold")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                )
+            sell_beats_hold = self._sell_value_exceeds_hold_value(
+                current_p_posterior=float(exit_context.fresh_prob),
+                best_bid=exit_context.best_bid,
+                hours_to_settlement=exit_context.hours_to_settlement,
+                applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
+            )
+            if sell_beats_hold is not False:
+                # sell-EV dominant (physics REVERSAL, or the market overpaying our fresh belief)
+                # OR unprovable (no executable bid / no shares -> None): conservative force-sell.
+                applied.append("near_settlement_gate")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True, "SETTLEMENT_IMMINENT", "immediate",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="SETTLEMENT_IMMINENT",
+                )
+            # Hold-EV is mathematically positive but not a confirmed win. Near settlement this is not
+            # enough to hand control to panic/divergence gates; exit under the deterministic time gate.
+            applied.append("near_settlement_hold_ev_unconfirmed")
             applied.append("near_settlement_gate")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
@@ -1078,35 +1133,16 @@ class Position:
                 trigger="WHALE_TOXICITY",
             )
 
-        if exit_context.divergence_score >= divergence_hard_threshold():
-            applied.append("divergence_hard_trigger")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True,
-                f"MODEL_DIVERGENCE_PANIC (score={exit_context.divergence_score:.2f})",
-                "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="MODEL_DIVERGENCE_PANIC",
-            )
-
-        if (
-            exit_context.divergence_score >= divergence_soft_threshold()
-            and exit_context.market_velocity_1h <= divergence_velocity_confirm()
-        ):
-            applied.append("divergence_soft_trigger")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True,
-                (
-                    "MODEL_DIVERGENCE_PANIC "
-                    f"(score={exit_context.divergence_score:.2f}, velocity={exit_context.market_velocity_1h:.2f}/hr)"
-                ),
-                "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="MODEL_DIVERGENCE_PANIC",
-            )
+        # MODEL_DIVERGENCE_PANIC removed 2026-06-24 (Shanghai 25C "wrong exit"; frontier consult
+        # REQ-20260624-105149 HIGH-confidence verdict). divergence_score = max(0, p_market - p_belief)
+        # is positive ONLY when the market values the HELD side ABOVE the model — which for a held binary
+        # is harmless overpayment or a cold model, NEVER adverse. The two panic branches turned that gap
+        # into an immediate market-order liquidation here, PREEMPTING the purpose-built CI-separation
+        # reversal gate + HoldValue economics below (the machinery that exits only on a CONFIRMED reversal,
+        # never a bare price move) — and dumped near-certain winners (Shanghai NO @0.96, belief 0.655).
+        # Removed outright (gate collapse, not a conditional gate). Real deterioration still exits via
+        # day0 absorbing hard-fact, SETTLEMENT_IMMINENT, WHALE_TOXICITY, the velocity-evidenced
+        # FLASH_CRASH_PANIC below, CI_SEPARATED_REVERSAL, and the direction-specific HoldValue economics.
 
         # BUG#127 (守護 SEV1): FLASH_CRASH_PANIC is evidence-gated, not a bare
         # price-delta trigger. Maintain the consecutive-cycle persistence counter
@@ -2326,6 +2362,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         order_posted_at=order_posted_at,
         chain_state=str(row.get("chain_state") or ""),
         exit_state=runtime_exit_state,
+        exit_reason=str(row.get("exit_reason") or ""),
         last_monitor_prob=row.get("last_monitor_prob"),
         last_monitor_prob_is_fresh=bool(row.get("last_monitor_prob_is_fresh") or False),
         last_monitor_edge=row.get("last_monitor_edge"),

@@ -326,6 +326,20 @@ def test_deploy_live_knows_sidecar_labels():
     assert "deploy/launchd/" in dl.RUNTIME_PATHSPECS
 
 
+def test_deploy_live_resolves_repo_from_live_trading_plist(tmp_path, monkeypatch):
+    dl = _load("deploy_live_plist_repo", "deploy_live.py")
+    import plistlib
+
+    live_repo = tmp_path / "live-main"
+    live_repo.mkdir()
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_bytes(plistlib.dumps({"WorkingDirectory": str(live_repo)}))
+    monkeypatch.delenv("ZEUS_LIVE_REPO", raising=False)
+    monkeypatch.setattr(dl, "LIVE_TRADING_PLIST", plist)
+
+    assert dl._resolve_live_repo() == str(live_repo.resolve())
+
+
 def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
     """The clean-tree gate refuses a dirty/unpushed checkout and respects --allow-dirty."""
     dl = _load("deploy_live_smoke2", "deploy_live.py")
@@ -371,6 +385,46 @@ def test_deploy_live_gate_fails_closed_when_git_status_fails(monkeypatch):
     blob = " ".join(blockers)
     assert "git status failed" in blob
     assert "fatal: bad pathspec" in blob
+
+
+def test_deploy_live_trading_restart_requires_preflight(monkeypatch, tmp_path):
+    dl = _load("deploy_live_preflight_gate", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        calls.append(cmd)
+        if cmd[:2] == ["python", "scripts/check_live_restart_preflight.py"] or (
+            len(cmd) >= 2 and cmd[1] == "scripts/check_live_restart_preflight.py"
+        ):
+            return subprocess.CompletedProcess(cmd, 1, '{"ok": false}', "")
+        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_preflight_if_needed(["com.zeus.live-trading"])
+
+    assert ok is False
+    assert "preflight failed" in detail
+    assert calls
+
+
+def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
+    dl = _load("deploy_live_preflight_skip", "deploy_live.py")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("preflight subprocess should not run")
+
+    monkeypatch.setattr(dl.subprocess, "run", _boom)
+
+    ok, detail = dl._run_restart_preflight_if_needed(["com.zeus.price-channel-ingest"])
+
+    assert ok is True
+    assert "not required" in detail
 
 
 def test_deploy_live_unknown_daemon_rejected(capsys):

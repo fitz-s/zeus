@@ -12,7 +12,9 @@
 #   symmetry): the soft-anchor (CAPTURE_MISSING) fallback can compute a GENUINE Wilson UPPER bound
 #   alongside its lower twin (same inputs/z), but non-live carriers must not enter
 #   forecast_posteriors. Only fused-Normal rows with certified bootstrap bounds and a live runtime
-#   policy are materialized as execution-authority posterior rows.
+#   policy are materialized as execution-authority posterior rows. 2026-06-24: ANCHOR_ONLY_CURRENT
+#   is no longer a live carrier; missing BPF current inputs block materialization instead of
+#   trading a single-anchor surrogate.
 """
 
 from __future__ import annotations
@@ -72,12 +74,14 @@ UTC = timezone.utc
 # and recorded in provenance_json. The live gate (event_reactor_adapter) admits ONLY the two
 # fused-Normal modes; every other mode is a deterministic no-submit. This kills the silent
 # degradation category: with all flags on, a row that fell back to the legacy member-vote
-# soft-anchor q (fusion None / fused-q build failed / flag off) used to differ ONLY by a
-# WARNING log + a q_shape string — live EDLI could size Kelly under a different probability
-# regime than the release evidence assumes. The mode is a fail-closed data-class label.
+# soft-anchor q, anchor-only current surrogate, fused-q build failure, or flag-off path used
+# to differ ONLY by a WARNING log + a q_shape string — live EDLI could size Kelly under a
+# different probability regime than the release evidence assumes. The mode is a fail-closed
+# data-class label.
 # ---------------------------------------------------------------------------
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
+REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
 REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
@@ -100,6 +104,7 @@ REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL = "FUSED_CENTER_ONLY_NORMAL"
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
 REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
+REPLACEMENT_CAPTURE_STATUS_ANCHOR_ONLY_CURRENT = "ANCHOR_ONLY_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
@@ -227,7 +232,10 @@ def _replacement_is_live_layer(
 ) -> bool:
     """True only for the exact live q carrier."""
     live_q_carrier = (
-        replacement_q_mode in {REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+        replacement_q_mode in {
+            REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL,
+            REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL,
+        }
         and q_lcb_map is not None
         and q_ucb_map is not None
         and q_lcb_basis == _QLCB_BASIS
@@ -839,10 +847,18 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
     try:
         import os  # noqa: PLC0415
 
-        path = _SIGMA_SCALE_FIT_PATH
-        if not os.path.isabs(path):
-            repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            path = os.path.join(repo, _SIGMA_SCALE_FIT_PATH)
+        # Resolve the σ-scale fit against the RUNTIME state dir (ZEUS_PRIMARY_ROOT/
+        # state — the shared live state the fitter writes), like every other state
+        # artifact, NOT relative to __file__ (the deployed code tree). The live
+        # daemon runs CODE from zeus-live-main but STATE from /Users/leofitz/zeus/
+        # state; resolving via __file__ made it read a STALE bundled copy (C k=1.0)
+        # and silently drop the fitted k<1 sharpening, so the served forecast stayed
+        # too flat (modal under-weighted → YES leaks to tails, NO on the predicted
+        # bin). Dev/tests resolve to the same path, so they are unchanged.
+        # (2026-06-23 severed-σ-scale fix.)
+        from src.config import runtime_state_path  # noqa: PLC0415
+
+        path = str(runtime_state_path("sigma_scale_fit.json"))
         if not os.path.exists(path):
             return 1.0, 0.0, 0.0
         with open(path, "r", encoding="utf-8") as fh:
@@ -864,6 +880,27 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
         return k, w, floor_steps
     except Exception:
         return 1.0, 0.0, 0.0
+
+
+def _effective_unit_sigma_scale(unit: str) -> tuple[float, float, float]:
+    """The (k, w, floor_steps) the fused-q build applies for a settlement-unit family.
+
+    The FITTED artifact is the SOLE licensing authority. ``_replacement_sigma_scale_lookup`` already
+    returns inert ``(1.0, 0.0, 0.0)`` for any family the fitter REFUSED (``fitted=False`` — written
+    when a family has < MIN_CELLS=60 settled cells), so a family is σ-scaled iff math licensed it by
+    fitting it. There is NO hardcoded settlement-unit allow-list.
+
+    2026-06-23 universal-correctness fix: the prior inline ``unit != "C"`` defense-in-depth gate
+    forced EVERY non-Celsius family to ``(1.0, 0.0)`` regardless of the artifact. That was correct
+    when F was unfitted (n=47 < 60), but the σ-scale fitter has since LICENSED F (n_cells=100,
+    k=0.7322, w=0.0552; settled d=0 modal realized/expected ratio 1.424→1.090) — and the gate was
+    SUPPRESSING that math-supported correction, leaving every US (Fahrenheit) city's served
+    posterior too FLAT, so the modal (predicted) bin was under-weighted and buy_yes leaked to
+    deep-OTM tails instead of landing on the predicted bin. The artifact's per-family ``fitted``
+    flag now governs uniformly. OPERATOR LAW (2026-06-12) "no hardcoded value without math support"
+    is satisfied: k is MLE-fitted (never hand-set), and a refused family still falls back to inert.
+    """
+    return _replacement_sigma_scale_lookup(unit)
 
 
 def _city_settlement_unit_from_bins(request: "ReplacementForecastMaterializeRequest") -> str:
@@ -972,6 +1009,113 @@ class _BayesPrecisionFusionFusionOverride:
     # when the grid table is absent ⇒ precision_center_basis is the same as before Option C.
     precision_center_basis: Mapping[str, Mapping[str, float]] | None = None
     precision_basis_hash: str | None = None
+    # Cold-start guard (2026-06-22, Finding 1): models excluded from the center because
+    # their walk-forward VERIFIED settled obs count was below MIN_SETTLED_N.  Empty when
+    # all models are mature (byte-identical to pre-guard in that case).
+    cold_start_excluded_models: tuple[str, ...] = ()
+
+
+def _anchor_only_current_override(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    anchor_value_corrected_c: float,
+) -> _BayesPrecisionFusionFusionOverride | None:
+    """Current-cycle anchor-only carrier used when BPF extras are temporarily absent.
+
+    This is not the legacy soft-anchor/member-vote fallback. It keeps the live posterior on the
+    same settlement-preimage Normal + certified bootstrap q_lcb seam as fused rows, but records
+    that only the current OM9 anchor was available. The wider ``anchor_sigma_c`` is used as both
+    predictive spread and center uncertainty, making the lower bound conservative until extras heal.
+    """
+    sigma = float(request.anchor_sigma_c)
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        return None
+    return _BayesPrecisionFusionFusionOverride(
+        anchor_value_c=float(anchor_value_corrected_c),
+        anchor_sigma_c=sigma,
+        method="anchor_only_current",
+        used_models=("openmeteo_ecmwf_ifs9_anchor",),
+        model_set_hash=_json_hash(["openmeteo_ecmwf_ifs9_anchor"]),
+        resolution_mix_hash=_json_hash({"models": ["openmeteo_ecmwf_ifs9_anchor"], "regional": []}),
+        lead_bucket="anchor_only",
+        dropped_models=(),
+        excluded_regionals=(),
+        dropped_aliases=(),
+        raw_model_forecast_ids=(),
+        anchor_bridge=None,
+        predictive_sigma_c=sigma,
+        decorrelated_providers_complete=False,
+        decorrelated_providers_served=1,
+        decorrelated_providers_expected=1,
+        current_value_serving=None,
+        precision_center_basis={
+            "openmeteo_ecmwf_ifs9_anchor": {
+                "raw_m2": float("nan"),
+                "n": 0.0,
+                "repr_m2": 0.0,
+                "weight": 1.0,
+            }
+        },
+        precision_basis_hash=_json_hash(
+            {
+                "openmeteo_ecmwf_ifs9_anchor": {
+                    "raw_m2": None,
+                    "n": 0,
+                    "repr_m2": 0.0,
+                    "weight": 1.0,
+                }
+            }
+        ),
+        cold_start_excluded_models=(),
+    )
+
+
+@dataclass(frozen=True)
+class _PosteriorComputeResult:
+    """The pure (no-DB-write) product of the posterior compute.
+
+    Extracted from ``_insert_posterior`` so the SAME canonical fusion compute can
+    be reused on a READ-ONLY path (the monitor held-belief read-through, LAYER 2
+    of the 2026-06-21 freeze fix) without writing ``forecast_posteriors``.
+
+    Contract: this struct is returned by ``_compute_posterior_payload`` ALWAYS
+    (even when not live-eligible) so a read-only caller can distinguish
+    "computed a fresh but non-live-eligible posterior" from "compute blocked".
+    ``_insert_posterior`` maps ``not live_eligible -> None`` to preserve the
+    historical write-path contract byte-for-byte. Every field below is exactly a
+    value the INSERT (or its identity hash / provenance payload) consumes; nothing
+    here is recomputed by the caller.
+    """
+
+    live_eligible: bool
+    # Point distribution + the certified bootstrap band (may be None when not live).
+    q: dict[str, float]
+    q_lcb_map: dict[str, float] | None
+    q_ucb_map: dict[str, float] | None
+    # The fused center (mu*) and predictive spread — carried so a read-only caller
+    # can audit belief WIDTH (honestly wider when fewer providers). None when no
+    # multi-model fused center was produced (single-anchor fallback).
+    mu_star: float | None
+    predictive_sigma_c: float | None
+    # K3 provider completeness so the caller sees when the CI is honestly wider.
+    decorrelated_providers_complete: bool
+    decorrelated_providers_served: int
+    decorrelated_providers_expected: int
+    capture_status: str
+    replacement_q_mode: str
+    # The remaining values the INSERT + identity hash + provenance payload consume.
+    data_version: str
+    source_cycle_time: str
+    available_at: str
+    computed_at: str
+    runtime_layer: str | None
+    dependency_payload: dict[str, object]
+    dependency_hash: str
+    bin_topology_hash: str
+    posterior_config_hash: str
+    family_id: str
+    provenance_payload: dict[str, object] | None
 
 
 def _read_persisted_current_capture(
@@ -1134,17 +1278,20 @@ def _replacement_bayes_precision_fusion_override(
         # An explicitly-assigned _live_fetch is honored ONLY as a per-model override seam for
         # models WITHOUT a persisted current row (legacy/test injection). It is never consulted
         # when the persisted row exists. It does NOT defeat the missing-capture gate: when the
-        # persisted capture is entirely absent the q path falls back to single-anchor regardless,
-        # because B5 forbids building the traded q from any non-persisted current value.
+        # persisted capture is entirely absent the q path serves the current OM9 anchor through
+        # the same settlement-preimage Normal + bootstrap-q_lcb carrier, because B5 forbids
+        # building the traded q from any non-persisted network value.
         injected_live_fetch = getattr(_replacement_bayes_precision_fusion_override, "_live_fetch", None)
 
         if conn is not None and not persisted_current:
-            # Missing current capture on the live path -> single-anchor fallback + logged reason.
-            # NEVER a network fetch in the q path (the persisted download is the sole q source).
+            # Missing current capture on the live path -> explicit block + logged reason.
+            # NEVER a network fetch in the q path (the persisted download is the sole q source),
+            # and no anchor-only surrogate is written as a live posterior.
             import logging  # noqa: PLC0415
             logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                 "replacement_0_1 BAYES_PRECISION_FUSION fusion: persisted current single_runs capture MISSING for "
-                "%s %s %s lead=%s cycle=%s -> single-anchor fallback (no network fetch in q path)",
+                "%s %s %s lead=%s cycle=%s -> live posterior blocked "
+                "(no network fetch and no anchor-only live surrogate in q path)",
                 request.city, metric, target_date, lead_days, source_cycle_iso,
             )
             return None
@@ -1297,6 +1444,19 @@ def _replacement_bayes_precision_fusion_override(
             }
         )
 
+        # Cold-start guard provenance (Finding 1, 2026-06-22): models that were
+        # excluded from the center because n < MIN_SETTLED_N.  Derived from the
+        # precision_center_basis: any model with weight=0.0 AND n < MIN_SETTLED_N
+        # was excluded by the guard (not merely absent from the DB).
+        from src.forecast.center import MIN_SETTLED_N as _MIN_SETTLED_N  # noqa: PLC0415
+        _cold_start_excluded: tuple[str, ...] = tuple(
+            sorted(
+                str(_m)
+                for _m, _v in _precision_center_basis.items()
+                if int(_v["n"]) < _MIN_SETTLED_N and _v["weight"] == 0.0
+            )
+        )
+
         used_models = tuple(fused.used_models)
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
@@ -1426,6 +1586,7 @@ def _replacement_bayes_precision_fusion_override(
             current_value_serving=_current_value_serving,
             precision_center_basis=_precision_center_basis or None,
             precision_basis_hash=_precision_basis_hash,
+            cold_start_excluded_models=_cold_start_excluded,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -1475,6 +1636,33 @@ _QLCB_BOOTSTRAP_DRAWS = 200
 # _QLCB_BASIS for the in-module call sites + existing tests that import it by this name.
 _QLCB_BASIS = TRADEABLE_GRADE_QLCB_BASIS
 _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
+
+# ---------------------------------------------------------------------------
+# FAR-TAIL q_lcb HONESTY (2026-06-22) — forward-validated monotone lower-bound calibration.
+#
+# Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
+# Forward-validated by qlcbHonest analysis:
+#   - Far-tail YES bins (served q_point < ~0.05) have q_lcb ~0.07-0.10 in raw bootstrap
+#     but realize ~0.006 frequency → the bootstrap centre-uncertainty draws place them as
+#     too probable. Actual far-tail realized frequency is stationary near-zero across 3 dates.
+#   - Flooring q_lcb at FAR_TAIL_LCB_FLOOR (0.003) = the realized far-tail frequency makes
+#     far-tail YES bins self-reject at typical fill prices (~0.01): edge = 0.003 - 0.01 < 0.
+#   - Kills 191 give-away admissions (188 losers / 3 winners), log-loss −0.22%, zero
+#     winning-bin q_point blowup (q_point UNTOUCHED).
+#   - Shoulder / mode / buy_no path: IDENTITY (byte-identical to prior behavior).
+#
+# IMPLEMENTATION: in _build_fused_q_bounds, after the per-bin bootstrap p5 quantile,
+# for any bin where q_point[bin] < FAR_TAIL_Q_POINT_THRESH apply:
+#   q_lcb[bin] = min(q_lcb[bin], FAR_TAIL_LCB_FLOOR)
+# This is a monotone CEILING on q_lcb (can only decrease it), never zero (the floor is
+# 0.003 > 0 so q_point is still > 0 for any winning bin → no -log blowup). The NO lower
+# bound uses q_ucb_yes; this code does NOT touch q_ucb.
+# ---------------------------------------------------------------------------
+# Forward-validated threshold: q_point bins < this value are in the "far-tail YES" region.
+FAR_TAIL_Q_POINT_THRESH: float = 0.05   # §evidence doc: "served q_point < ~0.05"
+# Forward-validated floor: the realized far-tail frequency (~0.006 mean; 0.003 is conservative
+# and ensures self-reject at the observed fill floor ~0.01 after cost).
+FAR_TAIL_LCB_FLOOR: float = 0.003       # §evidence doc "realized far-tail floor (~0.003)"
 
 # Live rows carry only certified fused-center bootstrap bounds. Degraded or
 # missing-capture carriers are not written into the live posterior table.
@@ -1679,6 +1867,15 @@ def _build_fused_q_bounds(
         # Defensive ordering clips: q_lcb in [0, q_point], q_ucb >= q_point.
         lcb = min(max(lcb, 0.0), max(q_pt, 0.0))
         ucb = max(ucb, q_pt)
+        # FAR-TAIL q_lcb HONESTY (2026-06-22) — monotone ceiling for far-tail YES bins.
+        # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
+        # For bins where the served q_point < FAR_TAIL_Q_POINT_THRESH (0.05), the raw
+        # bootstrap p5 quantile is ~0.07-0.10 due to centre-uncertainty draws but the
+        # realized frequency is ~0.003. Cap q_lcb at FAR_TAIL_LCB_FLOOR (0.003) so these
+        # bins self-reject at typical fill prices. q_point is NEVER modified; q_ucb is
+        # NEVER modified (buy_no path invariant preserved). Identity for q_point >= 0.05.
+        if q_pt < FAR_TAIL_Q_POINT_THRESH:
+            lcb = min(lcb, FAR_TAIL_LCB_FLOOR)
         q_lcb_map[bin_id] = lcb
         q_ucb_map[bin_id] = ucb
         if return_samples:
@@ -1688,13 +1885,30 @@ def _build_fused_q_bounds(
     return q_lcb_map, q_ucb_map
 
 
-def _insert_posterior(
+def _compute_posterior_payload(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
     *,
     metric: str,
     anchor_id: int,
-) -> int | None:
+) -> _PosteriorComputeResult:
+    """Pure (no-DB-write) posterior compute extracted from ``_insert_posterior``.
+
+    Runs the SAME canonical multi-model Bayes-precision fusion + fused-q shape +
+    certified bootstrap bounds the write path always ran, and returns the result
+    as a ``_PosteriorComputeResult``. It performs ZERO ``forecast_posteriors``
+    writes — only the read paths inside the fusion override (persisted single_runs
+    + walk-forward history) touch ``conn``, all read-only. The boundary is exact:
+    everything that historically lived in ``_insert_posterior`` BEFORE the INSERT
+    (the value build + the ``not live_layer -> return`` gate + the provenance
+    payload assembly) is here; the INSERT itself stays in ``_insert_posterior``.
+
+    Live-eligibility: the historical write path did ``if not live_layer: return
+    None`` (no row, no provenance). Here we instead return the struct with
+    ``live_eligible=False`` so the read-only monitor caller can tell "fresh but
+    not live-eligible" from "compute blocked"; ``_insert_posterior`` maps
+    ``not live_eligible -> None`` to keep the write contract byte-identical.
+    """
     # Wave-2 item 7 (2026-06-12): the per-city EB bias-correction of the center was
     # DELETED — settlement-refuted as a wrong-set over-correction (2026-06-09 wiring
     # audit, commit ff7f33dd5b) because it was fit on the thin live single_runs anchor
@@ -1801,6 +2015,10 @@ def _insert_posterior(
     q_ucb_map: dict[str, float] | None = None
     q_bootstrap_samples_by_bin: dict[str, list[float]] | None = None
     q_lcb_basis: str | None = None
+    # FAR-TAIL HONESTY PROVENANCE (2026-06-22): count of bins whose q_lcb was capped by the
+    # far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH). 0 = no far-tail bins / cap did
+    # not fire (identity). Stamped in provenance_payload as a plain fact of the live value.
+    _far_tail_honesty_count: int = 0
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
@@ -1842,13 +2060,22 @@ def _insert_posterior(
             # the artifact and docs/operations/c3_sigma_calibration_surface_2026-06-12.md).
             # Contract: σ-scale applies BEFORE the floor (floor stays a lower bound on the scaled σ);
             # the uniform mixture w is applied to the FINAL normalized q below (after integration).
-            # The C-only restriction is enforced by the artifact (F family unfitted → (1.0,0.0)); the
-            # explicit unit gate is kept as defense-in-depth so k can never touch an F family.
+            # Per-family licensing is the artifact's job (a REFUSED family → (1.0,0.0,0.0) inert from
+            # the lookup), so NO hardcoded settlement-unit allow-list here: every family the fitter
+            # licensed (C, and F since it crossed n>=60 → k=0.7322) applies. See
+            # _effective_unit_sigma_scale (2026-06-23 universal-correctness fix — the stale
+            # `unit != "C"` gate was suppressing the math-licensed F correction → US cities stayed
+            # flat → buy_yes leaked to deep-OTM tails instead of the predicted bin).
             _city_unit = _city_settlement_unit_from_bins(request)
-            _k, _uniform_w, _floor_steps = _replacement_sigma_scale_lookup(_city_unit)
-            if _city_unit != "C":
-                _k, _uniform_w = 1.0, 0.0  # defense-in-depth: only C families are corrected today
-            if _k > 1.0:
+            _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(_city_unit)
+            # Apply k for BOTH widening (k>1) and SHARPENING (k<1). genuine-alpha 2026-06-21:
+            # the served fused belief drifted too FLAT / over-smoothed, so the MLE now fits k<1
+            # (mode under-weighted ratio 1.63; -6.5% out-of-sample log-loss from a sharpen,
+            # forward-validated). The body is IDENTICAL — σ·k sharpens when k<1 and widens when
+            # k>1. The guard fires for any k != 1.0 (the k=1 no-op stays byte-identical). _k>0.0
+            # is defensive: _replacement_sigma_scale_lookup already clamps k>0, and a k<=0 σ is
+            # nonsensical, so a non-positive k is treated as the inert no-op.
+            if _k != 1.0 and _k > 0.0:
                 _sigma_pred = _sigma_pred * _k
                 _sigma_used = _sigma_pred
                 sigma_scale_k_applied = _k
@@ -1977,7 +2204,11 @@ def _insert_posterior(
             # after mixing, any open-ended catch-all is re-capped at its honest (predictive-sigma) mass
             # in NORMALIZED space, so neither correction can recreate the far-catch-all inflation
             # category. The mass removed by the cap is redistributed over the remaining bins (renorm).
-            if _uniform_w > 0.0 and _k >= 1.0 and _city_unit == "C":
+            # Pedestal applies under SHARPENING too (genuine-alpha 2026-06-21): the `_k >= 1.0`
+            # condition was dropped so a k<1 fit (sharpen) still gets its fitted uniform mixture
+            # w (the two are fit JOINTLY from the same artifact family entry — w lifts the flat
+            # realized tails the scaled Normal alone cannot match, independent of k's direction).
+            if _uniform_w > 0.0 and _city_unit == "C":
                 _uniform_eligible_bins = (
                     [key for key, val in q.items() if float(val) > 0.0]
                     if _day0_obs_extreme_c is not None
@@ -2092,6 +2323,22 @@ def _insert_posterior(
                 q_ucb_map = _ucb_map
                 q_bootstrap_samples_by_bin = _q_samples
                 q_lcb_basis = _QLCB_BASIS
+                # FAR-TAIL HONESTY PROVENANCE (2026-06-22): count how many bins had their
+                # q_lcb capped by the far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH
+                # and raw lcb > FAR_TAIL_LCB_FLOOR → capped to FAR_TAIL_LCB_FLOOR).
+                # This is a plain fact of the LIVE value: True (non-zero count) when at
+                # least one far-tail bin was capped; False / 0 when the data had no far-
+                # tail bins (identity for all bins). Recorded in provenance_payload below.
+                # We re-derive from the final q_lcb_map + q_point dict: a bin was capped
+                # iff its q_lcb == FAR_TAIL_LCB_FLOOR AND q_point < FAR_TAIL_Q_POINT_THRESH
+                # (the cap is min(lcb, FLOOR) so equality holds when the floor bit). A bin
+                # where q_point < THRESH but lcb was already ≤ FLOOR before the cap is also
+                # counted (the floor was effectively applied).
+                _far_tail_honesty_count = sum(
+                    1 for _bid, _lcb in _lcb_map.items()
+                    if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
+                    and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
+                )
             except Exception as _qexc:
                 q_lcb_map = None
                 q_ucb_map = None
@@ -2119,6 +2366,8 @@ def _insert_posterior(
             # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
             if q_lcb_map is None or q_ucb_map is None:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING
+            elif bayes_precision_fusion_override.method == "anchor_only_current":
+                replacement_q_mode = REPLACEMENT_Q_MODE_ANCHOR_ONLY_CURRENT
             elif bayes_precision_fusion_override.decorrelated_providers_complete:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
@@ -2268,12 +2517,18 @@ def _insert_posterior(
     # Derived from the SAME K3 completeness verdict the fusion computed (no parallel re-derivation):
     #   FULL_CURRENT     — override present AND all 5 decorrelated providers' current values served.
     #   PARTIAL_CURRENT  — override present but the decorrelated set was INCOMPLETE (count present).
-    #   STALE_HISTORY_ONLY — no fusion override at all (capture/fusion raised or current capture
-    #                        missing -> the legacy single-anchor q; no current multi-model capture).
+    #   ANCHOR_ONLY_CURRENT — BPF extras are absent/transport-limited, but the current OM9 anchor
+    #                         is served through the same Normal + bootstrap-q_lcb carrier.
+    #   STALE_HISTORY_ONLY — no current live carrier could be built.
     # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
-    if bayes_precision_fusion_override is None:
+    if (
+        bayes_precision_fusion_override is not None
+        and bayes_precision_fusion_override.method == "anchor_only_current"
+    ):
+        capture_status = REPLACEMENT_CAPTURE_STATUS_ANCHOR_ONLY_CURRENT
+    elif bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
     elif bayes_precision_fusion_override.decorrelated_providers_complete:
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
@@ -2288,8 +2543,55 @@ def _insert_posterior(
         q_ucb_map=q_ucb_map,
         q_lcb_basis=q_lcb_basis,
     )
+    # Shared provider/center provenance carried on the result either way so a
+    # read-only caller can audit belief width / honesty even when not live.
+    _mu_star = (
+        float(bayes_precision_fusion_override.anchor_value_c)
+        if bayes_precision_fusion_override is not None
+        else None
+    )
+    _pred_sigma = (
+        bayes_precision_fusion_override.predictive_sigma_c
+        if bayes_precision_fusion_override is not None
+        else None
+    )
+    _prov_complete = bool(
+        bayes_precision_fusion_override.decorrelated_providers_complete
+    ) if bayes_precision_fusion_override is not None else False
+    _prov_served = int(
+        bayes_precision_fusion_override.decorrelated_providers_served
+    ) if bayes_precision_fusion_override is not None else 0
+    _prov_expected = int(
+        bayes_precision_fusion_override.decorrelated_providers_expected
+    ) if bayes_precision_fusion_override is not None else 0
     if not live_layer:
-        return None
+        # Historical write path returned None here (no row, no provenance). The
+        # read path needs the computed values to decide; return the struct flagged
+        # not-eligible. ``_insert_posterior`` maps this to None (byte-identical).
+        return _PosteriorComputeResult(
+            live_eligible=False,
+            q=q,
+            q_lcb_map=q_lcb_map,
+            q_ucb_map=q_ucb_map,
+            mu_star=_mu_star,
+            predictive_sigma_c=(None if _pred_sigma is None else float(_pred_sigma)),
+            decorrelated_providers_complete=_prov_complete,
+            decorrelated_providers_served=_prov_served,
+            decorrelated_providers_expected=_prov_expected,
+            capture_status=capture_status,
+            replacement_q_mode=replacement_q_mode,
+            data_version=data_version,
+            source_cycle_time=source_cycle_time,
+            available_at=available_at,
+            computed_at=computed_at,
+            runtime_layer=None,
+            dependency_payload=dependency_payload,
+            dependency_hash=dependency_hash,
+            bin_topology_hash=bin_topology_hash,
+            posterior_config_hash=posterior_config_hash,
+            family_id=family_id,
+            provenance_payload=None,
+        )
     runtime_layer = LIVE_RUNTIME_LAYER
     if bayes_precision_fusion_override is not None:
         _prov_anchor_value_c = float(bayes_precision_fusion_override.anchor_value_c)
@@ -2328,6 +2630,12 @@ def _insert_posterior(
         "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
+        # FAR-TAIL q_lcb HONESTY provenance (2026-06-22): plain fact of the live value.
+        # True when >= 1 far-tail bin (q_point < FAR_TAIL_Q_POINT_THRESH) had its q_lcb
+        # capped at FAR_TAIL_LCB_FLOOR. The count is also stored for diagnostics.
+        # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
+        "q_lcb_far_tail_honesty_applied": _far_tail_honesty_count > 0,
+        "q_lcb_far_tail_honesty_bin_count": _far_tail_honesty_count,
         # Q_LCB / Q_UCB provenance. The role is BASIS-AWARE so the certified fused-center bootstrap
         # bound and any legacy fallback bound never alias: only the
         # bootstrap basis carries the calibration credential (event_reactor_adapter basis-exact
@@ -2427,8 +2735,70 @@ def _insert_posterior(
                 if bayes_precision_fusion_override.current_value_serving
                 else None
             ),
+            # Cold-start guard provenance (Finding 1, 2026-06-22): models excluded from the
+            # center because n_train < MIN_SETTLED_N.  Empty list when all models are mature
+            # (byte-identical provenance to pre-guard in that case).
+            "cold_start_excluded_models": list(bayes_precision_fusion_override.cold_start_excluded_models),
             "runtime_layer": runtime_layer,
         }
+    return _PosteriorComputeResult(
+        live_eligible=True,
+        q=q,
+        q_lcb_map=q_lcb_map,
+        q_ucb_map=q_ucb_map,
+        mu_star=_mu_star,
+        predictive_sigma_c=(None if _pred_sigma is None else float(_pred_sigma)),
+        decorrelated_providers_complete=_prov_complete,
+        decorrelated_providers_served=_prov_served,
+        decorrelated_providers_expected=_prov_expected,
+        capture_status=capture_status,
+        replacement_q_mode=replacement_q_mode,
+        data_version=data_version,
+        source_cycle_time=source_cycle_time,
+        available_at=available_at,
+        computed_at=computed_at,
+        runtime_layer=runtime_layer,
+        dependency_payload=dependency_payload,
+        dependency_hash=dependency_hash,
+        bin_topology_hash=bin_topology_hash,
+        posterior_config_hash=posterior_config_hash,
+        family_id=family_id,
+        provenance_payload=provenance_payload,
+    )
+
+
+def _insert_posterior(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    anchor_id: int,
+) -> int | None:
+    """Compute the posterior payload then INSERT it (the live write path).
+
+    Behavior-preserving wrapper around ``_compute_posterior_payload``: the value
+    build is identical (single source of truth shared with the read-only path),
+    and the historical ``not live_layer -> return None`` contract is preserved by
+    mapping a not-live-eligible compute result to ``None`` (no row written).
+    """
+    result = _compute_posterior_payload(conn, request, metric=metric, anchor_id=anchor_id)
+    if not result.live_eligible:
+        return None
+    target_date = _date_text(request.target_date)
+    data_version = result.data_version
+    source_cycle_time = result.source_cycle_time
+    available_at = result.available_at
+    computed_at = result.computed_at
+    q = result.q
+    q_lcb_map = result.q_lcb_map
+    q_ucb_map = result.q_ucb_map
+    dependency_payload = result.dependency_payload
+    dependency_hash = result.dependency_hash
+    bin_topology_hash = result.bin_topology_hash
+    posterior_config_hash = result.posterior_config_hash
+    family_id = result.family_id
+    provenance_payload = result.provenance_payload
+    runtime_layer = result.runtime_layer
     posterior_identity_hash = _json_hash(
         {
             "source_id": SOURCE_ID,
@@ -2514,6 +2884,47 @@ def _insert_posterior(
             f"{posterior_identity_hash}"
         )
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["posterior_id"])
+
+
+def compute_replacement_posterior_readonly(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+) -> _PosteriorComputeResult | None:
+    """READ-ONLY single-family replacement posterior recompute (LAYER 2).
+
+    Runs the SAME canonical multi-model Bayes-precision fusion the live write
+    path runs, against whatever single_runs are CURRENTLY persisted on ``conn``,
+    and returns the fused posterior (q point + certified q_lcb/q_ucb band + fused
+    center/spread + provider provenance) WITHOUT writing ``forecast_posteriors``.
+
+    Purpose: the monitor's held-belief read-through (2026-06-21 freeze fix). When
+    a held position's cached posterior is stale/missing, the monitor recomputes
+    the SAME-authority belief here rather than fail-closing on a frozen row or
+    substituting a cold legacy center. Fewer providers ⇒ the fusion's CI is
+    honestly wider (conservative), which is correct, not a failure.
+
+    INV-37 / connection contract: ``conn`` MUST be a forecasts-MAIN connection
+    (e.g. ``get_forecasts_connection_read_only()``) because the fusion override's
+    current-value + walk-forward readers query BARE forecast-class table names
+    (``raw_model_forecasts``, ``settlement_outcomes``, ...). This function issues
+    ZERO writes; the only DB access is the override's read paths.
+
+    Returns:
+        ``_PosteriorComputeResult`` with ``live_eligible`` set, or ``None`` when a
+        pure pre-compute guard (request well-formedness / precision guard) blocks
+        the family — an honest "cannot compute", never a fabricated belief.
+    """
+    # Pure pre-compute guards (no DB write): the same well-formedness + precision
+    # checks the write path runs FIRST. A blocked request is not an honest
+    # posterior, so report it as not-computable (None) — the caller fail-closes.
+    if _prewrite_block_reasons(request):
+        return None
+    if _precision_guard_block_reason(request):
+        return None
+    # anchor_id is consumed ONLY by the write-path identity hash (not built here),
+    # so a sentinel is safe; the read path never persists a posterior row.
+    metric = _metric(request.temperature_metric)
+    return _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
 
 
 def _build_readiness(

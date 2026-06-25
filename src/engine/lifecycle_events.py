@@ -196,7 +196,9 @@ def _nullable_bool_int(value: Any) -> int | None:
 def build_position_current_projection(position: Any) -> dict:
     _position_metric = resolve_position_metric(position)
     order_status = getattr(position, "order_status", "")
-    exit_state = str(getattr(position, "exit_state", "") or "")
+    order_status_value = getattr(order_status, "value", order_status)
+    exit_state_raw = getattr(position, "exit_state", "")
+    exit_state = str(getattr(exit_state_raw, "value", exit_state_raw) or "")
     exit_reason = str(getattr(position, "exit_reason", "") or "")
     if exit_state == "backoff_exhausted" and exit_reason:
         # position_current does not have a dedicated exit_state column. Persist
@@ -204,6 +206,11 @@ def build_position_current_projection(position: Any) -> dict:
         # restarted monitor reloads the same hold-to-settlement state instead
         # of treating dust as a fresh pending exit.
         order_status = "backoff_exhausted"
+    elif str(order_status_value or "") == "backoff_exhausted":
+        # A backoff order_status is meaningful only while the exit lifecycle is
+        # actually in backoff. Held positions repaired back to active/day0 must
+        # not keep a stale sell-failure label through later monitor refreshes.
+        order_status = "filled"
     return {
         "position_id": getattr(position, "trade_id"),
         "phase": canonical_phase_for_position(position),
@@ -589,6 +596,7 @@ def build_monitor_refreshed_canonical_write(
     exit_decision: Any | None = None,
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
+    final_exit_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
     if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
@@ -639,12 +647,17 @@ def build_monitor_refreshed_canonical_write(
             if final_exit_reason is not None
             else str(getattr(exit_decision, "reason", "") or "")
         )
+        trigger = (
+            str(final_exit_trigger)
+            if final_exit_trigger is not None
+            else str(getattr(exit_decision, "trigger", "") or "")
+        )
         payload_dict.update(
             {
                 "exit_decision_available": True,
                 "exit_decision_should_exit": should_exit,
                 "exit_decision_reason": reason,
-                "exit_decision_trigger": str(getattr(exit_decision, "trigger", "") or ""),
+                "exit_decision_trigger": trigger,
                 "exit_decision_urgency": str(getattr(exit_decision, "urgency", "") or ""),
                 "exit_decision_selected_method": str(
                     getattr(exit_decision, "selected_method", "") or ""
@@ -676,7 +689,7 @@ def build_monitor_refreshed_canonical_write(
         "command_id": None,
         "caused_by": "monitor_refresh",
         "idempotency_key": f"{trade_id}:{slug}",
-        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "venue_status": _nullable(projection.get("order_status")),
         "source_module": source_module,
         "env": _position_env(position),
         "payload_json": payload,

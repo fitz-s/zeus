@@ -2660,33 +2660,52 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
     assert time.monotonic() - started < 1.0
 
 
-def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
+def test_main_pre_submit_jit_book_provider_uses_decoupled_bounded_timeout(monkeypatch):
+    """The JIT book client must be built with an explicit connect/read Timeout
+    whose connect budget clears the measured ~2.2-2.7s cold-handshake floor while
+    connect+read stays under the outer daemon guard (corrected 2026-06-22: the old
+    coupled scalar < 1.25s timed out 118/120 cold handshakes)."""
+    import httpx
+
     import src.data.polymarket_client as polymarket_client
     import src.main as main
 
     captured = {}
 
     class FakePolymarketClient:
-        def __init__(self, *, public_http_timeout=None):
+        def __init__(self, *, public_http_timeout=None, public_http_limits=None):
             captured["public_http_timeout"] = public_http_timeout
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
+            captured["public_http_limits"] = public_http_limits
 
         def get_orderbook_snapshot(self, token_id):
             return {"hash": "book-hash", "bids": [{"price": "0.40"}], "asks": [{"price": "0.42"}]}
 
+        def warm_public_connection(self, *, timeout=None):
+            return True
+
+        def close(self):
+            pass
+
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
-    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "2.5")
+    # Realistic outer guard (production default) so a connect budget exceeding the
+    # cold-handshake floor is expressible (NOT under an artificially tight guard).
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "6.0")
 
-    provider = main._edli_pre_submit_jit_book_quote_provider()
-
-    assert provider("yes-1")["hash"] == "book-hash"
-    assert 0 < captured["public_http_timeout"] < 1.25
-    assert captured["public_http_timeout"] * 2.0 < 2.5
+    main._edli_reset_pre_submit_jit_clob_client()
+    try:
+        provider = main._edli_pre_submit_jit_book_quote_provider()
+        assert provider("yes-1")["hash"] == "book-hash"
+        t = captured["public_http_timeout"]
+        assert isinstance(t, httpx.Timeout), "JIT client must receive an explicit httpx.Timeout"
+        # Strict submit profile: the boot pre-warm + keepalive pinger keep the socket
+        # warm, so this connect budget is a fail-closed bound. httpcore double-applies
+        # connect to TCP+TLS, so 2*connect+read+write+pool must stay under outer 6.0s.
+        assert 2 * t.connect + t.read + t.write + t.pool < 6.0, (
+            f"worst-case inner budget {2 * t.connect + t.read + t.write + t.pool:.2f}s "
+            "must stay under outer guard 6.0s"
+        )
+    finally:
+        main._edli_reset_pre_submit_jit_clob_client()
 
 
 def test_main_pre_submit_inner_io_timeout_stays_inside_outer_guard(monkeypatch):

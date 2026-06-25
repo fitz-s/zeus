@@ -3,18 +3,14 @@
 # Authority basis: pipeline-contract project, operator directive 2026-06-10
 """Typed boundary contracts for the replacement-forecast pipeline file kinds.
 
-The replacement-forecast pipeline moves three distinct JSON file kinds between
+The replacement-forecast pipeline moves JSON file kinds between
 producers and consumers, and until now each kind existed only as an *implicit*
 dict convention scattered across a seed builder, a request builder, a queue
-runner, a materializer subprocess, and a new-listing scout. That implicit
-schema let a producer (the scout) write one kind's shape into another kind's
-directory: the scout wrote condition-id INTENT stubs
-``{source, condition_id, enqueued_at, reason}`` into the materializer's
-``requests/`` directory, whose consumer expects fully-resolved REQUEST
-payloads. The materializer subprocess crashed with ``KeyError`` on every
-cycle and, because the bad file was never removed, permanently consumed a
-queue slot — 772 such stubs starved all legitimate posterior production for
-~8h on 2026-06-10.
+runner, and a materializer subprocess. That implicit schema once let a
+condition-id-only payload be written into the materializer's ``requests/``
+directory, whose consumer expects fully-resolved REQUEST payloads. The
+materializer subprocess crashed with ``KeyError`` on every cycle and, because
+the bad file was never removed, permanently consumed a queue slot.
 
 That is a *category* failure, not an instance failure: any time one stage's
 output passes to the next stage and the schema contract lives only in two
@@ -43,10 +39,6 @@ Field sources of truth (derived from the ACTUAL consumers, not invented):
   ``.build_replacement_forecast_materialization_seed`` and the queue's
   ``_looks_like_seed`` consumer check.
 
-* ``SCOUT_INTENT`` — the condition-id stub the new-listing scout stages.
-  Authority: the intent dict written by ``_new_listing_scout_cycle`` in
-  ``src.main`` (~L4317).
-
 Each contract exposes:
 
 * a frozen dataclass capturing the validated, typed payload;
@@ -73,13 +65,10 @@ from typing import Mapping
 
 __all__ = [
     "ContractViolation",
-    "SCOUT_INTENT_SCHEMA_VERSION",
     "MATERIALIZATION_SEED_SCHEMA_VERSION",
     "MATERIALIZATION_REQUEST_SCHEMA_VERSION",
-    "ScoutIntent",
     "MaterializationSeed",
     "MaterializationRequest",
-    "validate_scout_intent",
     "validate_materialization_seed",
     "validate_materialization_request",
 ]
@@ -167,58 +156,6 @@ def _optional_typed_number(
         bad_type.append(f"{key}(must be number)")
         return None
     return float(value)
-
-
-# ===========================================================================
-# SCOUT_INTENT
-# ===========================================================================
-SCOUT_INTENT_SCHEMA_VERSION = "1"
-
-# Authority: src.main._new_listing_scout_cycle intent writer (~L4317).
-_SCOUT_INTENT_REQUIRED_KEYS: tuple[str, ...] = (
-    "source",
-    "condition_id",
-    "enqueued_at",
-    "reason",
-)
-
-
-@dataclass(frozen=True)
-class ScoutIntent:
-    """A condition-id-only new-listing scout stub (NOT a materialization request)."""
-
-    source: str
-    condition_id: str
-    enqueued_at: str
-    reason: str
-    schema_version: str = SCOUT_INTENT_SCHEMA_VERSION
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "source": self.source,
-            "condition_id": self.condition_id,
-            "enqueued_at": self.enqueued_at,
-            "reason": self.reason,
-        }
-
-
-def validate_scout_intent(payload: Mapping[str, object]) -> ScoutIntent:
-    """Validate a scout-intent payload; raise ContractViolation on any violation."""
-    kind = "SCOUT_INTENT"
-    if not isinstance(payload, Mapping):
-        raise ContractViolation(kind, SCOUT_INTENT_SCHEMA_VERSION, f"payload must be an object, got {type(payload).__name__}")
-    missing: list[str] = []
-    source = _require_non_empty_str(payload, "source", kind=kind, schema_version=SCOUT_INTENT_SCHEMA_VERSION, missing=missing)
-    condition_id = _require_non_empty_str(payload, "condition_id", kind=kind, schema_version=SCOUT_INTENT_SCHEMA_VERSION, missing=missing)
-    enqueued_at = _require_non_empty_str(payload, "enqueued_at", kind=kind, schema_version=SCOUT_INTENT_SCHEMA_VERSION, missing=missing)
-    reason = _require_non_empty_str(payload, "reason", kind=kind, schema_version=SCOUT_INTENT_SCHEMA_VERSION, missing=missing)
-    if missing:
-        raise ContractViolation(
-            kind,
-            SCOUT_INTENT_SCHEMA_VERSION,
-            "missing_or_empty_required_keys=" + ",".join(sorted(missing)),
-        )
-    return ScoutIntent(source=source, condition_id=condition_id, enqueued_at=enqueued_at, reason=reason)
 
 
 # ===========================================================================

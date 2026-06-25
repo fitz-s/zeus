@@ -600,9 +600,9 @@ def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
     assert "emit_families = set(all_families) - pending_families" in screen_src
     assert "if emit_families:" in screen_src
     assert "restrict_to_families=emit_families" in screen_src
-    assert "emitted = []" in screen_src
+    assert "events_to_emit = []" in screen_src
     assert screen_src.index("emit_families = set(all_families) - pending_families") < screen_src.index(
-        "trig.scan_committed_snapshots"
+        "trig.build_committed_snapshot_events"
     )
 
 
@@ -688,6 +688,51 @@ def test_unadmitted_redecision_pending_is_expired():
     assert statuses[stale.entity_key] == "expired"
     assert statuses[admitted.entity_key] == "pending"
     assert statuses[fsr.entity_key] == "pending"
+
+
+def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
+    """A just-emitted redecision must get a reactor claim window before expiry."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    fresh = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Berlin|2026-06-19|high|run-fresh",
+        source="cycle-fresh",
+        observed_at="2026-06-17T15:59:00+00:00",
+        available_at="2026-06-17T15:59:00+00:00",
+        received_at="2026-06-17T15:59:00+00:00",
+        causal_snapshot_id="snap-fresh",
+        payload=_ready_payload(
+            city="Berlin",
+            target_date="2026-06-19",
+            metric="high",
+            source_run_id="run-fresh",
+            snapshot_id="snap-fresh",
+        ),
+        priority=50,
+    )
+    store.insert_or_ignore(fresh)
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        set(),
+        decision_time="2026-06-17T16:00:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (fresh.entity_key,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("pending", None)
 
 
 def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
@@ -804,7 +849,7 @@ def test_restricted_redecision_filters_before_fairness_window():
         selected[0]["snapshot_temperature_metric"],
     )] == [("Tokyo", "2026-06-18", "low")]
 
-    src = inspect.getsource(ForecastSnapshotReadyTrigger.scan_committed_snapshots)
+    src = inspect.getsource(ForecastSnapshotReadyTrigger.build_committed_snapshot_events)
     assert src.index("rows = _filter_rows_to_restricted_families") < src.index(
         "rows = CoverageFairnessRequest"
     )
@@ -829,8 +874,18 @@ def test_held_position_families_are_monitor_inputs_for_entry_suppression(monkeyp
     }
 
 
-def test_held_position_families_do_not_enter_forecast_reemit(monkeypatch):
-    """Real held exposure is re-evaluated by monitor/exit, not entry reemit."""
+def test_held_position_families_reemit_when_forecast_phase_admits(monkeypatch):
+    """Pre-settlement held exposure re-enters full redecision for fill-up/shift."""
+
+    def _fake_market_phase_admits(*, city, target_date, metric, decision_time, market_row):
+        assert decision_time == datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc)
+        assert market_row == {}
+        return city == "Tokyo"
+
+    monkeypatch.setattr(
+        "src.strategy.market_phase.market_phase_admits",
+        _fake_market_phase_admits,
+    )
 
     assert main._edli_reemittable_held_position_family_keys(
         {
@@ -838,7 +893,7 @@ def test_held_position_families_do_not_enter_forecast_reemit(monkeypatch):
             ("Shenzhen", "2026-06-19", "high"),
         },
         decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
-    ) == set()
+    ) == {("Tokyo", "2026-06-18", "low")}
 
 
 def test_entry_redecision_families_use_forecast_phase_gate(monkeypatch):
@@ -864,16 +919,16 @@ def test_entry_redecision_families_use_forecast_phase_gate(monkeypatch):
     ) == {("Shenzhen", "2026-06-19", "high")}
 
 
-def test_redecision_screen_separates_held_monitor_from_forecast_reemit():
-    """Held monitor families must not be routed through entry redecision."""
+def test_redecision_screen_separates_entry_from_held_reemit():
+    """Held families use a separate full-redecision admission path from new entry."""
 
     screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
 
     assert "raw_entry_family_keys = screened_family_keys" in screen_src
     assert "family_keys = _edli_entry_redecision_family_keys" in screen_src
-    assert "held_reemit_families" not in screen_src
-    assert "all_families = set(family_keys) | rest_pull_families" in screen_src
-    assert "held_monitor_families=%d families_reemitted=%d" in screen_src
+    assert "held_reemit_families = _edli_reemittable_held_position_family_keys" in screen_src
+    assert "all_families = set(family_keys) | rest_pull_families | held_reemit_families" in screen_src
+    assert "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d" in screen_src
     assert "suppressed_existing_pending=%d" in screen_src
     assert "no_current_edge_or_rest_reprice_value" in inspect.getsource(
         main._edli_expire_unadmitted_redecision_pending
@@ -899,8 +954,8 @@ def test_entry_redecision_excludes_current_held_families(monkeypatch):
     assert admitted == {("Shanghai", "2026-06-19", "low")}
 
 
-def test_unvalued_pending_redecision_expires_even_when_family_is_held():
-    """Held exposure is handled by monitor/exit; it must not keep an entry redecision pending."""
+def test_unvalued_pending_redecision_is_kept_for_admitted_held_reemit_family():
+    """Held redecision admission keeps pending work alive for the full selector."""
 
     world = sqlite3.connect(":memory:")
     init_schema(world)
@@ -926,7 +981,7 @@ def test_unvalued_pending_redecision_expires_even_when_family_is_held():
 
     expired = main._edli_expire_unadmitted_redecision_pending(
         world,
-        set(),
+        {("Tokyo", "2026-06-18", "low")},
         decision_time="2026-06-17T16:00:00+00:00",
     )
 
@@ -939,11 +994,8 @@ def test_unvalued_pending_redecision_expires_even_when_family_is_held():
         """,
         (held_only.entity_key,),
     ).fetchone()
-    assert expired == 1
-    assert tuple(row) == (
-        "expired",
-        "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value",
-    )
+    assert expired == 0
+    assert tuple(row) == ("pending", None)
 
 
 def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
@@ -1047,6 +1099,52 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
     )
 
 
+def test_unready_replacement_sweep_batches_forecast_reads():
+    src = inspect.getsource(main._edli_expire_unready_forecast_snapshot_pending)
+    assert "date(source_cycle_time)" not in src
+    assert "runtime_layer = 'live'" in src
+    assert "endpoint = 'single_runs'" in src
+    assert "INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members" in src
+    assert "latest_cycle_by_family" in src
+    assert "member_count_by_family_cycle" in src
+    assert "COUNT(DISTINCT model)" in src
+
+
+def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    for city in ("Tokyo", "Paris", "Taipei"):
+        store.insert_or_ignore(
+            make_opportunity_event(
+                event_type="FORECAST_SNAPSHOT_READY",
+                entity_key=f"{city}|2026-06-25|high|rmf-2026-06-24",
+                source="cycle-test",
+                observed_at="2026-06-24T06:00:00+00:00",
+                available_at="2026-06-24T06:00:00+00:00",
+                received_at="2026-06-24T06:00:00+00:00",
+                causal_snapshot_id=f"rmf-{city}|2026-06-25|high|2026-06-24",
+                payload={
+                    "city": city,
+                    "target_date": "2026-06-25",
+                    "metric": "high",
+                    "snapshot_id": f"rmf-{city}|2026-06-25|high|2026-06-24",
+                },
+                priority=50,
+            )
+        )
+
+    assert main._edli_active_rmf_forecast_snapshot_pending_count(world, limit=2) == 2
+    assert main._edli_active_rmf_forecast_snapshot_pending_count(world, limit=10) == 3
+
+    cfg_src = inspect.getsource(main._edli_unready_fsr_prune_min_active_pending)
+    assert "reactor_unready_fsr_prune_min_active_pending" in cfg_src
+    prune_src = inspect.getsource(main._edli_prune_pending_working_set)
+    assert prune_src.index("_edli_active_rmf_forecast_snapshot_pending_count") < prune_src.index(
+        "_edli_expire_unready_forecast_snapshot_pending"
+    )
+
+
 def test_held_position_family_provider_excludes_closed_phases():
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -1086,8 +1184,8 @@ def test_held_position_family_provider_excludes_closed_phases():
     }
 
 
-def test_held_position_family_provider_excludes_market_closed_pending_exit():
-    """Closed pending-exit rows wait for settlement; they must not refresh CLOB books."""
+def test_held_position_family_provider_includes_market_closed_hold_exposure():
+    """Market-closed rows with chain exposure remain held-family redecision inputs."""
 
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -1157,6 +1255,7 @@ def test_held_position_family_provider_excludes_market_closed_pending_exit():
     )
 
     assert _held_position_families(conn) == {
+        ("Seattle", "2026-06-19", "high"),
         ("Tokyo", "2026-06-21", "low"),
         ("Paris", "2026-06-20", "low"),
     }

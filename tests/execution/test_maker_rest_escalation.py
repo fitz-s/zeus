@@ -280,6 +280,44 @@ class TestFailSoft:
         assert payload["semantic_cancel_status"] == "CANCEL_UNKNOWN"
         assert payload["requires_m5_reconcile"] is True
 
+    def test_cancel_not_canceled_is_recoverable_unknown_not_cancel_failed(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        expired = find_expired_resting_entries(conn, now=NOW)
+
+        class NotCanceledClob:
+            def cancel_order(self, _order_id: str):
+                return {
+                    "orderID": "o1",
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "order still live after cancel request",
+                }
+
+        stats = run_persisted_cancels_for_expired_rests(
+            expired,
+            NotCanceledClob(),
+            conn_factory=lambda: conn,
+            close_connections=False,
+        )
+
+        events = [
+            (row["event_type"], json.loads(row["payload_json"] or "{}"))
+            for row in conn.execute(
+                "SELECT event_type, payload_json FROM venue_command_events "
+                "WHERE command_id = 'c1' ORDER BY sequence_no"
+            )
+        ]
+        assert stats == {
+            "scanned": 1,
+            "cancelled": 0,
+            "cancel_failed": 1,
+            "cancel_journal_failed": 0,
+        }
+        assert events[-1][0] == "CANCEL_REPLACE_BLOCKED"
+        assert "CANCEL_FAILED" not in [event_type for event_type, _ in events]
+        assert events[-1][1]["semantic_cancel_status"] == "CANCEL_UNKNOWN"
+        assert events[-1][1]["requires_m5_reconcile"] is True
+
     def test_terminal_command_race_does_not_append_cancel_replace_blocked(self):
         conn = _db()
         _add_order(conn, command_id="c1", venue_order_id="o1")

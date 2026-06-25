@@ -39,6 +39,13 @@ from src.data.replacement_forecast_materializer import (
     SOURCE_ID as MAT_SOURCE_ID,
     _cycle_monotone_block_reasons,
 )
+from src.data.openmeteo_ecmwf_ifs9_anchor import (
+    HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION,
+    PRODUCT_ID as OPENMETEO_PRODUCT_ID,
+    SOURCE_ID as OPENMETEO_SOURCE_ID,
+)
+from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest
+from src.data.replacement_forecast_seed_discovery import _latest_manifest
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 
 UTC = timezone.utc
@@ -111,6 +118,79 @@ def _insert_artifact(conn: sqlite3.Connection, *, source_id: str, cycle_iso: str
     qs = ", ".join("?" for _ in values)
     conn.execute(f"INSERT INTO raw_forecast_artifacts ({names}) VALUES ({qs})", tuple(values.values()))
     conn.commit()
+
+
+def _openmeteo_manifest_for_test(
+    path: Path,
+    *,
+    cycle: datetime,
+    city: str = "Buenos Aires",
+    target_date: str = "2026-06-24",
+) -> RawForecastArtifactManifest:
+    precision = path.with_name(path.stem + ".precision.json")
+    precision.write_text("{}", encoding="utf-8")
+    return RawForecastArtifactManifest.from_file(
+        path,
+        source_id=OPENMETEO_SOURCE_ID,
+        product_id=OPENMETEO_PRODUCT_ID,
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time=cycle,
+        source_available_at=cycle + timedelta(minutes=1),
+        captured_at=cycle + timedelta(minutes=2),
+        request_url="https://single-runs-api.open-meteo.com/v1/forecast",
+        request_params={"run": cycle.isoformat()},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "city": city,
+            "target_date": target_date,
+            "city_timezone": "America/Argentina/Buenos_Aires",
+            "metric": "high",
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(path),
+            "precision_metadata_json": str(precision),
+        },
+    )
+
+
+def test_latest_manifest_rejects_corrupt_openmeteo_payload(tmp_path: Path) -> None:
+    corrupt = tmp_path / "openmeteo_Buenos_Aires_2026-06-24_high_20260624T000000Z.json"
+    corrupt.write_text('{"hourly": {}}\n}\n', encoding="utf-8")
+    valid = tmp_path / "openmeteo_Buenos_Aires_2026-06-24_high_20260624T060000Z.json"
+    valid.write_text(
+        '{"hourly": {"time": ["2026-06-24T12:00"], "temperature_2m": [10.0]}}\n',
+        encoding="utf-8",
+    )
+
+    corrupt_manifest = _openmeteo_manifest_for_test(
+        corrupt,
+        cycle=datetime(2026, 6, 24, 0, tzinfo=UTC),
+    )
+    valid_manifest = _openmeteo_manifest_for_test(
+        valid,
+        cycle=datetime(2026, 6, 24, 6, tzinfo=UTC),
+    )
+
+    selected = _latest_manifest(
+        (corrupt_manifest, valid_manifest),
+        source_id=OPENMETEO_SOURCE_ID,
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        city="Buenos Aires",
+        target_date="2026-06-24",
+        city_timezone="America/Argentina/Buenos_Aires",
+    )
+
+    assert selected is valid_manifest
+    assert (
+        _latest_manifest(
+            (corrupt_manifest,),
+            source_id=OPENMETEO_SOURCE_ID,
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            city="Buenos Aires",
+            target_date="2026-06-24",
+            city_timezone="America/Argentina/Buenos_Aires",
+        )
+        is None
+    )
 
 
 # ===========================================================================
@@ -277,7 +357,15 @@ class _FakeManifest:
         self._target_date = target_date
 
 
-def _fake_latest_manifest(manifests, *, source_id, data_version, city, target_date):
+def _fake_latest_manifest(
+    manifests,
+    *,
+    source_id,
+    data_version,
+    city,
+    target_date,
+    city_timezone=None,
+):
     """Mirror _latest_manifest's contract: newest manifest matching source_id+data_version that is
     allowed for (city, target_date), or None when no manifest matches the scope+leg. This is the
     SAME scope-filtered selection the seed builder uses — it returns None precisely when THIS
@@ -475,6 +563,135 @@ def test_day0_observed_extreme_reseed_can_replace_moved_seed_file(tmp_path) -> N
     assert row["held_position"] == 1
     assert row["seed_file"] == str(new_seed)
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
+
+
+def test_held_marker_with_moved_seed_reheals_without_day0_optin(tmp_path) -> None:
+    """LIVE FREEZE FIX (2026-06-21): a HELD position whose materialization seed was built then
+    processed/moved out of the live queue but produced NO posterior (the single_runs serving race
+    -> BLOCKED on REQUIREMENTS_NOT_MET) must be re-enqueueable WITHOUT the caller opting in via a
+    day0-observed-extreme. Otherwise the held belief freezes permanently (Panama City 2026-06-22
+    stuck at the 18:00 cycle for 13h+ -> BELIEF_AUTHORITY_FAULT fail-closed HOLD -> reversal exit
+    starved -> 'observe but not act'). Money-at-risk held rows re-heal a moved seed automatically."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    moved_seed = tmp_path / "seeds_processed" / "PanamaCity.moved.json"  # processed out of seeds/
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','PanamaCity','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is False, "held marker with a moved/missing seed must re-heal (no permanent belief freeze)"
+
+
+def test_held_marker_with_present_seed_still_suppresses(tmp_path) -> None:
+    """CHURN GUARD: a held marker whose seed file is STILL PRESENT (validly pending in the queue,
+    not yet processed) must NOT re-enqueue — only a moved/missing seed re-heals. This keeps the
+    re-heal bounded so a pending or already-materialized cycle never rebuilds seeds each tick."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    present_seed = tmp_path / "PanamaCity.pending.json"
+    present_seed.write_text("{}", encoding="utf-8")
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','PanamaCity','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
+        (target_cycle, str(present_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is True, "a held marker with a present (pending) seed must suppress re-enqueue (no churn)"
+
+
+def test_recent_held_marker_with_moved_seed_cools_down(tmp_path) -> None:
+    """COOLDOWN GUARD: a moved held seed is re-healable, but not every 5-minute poll tick.
+
+    This prevents one transient materialization failure from flooding seeds/failed with identical
+    same-scope same-cycle work. A genuinely old marker still heals; Day0 observation-version
+    advancement has its own immediate bypass.
+    """
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    moved_seed = tmp_path / "seeds_processed" / "PanamaCity.moved.json"
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('2999-06-21T06:05:00+00:00','PanamaCity','2026-06-22','high',
+                   '2026-06-20T18:00:00+00:00', ?, 1, ?, NULL)""",
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is True, "recent moved held seed must cool down before re-enqueue"
+
+    conn.execute(
+        "UPDATE cycle_advance_enqueues SET enqueued_at='2000-06-21T05:00:00+00:00'"
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is False, "old moved held seed must re-heal after cooldown"
+
+
+def test_nonheld_marker_with_moved_seed_still_suppresses(tmp_path) -> None:
+    """SCOPE GUARD: the auto re-heal is for MONEY-AT-RISK held rows only. A non-held marker with a
+    moved seed keeps the prior behavior (suppress) unless the caller explicitly opts in via
+    allow_missing_seed_file_reenqueue — the held auto-heal must not silently widen non-held churn."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    moved_seed = tmp_path / "gone" / "CityX.moved.json"
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','CityX','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 0, ?, NULL)""",
+        (target_cycle, str(moved_seed)),
+    )
+    conn.commit()
+    assert cycle_advance._already_enqueued(
+        conn, city="CityX", target_date="2026-06-22", metric="high",
+        target_cycle_iso=target_cycle,
+    ) is True, "non-held marker with a moved seed must keep prior suppress behavior"
+
+
+def test_record_enqueue_replaces_moved_seed_for_held_position() -> None:
+    """A held re-enqueue must REPLACE an existing seed-built marker (the moved/BLOCKED row), not be
+    ignored as ALREADY_ENQUEUED. Without auto-replace for held rows the re-heal in _already_enqueued
+    cannot complete (INSERT OR IGNORE no-ops and the default UPDATE only heals a NULL-seed gap)."""
+    conn = _conn()
+    target_cycle = "2026-06-21T06:00:00+00:00"
+    conn.execute(
+        """INSERT INTO cycle_advance_enqueues
+           (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
+            held_position, seed_file, reason)
+           VALUES ('t','PanamaCity','2026-06-22','high','2026-06-20T18:00:00+00:00', ?, 1,
+                   'PanamaCity.old.json', NULL)""",
+        (target_cycle,),
+    )
+    conn.commit()
+    replaced = cycle_advance._record_enqueue(
+        conn, city="PanamaCity", target_date="2026-06-22", metric="high",
+        consumed_cycle_iso="2026-06-20T18:00:00+00:00", target_cycle_iso=target_cycle,
+        held_position=True, seed_file="PanamaCity.new.json", reason=None,
+    )
+    conn.commit()
+    assert replaced is True, "a held re-enqueue must replace the prior seed-built marker row"
+    row = conn.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues WHERE city='PanamaCity'"
+    ).fetchone()
+    assert row["seed_file"] == "PanamaCity.new.json", "the marker must carry the fresh seed"
 
 
 def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypatch) -> None:

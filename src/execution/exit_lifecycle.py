@@ -154,6 +154,36 @@ def _emit_typed_realized_fill(
 
 MAX_EXIT_RETRIES = 10
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
+# Transient submit-channel gap: retry ~each monitor cycle and NEVER give up, so a
+# correct reversal exit sells once the channel recovers instead of being abandoned.
+CHANNEL_NOT_READY_COOLDOWN_SECONDS = 120
+
+
+def _is_channel_not_ready_error(error: str) -> bool:
+    """True for TRANSIENT submit-channel-not-ready conditions where the position
+    is still sellable once the channel recovers — a user-channel WS disconnect
+    (``ws_gap...m5_reconcile_required``) or a transient CLOB read. These must NOT
+    consume the bounded exit-retry budget that terminates in
+    ``backoff_exhausted`` → admin-close: a correct reversal exit has to keep
+    retrying until a bid can be hit, not be abandoned over a brief gap (operator:
+    react to reversal, sell before the market notices).
+
+    EXCLUDES genuinely terminal / unsellable conditions — ``market_end`` (the
+    market closed; it settles), no ``bid-side`` liquidity, and sub-min
+    ``min_order_size`` dust — which keep the existing fail-closed budget path so
+    they are not retried forever. (2026-06-23 exit-execution diagnosis.)
+    """
+    if not error:
+        return False
+    e = error.lower()
+    if "market_end" in e or "min_order_size" in e or "bid-side" in e:
+        return False
+    return (
+        ("ws_gap=" in e and "m5_reconcile_required=true" in e)
+        or "clob_market_info" in e
+        or "venue_read_transient" in e
+        or "transientvenueread" in e
+    )
 PENDING_EXIT_REPRICE_MIN_TICKS = 2
 
 EXIT_EVENT_VOCABULARY = (
@@ -542,32 +572,158 @@ def _mark_pending_exit(position: Position) -> None:
     )
 
 
-def mark_market_closed_awaiting_settlement(
+def mark_market_closed_hold_to_settlement(
     position: Position,
     *,
     reason: str = "MARKET_CLOSED_AWAITING_SETTLEMENT",
     error: str = "market_closed_non_accepting_orders",
     conn: sqlite3.Connection | None = None,
 ) -> None:
-    """Stop live exit retry for a market that can no longer accept orders.
+    """Record a market-closed hold without manufacturing a sell failure.
 
     Once the market is closed, quote freshness is no longer a solvable exit
-    precondition. The position must remain in the settlement lane instead of
-    re-entering stale-price retry loops.
+    precondition. That is a held-to-settlement monitor fact, not an
+    EXIT_ORDER_REJECTED event: no sell was submitted, no venue order failed,
+    and the position must keep flowing through held-position redecision and
+    settlement harvesting.
     """
 
-    _mark_pending_exit(position)
-    position.exit_state = "backoff_exhausted"
+    position.state = LifecyclePhase.DAY0_WINDOW.value
+    position.pre_exit_state = ""
+    position.exit_state = ""
     position.next_exit_retry_at = ""
-    position.exit_reason = reason
-    position.last_exit_error = error[:500]
-    _dual_write_canonical_pending_exit_if_available(
+    position.exit_retry_count = 0
+    order_status = getattr(position, "order_status", "")
+    order_status = getattr(order_status, "value", order_status)
+    if str(order_status or "") in {
+        "backoff_exhausted",
+        "retry_pending",
+        "sell_pending",
+        "sell_placed",
+    }:
+        position.order_status = "filled"
+    position.exit_reason = ""
+    position.last_exit_error = f"{reason}:{error}"[:500]
+    validations = list(getattr(position, "applied_validations", []) or [])
+    if reason not in validations:
+        validations.append(reason)
+    position.applied_validations = validations
+    _dual_write_market_closed_hold_if_available(
         conn,
         position,
         reason=reason,
         error=error,
-        event_type="EXIT_ORDER_REJECTED",
     )
+
+
+def _dual_write_market_closed_hold_if_available(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    reason: str,
+    error: str,
+) -> bool:
+    """Persist a no-transition Day0 monitor hold for closed markets."""
+
+    if conn is None:
+        return False
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return False
+    try:
+        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+        from src.state.db import append_many_and_project
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        position.last_monitor_at = occurred_at
+        events, projection = build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_after=LifecyclePhase.DAY0_WINDOW.value,
+            source_module="src.execution.exit_lifecycle",
+        )
+        event = dict(events[0])
+        payload = json.loads(str(event.get("payload_json") or "{}"))
+        payload.update(
+            {
+                "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                "hold_reason": reason,
+                "market_closed_error": error,
+                "exit_order_submitted": False,
+                "exit_failure": False,
+            }
+        )
+        event["event_id"] = f"{trade_id}:market_closed_hold:{sequence_no}"
+        event["caused_by"] = "market_closed_hold_to_settlement"
+        event["occurred_at"] = occurred_at
+        event["venue_status"] = None
+        event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
+        projection["updated_at"] = occurred_at
+        projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
+        projection["order_status"] = getattr(position, "order_status", "") or "filled"
+        projection["exit_reason"] = ""
+        projection["exit_retry_count"] = 0
+        projection["next_exit_retry_at"] = ""
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle
+        logger.warning(
+            "market closed hold projection failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
+def release_market_closed_pending_exit_hold(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Repair legacy market-closed pending_exit rows back into held Day0 state.
+
+    This is deliberately narrow: only rows that were stranded by the old
+    MARKET_CLOSED_AWAITING_SETTLEMENT projection, still have chain-confirmed
+    shares, and have no EXIT venue command are repaired. Genuine dust/backoff
+    exit failures stay in the exit lifecycle lane.
+    """
+
+    if _runtime_state_value(position) != "pending_exit":
+        return False
+    exit_state = getattr(position, "exit_state", "")
+    exit_state = getattr(exit_state, "value", exit_state)
+    if str(exit_state or "") != "backoff_exhausted":
+        return False
+    if str(getattr(position, "exit_reason", "") or "") != "MARKET_CLOSED_AWAITING_SETTLEMENT":
+        return False
+    chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
+    if chain_shares is None or chain_shares <= 0:
+        return False
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands
+             WHERE position_id = ?
+               AND intent_kind = 'EXIT'
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is not None:
+        return False
+    mark_market_closed_hold_to_settlement(
+        position,
+        reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        error="legacy_pending_exit_projection_repaired",
+        conn=conn,
+    )
+    return True
 
 
 def _release_pending_exit(position: Position) -> None:
@@ -2747,6 +2903,7 @@ def check_pending_exits(
             stats["retried"] += 1
             continue
 
+        _commit_before_exit_venue_io(conn, stage="pending_exit_status_poll")
         status, status_payload = _check_order_fill(clob, exit_order_id)
         if conn is not None:
             if status:
@@ -2904,6 +3061,7 @@ def check_pending_exits(
                     stats["unchanged"] += 1
             else:
                 token_id = _asset_id_for_position(pos)
+                _commit_before_exit_venue_io(conn, stage="pending_exit_reprice")
                 if _cancel_stale_pending_exit_for_reprice(
                     conn=conn,
                     position=pos,
@@ -3243,6 +3401,30 @@ def _mark_exit_retry(
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
+
+    if _is_channel_not_ready_error(error):
+        # Transient channel gap: do NOT consume the bounded retry budget toward
+        # backoff_exhausted/admin-close. Keep the exit alive and retrying on a
+        # short fixed cooldown so it sells once the channel recovers, rather than
+        # abandoning a still-sellable reversal exit. (2026-06-23 diagnosis.)
+        position.last_exit_error = error[:500]
+        position.exit_state = "retry_pending"
+        position.next_exit_retry_at = (
+            _utcnow() + timedelta(seconds=CHANNEL_NOT_READY_COOLDOWN_SECONDS)
+        ).isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+        )
+        logger.info(
+            "EXIT CHANNEL-NOT-READY %s: %s (budget NOT consumed; next retry %s)",
+            position.trade_id, reason, position.next_exit_retry_at,
+        )
+        return
+
     position.exit_retry_count += 1
     position.last_exit_error = error[:500]
 

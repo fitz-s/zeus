@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-20
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-06-24
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -2469,6 +2469,48 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
 
+    def test_maker_rest_cancel_pending_live_order_restores_acked(self, conn, mock_client):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-maker-live")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "venue_order_id": "vord-maker-live",
+                "source": "maker_rest_escalation",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "vord-maker-live",
+            "status": "LIVE",
+            "matched_size": "0",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-2]["event_type"] == "CANCEL_REPLACE_BLOCKED"
+        assert events[-1]["event_type"] == "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+        cancel_payload = json.loads(events[-2]["payload_json"])
+        clear_payload = json.loads(events[-1]["payload_json"])
+        assert cancel_payload["semantic_cancel_status"] == "CANCEL_UNKNOWN"
+        assert cancel_payload["requires_m5_reconcile"] is True
+        assert clear_payload["proof_class"] == "cancel_unknown_venue_order_live"
+
     def test_acked_terminal_no_fill_order_fact_expires_command_and_voids_pending_entry(
         self,
         conn,
@@ -3123,6 +3165,68 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("1.7")
         assert Decimal(str(current["entry_price"])) == Decimal("0.34")
         assert current["order_status"] == "filled"
+
+    def test_exit_point_order_matched_uses_sell_making_amount_as_share_size(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, intent_kind="EXIT", side="SELL", size=15.5, price=0.7)
+        _advance_to_acked(conn, venue_order_id="ord-sell-matched")
+        _append_order_fact(
+            conn,
+            order_id="ord-sell-matched",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="15.5",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-sell-matched",
+            "status": "MATCHED",
+            "makingAmount": "15.5",
+            "takingAmount": "10.85",
+            "associate_trades": ["trade-sell-matched"],
+            "transactionsHashes": ["0xhash-sell-matched"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "15.5",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-sell-matched",
+            "venue_order_id": "ord-sell-matched",
+            "state": "MATCHED",
+            "filled_size": "15.5",
+            "fill_price": "0.7",
+            "tx_hash": "0xhash-sell-matched",
+        }
 
     def test_matched_order_recovery_finalizes_when_venue_normalizes_size_below_command(
         self,
@@ -6297,7 +6401,7 @@ class TestRecoveryResolutionTable:
             "order_status": "partial",
         }
 
-    def test_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
+    def test_partial_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
         self,
         conn,
         mock_client,
@@ -6334,7 +6438,7 @@ class TestRecoveryResolutionTable:
             order_id="ord-exit",
             trade_id="trade-exit-001",
             state="MATCHED",
-            filled_size="23.7",
+            filled_size="10.85",
             fill_price="0.04",
         )
 
@@ -6842,11 +6946,11 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "pending_exit",
+            "phase": "economically_closed",
             "shares": 6.0,
             "cost_basis_usd": 1.86,
-            "order_id": "ord-exit",
-            "order_status": "sell_pending_confirmation",
+            "order_id": "ord-entry",
+            "order_status": "sell_filled",
         }
         lifecycle_events = conn.execute(
             """
@@ -6857,14 +6961,13 @@ class TestRecoveryResolutionTable:
             """
         ).fetchall()
         assert dict(lifecycle_events[-1]) == {
-            "event_type": "EXIT_ORDER_POSTED",
+            "event_type": "EXIT_ORDER_FILLED",
             "phase_before": "pending_exit",
-            "phase_after": "pending_exit",
+            "phase_after": "economically_closed",
             "order_id": "ord-exit",
             "command_id": "cmd-exit",
-            "venue_status": "MATCHED",
+            "venue_status": "sell_filled",
         }
-        assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
 
     def test_exit_matched_trade_fact_repairs_existing_event_torn_projection(
         self,
@@ -6943,9 +7046,9 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "pending_exit",
-            "order_id": "ord-exit",
-            "order_status": "sell_pending_confirmation",
+            "phase": "economically_closed",
+            "order_id": "ord-entry",
+            "order_status": "sell_filled",
         }
         event_count = conn.execute(
             """
@@ -7260,6 +7363,33 @@ class TestRecoveryResolutionTable:
         assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         assert _get_state(conn, "cmd-001") == "EXPIRED"
 
+    def test_partial_remainder_matched_point_order_routes_to_review_required(
+        self,
+        conn,
+        mock_client,
+    ):
+        # GATE #84 follow-up (2026-06-22): a PARTIAL remainder absent from open
+        # orders whose point order reports MATCHED means the remainder filled at the
+        # venue but the fill fact has not yet arrived. MATCHED is not a terminal
+        # no-fill status (it carries a live/fill record), so before the fix this
+        # looped "staying" forever and the PARTIALLY_MATCHED order fact kept the
+        # family's entry lane blocked (unexpired_family_rest=True; live market
+        # 2625913, 2026-06-22). It must route to REVIEW_REQUIRED for fill-fact
+        # reconciliation, identical to the FILLED case.
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_order.return_value = {"orderID": "ord-partial", "status": "MATCHED"}
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert "REVIEW_REQUIRED" in [e["event_type"] for e in _get_events(conn, "cmd-001")]
+
     def test_partial_remainder_without_point_reader_fails_closed(
         self,
         conn,
@@ -7354,6 +7484,86 @@ def _seed_edli_reconciled_absence(
         payload=payload,
         occurred_at=occurred_at,
     )
+
+
+def _seed_edli_stalled_attempt_with_reserved_cap(
+    conn,
+    *,
+    aggregate_id="agg-ack-stalled",
+    event_id="edli-event-ack-stalled",
+    final_intent_id="edli-intent-ack-stalled",
+    execution_command_id="edli-exec-ack-stalled",
+    token_id="tok-ack-stalled",
+    usage_id="cap-ack-stalled",
+):
+    plan_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "token_id": token_id,
+        "condition_id": "condition-ack-stalled",
+        "direction": "buy_yes",
+    }
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload=plan_payload,
+        occurred_at="2026-04-26T00:00:00Z",
+    )
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload=plan_payload,
+        occurred_at="2026-04-26T00:00:01Z",
+    )
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="VenueSubmitAttempted",
+        payload=plan_payload,
+        occurred_at="2026-04-26T00:00:02Z",
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        )
+        SELECT ?, ?, ?, 'VENUE_SUBMIT_ATTEMPTED',
+               3, 'VenueSubmitAttempted', event_hash,
+               0, NULL, '2026-04-26T00:00:02Z', 1
+        FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_sequence = 3
+        """,
+        (aggregate_id, event_id, final_intent_id, aggregate_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (?, ?, '2026-04-26T00:00:00Z', 'tiny_live_canary',
+                  5.0, 1, 5.0, 1, 'RESERVED', ?, ?, '2026-04-26T00:00:00Z', 1)
+        """,
+        (usage_id, event_id, final_intent_id, execution_command_id),
+    )
+    return {
+        "aggregate_id": aggregate_id,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "token_id": token_id,
+        "usage_id": usage_id,
+    }
 
 
 def _seed_unknown_side_effect_with_decision(conn, *, command_id, decision_id, token_id):
@@ -7544,6 +7754,67 @@ class TestEdliAbsenceVenueCommandSync:
 
         assert summary["venue_command_absence_sync"]["advanced"] == 0
         assert _get_state(conn, "cmd-token-mismatch") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+
+    def test_acked_command_sync_consumes_stalled_edli_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        seeded = _seed_edli_stalled_attempt_with_reserved_cap(conn)
+        _insert(
+            conn,
+            command_id="cmd-acked-edli-stall",
+            decision_id=seeded["execution_command_id"],
+            token_id=seeded["token_id"],
+            side="BUY",
+            price=0.01,
+            size=569.08,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-acked-edli-stall",
+            venue_order_id="0xackedvenueorder",
+        )
+
+        _venue_read_unavailable_client(mock_client)
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_acknowledged_venue_command_sync"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        cap = conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()
+        assert cap["reservation_status"] == "CONSUMED"
+        projection = conn.execute(
+            """
+            SELECT current_state, last_event_type, venue_order_id, pending_reconcile
+            FROM edli_live_order_projection
+            WHERE aggregate_id = ?
+            """,
+            (seeded["aggregate_id"],),
+        ).fetchone()
+        assert dict(projection) == {
+            "current_state": "CAP_TRANSITIONED",
+            "last_event_type": "CapTransitioned",
+            "venue_order_id": "0xackedvenueorder",
+            "pending_reconcile": 0,
+        }
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                FROM edli_live_order_events
+                WHERE aggregate_id = ?
+                ORDER BY event_sequence
+                """,
+                (seeded["aggregate_id"],),
+            ).fetchall()
+        ]
+        assert event_types[-2:] == ["VenueSubmitAcknowledged", "CapTransitioned"]
 
 
 # ---------------------------------------------------------------------------

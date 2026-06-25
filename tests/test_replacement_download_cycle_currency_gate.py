@@ -85,8 +85,32 @@ def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
     import scripts.download_replacement_forecast_current_targets as dl
     import src.data.replacement_forecast_current_target_plan as plan_mod
 
+    def _plan_builder(db, *args, **kwargs):
+        required_cycle = kwargs.get("required_openmeteo_source_cycle_time")
+        if required_cycle is None:
+            return plan
+        conn = sqlite3.connect(db)
+        try:
+            row = conn.execute(
+                "SELECT MAX(source_cycle_time) FROM raw_forecast_artifacts "
+                "WHERE source_id = 'openmeteo_ecmwf_ifs_9km'"
+            ).fetchone()
+        finally:
+            conn.close()
+        max_cycle = None if row is None else row[0]
+        required_iso = required_cycle.isoformat() if hasattr(required_cycle, "isoformat") else str(required_cycle)
+        if max_cycle is None or str(max_cycle) < required_iso:
+            return _PlanStub(
+                ready=False,
+                missing_openmeteo_manifest_count=1,
+                payload={"status": "CURRENT_TARGETS_MISSING_CURRENT_CYCLE_MANIFESTS"},
+            )
+        return plan
+
     monkeypatch.setattr(
-        plan_mod, "build_replacement_forecast_current_target_plan", lambda _db: plan
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        _plan_builder,
     )
     # Run-selection single authority (2026-06-11): the production job resolves the
     # available cycle via provider probes, never the dead now-minus-lag guess.
@@ -190,6 +214,51 @@ def test_have_raw_manifests_gate_is_also_cycle_aware(tmp_path, monkeypatch) -> N
     assert len(calls) == 1
 
 
+def test_partial_current_cycle_manifests_do_not_skip_download(tmp_path, monkeypatch) -> None:
+    # Live 2026-06-24 shape: the artifact high-water mark reached the available
+    # cycle because a few targets wrote 12Z manifests, while most current targets
+    # still only had older-cycle manifests. The skip gate must ask the plan for
+    # current-cycle coverage, not use a non-cycle-aware manifest count.
+    db = _make_db(tmp_path, {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO})
+    calls: list = []
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    stale_non_cycle_plan = _PlanStub(
+        ready=False,
+        missing_openmeteo_manifest_count=0,
+        payload={"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS_STALE"},
+    )
+    current_cycle_plan = _PlanStub(
+        ready=False,
+        missing_openmeteo_manifest_count=1,
+        payload={"status": "CURRENT_TARGETS_MISSING_CURRENT_CYCLE_MANIFESTS"},
+    )
+
+    def _plan_builder(_db, *args, **kwargs):
+        if kwargs.get("required_openmeteo_source_cycle_time") is not None:
+            return current_cycle_plan
+        return stale_non_cycle_plan
+
+    monkeypatch.setattr(plan_mod, "build_replacement_forecast_current_target_plan", _plan_builder)
+    monkeypatch.setattr(production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE)
+
+    def _fake_download(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "cycle": kwargs["cycle"].isoformat(),
+        }
+
+    monkeypatch.setattr(dl, "download_current_target_raw_inputs", _fake_download)
+    report = _download_replacement_forecast_current_targets_if_needed(_cfg(db, tmp_path))
+
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    assert calls[0].get("include_covered") is True
+
+
 def test_disabled_flag_still_short_circuits(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {})
     calls: list = []
@@ -218,3 +287,16 @@ def test_stale_cycle_download_includes_covered_targets(tmp_path, monkeypatch) ->
         "a stale-cycle download must fetch raw inputs for ALL current targets — filtering "
         "to uncovered rows self-perpetuates staleness (coverage never implies currency)"
     )
+
+
+def test_existing_corrupt_openmeteo_payload_is_not_reused(tmp_path: Path) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    payload = tmp_path / "openmeteo_Buenos_Aires_2026-06-24_high_20260624T000000Z.json"
+    payload.write_text('{"hourly": {}}\n}\n', encoding="utf-8")
+
+    assert dl._json_file_valid(payload) is False
+
+    dl._write_json(payload, {"hourly": {"time": [], "temperature_2m": []}})
+
+    assert dl._json_file_valid(payload) is True

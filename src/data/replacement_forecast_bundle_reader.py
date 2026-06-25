@@ -30,20 +30,21 @@ from src.data.replacement_forecast_readiness import (
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
-# Operator clobber-category directive 2026-06-10 — live-latest read semantics.
-# The bounds-less clobber: a NEWER model cycle that has anchor manifests but no fusion
-# instruments yet materializes a bounds-less posterior (q_lcb_json NULL,
-# replacement_q_mode=BAYES_PRECISION_FUSION_CAPTURE_MISSING — a diagnostic row). The
-# absolute-latest read semantics (ORDER BY computed_at DESC) must not serve that diagnostic row over
-# the still-current live FUSED row, collapsing live eligibility for the whole scope.
+# Operator clobber-category directive 2026-06-10 — live executable read semantics.
+# A newer capture can materialize a non-executable posterior before the full fusion
+# certificate is present (q_lcb_json NULL or a non-live q carrier). Absolute latest
+# read semantics must not serve that row over a certified live FUSED row and collapse
+# live eligibility for the whole scope.
 # This is the THIRD recurrence; the seed-coverage antibody only fixed the masking side.
 #
 # A posterior is live-grade iff the row itself is in runtime_layer == "live",
 # carries certified bounds (q_lcb_json/q_ucb_json NOT NULL), and its provenance
-# replacement_q_mode is one of the fused-Normal modes. Mirrored here so LIVE
+# replacement_q_mode is one of the fused Normal carrier modes. Mirrored here so LIVE
 # selection can prefer the latest live row WITHOUT importing the adapter
 # (no cycle); the constant set is asserted equal in a relationship test.
-_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset({"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"})
+_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
+    {"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"}
+)
 
 # H3 (REAUDIT_0_1.md §2): fail-closed staleness horizon. ``readiness.expires_at``
 # was loaded but NEVER compared to decision_time; a forecast cycle this many hours
@@ -230,6 +231,16 @@ def _row_is_live_grade(row_map: Mapping[str, Any]) -> bool:
     if not isinstance(mode, str) or not mode:
         return False
     return mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
+
+
+def _readiness_posterior_id(readiness: ReplacementForecastReadinessDecision) -> int | None:
+    dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")
+    if dependency is None:
+        return None
+    try:
+        return int(dependency.get("posterior_id") or -1)
+    except (TypeError, ValueError):
+        return None
 
 
 def _canonical_json(value: object) -> str:
@@ -516,8 +527,15 @@ def read_replacement_forecast_bundle(
             decision_utc.isoformat(),
         )
 
-    # Live read semantics: execution binds only rows explicitly materialized into the live layer.
-    candidate_rows = conn.execute(
+    readiness_bound_posterior_id = _readiness_posterior_id(readiness)
+    if readiness_bound_posterior_id is None:
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
+
+    # Live read semantics: execution binds the exact posterior certified by readiness.
+    # Forecast posteriors are append-only; a later same-scope row can appear before its
+    # readiness certificate is durable. Serving that later row with an older readiness
+    # creates a false mismatch and blocks profitable candidates.
+    latest_row = conn.execute(
         """
         SELECT * FROM forecast_posteriors
         WHERE city = ?
@@ -529,33 +547,54 @@ def read_replacement_forecast_bundle(
           AND training_allowed = 0
           AND runtime_layer = ?
         ORDER BY computed_at DESC, posterior_id DESC
-        LIMIT 16
+        LIMIT 1
         """,
         (city, target_date_text, metric, SOURCE_ID, PRODUCT_ID, data_version, LIVE_RUNTIME_LAYER),
-    ).fetchall()
-    if not candidate_rows:
+    ).fetchone()
+    if latest_row is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_MISSING")
-    latest_row_map = dict(candidate_rows[0])
-    live_row_map: dict | None = None
-    for candidate in candidate_rows:
-        candidate_map = dict(candidate)
-        if _row_is_live_grade(candidate_map):
-            live_row_map = candidate_map
-            break
-    if live_row_map is None:
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_LIVE_MISSING")
-    row_map = live_row_map
+    latest_row_map = dict(latest_row)
+    certified_row = conn.execute(
+        """
+        SELECT * FROM forecast_posteriors
+        WHERE posterior_id = ?
+          AND city = ?
+          AND target_date = ?
+          AND temperature_metric = ?
+          AND source_id = ?
+          AND product_id = ?
+          AND data_version = ?
+          AND training_allowed = 0
+          AND runtime_layer = ?
+        LIMIT 1
+        """,
+        (
+            readiness_bound_posterior_id,
+            city,
+            target_date_text,
+            metric,
+            SOURCE_ID,
+            PRODUCT_ID,
+            data_version,
+            LIVE_RUNTIME_LAYER,
+        ),
+    ).fetchone()
+    if certified_row is None:
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
+    row_map = dict(certified_row)
+    if not _row_is_live_grade(row_map):
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
     # Fallback case: we are serving an OLDER live row because a NEWER non-live
-    # row sits on top. The scope readiness (per-scope upsert) now points at that newer diagnostic
+    # row sits on top. The scope readiness (per-scope upsert) now points at that newer non-executable
     # row, so the readiness/dependency-agreement gates below must be re-anchored to the SERVED
     # row's OWN intrinsic provenance (immutable, validated at its materialization) rather than
     # to the overwritten scope readiness. We still enforce EVERY intrinsic-integrity gate on the
     # served row (staleness, intermediate-cycle, topology-to-current-market, identity hashes).
     _served_via_tradeable_fallback = (
-        live_row_map is not None
-        and int(row_map["posterior_id"]) != int(latest_row_map["posterior_id"])
+        int(row_map["posterior_id"]) != int(latest_row_map["posterior_id"])
+        and not _row_is_live_grade(latest_row_map)
     )
-    _newer_diagnostic_posterior_id = (
+    _newer_non_executable_posterior_id = (
         int(latest_row_map["posterior_id"]) if _served_via_tradeable_fallback else None
     )
     if _parse_utc(str(row_map["source_available_at"]), field_name="source_available_at") > decision_utc:
@@ -593,7 +632,7 @@ def read_replacement_forecast_bundle(
     dependency_json = _json_mapping(row_map["dependency_source_run_ids_json"], field_name="dependency_source_run_ids_json")
     if _served_via_tradeable_fallback:
         # Re-anchor the certification to the SERVED live row's intrinsic provenance. The
-        # scope readiness was overwritten in place by the newer diagnostic cycle's materialization
+        # scope readiness was overwritten in place by the newer non-executable cycle's materialization
         # (readiness_state upserts on scope_key — no cycle in the key), so it no longer points at
         # this row. The served row is self-certifying: it was materialized WITH its own READY
         # readiness (a BAYES_PRECISION_FUSION/bounds-less row is never live-grade), and it carries its own
@@ -602,14 +641,11 @@ def read_replacement_forecast_bundle(
         # readiness's), and we DO NOT require the scope readiness to point at this posterior.
         # Every intrinsic-integrity gate (staleness, intermediate-cycle, topology-to-market,
         # identity-hash presence) has already run / still runs against this served row, so the
-        # no-bypass guarantee is preserved — only the (stale) readiness pointer is relaxed.
+        # no-bypass guarantee is preserved — only the stale readiness pointer is relaxed.
         intrinsic_baseline = dependency_json.get("baseline_b0")
         if isinstance(intrinsic_baseline, str) and intrinsic_baseline:
             baseline_run_id = intrinsic_baseline
     else:
-        posterior_dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")
-        if posterior_dependency is None or int(posterior_dependency.get("posterior_id") or -1) != int(row_map["posterior_id"]):
-            return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
         baseline_dependency = _readiness_dependency_by_role(readiness, "baseline_b0")
         if baseline_dependency is None or baseline_dependency.get("source_run_id") != baseline_run_id:
             return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_BASELINE_READINESS_MISMATCH")
@@ -647,7 +683,7 @@ def read_replacement_forecast_bundle(
             **provenance,
             "tradeable_latest_selection": {
                 "served_posterior_id": int(row_map["posterior_id"]),
-                "newer_diagnostic_posterior_id": _newer_diagnostic_posterior_id,
+                "newer_non_executable_posterior_id": _newer_non_executable_posterior_id,
                 "reason": "newer_row_not_live_grade_served_older_live_bounds",
             },
         }

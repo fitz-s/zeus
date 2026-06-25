@@ -416,6 +416,29 @@ def test_boot_helper_silent_when_only_safe_strategy_enabled(monkeypatch):
     cp._control_state.update(original_state)
 
 
+def test_boot_helper_does_not_import_cycle_runner(monkeypatch):
+    """Boot guard must not import the full trading engine before scheduler startup."""
+    import builtins
+    import src.control.control_plane as cp
+    import src.main as main_mod
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "src.engine.cycle_runner":
+            raise AssertionError("boot strategy guard must not import cycle_runner")
+        return original_import(name, globals, locals, fromlist, level)
+
+    original_state = dict(cp._control_state)
+    monkeypatch.setattr(cp, "_control_state", {})
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    try:
+        main_mod._assert_live_safe_strategies_or_exit(refresh_state=False)
+    finally:
+        cp._control_state.clear()
+        cp._control_state.update(original_state)
+
+
 def test_boot_helper_with_cold_cache_under_post_a4_single_source(monkeypatch):
     """Cold cache + post-A4 single-source registry: silent boot.
 

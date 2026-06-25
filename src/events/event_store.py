@@ -15,6 +15,7 @@ import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 
+from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.opportunity_event import OpportunityEvent
 
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
@@ -68,6 +69,13 @@ def _no_value_refutation_event_types_compatible(
     if active == "DAY0_EXTREME_UPDATED":
         return regret == "DAY0_EXTREME_UPDATED"
     return bool(active and regret and active == regret)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -195,7 +203,6 @@ class EventStore:
         """
 
         self._require_world_event_tables()
-        from src.events.event_priority import claim_tier_expr_sql
 
         parsed_decision_time = _parse_utc(decision_time)
         stale_processing_before = (
@@ -205,11 +212,6 @@ class EventStore:
         # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
         # clause so shadow-only day0 events fall to Tier 2 — strictly below the
         # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
-        # The bare tier CASE expression (no ASC) — used as a SELECT column so the
-        # per-city round-robin window can PARTITION by tier, and reused as the
-        # outer ORDER BY tier key. One authority (claim_tier_expr_sql); the legacy
-        # ORDER-BY-only form (claim_tier_case_sql) appends ASC to this same string.
-        _claim_tier_expr = claim_tier_expr_sql(day0_is_tradeable=day0_is_tradeable)
         # PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput incident).
         #
         # THE CATEGORY THIS MAKES UNCONSTRUCTABLE
@@ -237,125 +239,96 @@ class EventStore:
         # admissibility, same WITHIN-city freshness order — only the CROSS-city
         # interleaving changes from "drain one city fully" to "one per city, fair".
         #
-        # The city key is the leading entity_key segment ("Chicago|2026-06-12|..."),
-        # so no per-row json_extract is needed for the partition. Events without a
-        # '|' (or with an empty/NULL entity_key) fall back to the whole entity_key
-        # then the event_type, so non-city lanes form their own buckets and never
-        # fragment the city round-robin.
-        rows = self.conn.execute(
-            f"""
-            WITH candidates AS (
-              SELECT
-                e.*,
-                p.attempt_count AS _p_attempt_count,
-                ({_claim_tier_expr}) AS _claim_tier,
-                COALESCE(
-                  NULLIF(
-                    CASE
-                      WHEN instr(e.entity_key, '|') > 0
-                      THEN substr(e.entity_key, 1, instr(e.entity_key, '|') - 1)
-                      ELSE e.entity_key
-                    END,
-                    ''
-                  ),
-                  e.event_type
-                ) AS _city_key
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              JOIN opportunity_events e
-                ON e.event_id = p.event_id
-              WHERE p.consumer_name = ?
-                AND (
-                      p.processing_status = 'pending'
-                   OR (
-                      p.processing_status = 'processing'
-                      AND p.claimed_at IS NOT NULL
-                      AND p.claimed_at <= ?
-                   )
-                )
-                AND e.available_at <= ?
-                AND e.received_at <= ?
-                AND (e.expires_at IS NULL OR e.expires_at > ?)
-                AND e.event_type NOT IN (
-                      'BEST_BID_ASK_CHANGED',
-                      'BOOK_SNAPSHOT',
-                      'NEW_MARKET_DISCOVERED'
-                )
-            )
-            SELECT
-              -- Project EXACTLY the opportunity_events columns (in table order) so
-              -- _event_from_row receives only its expected keys — the helper
-              -- columns (_claim_tier/_city_key/_p_attempt_count/_city_round) drive
-              -- ordering but must NOT reach OpportunityEvent(**row).
-              c.event_id, c.event_type, c.entity_key, c.source,
-              c.observed_at, c.available_at, c.received_at,
-              c.causal_snapshot_id, c.payload_hash, c.idempotency_key,
-              c.priority, c.expires_at, c.payload_json, c.schema_version,
-              c.created_at,
-              c._claim_tier,
-              -- Per-(tier, city) occurrence rank. The window ORDER is the EXACT
-              -- intra-city freshness order the legacy query used as its tail sort,
-              -- so each city's rank-1 event is still its freshest. Ranking inside
-              -- the tier partition keeps cross-tier dominance intact (a Tier-2
-              -- rank-1 can never jump a Tier-1 rank-2).
-              ROW_NUMBER() OVER (
-                PARTITION BY c._claim_tier, c._city_key
-                ORDER BY
-                  json_extract(c.payload_json, '$.target_date') DESC,
-                  c.available_at DESC,
-                  CASE WHEN c._p_attempt_count > 0 THEN 0 ELSE 1 END ASC,
-                  c.received_at DESC,
-                  c.event_id ASC
-              ) AS _city_round
-            FROM candidates c
-            ORDER BY
-              -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
-              --         actionable alpha source while day0 is a tradeable lane. Test/replay callers
-              --         can pass day0_is_tradeable=False to omit the Tier-0 clause.
-              -- Tier 1: window-complete FORECAST_SNAPSHOT_READY — direct receipt candidates.
-              --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
-              --         target window, so source_run completeness is not the queue authority.
-              -- Tier 2: Other decision-trigger events — still actionable
-              --         or cheaply dead-letterable. Market-channel cache-hydration
-              --         events are intentionally excluded from fetch_pending and
-              --         initialized as ignored at the write boundary; they are quote
-              --         cache / feasibility inputs, not submit-reactor work.
-              c._claim_tier ASC,
-              -- FAIRNESS (primary cross-city key): one event per city before any
-              -- city's second event. A budget of K reaches K distinct cities/cycle;
-              -- every city is reached within ceil(N/K) cycles (anti-starvation).
-              -- _city_round is the outer SELECT's window alias (no table prefix).
-              _city_round ASC,
-              c.priority DESC,
-              -- FRESHEST-TARGET-FIRST tiebreak (now SECONDARY to fairness): within
-              -- the same round across cities, the fresher target/available wins.
-              -- NULL target_date (non-forecast events) sorts last within its tier
-              -- (json_extract → NULL → last under DESC in SQLite). Newer available_at
-              -- wins before retry debt because it is fresher evidence; for SAME
-              -- target_date + available_at, retry debt wins before zero-attempt
-              -- redecision rows so transiently blocked events cannot be starved
-              -- forever by same-evidence rows.
-              json_extract(c.payload_json, '$.target_date') DESC,
-              c.available_at DESC,
-              CASE WHEN c._p_attempt_count > 0 THEN 0 ELSE 1 END ASC,
-              c.received_at DESC,
-              c.event_id ASC
-            LIMIT ?
-            """,
-            (
-                self.consumer_name,
-                stale_processing_before,
-                parsed_decision_time.isoformat(),
-                parsed_decision_time.isoformat(),
-                parsed_decision_time.isoformat(),
-                # Fetch extra rows so the post-filter can drop stale events
-                # without under-filling the caller's requested limit.
-                max(limit * 4, limit + 50),
-            ),
-        ).fetchall()
+        # The original SQL implemented the round-robin with ROW_NUMBER() and sorted
+        # by json_extract(payload_json, '$.target_date'). On the live world DB that
+        # forced SQLite to build temp B-trees and spend reactor time in jsonExtractFunc.
+        # A later bounded-overfetch CTE still let SQLite choose an event-table-first
+        # plan under redecision/day0 predicates. Keep SQL to active processing rows
+        # only, then point-read events by event_id and do tier/city ranking in Python.
+        active_limit = max(limit * 512, limit + 20_000)
+        active_rows: list[tuple[str, int]] = []
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]))
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'pending'
+                   AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+                 ORDER BY p.updated_at ASC
+                 LIMIT ?
+                """,
+                (self.consumer_name, parsed_decision_time.isoformat(), active_limit),
+            ).fetchall()
+        )
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]))
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_stale_claim
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'processing'
+                   AND p.claimed_at IS NOT NULL
+                   AND p.claimed_at <= ?
+                 ORDER BY p.claimed_at ASC
+                 LIMIT ?
+                """,
+                (self.consumer_name, stale_processing_before, active_limit),
+            ).fetchall()
+        )
+        if not active_rows:
+            return []
+        attempt_by_event: dict[str, int] = {}
+        event_ids: list[str] = []
+        for event_id, attempt_count in active_rows:
+            if not event_id or event_id in attempt_by_event:
+                continue
+            attempt_by_event[event_id] = attempt_count
+            event_ids.append(event_id)
 
-        events = [_event_from_row(row) for row in rows]
-        admissible = [e for e in events if self._is_timely(e, parsed_decision_time)]
-        return admissible[:limit]
+        rows: list[tuple[object, ...]] = []
+        event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        for start in range(0, len(event_ids), 250):
+            chunk = event_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            event_rows = self.conn.execute(
+                f"""
+                SELECT {event_cols}
+                  FROM opportunity_events e
+                 WHERE e.available_at <= ?
+                   AND e.received_at <= ?
+                   AND (e.expires_at IS NULL OR e.expires_at > ?)
+                   AND e.event_type NOT IN (
+                         'BEST_BID_ASK_CHANGED',
+                         'BOOK_SNAPSHOT',
+                         'NEW_MARKET_DISCOVERED'
+                   )
+                   AND e.event_id IN ({placeholders})
+                """,
+                (
+                    parsed_decision_time.isoformat(),
+                    parsed_decision_time.isoformat(),
+                    parsed_decision_time.isoformat(),
+                    *chunk,
+                ),
+            ).fetchall()
+            for row in event_rows:
+                if isinstance(row, sqlite3.Row):
+                    event_id = str(row["event_id"] or "")
+                    event_tuple = tuple(row[key] for key in _EVENT_ROW_KEYS)
+                else:
+                    event_id = str(row[0] or "")
+                    event_tuple = tuple(row[: len(_EVENT_ROW_KEYS)])
+                rows.append(event_tuple + (attempt_by_event.get(event_id, 0),))
+
+        ranked = _rank_pending_rows_python(rows, day0_is_tradeable=day0_is_tradeable)
+        events = [event for event, _attempt_count in ranked]
+        timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
+        return timely[:limit]
 
     def archive_expired_candidates(
         self, *, decision_time: str, batch_limit: int = 50_000
@@ -474,27 +447,19 @@ class EventStore:
             """
             SELECT e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
-                   json_extract(e.payload_json, '$.target_date') AS target_date
-            FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
-            JOIN opportunity_event_processing p
-              ON p.event_id = e.event_id
-             AND p.consumer_name = ?
-            WHERE e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
-              AND p.processing_status IN ('pending', 'processing')
-              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
-              AND (
-                    (e.event_type = 'FORECAST_SNAPSHOT_READY'
-                       AND (   json_extract(e.payload_json, '$.target_date') < ?
-                            OR json_extract(e.payload_json, '$.target_date') <= ?))
-                 OR (e.event_type = 'DAY0_EXTREME_UPDATED'
-                       AND (   json_extract(e.payload_json, '$.target_date') < ?
-                            OR json_extract(e.payload_json, '$.target_date') <= ?))
-              )
-            ORDER BY json_extract(e.payload_json, '$.target_date') ASC
-            LIMIT ?
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   e.event_type
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
+               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+             ORDER BY p.updated_at ASC, p.event_id ASC
+             LIMIT ?
             """,
-            (self.consumer_name, frontier_floor, venue_close_ceiling,
-             day0_floor, venue_close_ceiling, batch_limit),
+            (self.consumer_name, batch_limit),
         ).fetchall()
 
         expired_ids: list[str] = []
@@ -502,6 +467,15 @@ class EventStore:
             event_id = row[0]
             city = row[1]
             target_date = row[2]
+            event_type = str(row[3] or "")
+            if event_type == "FORECAST_SNAPSHOT_READY":
+                if not (target_date < frontier_floor or target_date <= venue_close_ceiling):
+                    continue
+            elif event_type == "DAY0_EXTREME_UPDATED":
+                if not (target_date < day0_floor or target_date <= venue_close_ceiling):
+                    continue
+            else:
+                continue
             if self._strictly_past_in_tz(city, target_date, decision_time_utc) or \
                self._venue_closed_in_phase(city, target_date, decision_time_utc):
                 expired_ids.append(event_id)
@@ -538,28 +512,44 @@ class EventStore:
         """
 
         self._require_world_event_tables()
-        rows = self.conn.execute(
+        candidate_rows = self.conn.execute(
             """
             SELECT p.event_id
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-              LEFT JOIN opportunity_events e
-                ON e.event_id = p.event_id
              WHERE p.consumer_name = ?
                AND p.processing_status IN ('pending', 'processing')
-               AND e.event_id IS NULL
              ORDER BY p.updated_at ASC, p.event_id ASC
              LIMIT ?
             """,
             (self.consumer_name, batch_limit),
         ).fetchall()
-        event_ids = [str(row[0]) for row in rows]
-        if not event_ids:
+        candidate_ids = [str(row[0]) for row in candidate_rows]
+        if not candidate_ids:
+            return 0
+
+        missing_ids: list[str] = []
+        _CHUNK = 500
+        for chunk_start in range(0, len(candidate_ids), _CHUNK):
+            chunk = candidate_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            existing = {
+                str(row[0])
+                for row in self.conn.execute(
+                    f"""
+                    SELECT event_id
+                      FROM opportunity_events
+                     WHERE event_id IN ({placeholders})
+                    """,
+                    tuple(chunk),
+                ).fetchall()
+            }
+            missing_ids.extend(event_id for event_id in chunk if event_id not in existing)
+        if not missing_ids:
             return 0
 
         now = _utc_now()
-        _CHUNK = 500
-        for chunk_start in range(0, len(event_ids), _CHUNK):
-            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+        for chunk_start in range(0, len(missing_ids), _CHUNK):
+            chunk = missing_ids[chunk_start : chunk_start + _CHUNK]
             placeholders = ",".join("?" * len(chunk))
             self.conn.execute(
                 f"""
@@ -574,7 +564,7 @@ class EventStore:
                 """,
                 (now, now, self.consumer_name, *chunk),
             )
-        return len(event_ids)
+        return len(missing_ids)
 
     # Channel event types that carry a per-token price-update stream and are
     # subject to the superseded-keep-latest sweep. NEW_MARKET_DISCOVERED is
@@ -806,64 +796,71 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        # Step 2: per family key in the candidate batch, find the absorbing keeper(s).
-        # The keeper may be outside the batch or already terminal from the older
-        # latest-by-clock rule; in that case active regressed rows are still expired so
-        # the queue cannot keep reprocessing a lower high / higher low as "latest".
+        # Step 2: compute absorbing keeper(s) from the active Day0 working set.
+        # Do not probe immutable opportunity_events once per family: the live table
+        # is append-only and can be huge, while the decision-relevant surface is the
+        # active processing rows. Scanning active Day0 rows once via the processing
+        # status index preserves keepers outside this candidate batch without a
+        # target-date JSON expression index over historical event bodies.
         candidate_keys = {
             (str(row[1]), str(row[2]), str(row[3]))
             for row in candidate_rows
             if row[1] is not None and row[2] is not None and row[3] is not None
         }
-        keeper_ids: set[str] = set()
-        for city, target_date, metric in candidate_keys:
-            agg = "MAX" if metric == "high" else "MIN"
-            value_expr = (
-                "CAST(COALESCE("
-                "json_extract(e.payload_json, '$.rounded_value'), "
-                "json_extract(e.payload_json, '$.high_so_far'), "
-                "json_extract(e.payload_json, '$.low_so_far')"
-                ") AS REAL)"
-            )
-            extreme_row = self.conn.execute(
-                """
-                SELECT {agg}({value_expr})
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                   AND json_extract(e.payload_json, '$.target_date') = ?
-                   AND json_extract(e.payload_json, '$.city') = ?
-                   AND json_extract(e.payload_json, '$.metric') = ?
-                   AND {value_expr} IS NOT NULL
-                """.format(agg=agg, value_expr=value_expr),
-                (self.consumer_name, target_date, city, metric),
-            ).fetchone()
-            if extreme_row is None or extreme_row[0] is None:
+        value_expr = (
+            "CAST(COALESCE("
+            "json_extract(e.payload_json, '$.rounded_value'), "
+            "json_extract(e.payload_json, '$.high_so_far'), "
+            "json_extract(e.payload_json, '$.low_so_far')"
+            ") AS REAL)"
+        )
+        active_rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city')        AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric')      AS metric,
+                   {value_expr}                                 AS extreme_value
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e
+              ON e.event_id = p.event_id
+            WHERE p.consumer_name = ?
+              AND p.processing_status IN ('pending', 'processing')
+              AND e.event_type = 'DAY0_EXTREME_UPDATED'
+              AND json_extract(e.payload_json, '$.city') IS NOT NULL
+              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+              AND json_extract(e.payload_json, '$.metric') IS NOT NULL
+              AND {value_expr} IS NOT NULL
+            """.format(value_expr=value_expr),
+            (self.consumer_name,),
+        ).fetchall()
+        extreme_by_key: dict[tuple[str, str, str], float] = {}
+        for row in active_rows:
+            key = (str(row[1]), str(row[2]), str(row[3]))
+            if key not in candidate_keys:
                 continue
-            extreme_value = float(extreme_row[0])
-            keeper_rows = self.conn.execute(
-                """
-                SELECT e.event_id
-                  FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                   AND json_extract(e.payload_json, '$.target_date') = ?
-                   AND json_extract(e.payload_json, '$.city') = ?
-                   AND json_extract(e.payload_json, '$.metric') = ?
-                   AND CAST(COALESCE(
-                         json_extract(e.payload_json, '$.rounded_value'),
-                         json_extract(e.payload_json, '$.high_so_far'),
-                         json_extract(e.payload_json, '$.low_so_far')
-                       ) AS REAL) = ?
-                   AND p.processing_status IN ('pending', 'processing')
-                """,
-                (self.consumer_name, target_date, city, metric, extreme_value),
-            ).fetchall()
-            keeper_ids.update(str(row[0]) for row in keeper_rows)
+            try:
+                value = float(row[4])
+            except (TypeError, ValueError):
+                continue
+            previous = extreme_by_key.get(key)
+            if previous is None:
+                extreme_by_key[key] = value
+            elif key[2] == "high":
+                extreme_by_key[key] = max(previous, value)
+            else:
+                extreme_by_key[key] = min(previous, value)
+        keeper_ids: set[str] = set()
+        for row in active_rows:
+            key = (str(row[1]), str(row[2]), str(row[3]))
+            if key not in extreme_by_key:
+                continue
+            try:
+                value = float(row[4])
+            except (TypeError, ValueError):
+                continue
+            if value == extreme_by_key[key]:
+                keeper_ids.add(str(row[0]))
 
         superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
 
@@ -1597,21 +1594,29 @@ class EventStore:
         ).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
-    def requeue_pending(self, event_id: str) -> None:
+    def requeue_pending(
+        self,
+        event_id: str,
+        *,
+        not_before: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
         """Return an in-flight ('processing') event to 'pending' for retry next cycle.
 
         Used for TRANSIENT, non-terminal blocks (e.g. the executable market snapshot for the
         family has not been captured yet this cycle). Keeps ``attempt_count`` so the caller
-        can bound retries and eventually dead-letter; does NOT consume the event the way
-        ``mark_processed`` does.
+        can observe retry debt; does NOT consume the event the way ``mark_processed`` does.
+        ``not_before`` stores a retry floor in ``claimed_at`` for pending rows so refresh-waiting
+        substrate blocks do not immediately reclaim the next decision slot before their sidecar
+        refresh can complete.
         """
 
         self._require_world_event_tables()
         self.conn.execute(
             "UPDATE opportunity_event_processing "
-            "SET processing_status = 'pending', claimed_at = NULL, updated_at = ? "
+            "SET processing_status = 'pending', claimed_at = ?, last_error = ?, updated_at = ? "
             "WHERE consumer_name = ? AND event_id = ?",
-            (_utc_now(), self.consumer_name, event_id),
+            (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
 
     def _mark_terminal(
@@ -1671,6 +1676,150 @@ _EVENT_ROW_KEYS: tuple[str, ...] = (
     "schema_version",
     "created_at",
 )
+
+
+def _event_payload_dict(event: OpportunityEvent) -> dict:
+    try:
+        payload = json.loads(event.payload_json)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _event_city_key(event: OpportunityEvent) -> str:
+    entity_key = str(event.entity_key or "")
+    if "|" in entity_key:
+        city = entity_key.split("|", 1)[0].strip()
+        if city:
+            return city
+    return entity_key.strip() or str(event.event_type or "")
+
+
+def _claim_tier_for_event(
+    event: OpportunityEvent,
+    payload: dict,
+    *,
+    day0_is_tradeable: bool,
+) -> int:
+    if (
+        event.event_type == "FORECAST_SNAPSHOT_READY"
+        and str(event.source or "").startswith(ESCALATION_CROSS_SOURCE_PREFIX)
+    ):
+        return 0
+    if event.event_type == "EDLI_REDECISION_PENDING":
+        return 0
+    if event.event_type == "DAY0_EXTREME_UPDATED" and day0_is_tradeable:
+        return 0
+    if (
+        event.event_type == "FORECAST_SNAPSHOT_READY"
+        and payload.get("coverage_completeness_status") == "COMPLETE"
+        and payload.get("coverage_readiness_status") == "LIVE_ELIGIBLE"
+    ):
+        return 1
+    if event.event_type in {
+        "BEST_BID_ASK_CHANGED",
+        "BOOK_SNAPSHOT",
+        "NEW_MARKET_DISCOVERED",
+    }:
+        return 3
+    return 2
+
+
+def _date_desc_key(value: object) -> tuple[int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return (1, 0)
+    try:
+        return (0, -date.fromisoformat(text).toordinal())
+    except ValueError:
+        return (1, 0)
+
+
+def _datetime_desc_key(value: object) -> tuple[int, float]:
+    text = str(value or "").strip()
+    if not text:
+        return (1, 0.0)
+    try:
+        parsed = _parse_utc(text)
+    except Exception:
+        return (1, 0.0)
+    return (0, -parsed.timestamp())
+
+
+def _pending_row_attempt_count(row: sqlite3.Row | tuple) -> int:
+    if isinstance(row, sqlite3.Row):
+        try:
+            raw = row["_p_attempt_count"]
+        except (IndexError, KeyError):
+            raw = None
+    else:
+        raw = row[len(_EVENT_ROW_KEYS)] if len(row) > len(_EVENT_ROW_KEYS) else None
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rank_pending_rows_python(
+    rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
+    *,
+    day0_is_tradeable: bool,
+) -> list[tuple[OpportunityEvent, int]]:
+    records: list[dict] = []
+    for row in rows:
+        event = _event_from_row(row)
+        attempt_count = _pending_row_attempt_count(row)
+        payload = _event_payload_dict(event)
+        records.append(
+            {
+                "event": event,
+                "attempt_count": attempt_count,
+                "payload": payload,
+                "tier": _claim_tier_for_event(
+                    event,
+                    payload,
+                    day0_is_tradeable=day0_is_tradeable,
+                ),
+                "city_key": _event_city_key(event),
+                "target_key": _date_desc_key(payload.get("target_date")),
+                "available_key": _datetime_desc_key(event.available_at),
+                "retry_key": 0 if attempt_count > 0 else 1,
+                "received_key": _datetime_desc_key(event.received_at),
+            }
+        )
+
+    intra_city = sorted(
+        records,
+        key=lambda item: (
+            item["tier"],
+            item["city_key"],
+            item["target_key"],
+            item["available_key"],
+            item["retry_key"],
+            item["received_key"],
+            item["event"].event_id,
+        ),
+    )
+    rounds_by_key: dict[tuple[int, str], int] = {}
+    for item in intra_city:
+        key = (int(item["tier"]), str(item["city_key"]))
+        rounds_by_key[key] = rounds_by_key.get(key, 0) + 1
+        item["city_round"] = rounds_by_key[key]
+
+    ranked = sorted(
+        records,
+        key=lambda item: (
+            item["tier"],
+            item.get("city_round", 1),
+            -int(getattr(item["event"], "priority", 0) or 0),
+            item["target_key"],
+            item["available_key"],
+            item["retry_key"],
+            item["received_key"],
+            item["event"].event_id,
+        ),
+    )
+    return [(item["event"], int(item["attempt_count"])) for item in ranked]
 
 
 def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:

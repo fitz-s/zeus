@@ -31,6 +31,7 @@ from src.data.replacement_forecast_seed_discovery import (
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 240.0
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,23 @@ class ReplacementForecastLiveMaterializationQueueReport:
         }
 
 
+def _materialization_subprocess_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS must be numeric"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS must be > 0"
+        )
+    return value
+
+
 def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
@@ -82,6 +100,7 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
+        timeout=_materialization_subprocess_timeout_seconds(),
     )
 
 
@@ -260,6 +279,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         target_date = str(seed["target_date"])
         metric = str(seed["temperature_metric"])
         baseline_source_run_id = str(seed["baseline_source_run_id"])
+        openmeteo_source_run_id = str(seed["openmeteo_source_run_id"])
         posterior_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
         }
@@ -268,19 +288,22 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         # degraded posterior must not count as "done forever" and block its own repair.
         # Single authority: cycle_policy.tradeable_grade_coverage_sql.
         tradeable_grade_clause = tradeable_grade_coverage_sql(posterior_columns=posterior_columns)
+        runtime_layer_clause = "AND runtime_layer = 'live'" if "runtime_layer" in posterior_columns else ""
         posterior = conn.execute(
             f"""
             SELECT 1
             FROM forecast_posteriors
             WHERE source_id = ?
+              {runtime_layer_clause}
               AND city = ?
               AND target_date = ?
               AND temperature_metric = ?
               {tradeable_grade_clause}
               AND json_extract(dependency_source_run_ids_json, '$.baseline_b0') = ?
+              AND json_extract(dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?
             LIMIT 1
             """,
-            (SOURCE_ID, city, target_date, metric, baseline_source_run_id),
+            (SOURCE_ID, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
         ).fetchone()
         if posterior is None:
             return False
@@ -316,13 +339,87 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
                   WHERE json_extract(value, '$.role') = 'baseline_b0'
                     AND json_extract(value, '$.source_run_id') = ?
               )
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_each(readiness_state.dependency_json, '$.dependencies')
+                  WHERE json_extract(value, '$.role') = 'openmeteo_ifs9_anchor'
+                    AND json_extract(value, '$.source_run_id') = ?
+              )
             LIMIT 1
             """,
-            (STRATEGY_KEY, city, target_date, metric, baseline_source_run_id),
+            (STRATEGY_KEY, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
         ).fetchone()
         return readiness is not None
     finally:
         conn.close()
+
+
+def _parse_utc_iso(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _seed_source_cycle_regresses_current_posterior(
+    *,
+    forecast_db: Path | str | None,
+    seed: dict[str, object],
+) -> bool:
+    """True when this seed is older than the family's latest materialized posterior.
+
+    The materializer's monotone consumed-cycle guard remains the final authority.
+    This queue-side check only prevents a seed that is already known to be
+    unconstructable from spending a subprocess slot every cycle.
+    """
+
+    if forecast_db is None:
+        return False
+    request_cycle = _parse_utc_iso(seed.get("source_cycle_time"))
+    if request_cycle is None:
+        return False
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return False
+    from src.state.db import _connect
+
+    try:
+        conn = _connect(db_path, write_class="live")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            row = conn.execute(
+                """
+                SELECT source_cycle_time
+                FROM forecast_posteriors
+                WHERE source_id = ?
+                  AND city = ?
+                  AND target_date = ?
+                  AND temperature_metric = ?
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                (
+                    SOURCE_ID,
+                    str(seed.get("city")),
+                    str(seed.get("target_date")),
+                    str(seed.get("temperature_metric")),
+                ),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
+    current_cycle = _parse_utc_iso(current_raw)
+    return current_cycle is not None and request_cycle < current_cycle
 
 
 def _write_request(path: Path, payload: dict[str, object]) -> None:
@@ -527,6 +624,20 @@ def _prepare_seed_requests(
                     {
                         "status": "SKIPPED_ALREADY_COVERED",
                         "reason_codes": ["REPLACEMENT_MATERIALIZATION_SEED_ALREADY_COVERED"],
+                        "request_written": False,
+                    },
+                )
+                processed.append(str(moved))
+                continue
+            if _seed_source_cycle_regresses_current_posterior(
+                forecast_db=forecast_db, seed=seed
+            ):
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"],
                         "request_written": False,
                     },
                 )
@@ -751,7 +862,40 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             "--init-schema",
             "--commit",
         )
-        completed = runner(command)
+        timed_out = False
+        timeout_seconds: float | None = None
+        try:
+            completed = runner(command)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            try:
+                timeout_seconds = float(exc.timeout) if exc.timeout is not None else None
+            except (TypeError, ValueError):
+                timeout_seconds = None
+            effective_timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS
+            )
+            completed = subprocess.CompletedProcess(
+                args=list(command),
+                returncode=124,
+                stdout=(exc.stdout.decode() if isinstance(exc.stdout, bytes) else exc.stdout) or "",
+                stderr=json.dumps(
+                    {
+                        "status": "ERROR",
+                        "error_type": "TimeoutExpired",
+                        "error": (
+                            "replacement materialization subprocess exceeded "
+                            f"{effective_timeout:.1f}s"
+                        ),
+                        "reason_codes": [
+                            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+                        ],
+                    }
+                )
+                + "\n",
+            )
         _surface_subprocess_warnings(input_json.name, completed)
         payload = {
             "command": list(command),
@@ -759,6 +903,11 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             "stdout": completed.stdout,
             "stderr": completed.stderr,
         }
+        if timed_out:
+            payload["timeout_seconds"] = timeout_seconds
+            payload["reason_codes"] = [
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+            ]
         if completed.returncode == 0:
             moved = _move_request(input_json, processed_path)
             _write_sidecar(moved, payload)

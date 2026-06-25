@@ -18,6 +18,7 @@ from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOU
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
     _manifest_allows_target_date,
+    _latest_manifest,
     discover_replacement_forecast_materialization_seeds,
 )
 
@@ -36,16 +37,34 @@ def _write_manifest(
     product_id: str,
     data_version: str,
     metadata: dict[str, object],
+    source_cycle_time: str = "2026-06-06T00:00:00+00:00",
+    source_available_at: str = "2026-06-06T02:30:00+00:00",
+    captured_at: str = "2026-06-06T03:00:00+00:00",
 ) -> Path:
     artifact = _write_file(raw_dir / f"{name}.json", {"name": name})
+    payload_name = metadata.get("openmeteo_payload_json")
+    if isinstance(payload_name, str) and payload_name.strip():
+        payload_path = Path(payload_name)
+        if not payload_path.is_absolute():
+            payload_path = raw_dir / payload_path
+        if not payload_path.exists() or payload_path == artifact:
+            _write_file(
+                payload_path,
+                {
+                    "hourly": {
+                        "time": ["2026-06-08T00:00", "2026-06-08T12:00"],
+                        "temperature_2m": [20.0, 24.0],
+                    }
+                },
+            )
     manifest = RawForecastArtifactManifest.from_file(
         artifact,
         source_id=source_id,
         product_id=product_id,
         data_version=data_version,
-        source_cycle_time="2026-06-06T00:00:00+00:00",
-        source_available_at="2026-06-06T02:30:00+00:00",
-        captured_at="2026-06-06T03:00:00+00:00",
+        source_cycle_time=source_cycle_time,
+        source_available_at=source_available_at,
+        captured_at=captured_at,
         request_url=f"https://example.invalid/{name}",
         request_params={"name": name},
         product_metadata={"source_run_id": f"{name}-run", **metadata},
@@ -184,7 +203,7 @@ def test_seed_discovery_writes_seed_from_db_target_and_raw_manifests(tmp_path: P
     assert seed["precision_metadata_json"].endswith("raw/precision_metadata.json")
 
 
-def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) -> None:
+def test_legacy_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) -> None:
     """A multi-day single-runs payload must not be treated as a one-day manifest.
 
     Live evidence 2026-06-20: raw_model_forecasts had 18Z rows for day+1 held
@@ -209,7 +228,6 @@ def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) 
             "openmeteo_endpoint": "single_runs_api",
             "city": "Paris",
             "target_date": "2026-06-19",
-            "target_dates": ["2026-06-19"],
             "forecast_hours": 120,
         },
     )
@@ -217,6 +235,81 @@ def test_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) 
     assert _manifest_allows_target_date(manifest, target_date="2026-06-19")
     assert _manifest_allows_target_date(manifest, target_date="2026-06-21")
     assert not _manifest_allows_target_date(manifest, target_date="2026-06-26")
+
+
+def test_exact_target_dates_do_not_horizon_admit_wrong_daily_payload(tmp_path: Path) -> None:
+    """New live manifests are target-day scoped and must not bind the wrong payload."""
+
+    artifact = _write_file(tmp_path / "openmeteo_Paris_2026-06-19_high.json", {"hourly": {}})
+    manifest = RawForecastArtifactManifest.from_file(
+        artifact,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-19T18:00:00+00:00",
+        source_available_at="2026-06-19T23:30:00+00:00",
+        captured_at="2026-06-19T23:31:00+00:00",
+        request_url="https://example.invalid/openmeteo",
+        request_params={"run": "2026-06-19T18:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "Paris",
+            "target_date": "2026-06-19",
+            "target_dates": ["2026-06-19"],
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(artifact),
+        },
+    )
+
+    assert _manifest_allows_target_date(manifest, target_date="2026-06-19")
+    assert not _manifest_allows_target_date(manifest, target_date="2026-06-20")
+
+
+def test_latest_manifest_rejects_horizon_admitted_payload_without_target_day_samples(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    payload = _write_file(
+        raw_dir / "openmeteo.json",
+        {
+            "hourly": {
+                "time": ["2026-06-24T13:00", "2026-06-24T14:00"],
+                "temperature_2m": [21.0, 22.0],
+            }
+        },
+    )
+    manifest = RawForecastArtifactManifest.from_file(
+        payload,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-24T12:00:00+00:00",
+        source_available_at="2026-06-24T19:31:00+00:00",
+        captured_at="2026-06-24T19:31:00+00:00",
+        request_url="https://example.invalid/openmeteo",
+        request_params={"run": "2026-06-24T12:00", "forecast_hours": 120},
+        product_metadata={
+            "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+            "openmeteo_endpoint": "single_runs_api",
+            "city": "London",
+            "city_timezone": "Europe/London",
+            "target_date": "2026-06-24",
+            "forecast_hours": 120,
+            "openmeteo_payload_json": str(payload),
+        },
+    )
+
+    assert _manifest_allows_target_date(manifest, target_date="2026-06-25")
+    assert (
+        _latest_manifest(
+            (manifest,),
+            source_id="openmeteo_ecmwf_ifs_9km",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            city="London",
+            target_date="2026-06-25",
+            city_timezone="Europe/London",
+        )
+        is None
+    )
 
 
 def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_manifest(tmp_path: Path) -> None:
@@ -239,6 +332,94 @@ def test_seed_discovery_reads_manifests_recursively_and_resolves_relative_to_man
     assert seed["openmeteo_payload_json"].endswith("raw/20260607T000000Z/openmeteo.json")
     assert seed["openmeteo_manifest_json"].endswith("raw/20260607T000000Z/openmeteo.manifest.json")
     assert seed["precision_metadata_json"].endswith("raw/20260607T000000Z/precision_metadata.json")
+
+
+def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_file(raw_dir / "precision_metadata.json", {"city": "NYC"})
+    _write_manifest(
+        raw_dir,
+        name="openmeteo-06z",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-06T06:00:00+00:00",
+        source_available_at="2026-06-06T08:30:00+00:00",
+        captured_at="2026-06-06T09:00:00+00:00",
+        metadata={
+            "openmeteo_payload_json": "openmeteo-06z.json",
+            "precision_metadata_json": "precision_metadata.json",
+            "city": "NYC",
+            "target_date": "2026-06-08",
+        },
+    )
+    _write_manifest(
+        raw_dir,
+        name="openmeteo-12z",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time="2026-06-06T12:00:00+00:00",
+        source_available_at="2026-06-06T12:30:00+00:00",
+        captured_at="2026-06-06T12:45:00+00:00",
+        metadata={
+            "openmeteo_payload_json": "openmeteo-12z.json",
+            "precision_metadata_json": "precision_metadata.json",
+            "city": "NYC",
+            "target_date": "2026-06-08",
+        },
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE raw_model_forecasts (
+                raw_model_forecast_id INTEGER PRIMARY KEY,
+                model TEXT NOT NULL,
+                city TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source_cycle_time TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                forecast_value_c REAL NOT NULL,
+                lead_days INTEGER,
+                captured_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts (
+                raw_model_forecast_id, model, city, metric, target_date, source_cycle_time,
+                endpoint, forecast_value_c, lead_days, captured_at
+            ) VALUES (
+                1, 'ifs9', 'NYC', 'high', '2026-06-08', '2026-06-06T06:00:00+00:00',
+                'single_runs', 27.0, 2, '2026-06-06T08:00:00+00:00'
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T13:00:00+00:00",
+    )
+
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["openmeteo_source_run_id"] == "openmeteo-12z-run"
+    assert seed["openmeteo_manifest_json"].endswith("openmeteo-12z.manifest.json")
+    assert (
+        "REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING_NON_BLOCKING"
+        in report.reason_codes
+    )
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:
@@ -308,6 +489,101 @@ def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path:
     assert report.status == "DISCOVERED"
     seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
     assert seed["target_date"] == "2026-06-08"
+
+
+def test_seed_discovery_prioritizes_held_position_family_before_alphabetical_targets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM market_events")
+        conn.execute("DELETE FROM source_run_coverage")
+        for city, run_id, tz in (
+            ("Amsterdam", "amsterdam-baseline-run", "Europe/Amsterdam"),
+            ("Tokyo", "tokyo-baseline-run", "Asia/Tokyo"),
+        ):
+            for label, low, high in (("69°F or below", None, 69.0), ("70-71°F", 70.0, 71.0)):
+                conn.execute(
+                    """
+                    INSERT INTO market_events
+                      (market_slug, city, target_date, temperature_metric, token_id, range_label, range_low, range_high)
+                    VALUES (?, ?, '2026-06-08', 'high', ?, ?, ?, ?)
+                    """,
+                    (f"slug-{city}", city, f"{city}-{label}", label, low, high),
+                )
+            conn.execute(
+                """
+                INSERT INTO source_run_coverage
+                  (coverage_id, source_run_id, source_id, city_id, city, city_timezone, target_local_date,
+                   temperature_metric, data_version, completeness_status, readiness_status, computed_at)
+                VALUES (?, ?, 'ecmwf_open_data', ?, ?, ?,
+                   '2026-06-08', 'high', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                   'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
+                """,
+                (f"coverage-{city}", run_id, city, city, tz),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    for city in ("Amsterdam", "Tokyo"):
+        _write_file(raw_dir / f"precision_{city}.json", {"city": city})
+        _write_manifest(
+            raw_dir,
+            name=f"openmeteo_{city}",
+            source_id="openmeteo_ecmwf_ifs_9km",
+            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            metadata={
+                "openmeteo_payload_json": f"openmeteo_{city}.json",
+                "precision_metadata_json": f"precision_{city}.json",
+                "city": city,
+                "target_date": "2026-06-08",
+            },
+        )
+    trade_conn = sqlite3.connect(trade_db)
+    try:
+        trade_conn.execute(
+            """
+            CREATE TABLE position_current (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                phase TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current
+              (city, target_date, temperature_metric, phase)
+        VALUES ('Tokyo', '2026-06-08', 'high', 'active')
+            """
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._zeus_trade_db_path",
+        lambda: trade_db,
+    )
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T04:00:00+00:00",
+        limit=1,
+    )
+
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["city"] == "Tokyo"
 
 
 def test_seed_discovery_does_not_seed_after_local_target_day_starts(tmp_path: Path) -> None:

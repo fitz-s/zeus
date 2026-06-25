@@ -116,11 +116,20 @@ def test_non_gem_previous_runs_substitution_is_served_and_branded() -> None:
     assert served["icon_global"].served_via == "single_runs"
 
 
-def test_gem_fallback_respects_natural_key_cycle() -> None:
-    # A previous_runs row from a DIFFERENT cycle must not leak into this capture.
+def test_gem_fallback_can_serve_prior_possessed_cycle() -> None:
+    # A prior previous_runs row is already-possessed evidence for the same target when the
+    # selected anchor cycle has no fresher value.
     conn = _conn()
     _insert(conn, 1, "icon_global", 20.5, "single_runs")
     _insert(conn, 2, "gem_global", 19.5, "previous_runs", cycle=OTHER_CYCLE)
+    out = _read(conn)
+    assert out["gem_global"] == (19.5, 2)
+
+
+def test_gem_fallback_rejects_future_cycle() -> None:
+    conn = _conn()
+    _insert(conn, 1, "icon_global", 20.5, "single_runs")
+    _insert(conn, 2, "gem_global", 19.5, "previous_runs", cycle="2026-06-09T06:00:00+00:00")
     out = _read(conn)
     assert "gem_global" not in out
 

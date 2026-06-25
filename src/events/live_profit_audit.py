@@ -1,8 +1,12 @@
 """EDLI live profit audit projection helpers.
 
 # Created: 2026-05-26
-# Last audited: 2026-06-21
+# Last audited: 2026-06-22
 # Authority basis: q-provenance stamping for settlement skill attribution (lifecycle-alpha mission).
+#   2026-06-22: stamp expected_edge from the ActionableTradeCertificate's
+#   qkernel_execution_economics.edge_lcb (previously read from PreSubmitRevalidated,
+#   which never carries it -> 0/1651 live rows NULL). Closes the ex-ante side of the
+#   decision->settlement audit loop. Consult REQ-20260622-021129 (Pro, HIGH).
 """
 
 from __future__ import annotations
@@ -433,6 +437,21 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
     )
     q_live_stamp = _float_or_none((edge_cert_payload or {}).get("q_live"))
     q_lcb_5pct_stamp = _float_or_none((edge_cert_payload or {}).get("q_lcb_5pct"))
+    # Stamp expected_edge (decision-time ex-ante edge) from the SAME edge cert.
+    # The live PreSubmitRevalidated payload carries NO expected_edge (verified
+    # 0/1651 live rows), so the canonical source is the ActionableTradeCertificate's
+    # qkernel_execution_economics.edge_lcb — the LCB edge (payoff_q_lcb - cost) the
+    # decision actually acted on (== the cert's action_score / trade_score). Without
+    # it the settlement audit has no ex-ante edge to compare realized outcome
+    # against. Leaves None when the cert / field is unavailable (fail-safe; mirrors
+    # the q_live / q_lcb_5pct stamping). INV-37: reuses the loaded cert payload, no
+    # new DB connection.
+    _edge_economics = (edge_cert_payload or {}).get("qkernel_execution_economics")
+    expected_edge_stamp = (
+        _float_or_none(_edge_economics.get("edge_lcb"))
+        if isinstance(_edge_economics, dict)
+        else None
+    )
     promotion_eligible = (
         state == "CONFIRMED"
         and lifecycle_type == "UserTradeObserved"
@@ -461,7 +480,7 @@ def record_edli_live_profit_audit_from_aggregate(conn: sqlite3.Connection, aggre
         visible_depth_fill_lcb=pre_submit.get("visible_depth_fill_lcb"),
         order_policy=pre_submit.get("order_policy"),
         native_token_side=pre_submit.get("native_token_side"),
-        expected_edge=pre_submit.get("expected_edge"),
+        expected_edge=expected_edge_stamp,
         quote_seen_at=pre_submit.get("quote_seen_at"),
         quote_age_ms=pre_submit.get("quote_age_ms"),
         best_bid=pre_submit.get("current_best_bid"),

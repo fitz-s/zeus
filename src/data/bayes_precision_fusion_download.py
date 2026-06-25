@@ -19,8 +19,9 @@ ncep_nbm/gfs_hrrr/gem_hrdps + in-domain regionals icon_d2/arome/ukmo_uk), this j
 jma_seamless, AND the alias-dedup probe icon_seamless were all DROPPED from the fusion; they are
 no longer fetched here.)
 
-  (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live capture
-      for replay; SPEC §3 single-runs identity). REUSES bayes_precision_fusion_capture._default_live_fetch.
+  (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live input
+      for the replacement posterior and replay; SPEC §3 single-runs identity). REUSES
+      bayes_precision_fusion_capture._default_live_fetch.
   (2) fixed-lead previous_runs fetch — the no-leak walk-forward train value via the OM
       previous-runs API temperature_2m_previous_dayN hourly var (SPEC §3 fixed-lead). Forces
       temperature_unit=celsius (forecast_value_c is ALWAYS degC -> SPEC §7 C/F unit-mix antibody).
@@ -30,9 +31,9 @@ no longer fetched here.)
 
 FAIL-SOFT IS STRUCTURAL: a per-model fetch failure (raise OR None) DROPS that model's row and
 the job proceeds with the survivors — a dropped model is simply absent (the fusion handles
-missing sources by construction). The job is a pure side-effect on raw_model_forecasts: it
-writes NOTHING into forecast_posteriors and touches NO posterior/q/center/spread/order, so the
-money path is byte-identical whether or not this job runs (gated by the SEPARATE capture flag).
+missing sources by construction). The job writes raw_model_forecasts only; the live materializer
+later consumes those rows as replacement-posterior inputs and writes forecast_posteriors. A
+missing current capture is therefore a live probability-input gap, not a harmless replay gap.
 """
 from __future__ import annotations
 
@@ -52,6 +53,7 @@ from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
     _default_live_fetch,
 )
+from src.data.openmeteo_quota import OpenMeteoQuotaTracker
 from src.forecast.model_selection import (
     ANCHOR_MODEL,
     GLOBAL_LIKELIHOOD_MODELS,
@@ -61,6 +63,8 @@ from src.forecast.model_selection import (
 )
 
 _LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
+
+_BPF_OPENMETEO_QUOTA_TRACKER = OpenMeteoQuotaTracker()
 
 # SPEC §5: ~6 months retention on the raw input capture table.
 RETENTION_DAYS = 180
@@ -389,6 +393,18 @@ SingleRunsFetchFn = Callable[..., float | None]
 # A previous-runs (fixed-lead) fetch: the fixed-lead local-day extremum (degC), or None.
 PreviousRunsFetchFn = Callable[..., float | None]
 
+_BATCH_TRANSPORT_ERROR_KEY = "__BAYES_PRECISION_FUSION_BATCH_TRANSPORT_ERROR__"
+
+
+def _is_quota_transport_error(message: object) -> bool:
+    text = str(message or "").lower()
+    return (
+        "open-meteo quota exhausted" in text
+        or "too many requests" in text
+        or "429" in text
+        or "rate limit" in text
+    )
+
 
 @dataclass(frozen=True)
 class BayesPrecisionFusionDownloadTarget:
@@ -496,8 +512,9 @@ def _default_live_fetch_batched(
 
     Returns {model: (high_c, low_c)} for each model whose series is present in the
     response. Models absent from the response (400, None series) are omitted.
-    FAIL-SOFT: any per-model parse error omits that model; total network failure
-    returns {}.
+    FAIL-SOFT: any per-model parse error omits that model. A non-quota batched transport
+    failure falls back to one request per model so one unsupported batched combination cannot
+    suppress the whole live current-cycle capture.
     """
     try:
         from src.data.openmeteo_client import fetch  # noqa: PLC0415
@@ -515,7 +532,7 @@ def _default_live_fetch_batched(
             "latitude": latitude,
             "longitude": longitude,
             "hourly": "temperature_2m",
-            "models": om_ids,
+            "models": ",".join(om_ids),
             "run": run_iso,
             "forecast_hours": forecast_hours,
             "temperature_unit": "celsius",
@@ -525,11 +542,97 @@ def _default_live_fetch_batched(
             SINGLE_RUNS_FORECAST_URL,
             params,
             endpoint_label="bayes_precision_fusion_single_runs_batched",
+            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+            fast_fail_429=True,
         )
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
-        _LOG.warning("BAYES_PRECISION_FUSION batched single_runs fetch failed (fail-soft): %s", exc)
-        return {}
+        batched_error_text = str(exc)
+        if _is_quota_transport_error(batched_error_text):
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
+                "(no per-model retry): %s",
+                exc,
+            )
+            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, None)}
+
+        _LOG.warning(
+            "BAYES_PRECISION_FUSION batched single_runs fetch failed; retrying per-model "
+            "so the cycle can retain surviving live inputs: %s",
+            exc,
+        )
+
+    from src.data.openmeteo_client import fetch  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        SINGLE_RUNS_FORECAST_URL,
+    )
+
+    fallback: dict[str, tuple[float | None, float | None]] = {}
+    fallback_errors: list[str] = []
+    run_iso = (
+        run.strftime("%Y-%m-%dT%H:%M")
+        if hasattr(run, "strftime")
+        else str(run)
+    )
+    for model in models:
+        om_id = OPENMETEO_MODEL_IDS.get(model, model)
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": "temperature_2m",
+            "models": om_id,
+            "run": run_iso,
+            "forecast_hours": forecast_hours,
+            "temperature_unit": "celsius",
+            "timezone": timezone_name,
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+        }
+        try:
+            payload = fetch(
+                SINGLE_RUNS_FORECAST_URL,
+                params,
+                endpoint_label=f"bayes_precision_fusion_{model}_single_runs_fallback",
+                quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+                fast_fail_429=True,
+            )
+            parsed = _parse_batched_single_runs_payload(
+                payload,
+                [model],
+                target_local_date,
+                timezone_name,
+            )
+            if model in parsed:
+                fallback[model] = parsed[model]
+            else:
+                fallback_errors.append(f"{model}:missing_series")
+        except Exception as model_exc:
+            model_error_text = str(model_exc)
+            fallback_errors.append(f"{model}:{model_error_text}")
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION per-model single_runs fallback dropped %s "
+                "(fail-soft): %s",
+                model,
+                model_exc,
+            )
+            if _is_quota_transport_error(model_error_text):
+                break
+
+    if fallback:
+        fallback[_BATCH_TRANSPORT_ERROR_KEY] = (
+            "batched_failed="
+            + batched_error_text
+            + ("; fallback_errors=" + ",".join(fallback_errors[:8]) if fallback_errors else ""),
+            None,
+        )
+        return fallback
+    return {
+        _BATCH_TRANSPORT_ERROR_KEY: (
+            "batched_failed="
+            + batched_error_text
+            + ("; fallback_errors=" + ",".join(fallback_errors[:8]) if fallback_errors else ""),
+            None,
+        )
+    }
 
 
 def _parse_batched_single_runs_payload(
@@ -611,7 +714,7 @@ def _default_previous_runs_fetch_batched(
             "start_date": target_date,
             "end_date": target_date,
             "hourly": hourly_var,
-            "models": om_ids,
+            "models": ",".join(om_ids),
             "temperature_unit": "celsius",
             "timezone": timezone_name,
         }
@@ -619,11 +722,13 @@ def _default_previous_runs_fetch_batched(
             PREVIOUS_RUNS_URL,
             params,
             endpoint_label="bayes_precision_fusion_previous_runs_batched",
+            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+            fast_fail_429=True,
         )
         return _parse_batched_previous_runs_payload(payload, models, hourly_var)
     except Exception as exc:
         _LOG.warning("BAYES_PRECISION_FUSION batched previous_runs fetch failed (fail-soft): %s", exc)
-        return {}
+        return {_BATCH_TRANSPORT_ERROR_KEY: (str(exc), None)}
 
 
 def _parse_batched_previous_runs_payload(
@@ -954,6 +1059,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     total_written = 0
     dropped: list[str] = []
     domain_excluded: list[str] = []
+    transport_errors: list[str] = []
+    abort_transport = False
 
     # ROW-LEVEL SKIP (2026-06-09, K-root instance #5 resolution): preload the logical keys
     # already persisted for THIS cycle so a re-run only fetches what is MISSING. This replaces
@@ -1011,6 +1118,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         targets_by_city_date[(t.city, t.target_date)].append(t)
 
     for (city, target_date), city_targets in targets_by_city_date.items():
+        if abort_transport:
+            break
         # All targets for the same (city, target_date) share lat/lon/timezone/lead_days.
         ref = city_targets[0]
         target_local_date = date.fromisoformat(target_date)
@@ -1125,6 +1234,14 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     target_local_date=target_local_date,
                     forecast_hours=forecast_hours,
                 )
+                single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
+                if single_transport_error is not None:
+                    single_error_text = str(single_transport_error[0])
+                    transport_errors.append(
+                        f"single_runs:{city}:{target_date}:{single_error_text}"
+                    )
+                    if _is_quota_transport_error(single_error_text):
+                        abort_transport = True
                 for model in single_models:
                     hilo = sv_map.get(model)
                     if hilo is None:
@@ -1166,7 +1283,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     prev_models.append(model)
 
             # ONE batched previous_runs fetch covers all models with missing history.
-            if prev_models:
+            if prev_models and not abort_transport:
                 pv_map = _default_previous_runs_fetch_batched(
                     models=prev_models,
                     latitude=ref.latitude,
@@ -1175,6 +1292,14 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     target_date=target_date,
                     lead_days=int(ref.lead_days),
                 )
+                previous_transport_error = pv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
+                if previous_transport_error is not None:
+                    previous_error_text = str(previous_transport_error[0])
+                    transport_errors.append(
+                        f"previous_runs:{city}:{target_date}:{previous_error_text}"
+                    )
+                    if _is_quota_transport_error(previous_error_text):
+                        abort_transport = True
                 for model in prev_models:
                     hilo = pv_map.get(model)
                     if hilo is None:
@@ -1241,8 +1366,18 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             sorted(global_single_unavailable),
         )
 
+    # A scoped transport gap after durable coverage is not a failed capture cycle.
+    # The downloader is monotone/idempotent per row and the production wrapper's
+    # coverage/fixpoint gate will keep healing residual scopes. Mark the pass
+    # retryable only when transport prevented every current single-runs row, or
+    # when a quota-style abort stopped the remaining target fan-out.
+    status = (
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        if transport_errors and (abort_transport or not single_success_models)
+        else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
     return {
-        "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+        "status": status,
         "cycle": cycle_iso,
         "forecast_db": str(forecast_db),
         "target_count": len(target_list),
@@ -1251,6 +1386,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "pruned_row_count": pruned,
         "dropped": tuple(dropped),
         "domain_excluded": tuple(sorted(set(domain_excluded))),
+        "transport_errors": tuple(transport_errors),
+        "transport_aborted_remaining_targets": abort_transport,
         # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
         "global_models_expected": len(global_models_expected),
         "global_models_dropped_scoped": sorted(global_single_dropped_scoped),

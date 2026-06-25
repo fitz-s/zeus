@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-25
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
@@ -20,6 +20,7 @@ src.events.continuous_redecision is authored.
 from __future__ import annotations
 
 import sqlite3
+import inspect
 from datetime import datetime
 
 import pytest
@@ -123,6 +124,31 @@ def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapsho
     )
 
 
+def test_latest_belief_reader_uses_bounded_sql_latest_window():
+    conn = _mem_world()
+    _cache_yes_belief(
+        conn,
+        p_posterior_yes=0.10,
+        recorded_at="2026-06-01T11:00:00+00:00",
+        snapshot_id="old-snap",
+    )
+    _cache_yes_belief(
+        conn,
+        p_posterior_yes=0.90,
+        recorded_at="2026-06-01T11:30:00+00:00",
+        snapshot_id="new-snap",
+    )
+
+    beliefs = cr._all_latest_beliefs(conn, scan_limit=1)
+
+    assert len(beliefs) == 1
+    assert beliefs[0].snapshot_id == "new-snap"
+    src = inspect.getsource(cr._all_latest_beliefs)
+    assert "ORDER BY recorded_at DESC" in src
+    assert "LIMIT ?" in src
+    assert "sorted(" not in src
+
+
 def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
     conn = _mem_world()
     _cache_yes_belief(
@@ -194,6 +220,50 @@ def test_executable_price_reader_ignores_closed_or_non_active_snapshot_rows():
     quotes = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
 
     assert quotes[("cid-1", "buy_yes")].price == 0.60
+
+
+def test_executable_price_reader_preserves_native_min_tick_size():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            orderbook_top_bid REAL,
+            orderbook_top_ask REAL,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            outcome_label TEXT,
+            min_tick_size TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, selected_outcome_token_id,
+            yes_token_id, no_token_id, outcome_label, min_tick_size,
+            enable_orderbook, active, closed, accepting_orders
+        ) VALUES ('tail-yes', 'cid-1', 0.001, 0.002,
+                  '2026-06-01T14:00:00+00:00',
+                  '2026-06-01T13:00:00+00:00', 'yes-1',
+                  'yes-1', 'no-1', 'YES', '0.001', 1, 1, 0, 1)
+        """
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
+
+    assert quotes[("cid-1", "buy_yes")].price == 0.002
+    assert quotes[("cid-1", "buy_yes")].tick_size == pytest.approx(0.001)
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +711,45 @@ def test_entry_screen_requires_robust_c95_value_not_raw_top_quote_edge():
     )
 
 
+def test_entry_screen_uses_native_tick_for_low_price_yes_tail():
+    conn = _mem_world()
+    cr.cache_belief(
+        conn,
+        family_id="Kuala Lumpur|2026-06-26|high",
+        city="Kuala Lumpur",
+        target_date="2026-06-26",
+        snapshot_id="tail-snap",
+        calibrator_model_hash="identity",
+        bin_labels=["28C"],
+        p_posterior_vec=[0.006],
+        q_lcb_yes_vec=[0.006],
+        q_lcb_no_vec=[0.994],
+        recorded_at="2026-06-25T11:30:00+00:00",
+    )
+    price_lookup = {
+        ("Kuala Lumpur|2026-06-26|high", "28C", "buy_yes"): cr.PriceQuote(
+            price=0.002,
+            freshness_deadline="2026-06-25T11:45:00+00:00",
+            tick_size=0.001,
+        ),
+    }
+
+    enqueued = cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-25T11:35:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.002,
+    )
+
+    assert [(e.bin_label, e.direction) for e in enqueued] == [("28C", "buy_yes")]
+    assert cr._entry_screen_robust_trade_score(
+        q_posterior=0.006,
+        q_lcb_5pct=0.006,
+        price=0.002,
+        tick_size=0.01,
+    ) < 0.0
+
+
 def test_latest_beliefs_dedupe_dynamic_family_hash_by_stable_market_identity():
     conn = _mem_world()
     label = "Will the lowest temperature in Shanghai be 24°C on June 19?"
@@ -963,6 +1072,67 @@ def test_all_candidates_rejected_row_is_family_backoff_not_candidate_backoff():
         len(key) == 5 and key[:3] == ("London", "2026-06-18", "low")
         for key in rejections
     )
+
+
+def test_candidate_rejected_row_is_candidate_backoff_not_family_backoff():
+    conn = _mem_world()
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_shanghai_hash",
+            "Shanghai",
+            "2026-06-25",
+            "high",
+            "Will the highest temperature in Shanghai be 25°C on June 25?",
+            "buy_yes",
+            "TRADE_SCORE",
+            "EVENT_BOUND_CANDIDATE_REJECTED:OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-1:candidate_id=candidate-buy-yes",
+            0.6712,
+            0.9616,
+            0.4327,
+            "2026-06-25T04:19:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    stable_key = (
+        "Shanghai",
+        "2026-06-25",
+        "high",
+        "Will the highest temperature in Shanghai be 25°C on June 25?",
+        "buy_yes",
+    )
+    assert stable_key in rejections
+    assert ("edli_family_shanghai_hash", stable_key[3], "buy_yes") in rejections
+    assert ("family", "Shanghai", "2026-06-25", "high") not in rejections
+    assert rejections[stable_key].execution_price == 0.6712
+    assert rejections[stable_key].q_lcb_5pct == 0.9616
+    assert rejections[stable_key].trade_score == 0.4327
 
 
 def test_certificate_build_failure_without_family_id_is_family_backoff():

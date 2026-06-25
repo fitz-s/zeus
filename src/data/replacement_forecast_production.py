@@ -108,12 +108,12 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seed_failed"),
         "forecast_db": _rooted_path(forecast_db),
         "raw_manifest_dir": _rooted_path(raw_manifest_dir),
-        "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
+        "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
         "request_dir": _rooted_path(cfg.get("request_dir"), base_dir / "requests"),
         "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
         "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
-        "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "limit": int(cfg.get("materialization_limit_per_cycle") or 10),
+        "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
+        "limit": int(cfg.get("materialization_limit_per_cycle") or 40),
         "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
         "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
         "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
@@ -245,22 +245,26 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
             "retrying next tick — a guessed run is never requested",
         }
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
-    cycle_is_current = downloaded_cycle is not None and downloaded_cycle >= available_cycle
 
-    plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-    if plan.ready and cycle_is_current:
+    plan = build_replacement_forecast_current_target_plan(
+        Path(str(forecast_db)),
+        required_openmeteo_source_cycle_time=available_cycle,
+    )
+    cycle_targets_have_current_manifests = plan.missing_openmeteo_manifest_count <= 0
+    cycle_targets_are_materialized = plan.ready
+    if cycle_targets_are_materialized:
         return {
             "status": "CURRENT_TARGETS_ALREADY_COVERED",
             "coverage": plan.as_dict(),
             "available_cycle": available_cycle.isoformat(),
-            "downloaded_cycle": downloaded_cycle.isoformat(),
+            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
-    if plan.missing_openmeteo_manifest_count <= 0 and cycle_is_current:
+    if cycle_targets_have_current_manifests:
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": plan.as_dict(),
             "available_cycle": available_cycle.isoformat(),
-            "downloaded_cycle": downloaded_cycle.isoformat(),
+            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
     cycle = available_cycle
     return download_current_target_openmeteo_inputs(
@@ -275,7 +279,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
         # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
         # needed for ALL current targets — coverage ("a posterior exists") must not filter
         # the target list, or covered targets can never re-materialize on the fresh cycle.
-        include_covered=not cycle_is_current,
+        include_covered=not cycle_targets_have_current_manifests,
     )
 
 
@@ -286,9 +290,9 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
     ``settings['edli']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
     SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
     OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
-    zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
-    center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
-    daily, fail-soft (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
+    zeus-forecasts.db. It does not directly write forecast_posteriors or orders; those rows are
+    live replacement-posterior inputs consumed by the materializer. Forward, daily, fail-soft
+    (it NEVER raises into the live materialization cycle). Returns None when the flag is OFF or
     there is no forecast_db / no targets."""
     try:
         if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
@@ -316,6 +320,15 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         # advance through meta/bucket before the single-runs API serves the same run;
         # extras must not follow that anchor-only cycle and then fail every target.
         cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
+        if cycle is None:
+            # The single-runs probe can be unavailable while the anchor lane has
+            # already durably captured a current-target cycle through another
+            # Open-Meteo rung. That DB row is live evidence, not a wall-clock
+            # guess. Use it so the BPF lane attempts to heal the exact cycle the
+            # materializer is reading; transport/quota failures are then surfaced
+            # by the downloader as retryable health instead of hiding behind a
+            # probe skip.
+            cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
         if cycle is None:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
@@ -517,6 +530,54 @@ def _record_extras_fixpoint(cfg: dict[str, object], cycle: datetime, *, written:
         )
     except Exception:
         logger.debug("BAYES_PRECISION_FUSION extras fixpoint record failed (non-fatal)", exc_info=True)
+
+
+def _record_bayes_precision_fusion_capture_health(
+    cfg: dict[str, object],
+    report: dict[str, object],
+) -> None:
+    """Write component health for the BPF capture sub-lane.
+
+    The parent replacement download job can succeed while the BPF capture lane
+    did not actually obtain current-cycle raw-model rows. That is not an OK
+    money-path state: materialization cannot produce a fresh fused posterior
+    without those rows. Keep this separate component fail-closed for preflight.
+    """
+
+    from src.observability.scheduler_health import _write_scheduler_health  # noqa: PLC0415
+
+    status = str(report.get("status") or "")
+    if status == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS":
+        return
+    if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
+        cycle_raw = report.get("cycle")
+        try:
+            cycle = datetime.fromisoformat(str(cycle_raw).replace("Z", "+00:00"))
+        except Exception:
+            cycle = None
+        if cycle is not None:
+            _record_extras_fixpoint(
+                cfg,
+                cycle,
+                written=int(report.get("written_row_count", 0) or 0),
+            )
+        unavailable = report.get("global_models_unavailable")
+        if unavailable:
+            _write_scheduler_health(
+                _EXTRAS_FIXPOINT_HEALTH_JOB,
+                failed=True,
+                reason=str(unavailable),
+            )
+            return
+        _write_scheduler_health(_EXTRAS_FIXPOINT_HEALTH_JOB, failed=False)
+        return
+    if status:
+        reason = str(report.get("error") or report.get("detail") or status)
+        _write_scheduler_health(
+            _EXTRAS_FIXPOINT_HEALTH_JOB,
+            failed=True,
+            reason=reason,
+        )
 
 
 def _extras_cycle_incomplete(cfg: dict[str, object], cycle: datetime | None = None) -> bool:
@@ -949,30 +1010,20 @@ def _replacement_forecast_download_cycle() -> None:
                 "replacement forecast current-target download report: %s", download_report
             )
     # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model capture/accrual (forward + fixed-lead), gated by the
-    # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Pure side-effect on
-    # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
+    # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Writes only
+    # raw_model_forecasts here; downstream live materialization consumes those rows to build
+    # replacement posteriors. Fail-soft.
     bayes_precision_fusion_capture_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     if bayes_precision_fusion_capture_report is not None and bayes_precision_fusion_capture_report.get("status") not in {
         "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
     }:
-        logger.info("BAYES_PRECISION_FUSION extra-model diagnostic capture report: %s", bayes_precision_fusion_capture_report)
-    # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails or is
-    # fail-soft skipped, the parent download job still shows OK in scheduler
-    # health (only the parent download wrapper is tracked by the @_scheduler_job wrapper).
-    # Write a distinct component entry so logs/scheduler_jobs_health.json shows
-    # the degradation and an operator/alert can detect multi-day extras outages.
+        logger.info("BAYES_PRECISION_FUSION extra-model raw-input capture report: %s", bayes_precision_fusion_capture_report)
+    # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails, probe-skips,
+    # or downloads with missing global instruments, the parent download job still
+    # shows OK. Write a distinct component entry so preflight can fail on the
+    # actual fusion-capture state.
     if bayes_precision_fusion_capture_report is not None:
-        _bayes_precision_fusion_status = bayes_precision_fusion_capture_report.get("status", "")
-        _bayes_precision_fusion_failed = _bayes_precision_fusion_status == "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
-        if _bayes_precision_fusion_failed or bayes_precision_fusion_capture_report.get("global_models_unavailable"):
-            from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415
-            _failure_reason = bayes_precision_fusion_capture_report.get("error") or str(
-                bayes_precision_fusion_capture_report.get("global_models_unavailable", "")
-            )
-            _wsh("bayes_precision_fusion_capture", failed=True, reason=_failure_reason)
-        elif _bayes_precision_fusion_status not in {"BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS", ""}:
-            from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415, F811
-            _wsh("bayes_precision_fusion_capture", failed=False)
+        _record_bayes_precision_fusion_capture_health(cfg, bayes_precision_fusion_capture_report)
 
 
 @_scheduler_job("replacement_forecast_live_materialize")
@@ -999,7 +1050,18 @@ def _replacement_forecast_live_materialize_cycle() -> None:
         seed_limit=int(cfg["seed_limit"]),
         limit=int(cfg["limit"]),
     )
-    if report.failed_count:
-        logger.warning("replacement forecast live materialization queue failures: %s", report.as_dict())
-    elif report.processed_count:
-        logger.info("replacement forecast live materialization queue processed: %s", report.as_dict())
+    report_payload = report.as_dict()
+    seed_discovery = report_payload.get("seed_discovery_report")
+    seed_discovery_active = (
+        isinstance(seed_discovery, dict)
+        and (
+            int(seed_discovery.get("discovered_count") or 0) > 0
+            or int(seed_discovery.get("failed_count") or 0) > 0
+        )
+    )
+    if report.failed_count or report.seed_failed_count or (
+        isinstance(seed_discovery, dict) and int(seed_discovery.get("failed_count") or 0) > 0
+    ):
+        logger.warning("replacement forecast live materialization queue failures: %s", report_payload)
+    elif report.processed_count or report.seed_processed_count or seed_discovery_active:
+        logger.info("replacement forecast live materialization queue processed: %s", report_payload)

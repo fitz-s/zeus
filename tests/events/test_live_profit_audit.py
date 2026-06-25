@@ -576,6 +576,40 @@ def test_q_provenance_stamped_from_expected_edge_certificate():
     assert row["q_lcb_5pct"] == pytest.approx(0.82), "q_lcb_5pct must be stamped from the edge certificate"
 
 
+def test_expected_edge_stamped_from_certificate_edge_lcb():
+    """expected_edge must be the decision-time ex-ante edge from the ActionableTradeCertificate.
+
+    Antibody: the live PreSubmitRevalidated payload carries NO expected_edge
+    (verified: 0/1651 live rows populated), so reading it from pre_submit leaves
+    expected_edge NULL on every audit row — the settlement loop then has no ex-ante
+    edge to compare realized outcome against. The canonical ex-ante edge the engine
+    acts on is the edge cert's qkernel_execution_economics.edge_lcb (== the cert's
+    action_score / trade_score). RED before fix (None), GREEN after. The fixture's
+    fictional top-level expected_edge (0.029) is intentionally NOT the asserted value
+    so this cannot pass by reading the wrong field.
+    """
+    conn = _conn()
+    _seed_authority_certificates(
+        conn,
+        edge_extra={"qkernel_execution_economics": {"edge_lcb": 0.0777}},
+    )
+    _seed_confirmed_aggregate(conn, seed_certificates=False)
+
+    row = conn.execute(
+        """
+        SELECT expected_edge
+        FROM edli_live_profit_audit
+        WHERE aggregate_id = ? AND order_lifecycle_state = 'CONFIRMED'
+        """,
+        ("event-1:intent-1",),
+    ).fetchone()
+    assert row is not None
+    assert row["expected_edge"] == pytest.approx(0.0777), (
+        "expected_edge must be stamped from the edge certificate's "
+        "qkernel_execution_economics.edge_lcb (the ex-ante edge the decision acted on)"
+    )
+
+
 def _seed_confirmed_aggregate(
     conn: sqlite3.Connection,
     *,

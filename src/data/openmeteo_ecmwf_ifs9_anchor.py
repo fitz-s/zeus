@@ -235,6 +235,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload(
     *,
     timeout: float = 30.0,
     max_retries: int = 3,
+    fast_fail_429: bool = False,
 ) -> Mapping[str, Any]:
     """Fetch a run-pinned Open-Meteo ECMWF IFS 9km Single Runs payload."""
 
@@ -248,13 +249,19 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload(
         timeout=timeout,
         max_retries=max_retries,
         endpoint_label="openmeteo_ecmwf_ifs9_single_runs_anchor",
+        fast_fail_429=fast_fail_429,
     )
     if not isinstance(payload, Mapping):
         raise ValueError("Open-Meteo ECMWF IFS 9km response must be a JSON object")
     return payload
 
 
-def fetch_openmeteo_ifs9_model_meta(*, timeout: float = 20.0) -> Mapping[str, Any]:
+def fetch_openmeteo_ifs9_model_meta(
+    *,
+    timeout: float = 20.0,
+    max_retries: int = 2,
+    fast_fail_429: bool = False,
+) -> Mapping[str, Any]:
     """Provider-declared run metadata for the ecmwf_ifs (9km) model.
 
     Returns the raw meta mapping plus parsed UTC datetimes under
@@ -268,8 +275,9 @@ def fetch_openmeteo_ifs9_model_meta(*, timeout: float = 20.0) -> Mapping[str, An
         MODEL_META_URL,
         {},
         timeout=timeout,
-        max_retries=2,
+        max_retries=max_retries,
         endpoint_label="openmeteo_ecmwf_ifs9_model_meta",
+        fast_fail_429=fast_fail_429,
     )
     if not isinstance(meta, Mapping):
         raise ValueError("Open-Meteo model meta must be a JSON object")
@@ -291,6 +299,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
     *,
     timeout: float = 30.0,
     max_retries: int = 3,
+    fast_fail_429: bool = False,
     meta_fetch: Any = None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     """Fetch the CURRENT run from the standard forecast API with provider meta run-stamp.
@@ -311,8 +320,16 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
         raise TypeError("request must be OpenMeteoEcmwfIfs9AnchorRequest")
     from src.data.openmeteo_client import fetch
 
-    _meta_fetch = meta_fetch or fetch_openmeteo_ifs9_model_meta
-    meta_before = _meta_fetch(timeout=timeout)
+    def _fetch_meta() -> Mapping[str, Any]:
+        if meta_fetch is not None:
+            return meta_fetch(timeout=timeout)
+        return fetch_openmeteo_ifs9_model_meta(
+            timeout=timeout,
+            max_retries=max_retries,
+            fast_fail_429=fast_fail_429,
+        )
+
+    meta_before = _fetch_meta()
     declared_run = meta_before["run_initialisation_utc"]
     if declared_run != request.run:
         raise ValueError(
@@ -328,10 +345,11 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
         timeout=timeout,
         max_retries=max_retries,
         endpoint_label="openmeteo_ecmwf_ifs9_standard_meta_stamped_anchor",
+        fast_fail_429=fast_fail_429,
     )
     if not isinstance(payload, Mapping):
         raise ValueError("Open-Meteo ECMWF IFS 9km response must be a JSON object")
-    meta_after = _meta_fetch(timeout=timeout)
+    meta_after = _fetch_meta()
     if meta_after["run_modification_utc"] != meta_before["run_modification_utc"]:
         raise ValueError(
             "meta-stamped anchor fetch discarded: provider modified the model dataset "
@@ -446,6 +464,13 @@ def extract_openmeteo_ecmwf_ifs9_localday_anchor(
             raise ValueError("hourly.time values must be strings")
         local_time = _parse_openmeteo_time(raw_time, city_timezone=city_timezone)
         if local_time.date() != target_local_date:
+            continue
+        if raw_temperature is None:
+            # Open-Meteo returns null for a missing hour at the forecast-horizon edge (notably
+            # the 2-day-out low metric — London/Paris 2026-06-26 crashed the live materializer here
+            # on float(None), 2026-06-24). Skip the gap rather than crash; the min_hourly_samples /
+            # require_full_localday checks below still enforce coverage and raise a clear ValueError
+            # if the surviving in-day samples are genuinely insufficient.
             continue
         contributing_local_times.append(local_time)
         contributing_valid_times_utc.append(local_time.astimezone(UTC))

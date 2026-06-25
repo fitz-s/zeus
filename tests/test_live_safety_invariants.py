@@ -3107,9 +3107,10 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
 
     assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert pos.state == "pending_exit"
-    assert pos.exit_state == "backoff_exhausted"
-    assert pos.exit_reason == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+    assert pos.state == "day0_window"
+    assert pos.exit_state == ""
+    assert pos.exit_reason == ""
+    assert pos.last_exit_error == "MARKET_CLOSED_AWAITING_SETTLEMENT:clob_market_info"
     assert summary["monitor_skipped_closed_market_pending_settlement"] == 1
     assert "monitor_chain_missing" not in summary
     assert "monitor_incomplete_exit_context" not in summary
@@ -3988,6 +3989,136 @@ def test_single_leg_monitor_records_family_redecision_value_payload():
     assert family["family_direct_sell_value_usd"] == pytest.approx(5.06 * 0.73)
 
 
+def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates():
+    """Continuous redecision must act when fresh family sell value beats hold value."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="family-direct-sell-dominates",
+        city="Seoul",
+        target_date="2026-06-26",
+        temperature_metric="low",
+        bin_label="21C",
+        direction="buy_no",
+        shares=15.5,
+        entry_price=0.62,
+        p_posterior=0.67,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-24T14:55:00+00:00"
+    pos.last_monitor_prob = 0.60
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.70108
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.70108
+    pos.last_monitor_best_ask = 0.72
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = ["replacement_posterior", "ci_separated_edge_within_threshold_hold"]
+
+    portfolio = _make_portfolio(pos)
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
+        trigger="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=list(pos.applied_validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=portfolio,
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+    trigger = cycle_runtime._effective_exit_trigger(hold_decision, reason)
+
+    assert should_exit is True
+    assert reason == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert trigger == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert summary["family_redecision_hold_exits_promoted"] == 1
+    assert "family_direct_sell_dominates_hold_exit" in pos.applied_validations
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=3,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_family_direct_sell_dominates",
+        exit_decision=hold_decision,
+        final_should_exit=should_exit,
+        final_exit_reason=reason,
+        final_exit_trigger=trigger,
+    )
+    payload = json.loads(events[0]["payload_json"])
+    family = payload["family_redecision"]
+    assert payload["exit_decision_should_exit"] is True
+    assert payload["exit_decision_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert payload["exit_decision_trigger"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert family["decision"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert family["belief_reversed_below_entry"] is True
+    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
+    assert family["family_direct_sell_advantage_usd"] > family["family_direct_sell_advantage_threshold_usd"]
+
+
+def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
+    """A high bid over a conservative belief is not by itself an exit signal."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-direct-sell-winner-hold",
+        city="Paris",
+        target_date="2026-06-20",
+        temperature_metric="low",
+        bin_label="19C",
+        direction="buy_no",
+        shares=5.1,
+        entry_price=0.75,
+        p_posterior=0.80,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-24T14:55:00+00:00"
+    pos.last_monitor_prob = 0.82
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.998
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.998
+    pos.last_monitor_best_ask = 0.999
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = ["replacement_posterior"]
+
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="replacement_posterior",
+        applied_validations=list(pos.applied_validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_OVERLAP_HOLD"
+    assert summary["family_redecision_overlay_evaluated"] == 1
+    family = pos._monitor_family_redecision
+    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
+    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
+    assert "family_direct_sell_dominates_hold_exit" not in pos.applied_validations
+
+
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path.
 
@@ -4246,6 +4377,63 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     assert "held_prob=1.000000" in belief_tags[0]
     assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
     assert "model_divergence_panic_inapplicable:day0_absorbing_hard_fact" in pos.applied_validations
+
+
+def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
+    """Active same-day positions must not wait for phase transition before hard-fact overlay."""
+    from src.engine import monitor_refresh
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+
+    pos = _make_position(
+        state="holding",
+        city="Tokyo",
+        cluster="East Asia",
+        target_date="2026-06-18",
+        bin_label="21°C on June 18?",
+        direction="buy_no",
+        temperature_metric="low",
+        unit="C",
+        entry_method="ens_member_counting",
+        selected_method="",
+        applied_validations=[],
+        entry_price=0.58,
+        p_posterior=0.720612963366361,
+        token_id="tok_yes_tokyo_low_21",
+        no_token_id="tok_no_tokyo_low_21",
+    )
+
+    class DummyClob:
+        def get_best_bid_ask(self, token_id):
+            assert token_id == "tok_no_tokyo_low_21"
+            return 0.99, 1.00, 100.0, 100.0
+
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda *, position, city, now=None, world_conn=None: HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="running low extreme 20 killed bin [21.0,21.0]",
+            metric="low",
+            rounded_extreme=20.0,
+            source="metar_fast_lane",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.engine.position_belief.load_replacement_belief",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("replacement posterior must not be read before active same-day hard fact")
+        ),
+    )
+
+    edge_ctx = monitor_refresh.refresh_position(None, DummyClob(), pos)
+
+    assert str(pos.state.value if hasattr(pos.state, "value") else pos.state) == "holding"
+    assert pos.selected_method == monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+    assert pos.last_monitor_prob_is_fresh is True
+    assert pos.last_monitor_prob == pytest.approx(1.0)
+    assert edge_ctx.p_posterior == pytest.approx(1.0)
+    assert monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT in pos.applied_validations
+    assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
 
 
 def test_day0_high_morning_observation_is_not_exit_authority():

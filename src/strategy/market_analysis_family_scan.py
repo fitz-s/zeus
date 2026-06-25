@@ -102,6 +102,15 @@ def scan_full_hypothesis_family(
 
         if not _supports_buy_no_for_bin(analysis, idx):
             continue
+        # DIRECTION LAW (mirror of MarketAnalysis.find_edges, market_analysis.py:669-695):
+        # buy_no on the modal bin (argmax p_posterior) bets against our own forecast =
+        # wrong-side, and find_edges makes it UNCONSTRUCTABLE. The full-family BH/FDR
+        # denominator must mirror that veto, else it carries a hypothesis the live edge
+        # builder never constructs and shrinks every other leg's BH threshold
+        # (consult REQ-20260623-084811 [HIGH] consistency).
+        _post_max = max(float(x) for x in analysis.p_posterior)
+        if float(analysis.p_posterior[idx]) >= _post_max - 1e-12:
+            continue
         p_market_no = _buy_no_market_price_for_bin(analysis, idx)
         p_posterior_no = 1.0 - float(analysis.p_posterior[idx])
         p_model_no = 1.0 - float(analysis.p_cal[idx])

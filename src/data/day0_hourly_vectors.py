@@ -58,9 +58,13 @@ DAY0_HOURLY_MODELS: tuple[str, ...] = (
     "ukmo_uk_deterministic_2km",
     "ncep_nbm_conus",
 )
+GLOBAL_DAY0_HOURLY_FALLBACK_MODELS: tuple[str, ...] = ("ecmwf_ifs",)
 
 DAY0_VECTOR_RETENTION_DAYS = 3.0
 DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-ish
+DEFAULT_FETCH_TIMEOUT_S = 4.0
+DEFAULT_REFRESH_BUDGET_S = 6.0
+DEFAULT_REFRESH_MAX_CITIES = 3
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -116,6 +120,21 @@ def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_
         return []
 
 
+def day0_hourly_models_for_city(city: Any) -> list[str]:
+    """Live Day0 remaining-day hourly model set for a city.
+
+    Regional high-resolution models are preferred when the domain gate admits at least one. Global
+    ECMWF IFS 9km is the universal fallback, matching the replacement forecast anchor source already
+    used by the live probability chain. Without this fallback, cities outside the regional polygons
+    enter the Day0 evaluator and then fail at ``DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`` forever.
+    """
+
+    regional = in_domain_models_for_city(city)
+    if regional:
+        return regional
+    return list(GLOBAL_DAY0_HOURLY_FALLBACK_MODELS)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_TABLE_DDL)
     conn.execute(_INDEX_DDL)
@@ -155,6 +174,7 @@ def fetch_day0_hourly_vectors(
     *,
     models: Optional[list[str]] = None,
     now: Optional[datetime] = None,
+    timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
 ) -> tuple[list[Day0HourlyVector], str]:
     """Fetch the freshest hourly temperature curves for in-domain high-res models.
 
@@ -166,7 +186,7 @@ def fetch_day0_hourly_vectors(
     """
     from src.data.openmeteo_client import fetch
 
-    chosen = models if models is not None else in_domain_models_for_city(city)
+    chosen = models if models is not None else day0_hourly_models_for_city(city)
     if not chosen:
         return [], ""
     captured_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
@@ -184,6 +204,10 @@ def fetch_day0_hourly_vectors(
             OPENMETEO_FORECAST_URL,
             params,
             endpoint_label=f"day0_hourly_{getattr(city, 'name', '?')}",
+            timeout=max(0.5, float(timeout_s)),
+            max_retries=1,
+            backoff_sec=0.0,
+            fast_fail_429=True,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft lane
         logger.warning(
@@ -270,6 +294,7 @@ def persist_day0_hourly_vectors(
     endpoint: str = OPENMETEO_FORECAST_URL,
     retention_days: float = DAY0_VECTOR_RETENTION_DAYS,
     now: Optional[datetime] = None,
+    lock_blocking: bool = True,
 ) -> int:
     """Persist vectors (idempotent on (model,city,date,captured_at)) + prune.
 
@@ -299,7 +324,11 @@ def persist_day0_hourly_vectors(
         from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection
         from src.state.db_writer_lock import WriteClass, db_writer_lock
 
-        lock_ctx = db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE)
+        lock_ctx = db_writer_lock(
+            ZEUS_FORECASTS_DB_PATH,
+            WriteClass.LIVE,
+            blocking=lock_blocking,
+        )
     else:
         from contextlib import nullcontext
 
@@ -461,6 +490,10 @@ def maybe_refresh_day0_hourly_vectors(
     *,
     decision_time: datetime,
     interval_s: float = DEFAULT_REFRESH_INTERVAL_S,
+    budget_s: float = DEFAULT_REFRESH_BUDGET_S,
+    max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
+    timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+    persist_lock_blocking: bool = True,
 ) -> int:
     """Throttled per-city fetch+persist of the freshest high-res hourly curves.
 
@@ -469,29 +502,55 @@ def maybe_refresh_day0_hourly_vectors(
     """
     written = 0
     now_monotonic = time.monotonic()
+    started_monotonic = now_monotonic
+    checked = 0
     for city in cities:
+        if checked >= max(0, int(max_cities)):
+            break
+        if budget_s > 0.0 and checked > 0 and (time.monotonic() - started_monotonic) >= budget_s:
+            logger.warning(
+                "DAY0_HOURLY_VECTORS_REFRESH_BUDGET_EXHAUSTED checked=%d budget_s=%.3f",
+                checked,
+                budget_s,
+            )
+            break
         name = str(getattr(city, "name", "") or "")
         if not name:
             continue
-        with _REFRESH_LOCK:
-            last = _LAST_REFRESH_MONOTONIC.get(name, 0.0)
-            if now_monotonic - last < float(interval_s):
-                continue
-            _LAST_REFRESH_MONOTONIC[name] = now_monotonic
         try:
-            models = in_domain_models_for_city(city)
-            if not models:
-                continue
             tz = ZoneInfo(str(getattr(city, "timezone")))
             target_date = decision_time.astimezone(tz).date().isoformat()
-            vectors, request_hash = fetch_day0_hourly_vectors(
-                city, models=models, now=decision_time
-            )
+            refresh_key = f"{name}|{target_date}"
+            with _REFRESH_LOCK:
+                last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
+                if now_monotonic - last < float(interval_s):
+                    continue
+                _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
+            models = day0_hourly_models_for_city(city)
+            if not models:
+                continue
+            checked += 1
+            try:
+                vectors, request_hash = fetch_day0_hourly_vectors(
+                    city, models=models, now=decision_time, timeout_s=timeout_s
+                )
+            except TypeError as exc:
+                if "timeout_s" not in str(exc):
+                    raise
+                vectors, request_hash = fetch_day0_hourly_vectors(
+                    city, models=models, now=decision_time
+                )
             if vectors and request_hash:
                 written += persist_day0_hourly_vectors(
-                    vectors, target_date=target_date, request_hash=request_hash
+                    vectors,
+                    target_date=target_date,
+                    request_hash=request_hash,
+                    lock_blocking=persist_lock_blocking,
                 )
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
+            if isinstance(exc, BlockingIOError):
+                with _REFRESH_LOCK:
+                    _LAST_REFRESH_MONOTONIC.pop(locals().get("refresh_key", name), None)
             logger.warning(
                 "DAY0_HOURLY_VECTORS_REFRESH_FAILED city=%s exc=%s: %s",
                 name, type(exc).__name__, exc,

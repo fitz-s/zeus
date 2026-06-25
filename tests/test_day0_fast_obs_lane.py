@@ -758,11 +758,105 @@ class TestMutexNoHttpSplit:
         )
         assert n == 2  # high + low emitted with ZERO fetcher invocations
 
+    def test_emit_prefetched_persists_anomaly_actions_with_world_conn(self, monkeypatch):
+        from src.data import day0_oracle_anomaly as oa
+        from src.data.day0_fast_obs import Day0FastObsEmitter, FastObsPrefetch
+        from src.state import db_writer_lock
+
+        def forbidden_lock(*_args, **_kwargs):
+            raise AssertionError("emit-phase anomaly persistence must use world_conn")
+
+        monkeypatch.setattr(db_writer_lock, "db_writer_lock", forbidden_lock)
+        conn = _world_conn()
+        action = oa.Day0OracleAnomalyAction(
+            action="flag",
+            city="Tokyo",
+            target_date="2026-06-10",
+            detail="paris-class",
+        )
+        prefetch = FastObsPrefetch(
+            eligible=(),
+            reports=(),
+            freshness_status="fresh_fetch",
+            cache_age_s=0.0,
+            decision_time=datetime(2026, 6, 10, 4, 0, tzinfo=UTC),
+            anomaly_actions=(action,),
+        )
+
+        emitted = Day0FastObsEmitter().emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at="2026-06-10T04:00:00+00:00",
+        )
+
+        assert emitted == 0
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused(
+            "Tokyo",
+            "2026-06-10",
+            now=datetime(2026, 6, 10, 5, 0, tzinfo=UTC),
+            conn=conn,
+        ) is True
+
+    def test_prefetch_anomaly_check_returns_action_without_writer_lock(self, monkeypatch):
+        from src.data import day0_oracle_anomaly as oa
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+        from src.state import db_writer_lock
+
+        def forbidden_lock(*_args, **_kwargs):
+            raise AssertionError("prefetch-phase anomaly check must not acquire a writer lock")
+
+        def wu_obs(city, target_date=None, **kw):
+            return SimpleNamespace(
+                source="wu_api",
+                coverage_status="OK",
+                observation_time="2026-06-09T15:05:00+00:00",
+                high_so_far=26.0,
+                low_so_far=21.0,
+            )
+
+        monkeypatch.setattr(db_writer_lock, "db_writer_lock", forbidden_lock)
+        monkeypatch.setattr("src.data.observation_client.get_current_observation", wu_obs)
+
+        t0 = datetime(2026, 6, 9, 15, 0, tzinfo=UTC)  # Jun 10 00:00 JST
+        reports = [
+            _report("RJTT", t0, 21.0, t_group=False),
+            _report("RJTT", t0 + timedelta(minutes=5), 21.0, t_group=False),
+        ]
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: reports, min_fetch_interval_s=0.0)
+
+        prefetch = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=10),
+            anomaly_check=oa.wu_metar_anomaly_check,
+        )
+
+        assert len(prefetch.anomaly_actions) == 1
+        action = prefetch.anomaly_actions[0]
+        assert action.action == "flag"
+        assert action.city == "Tokyo"
+        assert action.target_date == "2026-06-10"
+        assert oa.is_day0_family_paused(
+            "Tokyo",
+            "2026-06-10",
+            now=datetime(2026, 6, 9, 15, 15, tzinfo=UTC),
+            conn=sqlite3.connect(":memory:"),
+        ) is True
+
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused(
+            "Tokyo",
+            "2026-06-10",
+            now=datetime(2026, 6, 9, 15, 15, tzinfo=UTC),
+            conn=sqlite3.connect(":memory:"),
+        ) is False, "prefetch must not make restart durability depend on a standalone write"
+
     def test_main_prefetches_before_mutex_and_emit_is_write_only(self):
         """Source-order pin: the HTTP prefetch (_edli_prefetch_day0_fast_obs,
-        which also hosts the open-meteo hourly-vector refresh) happens BEFORE
-        _emit_mutex.acquire(); the mutex-held emit consumes fast_prefetch and
-        the write-phase function contains no fetch/HTTP entry points."""
+        for live observations only) happens BEFORE _emit_mutex.acquire(); the
+        mutex-held emit consumes fast_prefetch and the write-phase function
+        contains no fetch/HTTP entry points. Open-Meteo hourly-vector refresh is
+        an independent scheduler job and must not pin the reactor prefetch."""
         source = open("src/main.py", encoding="utf-8").read()
         prefetch_at = source.index("_edli_prefetch_day0_fast_obs(decision_time=now)")
         acquire_at = source.index("_emit_mutex.acquire()")
@@ -775,10 +869,14 @@ class TestMutexNoHttpSplit:
         for forbidden in ("emit_events(", "httpx", "maybe_refresh_day0_hourly_vectors", ".prefetch("):
             assert forbidden not in emit_body, f"write phase must not contain {forbidden!r}"
         assert "emit_prefetched(" in emit_body
-        # and the hourly-vector refresh lives in the PREFETCH (pre-mutex) helper
+        # and the hourly-vector refresh lives in an independent scheduler job
         pre_start = source.index("def _edli_prefetch_day0_fast_obs(")
-        pre_end = start
-        assert "maybe_refresh_day0_hourly_vectors" in source[pre_start:pre_end]
+        hourly_start = source.index("def _edli_day0_hourly_refresh_cycle(")
+        pre_end = hourly_start
+        assert "maybe_refresh_day0_hourly_vectors" not in source[pre_start:pre_end]
+        hourly_end = source.index("def _edli_emit_day0_extreme_events(")
+        assert "maybe_refresh_day0_hourly_vectors" in source[hourly_start:hourly_end]
+        assert 'id="edli_day0_hourly_refresh"' in source
 
     def test_publication_clock_missing_denies_live_authority(self):
         """PR#404 P2: receiptTime absent -> available_at falls back to the obs
@@ -863,6 +961,45 @@ class TestAnomalyPausePersistence:
 
         oa.flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="t", conn=_BrokenConn())
         assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=_BrokenConn()) is True
+
+    def test_anomaly_flag_uses_blocking_live_writer_lock(self, monkeypatch):
+        from contextlib import contextmanager
+        from src.data import day0_oracle_anomaly as oa
+        from src.state import db as state_db
+        from src.state import db_writer_lock
+
+        raw_conn = self._flags_conn()
+
+        class _Conn:
+            def execute(self, *args, **kwargs):
+                return raw_conn.execute(*args, **kwargs)
+
+            def commit(self):
+                return raw_conn.commit()
+
+            def close(self):
+                return None
+
+        conn = _Conn()
+        calls = []
+
+        @contextmanager
+        def _lock(db_path, write_class, *, blocking=True):
+            calls.append((db_path, write_class, blocking))
+            yield
+
+        monkeypatch.setattr(state_db, "get_world_connection", lambda **_kwargs: conn)
+        monkeypatch.setattr(db_writer_lock, "db_writer_lock", _lock)
+
+        oa.flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="t")
+
+        assert calls, "production anomaly flag path must acquire the world writer lock"
+        assert calls[-1][1] == db_writer_lock.WriteClass.LIVE
+        assert calls[-1][2] is True
+        rows = raw_conn.execute(
+            "SELECT COUNT(*) FROM day0_oracle_anomaly_flags WHERE city='Tokyo'"
+        ).fetchone()[0]
+        assert rows == 1
 
     def test_wu_outage_does_not_consume_success_memo(self, monkeypatch):
         """The old code armed the 10-min memo BEFORE calling WU — an outage
@@ -1087,6 +1224,36 @@ class TestAnomalyFreshnessGates:
         )
         assert pf2.freshness_status == "stale_cache_after_failure"
         assert calls["n"] == 1, "a stale METAR cache must not feed the divergence detector"
+
+    def test_prefetch_bounds_anomaly_checks_before_scanning_all_cities(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        tokyo = _tokyo()
+        tokyo_b = SimpleNamespace(
+            name="Tokyo-B",
+            timezone=tokyo.timezone,
+            settlement_unit=tokyo.settlement_unit,
+            wu_station="RJTT",
+            settlement_source_type=tokyo.settlement_source_type,
+        )
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        calls: list[str] = []
+
+        def check(city, extremes, rpts):
+            calls.append(city.name)
+
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: reports, min_fetch_interval_s=0.0)
+        prefetch = emitter.prefetch(
+            cities=[tokyo, tokyo_b],
+            decision_time=t0 + timedelta(minutes=5),
+            anomaly_check=check,
+            anomaly_check_budget_s=60.0,
+            anomaly_check_max_cities=1,
+        )
+
+        assert prefetch.freshness_status == "fresh_fetch"
+        assert calls == ["Tokyo"]
 
     def test_detector_refuses_conclusion_when_metar_window_lags_wu(self):
         """Operator scenario: METAR outage since 10:00, WU moved at 12:00 —

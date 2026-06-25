@@ -19,7 +19,7 @@ All fetchers are injected (NO network).
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -42,6 +42,22 @@ def _targets():
     return [
         BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                           lead_days=1, latitude=48.967, longitude=2.428, timezone_name="Europe/Paris"),
+    ]
+
+
+def _two_city_targets():
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
+    return [
+        BayesPrecisionFusionDownloadTarget(
+            city="Paris", metric="high", target_date="2026-06-09",
+            lead_days=1, latitude=48.967, longitude=2.428,
+            timezone_name="Europe/Paris",
+        ),
+        BayesPrecisionFusionDownloadTarget(
+            city="Berlin", metric="high", target_date="2026-06-09",
+            lead_days=1, latitude=52.520, longitude=13.405,
+            timezone_name="Europe/Berlin",
+        ),
     ]
 
 
@@ -453,6 +469,240 @@ def test_scoped_global_drop_does_not_fail_cycle_when_model_succeeds_elsewhere(tm
     assert "icon_global:single_runs" in report["dropped"]
     assert "icon_global" in report["global_models_dropped_scoped"]
     assert "icon_global" not in report["global_models_unavailable"]
+
+
+def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tmp_path, monkeypatch) -> None:
+    """A process-local Open-Meteo quota/cooldown failure must not flatten to a successful empty pass."""
+    import src.data.bayes_precision_fusion_download as dl
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+    single_calls: list[tuple[str, ...]] = []
+    previous_calls: list[tuple[str, ...]] = []
+
+    def _single_batch_fail(**kwargs):
+        single_calls.append(tuple(kwargs["models"]))
+        return {
+            dl._BATCH_TRANSPORT_ERROR_KEY: (
+                "Open-Meteo quota exhausted (2 calls today)",
+                None,
+            )
+        }
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch_fail)
+
+    def _previous_batch(**kwargs):
+        previous_calls.append(tuple(kwargs["models"]))
+        return {}
+
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", _previous_batch)
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_two_city_targets(),
+    )
+
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert report["written_row_count"] == 0
+    assert report["transport_errors"]
+    assert "Open-Meteo quota exhausted" in report["transport_errors"][0]
+    assert report["transport_aborted_remaining_targets"] is True
+    assert len(single_calls) == 1
+    assert previous_calls == []
+
+
+def test_scoped_transport_gap_with_progress_is_downloaded_not_failed(tmp_path, monkeypatch) -> None:
+    """One scoped transport gap must not mark the whole BPF lane failed after durable progress.
+
+    Live capture is row-idempotent and coverage-healed. If a pass writes rows for later
+    city/date scopes, the residual scoped gap is handled by the fixpoint/coverage gate instead of
+    poisoning forecast-pipeline health as a total transport failure.
+    """
+    import src.data.bayes_precision_fusion_download as dl
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+    calls = 0
+
+    def _single_batch(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                dl._BATCH_TRANSPORT_ERROR_KEY: (
+                    "Client error '400 Bad Request' for scoped regional model",
+                    None,
+                )
+            }
+        return {model: (20.0, 10.0) for model in kwargs["models"]}
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch)
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", lambda **_kwargs: {})
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_two_city_targets(),
+    )
+
+    assert report["transport_errors"]
+    assert report["transport_aborted_remaining_targets"] is False
+    assert report["written_row_count"] > 0
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+
+    monkeypatch.setattr(
+        dl,
+        "_default_live_fetch_batched",
+        lambda **_kwargs: {
+            dl._BATCH_TRANSPORT_ERROR_KEY: (
+                "Client error '400 Bad Request' for residual scoped model",
+                None,
+            )
+        },
+    )
+    rerun = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 9, 12, tzinfo=UTC),
+        targets=_two_city_targets(),
+    )
+
+    assert rerun["transport_errors"]
+    assert rerun["written_row_count"] == 0
+    assert rerun["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+
+
+def test_bpf_batched_fetch_uses_separate_quota_state_from_shared_openmeteo_lane(monkeypatch) -> None:
+    """A cooldown in another Open-Meteo lane must not suppress the BPF raw-input lane."""
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as om
+    from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+    class _Resp:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "hourly": {
+                    "temperature_2m_previous_day1_icon_global": [18.0, 19.5, 17.25],
+                }
+            }
+
+    monkeypatch.setattr(om.quota_tracker, "can_call", lambda: False)
+    monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", OpenMeteoQuotaTracker())
+    monkeypatch.setattr(om.httpx, "get", lambda *_args, **_kwargs: _Resp())
+
+    got = dl._default_previous_runs_fetch_batched(
+        models=["icon_global"],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        target_date="2026-06-09",
+        lead_days=1,
+    )
+
+    assert got == {"icon_global": (19.5, 17.25)}
+
+
+def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> None:
+    """Batched Open-Meteo requests must use the documented comma-separated models value."""
+    import src.data.openmeteo_client as om
+    from src.data import bayes_precision_fusion_download as dl
+    from src.forecast.model_selection import ANCHOR_MODEL
+
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "hourly": {
+                    "temperature_2m_previous_day1_icon_global": [18.0, 19.5, 17.25],
+                    "temperature_2m_previous_day1_ecmwf_ifs025": [20.0, 21.0, 19.0],
+                }
+            }
+
+    def _fake_get(_url, *, params, **_kwargs):
+        captured["models"] = params["models"]
+        return _Resp()
+
+    monkeypatch.setattr(om.httpx, "get", _fake_get)
+
+    got = dl._default_previous_runs_fetch_batched(
+        models=["icon_global", ANCHOR_MODEL],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        target_date="2026-06-09",
+        lead_days=1,
+    )
+
+    assert captured["models"] == "icon_global,ecmwf_ifs025"
+    assert got == {"icon_global": (19.5, 17.25), ANCHOR_MODEL: (21.0, 19.0)}
+
+
+def test_default_single_runs_batched_400_falls_back_per_model(monkeypatch) -> None:
+    """A provider 400 on the combined models request must not erase the whole live cycle.
+
+    Open-Meteo sometimes rejects a batched models combination even though the individual model
+    requests are valid. The live current-capture lane must preserve the valid per-model rows so
+    replacement posterior materialization can still advance on fresh evidence.
+    """
+    import src.data.openmeteo_client as om
+    from src.data import bayes_precision_fusion_download as dl
+
+    requested_models: list[object] = []
+
+    def _payload(value: float) -> dict:
+        return {
+            "hourly": {
+                "time": [
+                    "2026-06-09T00:00",
+                    "2026-06-09T03:00",
+                    "2026-06-09T12:00",
+                    "2026-06-09T21:00",
+                ],
+                "temperature_2m": [value - 1.0, value, value + 2.0, value + 1.0],
+            },
+            "hourly_units": {"temperature_2m": "°C"},
+        }
+
+    def _fake_fetch(_url, params, **_kwargs):
+        requested_models.append(params["models"])
+        if params["models"] == "icon_global,ecmwf_ifs":
+            raise RuntimeError("Client error '400 Bad Request' for batched models")
+        if params["models"] == "icon_global":
+            return _payload(20.0)
+        if params["models"] == "ecmwf_ifs":
+            return _payload(22.0)
+        raise RuntimeError("unexpected model")
+
+    monkeypatch.setattr(om, "fetch", _fake_fetch)
+
+    got = dl._default_live_fetch_batched(
+        models=["icon_global", "ecmwf_ifs"],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        target_local_date=date(2026, 6, 9),
+        forecast_hours=120,
+    )
+
+    assert requested_models == ["icon_global,ecmwf_ifs", "icon_global", "ecmwf_ifs"]
+    assert got["icon_global"] == (22.0, 19.0)
+    assert got["ecmwf_ifs"] == (24.0, 21.0)
+    assert dl._BATCH_TRANSPORT_ERROR_KEY in got
+    assert "400 Bad Request" in got[dl._BATCH_TRANSPORT_ERROR_KEY][0]
 
 
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:

@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pytest
 
+from src.control import live_health
 from src.control.live_health import compute_composite_live_health, STATUS_FRESH_BUDGET_SECONDS
 
 
@@ -167,8 +168,11 @@ def test_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["heartbeat"]["ok"] is True
 
 
-def test_mode_specific_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
+def test_mode_specific_run_mode_failed_yields_degraded_in_legacy_cron(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """_run_mode catches exceptions, so mode-specific failure is the authority."""
+    monkeypatch.setattr(live_health, "_live_execution_mode", lambda: "legacy_cron")
     sd = tmp_path / "state"
     sd.mkdir()
     cycle_time = _now_iso(-30)
@@ -207,6 +211,28 @@ def test_mode_specific_run_mode_failed_yields_degraded(tmp_path: Path) -> None:
     assert result["surfaces"]["run_mode"]["issue"] == (
         "RUN_MODE_FAILED[run_mode:opening_hunt]: exchange reconcile stuck"
     )
+
+
+def test_legacy_run_mode_failure_ignored_in_edli_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """edli_live does not register legacy cron run_mode jobs; stale rows are not live evidence."""
+    monkeypatch.setattr(live_health, "_live_execution_mode", lambda: "edli_live")
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    scheduler = json.loads((sd / "scheduler_jobs_health.json").read_text())
+    scheduler["run_mode:day0_capture"] = {
+        "status": "FAILED",
+        "last_run_at": "2026-06-14T00:47:10+00:00",
+        "last_failure_reason": "legacy cron stale row",
+    }
+    _write(sd / "scheduler_jobs_health.json", scheduler)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["surfaces"]["run_mode"]["ok"] is True
+    assert "run_mode" not in result["failing_surfaces"]
 
 
 def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) -> None:
@@ -699,7 +725,9 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda: {"scanned": 1, "advanced": 1},
+        lambda **kwargs: health_calls.append(
+            ("reconcile_scope", False, str(kwargs.get("scope")))
+        ) or {"scanned": 1, "advanced": 1},
     )
     monkeypatch.setattr(
         state_db,
@@ -723,4 +751,32 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
 
     assert refresh_calls == [fake_conn]
     assert fake_conn.closed is True
+    assert ("reconcile_scope", False, "live_tick") in health_calls
     assert ("edli_command_recovery", False, None) in health_calls
+
+
+def test_edli_command_recovery_defers_to_active_redecision(monkeypatch) -> None:
+    """Frequent recovery sweeps must not contend with the live management lane."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_redecision_screen_lock",
+        type("Locked", (), {"locked": lambda self: True})(),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append("reconcile") or {"scanned": 1, "advanced": 1},
+    )
+
+    main_module._edli_command_recovery_cycle()
+
+    assert calls == []

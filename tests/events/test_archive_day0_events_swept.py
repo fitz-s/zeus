@@ -473,3 +473,36 @@ def test_day0_supersession_candidate_query_uses_processing_status_index():
     assert "SCAN P" not in plan, (
         f"day0 candidate query must not full-scan opportunity_event_processing, got: {plan!r}"
     )
+
+
+def test_day0_supersession_keeper_query_scans_active_processing_set_once():
+    """Live-perf antibody: keeper lookup must not index historical event JSON at boot."""
+    conn = _world_conn(factory=CaptureConnection)
+    store = EventStore(conn)
+    for fam in range(15):
+        for j in range(20):
+            store.insert_or_ignore(
+                _day0_event(
+                    f"City{fam}",
+                    "2026-06-15",
+                    "high",
+                    available_at=f"2026-06-15T{j % 24:02d}:00:00+00:00",
+                    seq=fam * 20 + j,
+                )
+            )
+    conn.execute("ANALYZE")
+
+    conn.executed_sql.clear()
+    store.archive_superseded_day0_events()
+    keeper_sql, keeper_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "extreme_value" in sql
+        and "INDEXED BY idx_opportunity_event_processing_status" in sql
+        and "e.event_type = 'DAY0_EXTREME_UPDATED'" in sql
+    )
+    plan = _plan_text(conn, keeper_sql, keeper_params)
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan, (
+        f"day0 keeper query must scan active processing set by status index, got: {plan!r}"
+    )
+    assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY" not in plan

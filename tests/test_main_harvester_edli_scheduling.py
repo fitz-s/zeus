@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -64,6 +66,29 @@ def test_harvester_should_register_predicate_covers_live_boot_recovery_modes():
     assert pred("edli_submit_disabled_bridge") is False
     # 'disabled' mode does not run the trading scheduler — no harvester needed.
     assert pred("disabled") is False
+
+
+def test_boot_settlement_redeem_recovery_is_delegated_out_of_order_daemon(monkeypatch):
+    """The order daemon must not run the post-trade harvester at boot."""
+    import src.main as main_mod
+
+    def _fake_harvester_cycle():
+        raise AssertionError("order daemon boot path must not run _harvester_cycle")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "src.execution.post_trade_capital",
+        types.SimpleNamespace(_harvester_cycle=_fake_harvester_cycle),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_settings_section",
+        lambda name, default=None: {"enabled": True} if name == "edli" else (default or {}),
+    )
+    monkeypatch.setattr(main_mod, "_live_execution_mode", lambda _cfg: "edli_live")
+    monkeypatch.setattr(main_mod, "_harvester_should_register", lambda _mode: True)
+
+    main_mod._edli_boot_settlement_redeem_recovery()
 
 
 def _harvester_add_job_enclosing_gate() -> list[str]:

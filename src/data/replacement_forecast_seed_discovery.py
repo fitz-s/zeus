@@ -7,11 +7,11 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
-from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
     latest_baseline_coverage_for_replacement_seed,
@@ -19,11 +19,24 @@ from src.data.replacement_forecast_materialization_seed_builder import (
     write_seed,
 )
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
-from src.state.db import _connect
+from src.state.db import _connect, _zeus_trade_db_path
 
 
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+# Coverage authority anchor: seed discovery consumes
+# build_replacement_forecast_current_target_plan(), whose candidate rows are
+# filtered by tradeable_grade_coverage_sql. Keep this explicit import so this
+# third coverage site cannot drift from the plan/queue helper silently.
+_TRADEABLE_GRADE_COVERAGE_AUTHORITY = tradeable_grade_coverage_sql
+_OPEN_POSITION_PHASES = frozenset(
+    {
+        "pending_entry",
+        "active",
+        "day0_window",
+        "pending_exit",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -113,6 +126,89 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
     return tuple(manifests)
 
 
+def _manifest_payload_covers_target_local_day(
+    manifest: RawForecastArtifactManifest,
+    *,
+    city_timezone: str,
+    target_date: str,
+) -> bool:
+    """True iff the manifest's ON-DISK payload contains >=1 hourly sample inside the
+    wanted local day.
+
+    EASTWARD-BLACKOUT FIX (2026-06-23): the live downloader writes the Open-Meteo single-
+    runs anchor manifest with ``forecast_hours=120`` UNCONDITIONALLY, but the bytes on disk
+    can be a PARTIAL-HORIZON capture — when the provider's run was only partly published at
+    fetch time the rung-1 single-runs response carried only the launch local day (24h). The
+    ``payload_path.exists()`` guard in the downloader then never re-fetches it, so the 24h
+    file persists. ``_manifest_horizon_allows_target_date`` TRUSTS the declared 120h and
+    admits that 24h file for a LATER target date it physically cannot serve; the materialize
+    subprocess then raises "insufficient Open-Meteo hourly samples inside target local day"
+    and the whole eastward family produces no posterior (a discovery blackout). Selecting on
+    the declared horizon alone is therefore unsafe — the truth is the payload's actual
+    extractor-grade coverage. Fail-CLOSED here: if seed discovery cannot prove that the exact
+    payload can be extracted for the target local day, it must not enqueue a live request that
+    will predictably fail in the materializer.
+    """
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
+
+    payload_text = _manifest_path_value(manifest, "openmeteo_payload_json") or manifest.artifact_path
+    if not payload_text:
+        return True
+    base_dir = _manifest_base_dir(manifest, fallback=Path(manifest.artifact_path).parent)
+    payload_path = _resolve_path(payload_text, base_dir=base_dir)
+    try:
+        wanted = date.fromisoformat(str(target_date).strip())
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    try:
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            payload,
+            city_timezone=city_timezone,
+            target_local_date=wanted,
+            min_hourly_samples=1,
+            require_full_localday=False,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _json_path_valid(path_text: str | None, *, base_dir: Path | None = None) -> bool:
+    if path_text is None or not str(path_text).strip():
+        return False
+    path = Path(str(path_text))
+    if base_dir is not None and not path.is_absolute():
+        path = base_dir / path
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+def _manifest_materialization_inputs_valid(manifest: RawForecastArtifactManifest) -> bool:
+    """Reject corrupt raw JSON before it becomes a live materialization request.
+
+    Manifest byte/hash checks prove the file matches the manifest; they do not
+    prove the bytes are parseable JSON. A corrupt but self-consistent payload
+    must be treated as not materializable so held-position reseeds do not loop
+    on the same failing request.
+    """
+
+    if manifest.source_id != "openmeteo_ecmwf_ifs_9km":
+        return True
+    base_dir = _manifest_base_dir(manifest, fallback=Path(manifest.artifact_path).parent)
+    payload = _manifest_path_value(manifest, "openmeteo_payload_json") or manifest.artifact_path
+    precision = _manifest_path_value(manifest, "precision_metadata_json")
+    return _json_path_valid(payload, base_dir=base_dir) and _json_path_valid(
+        precision,
+        base_dir=base_dir,
+    )
+
+
 def _latest_manifest(
     manifests: tuple[RawForecastArtifactManifest, ...],
     *,
@@ -120,6 +216,8 @@ def _latest_manifest(
     data_version: str,
     city: str,
     target_date: str,
+    city_timezone: str | None = None,
+    cycle_admissible: Callable[[RawForecastArtifactManifest], bool] | None = None,
 ) -> RawForecastArtifactManifest | None:
     candidates = [
         manifest
@@ -127,10 +225,44 @@ def _latest_manifest(
         if manifest.source_id == source_id and manifest.data_version == data_version
         and _manifest_allows_city(manifest, city=city)
         and _manifest_allows_target_date(manifest, target_date=target_date)
+        and _manifest_materialization_inputs_valid(manifest)
+        and (cycle_admissible is None or cycle_admissible(manifest))
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda manifest: (manifest.source_cycle_time, manifest.source_available_at, manifest.captured_at))
+    # PRIMARY selection key: does the payload ACTUALLY cover the wanted local day? A
+    # partial-horizon capture admitted only by its (mislabeled) declared forecast_hours sorts
+    # BELOW any sibling that genuinely covers the day, so the fresher-but-broken neighbor can
+    # never be picked over a covering manifest at the same cycle/availability stamps (the live
+    # tie that selected the 24h file over the 120h sibling). When no city timezone is provided
+    # (defensive — the live caller always passes it) OR no candidate covers, the recency key
+    # alone decides, preserving the prior behaviour. The (source_cycle_time, source_available_at,
+    # captured_at) recency key is retained as the secondary discriminator.
+    tz_name = city_timezone or str(
+        candidates[0].product_metadata.get("city_timezone") or ""
+    )
+
+    def _covers(manifest: RawForecastArtifactManifest) -> bool:
+        if not tz_name:
+            return True  # no tz to check coverage with — neutral, recency decides
+        return _manifest_payload_covers_target_local_day(
+            manifest, city_timezone=tz_name, target_date=target_date
+        )
+
+    if tz_name:
+        covering = [manifest for manifest in candidates if _covers(manifest)]
+        if not covering:
+            return None
+        candidates = covering
+
+    return max(
+        candidates,
+        key=lambda manifest: (
+            manifest.source_cycle_time,
+            manifest.source_available_at,
+            manifest.captured_at,
+        ),
+    )
 
 
 def _manifest_allows_city(manifest: RawForecastArtifactManifest, *, city: str) -> bool:
@@ -146,13 +278,12 @@ def _manifest_allows_city(manifest: RawForecastArtifactManifest, *, city: str) -
 
 def _manifest_allows_target_date(manifest: RawForecastArtifactManifest, *, target_date: str) -> bool:
     metadata = manifest.product_metadata
+    dates = metadata.get("target_dates")
+    if isinstance(dates, list) and dates:
+        return target_date in {str(item).strip() for item in dates}
     explicit = metadata.get("target_date")
     if explicit is not None and str(explicit).strip():
         if str(explicit).strip() == target_date:
-            return True
-    dates = metadata.get("target_dates")
-    if isinstance(dates, list) and dates:
-        if target_date in {str(item).strip() for item in dates}:
             return True
     return _manifest_horizon_allows_target_date(metadata, target_date=target_date)
 
@@ -205,6 +336,58 @@ def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+def _fusion_current_values_schema_ready(conn: sqlite3.Connection) -> bool:
+    if "raw_model_forecasts" not in _table_names(conn):
+        return False
+    required = {
+        "raw_model_forecast_id",
+        "model",
+        "forecast_value_c",
+        "lead_days",
+        "city",
+        "metric",
+        "target_date",
+        "source_cycle_time",
+        "endpoint",
+    }
+    return required.issubset(_columns(conn, "raw_model_forecasts"))
+
+
+def _manifest_cycle_has_fusion_current_values(
+    conn: sqlite3.Connection,
+    manifest: RawForecastArtifactManifest,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+) -> bool | None:
+    """Return whether this manifest cycle has persisted BPF current values.
+
+    This is telemetry, not an admission filter. Seed discovery owns raw anchor
+    materialization freshness; the materializer and reactor own q-mode/live
+    eligibility. Blocking seed discovery here freezes held-position belief on
+    an older cycle whenever BPF extras are temporarily absent, even though the
+    materializer can publish an explicitly non-live-eligible capture-missing
+    posterior and the live gate will refuse submit from that q_mode.
+    """
+
+    if not _fusion_current_values_schema_ready(conn):
+        return None
+    from src.data.replacement_current_value_serving import read_current_instrument_values  # noqa: PLC0415
+
+    try:
+        served = read_current_instrument_values(
+            conn,
+            city=city,
+            metric=metric,
+            target_date=target_date,
+            source_cycle_time_iso=manifest.source_cycle_time.astimezone(UTC).isoformat(),
+        )
+    except Exception:
+        return False
+    return bool(served)
+
+
 def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
     tables = _table_names(conn)
     if "source_run_coverage" not in tables:
@@ -221,102 +404,62 @@ def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
     return required.issubset(_columns(conn, "source_run_coverage"))
 
 
-def _coverage_skip_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
-    if not {"forecast_posteriors", "readiness_state"}.issubset(tables):
-        return False
-    posterior_columns = _columns(conn, "forecast_posteriors")
-    readiness_columns = _columns(conn, "readiness_state")
-    return (
-        "dependency_source_run_ids_json" in posterior_columns
-        and "dependency_json" in readiness_columns
-    )
-
-
-def _candidate_targets(
-    conn: sqlite3.Connection,
-    *,
-    limit: int,
-    min_target_date: str,
-) -> tuple[Mapping[str, object], ...]:
-    tables = _table_names(conn)
-    skip_covered_sql = ""
-    if _coverage_skip_schema_ready(conn, tables):
-        # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision;
-        # basis-predicate fix 2026-06-12): only a CERTIFIED-bootstrap-bounded posterior counts as
-        # coverage. The old proxy `p.q_lcb_json IS NOT NULL` broke once the soft-anchor path began
-        # carrying non-certified q_lcb instead of NULL — a CAPTURE_MISSING row would then mask
-        # its own fusion repair (the mask-and-starve category).
-        # Now keyed on the certified bootstrap basis. Single authority: cycle_policy. Same clause as
-        # the queue antibody and the plan builder.
-        _tradeable = tradeable_grade_coverage_sql(
-            posterior_columns=_columns(conn, "forecast_posteriors"), alias="p."
-        )
-        skip_covered_sql = f"""
-          AND (
-              NOT EXISTS (
-                  SELECT 1
-                  FROM forecast_posteriors p
-                  WHERE p.source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'
-                    AND p.city = c.city
-                    AND p.target_date = c.target_local_date
-                    AND p.temperature_metric = c.temperature_metric
-                    AND p.training_allowed = 0
-                    AND p.runtime_layer = 'live'
-                    {_tradeable}
-                    AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
-              )
-              OR NOT EXISTS (
-                  SELECT 1
-                  FROM readiness_state r
-                  WHERE r.strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'
-                    AND json_extract(r.provenance_json, '$.city') = c.city
-                    AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
-                    AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
-                    -- An EXPIRED readiness row must NOT count as coverage, else a city is
-                    -- "covered" forever after its first posterior and never re-seeds once
-                    -- its 3h TTL lapses (the stale-after-first-cycle bug). Only a row whose
-                    -- expires_at is still in the future counts as live coverage.
-                    AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
-                    AND EXISTS (
-                        SELECT 1
-                        FROM json_each(r.dependency_json, '$.dependencies')
-                        WHERE json_extract(value, '$.role') = 'baseline_b0'
-                          AND json_extract(value, '$.source_run_id') = c.source_run_id
-                    )
-              )
-          )
-        """
-    rows = conn.execute(
-        f"""
-        SELECT c.city, c.target_local_date AS target_date, c.temperature_metric, max(c.computed_at) AS computed_at
-        FROM source_run_coverage c
-        WHERE c.source_id = 'ecmwf_open_data'
-          AND c.target_local_date >= ?
-          AND EXISTS (
-              SELECT 1
-              FROM market_events m
-              WHERE m.city = c.city
-                AND m.target_date = c.target_local_date
-                AND m.temperature_metric = c.temperature_metric
-                AND m.token_id IS NOT NULL
-                AND m.range_label IS NOT NULL
-          )
-          {skip_covered_sql}
-        GROUP BY c.city, c.target_local_date, c.temperature_metric
-        ORDER BY c.target_local_date DESC, c.city, c.temperature_metric
-        LIMIT ?
-        """,
-        (min_target_date, int(limit)),
-    ).fetchall()
-    return tuple(dict(row) for row in rows)
-
-
 def _seed_name(target: Mapping[str, object], *, computed_at: datetime) -> str:
     city = _reject_alias(str(target["city"]), field_name="city").replace("/", "_").replace(" ", "_")
     target_date = _reject_alias(str(target["target_date"]), field_name="target_date")
     metric = _reject_alias(str(target["temperature_metric"]), field_name="temperature_metric")
     stamp = computed_at.strftime("%Y%m%dT%H%M%SZ")
     return f"{city}.{target_date}.{metric}.{stamp}.json"
+
+
+def _held_position_family_priorities() -> dict[tuple[str, str, str], int]:
+    """Return live held-family priority from canonical position_current.
+
+    Forecast materialization is both an entry input and the held-position
+    redecision input. When a fresh cycle arrives, held families must not wait
+    behind alphabetical market discovery; stale beliefs directly affect exit,
+    hold, and shift decisions.
+    """
+
+    path = _zeus_trade_db_path()
+    if not path.exists():
+        return {}
+    try:
+        conn = _connect(path, write_class=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            tables = _table_names(conn)
+            if "position_current" not in tables:
+                return {}
+            cols = _columns(conn, "position_current")
+            required = {"city", "target_date", "temperature_metric", "phase"}
+            if not required.issubset(cols):
+                return {}
+            rows = conn.execute(
+                """
+                SELECT city, target_date, temperature_metric, phase
+                FROM position_current
+                WHERE city IS NOT NULL AND city != ''
+                  AND target_date IS NOT NULL AND target_date != ''
+                  AND temperature_metric IS NOT NULL AND temperature_metric != ''
+                  AND phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    priorities: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        phase = str(row["phase"] or "")
+        key = (
+            str(row["city"]),
+            str(row["target_date"]),
+            str(row["temperature_metric"]),
+        )
+        priorities[key] = 0 if phase in {"day0_window", "pending_exit"} else 1
+    return priorities
 
 
 def discover_replacement_forecast_materialization_seeds(
@@ -372,6 +515,7 @@ def discover_replacement_forecast_materialization_seeds(
                 skipped_count=0,
                 failed_count=0,
             )
+        held_family_priority = _held_position_family_priorities()
         targets = tuple(
             {
                 "city": row.city,
@@ -396,6 +540,10 @@ def discover_replacement_forecast_materialization_seeds(
             for row in sorted(
                 (row for row in target_plan.rows if row.can_seed),
                 key=lambda row: (
+                    held_family_priority.get(
+                        (str(row.city), str(row.target_date), str(row.temperature_metric)),
+                        2,
+                    ),
                     str(row.target_date),
                     str(row.city),
                     str(row.temperature_metric),
@@ -421,17 +569,38 @@ def discover_replacement_forecast_materialization_seeds(
             metric = str(target["temperature_metric"])
             target_key = f"{city}|{target_date}|{metric}"
             expected = expected_replacement_dependency_identity_by_role(metric)
+            # City timezone for payload-coverage selection (eastward-blackout fix): resolved
+            # from the SAME canonical city registry the seed builder uses, so the selector and
+            # the local-day extractor agree on the timezone. Absent -> coverage check is neutral.
+            from src.config import cities_by_name  # noqa: PLC0415
+
+            _city_cfg = cities_by_name.get(city)
+            _city_tz = str(getattr(_city_cfg, "timezone", "") or "") or None
+            fusion_schema_ready = _fusion_current_values_schema_ready(conn)
             openmeteo = _latest_manifest(
                 manifests,
                 source_id=expected["openmeteo_ifs9_anchor"].source_id,
                 data_version=expected["openmeteo_ifs9_anchor"].data_version,
                 city=city,
                 target_date=target_date,
+                city_timezone=_city_tz,
             )
             if openmeteo is None:
                 failed.append(target_key)
                 reasons.append("REPLACEMENT_SEED_DISCOVERY_REQUIRED_MANIFEST_MISSING")
                 continue
+            if fusion_schema_ready:
+                fusion_current_ready = _manifest_cycle_has_fusion_current_values(
+                    conn,
+                    openmeteo,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+                if fusion_current_ready is False:
+                    reasons.append(
+                        "REPLACEMENT_SEED_DISCOVERY_FUSION_CURRENT_VALUES_MISSING_NON_BLOCKING"
+                    )
             openmeteo_payload = _manifest_path_value(openmeteo, "openmeteo_payload_json") or openmeteo.artifact_path
             precision_metadata = _manifest_path_value(openmeteo, "precision_metadata_json")
             if not openmeteo_payload or not precision_metadata:

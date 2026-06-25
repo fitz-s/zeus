@@ -113,9 +113,7 @@
     "replacement_0_1_fused_q_shape_enabled": true,
     "_replacement_0_1_fused_q_shape_note": "2026-06-09 operator-directed promotion (the 'optimal final mathematical form'): the replacement q is built DIRECTLY from N(mu*, sigma_pred) via emos.bin_probability_settlement (ONE integrator), replacing the retired member-vote shape and anchor_weight heuristic on the replacement path. Evidence: settled-cell experiment n=39; old member-vote shape put EXACTLY ZERO on the winning bin in 11/39; LogLoss 11.07->1.51, hit 25.6%->46.2%; mu* MAE 0.77C vs anchor 1.27C. sigma_pred = sqrt(fused_sd^2 + walk-forward fused-center residual std^2), floor 1.0C.",
     "_mass_enable_note_2026_06_09": "Operator directive 2026-06-09 ('全部打开') + flag-implementation review verdicts (/tmp/flag_implementation_review.md): ENABLED q_lcb_settlement_coverage_gate (verified wired, decision-level, only lowers LCB, fail-open). DELETED stale_book_directional_trading_enabled (zero consumers in src/, dead key; OpeningStaleQuoteFOK never instantiated live) and mainstream_agreement_enforce_on_submit (operator: manual test item). The forecast_sharpness_gate (Wave-1 2026-06-12) was DELETED ENTIRELY — at 1.5x multiplier it suppressed edges for 50/54 cities (season-blended MAE defect); if sharpness ever matters it must be rebuilt inside calibrated q, never as a veto. Wave-2 2026-06-12 DELETED (settlement-refuted, code + key + tests removed): the typed-BiasTreatment DAY0-Kelly correction flag (would have changed DAY0 Kelly sizes; branch deleted) and the replacement_0_1 EB anchor-bias correction flag (settlement-refuted wrong-set; src/calibration/replacement_eb_bias.py module deleted). The three settlement-σ-floor flags (enabled / required / replacement-qlcb) were MERGED to one per-cell data-availability construction rule (Wave-2 item 6). NOTE: legacy edli_bias_correction_enabled + bias_decay haircut are INERT on the primary FORECAST lane while edli_emos_sole_calibrator_enabled=true (bias maze bypassed); they fire only on DAY0/emos-miss.",
-    "_pause_note_2026_06_10": "RESOLVED 2026-06-10: operator unpause after the Milan-incident defense stack landed (direction-law admission gate, COVERAGE_UNLICENSED_TAIL, mode-consistent EV with execution_mode_intent as submit authority + SUBMIT_ABORTED_MODE_FLIPPED, fused q_lcb/q_ucb materialization with FUSED_NORMAL_BOUNDS_MISSING live-ineligibility, maker bid-improve + post_only + 25% spread guard, fee V2 source). Superseded by the 2026-06-12 operator directive: day0 is live under forecast_plus_day0; remaining-window Day0 q is a live probabilistic observation belief when the Day0 source/quality gates pass.",
-    "day0_remaining_day_q_enabled": true,
-    "_day0_remaining_day_q_note": "2026-06-17 cleanup: ON as the live Day0 observation remaining-window belief under edli_live_scope=forecast_plus_day0 when source, freshness, quality, causality, and hard-fact precedence gates pass. It is probabilistic Day0 observation evidence, not settlement truth and not legacy alpha/market blending.",
+    "_pause_note_2026_06_10": "RESOLVED 2026-06-10: operator unpause after the Milan-incident defense stack landed (direction-law admission gate, COVERAGE_UNLICENSED_TAIL, mode-consistent EV with execution_mode_intent as submit authority + SUBMIT_ABORTED_MODE_FLIPPED, fused q_lcb/q_ucb materialization with FUSED_NORMAL_BOUNDS_MISSING live-ineligibility, maker bid-improve + post_only + 25% spread guard, fee V2 source). Superseded by the 2026-06-12 operator directive: day0 is live under forecast_plus_day0; remaining-window Day0 q is live probabilistic observation belief when the Day0 source/quality gates pass.",
     "_unpause_note_2026_06_12": "02:5xZ recovery complete: boot deadlock (wallet fail-closed crash + UNRESOLVED_SUBMIT_UNKNOWN/LIVE_CAP_RESERVED from PARTIAL commands) resolved via scripts/resolve_edli_unknown_by_authenticated_absence.py (venue absence proof, cap released); armed trio restored."
   },
   "entry_forecast": {
@@ -284,9 +282,9 @@
     "download_anchor_sigma_c": 3.0,
     "disable_legacy_opendata_forecast_live_jobs": false,
     "materialization_interval_min": 5,
-    "seed_discovery_limit_per_cycle": 10,
-    "seed_limit_per_cycle": 10,
-    "materialization_limit_per_cycle": 10,
+    "seed_discovery_limit_per_cycle": 80,
+    "seed_limit_per_cycle": 80,
+    "materialization_limit_per_cycle": 40,
     "promotion_evidence_path": "state/replacement_forecast_live/promotion_evidence.json"
   }
 }

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-27
+# Last reused/audited: 2026-06-25
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 import hashlib
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from src.decision_kernel import claims
@@ -301,6 +301,7 @@ def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_afte
         assert result.dead_lettered == 0
         assert result.retried == 1
         assert _status() == "pending"  # retryable, NOT consumed, NO cap
+        dt = dt + timedelta(seconds=61)
 
     present["v"] = True
     result = reactor.process_pending(decision_time=dt)
@@ -1282,6 +1283,221 @@ def test_all_candidates_rejected_regret_is_family_level_only():
     assert row is not None
     assert row[0] == "family-chicago"
     assert row[1:] == (None, None, None, None, None, None, None, None)
+
+
+def test_all_candidates_rejected_writes_structured_candidate_rows_from_receipt_book():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "family_id": "family-shanghai",
+            "city": "Shanghai",
+            "target_date": "2026-06-25",
+            "metric": "high",
+        }
+    )
+    event = replace(
+        event,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city="Shanghai",
+        target_date="2026-06-25",
+        metric="high",
+        family_id="family-shanghai",
+        executable_snapshot_id="exec-1",
+        opportunity_book={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-buy-yes",
+                    "family_id": "family-shanghai",
+                    "condition_id": "condition-25",
+                    "token_id": "yes-token-25",
+                    "direction": "buy_yes",
+                    "bin_label": "Will the highest temperature in Shanghai be 25°C on June 25?",
+                    "execution_price": 0.6712,
+                    "q_posterior": 0.9720,
+                    "q_lcb_5pct": 0.9616,
+                    "c_cost_95pct": 0.6712,
+                    "p_fill_lcb": 1.0,
+                    "trade_score": 0.4327,
+                    "native_quote_available": True,
+                    "missing_reason": "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:position_id=held-1",
+                },
+                {
+                    "candidate_id": "candidate-no-edge",
+                    "family_id": "family-shanghai",
+                    "condition_id": "condition-27",
+                    "token_id": "yes-token-27",
+                    "direction": "buy_yes",
+                    "bin_label": "Will the highest temperature in Shanghai be 27°C on June 25?",
+                    "execution_price": 0.90,
+                    "q_posterior": 0.10,
+                    "q_lcb_5pct": 0.08,
+                    "c_cost_95pct": 0.90,
+                    "p_fill_lcb": 1.0,
+                    "trade_score": -0.82,
+                    "native_quote_available": True,
+                    "missing_reason": "TRADE_SCORE_NON_POSITIVE",
+                },
+            ]
+        },
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22; best_rejected=25C buy_yes",
+        receipt=receipt,
+        decision_time=datetime(2026, 6, 25, 4, 19, tzinfo=timezone.utc),
+    )
+
+    rows = conn.execute(
+        """
+        SELECT rejection_reason, family_id, bin_label, direction, condition_id,
+               token_id, q_live, q_lcb_5pct, c_fee_adjusted, p_fill_lcb,
+               trade_score, native_quote_available, executable_snapshot_id
+          FROM no_trade_regret_events
+         WHERE event_id = ?
+         ORDER BY rejection_reason
+        """,
+        (event.event_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    family_summary = next(
+        row for row in rows if row[0].startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+    )
+    candidate = next(row for row in rows if row[0].startswith("EVENT_BOUND_CANDIDATE_REJECTED:"))
+    assert family_summary[0].startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+    assert family_summary[2:11] == (None, None, None, None, None, None, None, None, None)
+    assert candidate[0].startswith(
+        "EVENT_BOUND_CANDIDATE_REJECTED:OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:"
+    )
+    assert candidate[1] == "family-shanghai"
+    assert candidate[2] == "Will the highest temperature in Shanghai be 25°C on June 25?"
+    assert candidate[3] == "buy_yes"
+    assert candidate[4] == "condition-25"
+    assert candidate[5] == "yes-token-25"
+    assert candidate[6:11] == (0.972, 0.9616, 0.6712, 1.0, 0.4327)
+    assert candidate[11] == 1
+    assert candidate[12] == "exec-1"
+
+
+def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "family_id": "family-beijing",
+            "city": "Beijing",
+            "target_date": "2026-06-26",
+            "metric": "high",
+        }
+    )
+    event = replace(
+        event,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city="Beijing",
+        target_date="2026-06-26",
+        metric="high",
+        family_id="family-beijing",
+        executable_snapshot_id="exec-qkernel",
+        opportunity_book={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-buy-no-33c",
+                    "family_id": "family-beijing",
+                    "condition_id": "condition-33",
+                    "token_id": "no-token-33",
+                    "direction": "buy_no",
+                    "bin_label": "Will the highest temperature in Beijing be 33°C on June 26?",
+                    "execution_price": 0.74962,
+                    "q_posterior": 0.8054,
+                    "q_lcb_5pct": 0.773718,
+                    "c_cost_95pct": 0.74962,
+                    "p_fill_lcb": 1.0,
+                    "trade_score": 0.0084,
+                    "native_quote_available": True,
+                    "missing_reason": None,
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                        "route_id": "DIRECT_NO:bin-33@proof",
+                        "payoff_q_lcb": 0.748,
+                        "edge_lcb": -0.00162,
+                        "point_ev": 0.031,
+                        "delta_u_at_min": -0.0004,
+                        "optimal_stake_usd": "0",
+                        "optimal_delta_u": 0.0,
+                        "q_dot_payoff": 0.779,
+                        "cost": 0.74962,
+                    },
+                }
+            ]
+        },
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+        receipt=receipt,
+        decision_time=datetime(2026, 6, 25, 5, 24, tzinfo=timezone.utc),
+    )
+
+    rows = conn.execute(
+        """
+        SELECT rejection_reason, bin_label, direction, condition_id, token_id,
+               q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, trade_score
+          FROM no_trade_regret_events
+         WHERE event_id = ?
+         ORDER BY rejection_reason
+        """,
+        (event.event_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    family_summary = next(row for row in rows if row[0].startswith("QKERNEL_SPINE_NO_TRADE:"))
+    candidate = next(row for row in rows if row[0].startswith("EVENT_BOUND_CANDIDATE_REJECTED:"))
+    assert family_summary[0] == "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE"
+    assert family_summary[1:] == (None, None, None, None, None, None, None, None, None)
+    assert candidate[0].startswith(
+        "EVENT_BOUND_CANDIDATE_REJECTED:QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE:"
+    )
+    assert candidate[1] == "Will the highest temperature in Beijing be 33°C on June 26?"
+    assert candidate[2] == "buy_no"
+    assert candidate[3] == "condition-33"
+    assert candidate[4] == "no-token-33"
+    assert candidate[5:10] == (0.8054, 0.748, 0.74962, 0.74962, -0.00162)
 
 
 def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():

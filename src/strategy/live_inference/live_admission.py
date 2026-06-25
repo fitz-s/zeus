@@ -324,3 +324,138 @@ def live_buy_no_conservative_evidence_rejection_reason(
                 f"coverage_status={status or 'missing'}"
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Selection-aware q_lcb calibrator + per-city skill helper + would-admit logger.
+#
+# The selection calibrator is live entry law: if the promoted artifact does not license the side/cell
+# it returns 0.0 and the candidate cannot clear edge. City skill is not live-promoted in this checkout
+# because no current artifact exists; the only retained execution hook is the narrow loss-reduction
+# stable-bad blocker when a caller explicitly supplies an artifact. Logging stays observational and
+# cannot affect admission.
+# ---------------------------------------------------------------------------
+
+def selection_calibrated_admission_q_lcb(
+    *,
+    q_lcb: float | int | None,
+    raw_side_prob: float | int | None,
+    direction: str | None,
+    lead_days: float = 1.0,
+    bin_class: str = "nonmodal",
+    own_side_cost: float | int | None = None,
+    artifact=None,
+    expected_posterior_version: str | None = None,
+) -> float:
+    """The admission q_lcb after the live selection-aware calibrator deflation.
+
+    Deflates the served q_lcb to the calibrated lower bound for the adverse-selection tail, or 0.0
+    fail-closed, via ``selection_calibrated_side_lcb`` so downstream ``edge_lcb = q_lcb - cost`` turns
+    non-positive and the candidate is not admitted.
+
+    Runtime errors fail closed to 0.0. A calibration fault must stop new entries, not restore the raw
+    center-bootstrap q_lcb that caused the adverse-selection losses.
+    """
+    try:
+        from src.decision.selection_calibrator import (
+            DEFAULT_POSTERIOR_VERSION as _SC_DEFAULT_VER,
+            selection_calibrated_side_lcb,
+        )
+        prior = float(q_lcb)
+        if not math.isfinite(prior):
+            return 0.0
+        side = "NO" if str(direction or "").lower() == "buy_no" else "YES"
+        margin = None
+        if own_side_cost is not None and math.isfinite(float(own_side_cost)):
+            margin = prior - float(own_side_cost)
+        sc_lcb = float(
+            selection_calibrated_side_lcb(
+                raw_side_prob=float(raw_side_prob),
+                prior_lcb=prior,
+                side=side,
+                lead_days=float(lead_days),
+                bin_class=str(bin_class),
+                admission_margin=margin,
+                artifact=artifact,
+                expected_posterior_version=expected_posterior_version or _SC_DEFAULT_VER,
+            )
+        )
+        # 2026-06-23: compose the PRICE-CONDITIONED selection-curse deflation at ENTRY (the primary
+        # curse site — the gate admits mid-price buy_no whose realized rate (~0.69) is well below its
+        # claim (~0.83)). min() with the prior path: both only TIGHTEN. Absent/unarmed/out-of-support
+        # -> raw (identity). See src/decision/selection_curse_bound.py + the counterfactual evidence.
+        # PRICE BASIS: the bound is keyed on the RAW own-side ask. own_side_cost here is the candidate
+        # execution_price (the raw native ask — distinct from the fee-adjusted c_cost_95pct), matching
+        # the fitter's no_ask x-axis. The taker seams likewise pass the raw fresh ask. One basis.
+        if own_side_cost is not None and math.isfinite(float(own_side_cost)):
+            from src.decision.selection_curse_bound import corrected_side_q_lcb
+            from src.decision.selection_curse_bound_loader import load_bound
+
+            curse_lcb, _ = corrected_side_q_lcb(
+                load_bound(),
+                side=str(direction or ""),
+                price=float(own_side_cost),
+                raw_q_lcb=prior,
+            )
+            return min(sc_lcb, curse_lcb)
+        return sc_lcb
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def city_skill_block_rejection_reason(
+    *,
+    city: str | None,
+    artifact=None,
+    expected_posterior_version: str | None = None,
+) -> str | None:
+    """Block a candidate whose city is a confirmed temporally-stable loser.
+
+    City-skill is not globally live-promoted without an artifact. This execution hook is intentionally
+    narrow: it only acts when a caller supplies an artifact and that artifact marks the city as
+    stable-bad. Missing artifact/context is outside this live path and must not masquerade as an
+    enabled selector.
+    """
+    try:
+        from src.decision.city_skill_gate import (
+            DEFAULT_POSTERIOR_VERSION as _CSG_DEFAULT_VER,
+            apply_city_skill_gate,
+        )
+        if artifact is None:
+            return None
+        if not city or not str(city).strip():
+            return None
+        verdict = apply_city_skill_gate(
+            city=str(city),
+            artifact=artifact,
+            expected_posterior_version=expected_posterior_version or _CSG_DEFAULT_VER,
+            require_stable_bad_to_block=True,
+        )
+        if verdict.basis == "CITY_SKILL_BLOCKED_STABLE_BAD":
+            return (
+                f"ADMISSION_CITY_SKILL_STABLE_BAD:city={city}:"
+                f"prior_skill={verdict.prior_skill:.4f}:prior_n={verdict.n_g if hasattr(verdict, 'n_g') else verdict.prior_n}"
+            )
+        return None
+    except Exception:  # noqa: BLE001 — never break admission for the skill gate.
+        return None
+
+
+def shadow_log_admission(*, path: str | None = None, **fields) -> bool:
+    """Record a would-admit candidate to the shadow log (accrual of the missing population).
+
+    DEFAULT OFF (``ZEUS_SHADOW_ADMIT_LOG`` unset) -> no-op (returns False). When ON: appends the
+    would-admit record. FAIL-SOFT: any error is swallowed (observability never breaks trading).
+    ``side`` is derived from ``direction`` for the underlying logger."""
+    try:
+        from src.decision.shadow_admit_logger import maybe_log_candidate
+        if "side" not in fields and "direction" in fields:
+            fields["side"] = "NO" if str(fields.pop("direction") or "").lower() == "buy_no" else "YES"
+        elif "direction" in fields:
+            fields.pop("direction")
+        # The underlying record uses ``q_lcb_side``; the live seam is called with ``q_lcb``.
+        if "q_lcb_side" not in fields and "q_lcb" in fields:
+            fields["q_lcb_side"] = fields.pop("q_lcb")
+        return bool(maybe_log_candidate(path=path, **fields))
+    except Exception:  # noqa: BLE001 — never break trading for a log write.
+        return False

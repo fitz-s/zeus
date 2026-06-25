@@ -243,3 +243,127 @@ def build_replacement_forecast_materialization_request(
         reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
         request=request,
     )
+
+
+def build_materialize_request_dataclass(
+    request_json: Mapping[str, object],
+    *,
+    base_dir: Path | str,
+):
+    """Construct the ``ReplacementForecastMaterializeRequest`` dataclass from a
+    READY request-JSON (the output of ``build_replacement_forecast_materialization_request``).
+
+    SINGLE SOURCE OF TRUTH for the seed-JSON -> dataclass conversion: the live
+    queue worker (``scripts/materialize_replacement_forecast_live.py``) and the
+    monitor's read-only held-belief recompute (LAYER 2) both go through here, so
+    the request the read-through computes is byte-equivalent to the one the live
+    write path would have materialized. Reads the on-disk Open-Meteo anchor payload
+    + precision metadata (the request-JSON carries their resolved paths); performs
+    NO network fetch and NO DB write.
+    """
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest,
+    )
+
+    base_path = Path(base_dir)
+    metric = _required_text(request_json, "temperature_metric")
+    target_date = _date(request_json.get("target_date"), field_name="target_date")
+    source_cycle_time = _dt(request_json.get("source_cycle_time"), field_name="source_cycle_time")
+
+    openmeteo_payload_path = _existing_path(request_json, "openmeteo_payload_json", base_dir=base_path)
+    openmeteo_payload = _json_file(Path(openmeteo_payload_path))
+    openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
+        openmeteo_payload,
+        city_timezone=_required_text(request_json, "city_timezone"),
+        target_local_date=target_date,
+        source_cycle_time=source_cycle_time,
+    )
+    precision_metadata_path = _existing_path(request_json, "precision_metadata_json", base_dir=base_path)
+    precision_payload = _json_file(Path(precision_metadata_path))
+    precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
+    )
+
+    def _opt_float(key: str) -> float | None:
+        v = request_json.get(key)
+        return None if v in (None, "") else float(v)  # type: ignore[arg-type]
+
+    def _opt_text(key: str) -> str | None:
+        v = request_json.get(key)
+        return None if v in (None, "") else str(v)
+
+    def _opt_int(key: str) -> int | None:
+        v = request_json.get(key)
+        return None if v in (None, "") else int(v)  # type: ignore[arg-type]
+
+    anchor_artifact_id = _opt_int("openmeteo_anchor_artifact_id")
+    return ReplacementForecastMaterializeRequest(
+        city=_required_text(request_json, "city"),
+        city_id=str(request_json.get("city_id") or request_json["city"]),
+        city_timezone=_required_text(request_json, "city_timezone"),
+        target_date=target_date,
+        temperature_metric=metric,
+        baseline_source_run_id=_required_text(request_json, "baseline_source_run_id"),
+        baseline_data_version=_required_text(request_json, "baseline_data_version"),
+        baseline_source_available_at=_dt(
+            request_json.get("baseline_source_available_at"), field_name="baseline_source_available_at"
+        ),
+        openmeteo_anchor=openmeteo_anchor,
+        openmeteo_source_run_id=str(request_json.get("openmeteo_source_run_id") or ""),
+        openmeteo_source_available_at=_dt(
+            request_json.get("openmeteo_source_available_at"), field_name="openmeteo_source_available_at"
+        ),
+        bins=_bins_to_temperature_bins(request_json.get("bins")),
+        source_cycle_time=source_cycle_time,
+        computed_at=_dt(request_json.get("computed_at"), field_name="computed_at"),
+        expires_at=(
+            None if request_json.get("expires_at") is None
+            else _dt(request_json.get("expires_at"), field_name="expires_at")
+        ),
+        anchor_artifact_id=anchor_artifact_id,
+        openmeteo_precision_guard=precision_guard,
+        anchor_weight=float(request_json.get("anchor_weight", 0.80)),
+        anchor_sigma_c=float(request_json.get("anchor_sigma_c", 3.00)),
+        settlement_step_c=float(request_json.get("settlement_step_c", 1.0)),
+        day0_observed_extreme_c=_opt_float("day0_observed_extreme_c"),
+        day0_observed_extreme_source=_opt_text("day0_observed_extreme_source"),
+        day0_observed_extreme_observation_time=_opt_text("day0_observed_extreme_observation_time"),
+        day0_observed_extreme_sample_count=_opt_int("day0_observed_extreme_sample_count"),
+        day0_observed_extreme_unit=_opt_text("day0_observed_extreme_unit"),
+        upgrade_trigger=_opt_text("upgrade_trigger"),
+    )
+
+
+@dataclass(frozen=True)
+class _TemperatureBin:
+    bin_id: str
+    lower_c: float | None
+    upper_c: float | None
+    center_c: float | None
+    display_unit: str = "C"
+    settlement_unit: str = "C"
+    rounding_rule: str = "wmo_half_up"
+
+
+def _bins_to_temperature_bins(rows: object) -> tuple[_TemperatureBin, ...]:
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+        raise ValueError("bins must be a non-empty array")
+    out: list[_TemperatureBin] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("bins entries must be objects")
+        out.append(
+            _TemperatureBin(
+                bin_id=str(row["bin_id"]),
+                lower_c=None if row.get("lower_c") is None else float(row["lower_c"]),
+                upper_c=None if row.get("upper_c") is None else float(row["upper_c"]),
+                center_c=None if row.get("center_c") is None else float(row["center_c"]),
+                display_unit=str(row.get("display_unit") or "C").strip().upper(),  # type: ignore[arg-type]
+                settlement_unit=str(row.get("settlement_unit") or "C").strip().upper(),  # type: ignore[arg-type]
+                rounding_rule=str(row.get("rounding_rule") or "wmo_half_up").strip(),  # type: ignore[arg-type]
+            )
+        )
+    return tuple(out)

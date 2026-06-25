@@ -46,8 +46,8 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Mapping
 
 from src.decision_kernel import claims
 from src.events.day0_authority import normalize_day0_live_authority_status
@@ -61,6 +61,8 @@ from src.strategy.live_inference.live_admission import (
 UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
+DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
+DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -90,6 +92,43 @@ def _cycle_budget_seconds() -> float | None:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS
     return budget if budget > 0 else None
+
+
+def _fetch_batch_limit() -> int:
+    """Pagination size for unbounded ``process_pending(limit=None)`` cycles.
+
+    This is not a work cap: pending events stay pending and the cycle budget
+    decides when to return. Keeping each read page small prevents one large
+    world-DB fetch from spending the whole scheduler interval before the budget
+    guard can run.
+    """
+    raw = os.environ.get("ZEUS_REACTOR_FETCH_BATCH_LIMIT")
+    if raw is None:
+        return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
+    return max(1, min(250, limit))
+
+
+def _snapshot_block_retry_delay_seconds() -> float:
+    """Retry floor for executable-snapshot substrate blocks.
+
+    A blocked family is already delegated to the substrate refresher. Reclaiming
+    the same event immediately only spends decision budget before that refresh
+    can land. The delay is short and horizon-bounded; it does not terminalize or
+    suppress the event.
+    """
+
+    raw = os.environ.get("ZEUS_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS")
+    if raw is None:
+        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    return max(5.0, min(300.0, delay))
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
@@ -314,6 +353,16 @@ class EventSubmissionReceipt:
     # execution sizing is accountable to this guarded payoff-space certificate.
     # Omitted when None so non-qkernel receipts keep stable JSON.
     qkernel_execution_economics: dict[str, Any] | None = None
+    # B3 authority stamp propagated from the proof (qkernel_spine_bridge sets
+    # selection_authority_applied="qkernel_spine" while PRESERVING q_source as the
+    # probability track label). The taker-quality proof reads this to recognize a
+    # spine-selected taker under the live "replacement_0_1" q_source.
+    selection_authority_applied: str | None = None
+    # B3 identity key: the reactor's _candidate_bin_id(proof) — byte-identical to the
+    # qkernel cert's bin_id — so the taker-quality proof can match the cert to THIS
+    # selected leg across the two candidate_id namespaces (qkernel SIDE:bin_id:route_id
+    # vs reactor family_id:condition_id). Threaded the same way q_source / the stamp are.
+    candidate_bin_id: str | None = None
     strategy_key: str | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
@@ -377,6 +426,29 @@ class EventSubmissionReceipt:
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
     belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
+    # When this receipt is an APPROVED same-token fill-up (stake overridden to the
+    # residual delta), the family-rebalance lease intent_id + the owned-exposure
+    # identity are carried here so the live submit wrapper can run the pre-submit
+    # family-exposure reread and advance the lease to a terminal status (COMPLETE on
+    # ack / ABORTED on a late abort). compare=False + repr=False so it NEVER affects
+    # receipt equality or the receipt hash (internal plumbing, never serialized into
+    # receipt_json). None on EVERY non-fill-up receipt — the fresh-entry path never
+    # populates it, so the entry path is byte-identical.
+    fill_up_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # D2 SHIFT-BIN LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
+    # The close-before-open carrier. Two shapes, both keyed by the SHIFT_BIN lease
+    # intent_id + old-leg identity (old_position_id / old_token_id):
+    #   - phase="EXIT_OLD_LEG": this receipt is a TYPED NO-SUBMIT for the new bin. The
+    #     live submit wrapper submits the reduce-only exit for the OLD token via the
+    #     existing exit path (execute_exit_order) and advances the lease EXIT_SUBMITTED
+    #     / EXIT_PARTIAL / EXIT_UNKNOWN by the exit OrderResult — NEVER a new-bin entry.
+    #   - phase="ENTER_NEW_BIN": the old leg is proven closed; this receipt IS a real
+    #     counter-entry submit, and the wrapper advances the lease COMPLETE on ack.
+    # compare=False + repr=False so it NEVER affects receipt equality or the receipt
+    # hash. None on EVERY fresh-entry / fill-up receipt — the entry + D1 paths never
+    # populate it, so both are byte-identical.
+    shift_bin_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
     # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
     # /tmp/allpass_nosubmit_rootcause.md). Records WHICH submit adapter actually
     # ran this decision so a full-pass receipt emitted by the no-submit adapter
@@ -700,7 +772,7 @@ class OpportunityEventReactor:
         # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
         budget = _cycle_budget_seconds()
         cycle_start = time.monotonic()
-        batch_limit = 250 if limit is None else max(1, int(limit))
+        batch_limit = _fetch_batch_limit() if limit is None else max(1, int(limit))
         remaining = None if limit is None else batch_limit
         try:
           while remaining is None or remaining > 0:
@@ -1474,8 +1546,19 @@ class OpportunityEventReactor:
                 # (after capture completes / book settles / risk clears). Do NOT
                 # consume the event the way mark_processed would. There is NO
                 # attempt cap — the event requeues until a horizon terminal fires.
+                last_reason = self._transient_requeue_reasons.get(event.event_id)
+                retry_not_before = None
+                if last_reason == "EXECUTABLE_SNAPSHOT_BLOCKED":
+                    retry_not_before = (
+                        decision_time.astimezone(UTC)
+                        + timedelta(seconds=_snapshot_block_retry_delay_seconds())
+                    ).isoformat()
                 self._note_transient_requeue(event)
-                self._store.requeue_pending(event.event_id)
+                self._store.requeue_pending(
+                    event.event_id,
+                    not_before=retry_not_before,
+                    last_error=last_reason,
+                )
                 result.retried += 1
             return
         # disposition is None: a pre-submit gate rejected the event (its reject
@@ -2071,9 +2154,12 @@ class OpportunityEventReactor:
         envelope_json = self._build_regret_envelope_json(
             event, stage, reason, receipt=receipt, decision_time=decision_time, payload=payload
         )
-        family_level_all_rejected = str(reason or "").startswith(
+        reason_text = str(reason or "")
+        family_level_all_rejected = reason_text.startswith(
             "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
         )
+        family_level_qkernel_no_trade = reason_text.startswith("QKERNEL_SPINE_NO_TRADE:")
+        family_level_no_trade = family_level_all_rejected or family_level_qkernel_no_trade
         condition_id = _receipt_or_payload(receipt, payload, "condition_id")
         token_id = _receipt_or_payload(receipt, payload, "token_id")
         outcome_label = _receipt_or_payload(receipt, payload, "outcome_label")
@@ -2102,7 +2188,7 @@ class OpportunityEventReactor:
                 c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
                 c_cost_95pct = qkernel_economics["c_cost_95pct"]
                 trade_score = qkernel_economics["trade_score"]
-        if family_level_all_rejected:
+        if family_level_no_trade:
             condition_id = None
             token_id = None
             outcome_label = None
@@ -2152,6 +2238,54 @@ class OpportunityEventReactor:
                 executable_snapshot_id=executable_snapshot_id,
             )
         )
+        if family_level_no_trade:
+            for candidate_row in _all_candidates_rejected_candidate_rows(receipt, family_reason=reason_text):
+                candidate_reason = str(candidate_row["rejection_reason"])
+                self._regret_ledger.insert_idempotent(
+                    NoTradeRegretEvent(
+                        event_id=event.event_id,
+                        rejection_stage=stage,  # type: ignore[arg-type]
+                        rejection_reason=candidate_reason,
+                        regret_bucket=_regret_bucket_for(candidate_reason),  # type: ignore[arg-type]
+                        envelope_json=envelope_json,
+                        market_slug=payload.get("market_slug"),
+                        condition_id=candidate_row.get("condition_id"),
+                        token_id=candidate_row.get("token_id"),
+                        outcome_label=candidate_row.get("outcome_label"),
+                        decision_time=(
+                            decision_time.astimezone(UTC).isoformat()
+                            if decision_time is not None
+                            else None
+                        ),
+                        city=_receipt_or_payload(receipt, payload, "city"),
+                        target_date=_receipt_or_payload(receipt, payload, "target_date"),
+                        metric=_receipt_or_payload(receipt, payload, "metric"),
+                        observation_time=payload.get("observation_time"),
+                        decision_seq=_optional_int(payload.get("decision_seq")),
+                        family_id=candidate_row.get("family_id")
+                        or _receipt_or_payload(receipt, payload, "family_id"),
+                        bin_label=candidate_row.get("bin_label"),
+                        direction=candidate_row.get("direction"),
+                        q_live=candidate_row.get("q_live"),
+                        q_lcb_5pct=candidate_row.get("q_lcb_5pct"),
+                        c_fee_adjusted=candidate_row.get("c_fee_adjusted"),
+                        c_cost_95pct=candidate_row.get("c_cost_95pct"),
+                        p_fill_lcb=candidate_row.get("p_fill_lcb"),
+                        trade_score=candidate_row.get("trade_score"),
+                        native_quote_available=candidate_row.get("native_quote_available"),
+                        source_status=_receipt_or_payload(receipt, payload, "source_status"),
+                        family_complete=_optional_bool(
+                            _receipt_or_payload(receipt, payload, "family_complete")
+                        ),
+                        hypothetical_order_type=payload.get("hypothetical_order_type"),
+                        hypothetical_fill_status=payload.get("hypothetical_fill_status"),
+                        hypothetical_fill_price=_optional_float(
+                            payload.get("hypothetical_fill_price")
+                        ),
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        executable_snapshot_id=candidate_row.get("executable_snapshot_id"),
+                    )
+                )
 
     def _build_regret_envelope_json(
         self,
@@ -2318,6 +2452,96 @@ def _optional_bool(value: Any) -> bool | None:
     if lowered in {"0", "false", "no"}:
         return False
     return None
+
+
+def _all_candidates_rejected_candidate_rows(
+    receipt: EventSubmissionReceipt | None,
+    *,
+    family_reason: str | None = None,
+) -> list[dict[str, Any]]:
+    if receipt is None or not isinstance(receipt.opportunity_book, dict):
+        return []
+    raw_candidates = receipt.opportunity_book.get("candidates")
+    if not isinstance(raw_candidates, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for raw in raw_candidates:
+        if not isinstance(raw, dict):
+            continue
+        execution_price = _optional_float(raw.get("execution_price"))
+        trade_score = _optional_float(raw.get("trade_score"))
+        missing_reason = str(raw.get("missing_reason") or "").strip()
+        candidate_id = str(raw.get("candidate_id") or "").strip()
+        qkernel_economics = _candidate_qkernel_regret_economics(raw)
+        qkernel_family_reason = str(family_reason or "").startswith("QKERNEL_SPINE_NO_TRADE:")
+        if (
+            execution_price is None
+            or execution_price <= 0.0
+            or not candidate_id
+        ):
+            continue
+        if qkernel_family_reason and qkernel_economics is not None:
+            candidate_missing_reason = str(family_reason or "").strip()
+            q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
+            c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
+            c_cost_95pct = qkernel_economics["c_cost_95pct"]
+            candidate_trade_score = qkernel_economics["trade_score"]
+        else:
+            if (
+                trade_score is None
+                or trade_score <= 0.0
+                or not missing_reason
+            ):
+                continue
+            candidate_missing_reason = missing_reason
+            q_lcb_5pct = _optional_float(raw.get("q_lcb_5pct"))
+            c_fee_adjusted = execution_price
+            c_cost_95pct = _optional_float(raw.get("c_cost_95pct")) or execution_price
+            candidate_trade_score = trade_score
+        reason = (
+            "EVENT_BOUND_CANDIDATE_REJECTED:"
+            f"{candidate_missing_reason}:candidate_id={candidate_id}"
+        )
+        out.append(
+            {
+                "rejection_reason": reason,
+                "family_id": raw.get("family_id"),
+                "condition_id": raw.get("condition_id"),
+                "token_id": raw.get("token_id"),
+                "outcome_label": raw.get("outcome_label"),
+                "bin_label": raw.get("bin_label"),
+                "direction": raw.get("direction"),
+                "q_live": _optional_float(raw.get("q_posterior")),
+                "q_lcb_5pct": q_lcb_5pct,
+                "c_fee_adjusted": c_fee_adjusted,
+                "c_cost_95pct": c_cost_95pct,
+                "p_fill_lcb": _optional_float(raw.get("p_fill_lcb")),
+                "trade_score": candidate_trade_score,
+                "native_quote_available": _optional_bool(raw.get("native_quote_available")),
+                "executable_snapshot_id": receipt.executable_snapshot_id,
+            }
+        )
+    return out
+
+
+def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, float] | None:
+    cert = raw.get("qkernel_execution_economics")
+    if not isinstance(cert, Mapping):
+        return None
+    try:
+        payoff_q_lcb = float(cert["payoff_q_lcb"])
+        cost = float(cert["cost"])
+        edge_lcb = float(cert["edge_lcb"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+        return None
+    return {
+        "q_lcb_5pct": payoff_q_lcb,
+        "c_fee_adjusted": cost,
+        "c_cost_95pct": cost,
+        "trade_score": edge_lcb,
+    }
 
 
 def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, float] | None:
@@ -2520,6 +2744,12 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # Continuous redecision coordination: another live action already owns this
+    # family, or the old leg is still exiting. The cure is state advancement from
+    # that existing action, not burning the family forever.
+    "SHIFT_BIN_CONCURRENT_FAMILY_LEASE",
+    "FILL_UP_CONCURRENT_FAMILY_LEASE",
+    "SHIFT_BIN_EXIT_OLD_LEG_PENDING",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -2588,6 +2818,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # continuous redecision.
     "unsupported live candidate event type",
     "unsupported EDLI event type for inference",
+    # Continuous redecision evaluated successfully but found no action worth
+    # submitting for this event. Future price/belief movement arrives as a new
+    # redecision event; requeueing this one only clogs the lane.
+    "FILL_UP_NO_SUBMIT",
+    "SHIFT_BIN_NO_SUBMIT",
 })
 
 

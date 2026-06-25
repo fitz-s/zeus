@@ -31,6 +31,7 @@ import json
 from src.engine import event_reactor_adapter as era
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.opportunity_book import build_family_opportunity_book
+from src.strategy.live_inference.live_admission import live_capital_efficiency_rejection_reason
 
 
 # --- pure-aggregator relationship pins (book evaluations -> honest reason) -----------------------
@@ -126,6 +127,18 @@ def test_positive_ev_vetoed_leg_is_labelled_best_rejected_with_gate_reason():
     assert "reason_class=direction_law" in reason
     assert "missing_reason=DIRECTION_LAW_BIN_FORECAST_MISMATCH:direction=buy_yes" in reason
     assert "rejected_ev_per_dollar=1.0619" in reason
+
+
+def test_capital_efficiency_does_not_reject_shanghai_style_positive_buy_yes_edge():
+    """A cheap center YES with q_lcb above price must not be mislabeled as capital-inefficient."""
+
+    reason = live_capital_efficiency_rejection_reason(
+        q_lcb=0.65,
+        execution_price=0.27,
+        trade_score=0.38,
+    )
+
+    assert reason is None
 
 
 def test_genuinely_no_books_keeps_native_ask_missing_label():

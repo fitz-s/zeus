@@ -84,14 +84,19 @@ def test_read_is_robust_to_a_mismatched_lead_days():
         )
 
 
-def test_read_still_isolates_by_natural_key():
-    """Robustness to lead must NOT leak across the natural key: a different cycle/target/city/
-    metric/endpoint must still be excluded."""
+def test_read_allows_prior_cycle_but_rejects_future_cycle():
+    """Robustness to lead must not leak future data. A prior cycle is admissible because it is
+    already-possessed current evidence for the same city/metric/target; a future cycle is not."""
     conn = _conn_with_single_runs(stored_lead=2)
-    # wrong cycle -> empty
+    # selected cycle after the row -> prior row is usable and branded by served_cycle upstream
     assert _read_persisted_current_capture(
         conn, city="Wuhan", metric="high", target_date="2026-06-11",
         lead_days=2, source_cycle_time_iso="2026-06-09T00:00:00+00:00",
+    )
+    # selected cycle before the row -> future leakage is rejected
+    assert _read_persisted_current_capture(
+        conn, city="Wuhan", metric="high", target_date="2026-06-11",
+        lead_days=2, source_cycle_time_iso="2026-06-08T12:00:00+00:00",
     ) == {}
     # wrong target_date -> empty
     assert _read_persisted_current_capture(

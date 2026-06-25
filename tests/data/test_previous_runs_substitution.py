@@ -16,7 +16,7 @@ Relationship pins:
   (b) provider absent from BOTH endpoints                                      => dropped, exactly
       as today;
   (c) gem_global behavior byte-identical to the edc598b440 exception (same value, same row id;
-      single_runs priority; natural-key cycle isolation);
+      single_runs priority; future-cycle isolation);
   (d) the substituted instrument keeps its OWN lead bucket (lead_days reported verbatim from the
       served row; the walk-forward history at that lead prices the older run — no manual
       down-weighting field exists anywhere);
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import types
 from pathlib import Path
 
@@ -130,14 +131,33 @@ def test_single_runs_row_wins_over_previous_runs_for_every_model() -> None:
     assert out["jma_seamless"].served_via == "single_runs"
 
 
-def test_substitution_respects_natural_key_cycle() -> None:
-    # A previous_runs row from a DIFFERENT cycle must never leak into this capture
-    # (preserved from the original gem antibody — the natural key is the freshness anchor).
+def test_substitution_uses_prior_cycle_when_selected_cycle_has_no_row() -> None:
+    # Live 00Z can be selected by the anchor lane before single-runs has complete local-day
+    # coverage for a city. The serving boundary must not go blind: use the newest persisted row
+    # no later than the selected cycle, branded by its actual served_cycle.
     conn = _conn()
     _insert(conn, 1, "gfs_global", 33.0, "single_runs")
     _insert(conn, 2, "jma_seamless", 33.5, "previous_runs", cycle=OTHER_CYCLE)
     out = _read(conn)
+    assert out["jma_seamless"].value_c == 33.5
+    assert out["jma_seamless"].served_cycle == OTHER_CYCLE
+
+
+def test_substitution_rejects_future_cycle_rows() -> None:
+    conn = _conn()
+    future_cycle = "2026-06-11T12:00:00+00:00"
+    _insert(conn, 2, "jma_seamless", 33.5, "previous_runs", cycle=future_cycle)
+    out = _read(conn)
     assert "jma_seamless" not in out
+
+
+def test_selected_cycle_row_wins_over_prior_cycle_row() -> None:
+    conn = _conn()
+    _insert(conn, 1, "jma_seamless", 33.2, "previous_runs", cycle=OTHER_CYCLE)
+    _insert(conn, 2, "jma_seamless", 33.5, "previous_runs", cycle=CYCLE)
+    out = _read(conn)
+    assert out["jma_seamless"].value_c == 33.5
+    assert out["jma_seamless"].served_cycle == CYCLE
 
 
 # -------------------------------------------------------------------------------------
@@ -192,14 +212,14 @@ def test_trigger_capturable_set_is_the_serving_authority_key_set() -> None:
     conn = _conn()
     _insert(conn, 1, "gfs_global", 33.0, "single_runs")
     _insert(conn, 2, "jma_seamless", 33.5, "previous_runs")
-    _insert(conn, 3, "icon_global", 32.5, "previous_runs", cycle=OTHER_CYCLE)  # wrong cycle
+    _insert(conn, 3, "icon_global", 32.5, "previous_runs", cycle=OTHER_CYCLE)  # prior possessed cycle
     capturable = _capturable_models_for_scope(
         conn, city="Beijing", target_date="2026-06-12", metric="high", source_cycle_iso=CYCLE
     )
-    assert capturable == set(_read(conn).keys()) == {"gfs_global", "jma_seamless"}, (
+    assert capturable == set(_read(conn).keys()) == {"gfs_global", "jma_seamless", "icon_global"}, (
         "the trigger's capturable set must be EXACTLY the serving authority's key set — a "
-        "substitutable provider (JMA via previous_runs) counts as capturable, so the PARTIAL "
-        "posterior that dropped it is detected as upgradeable"
+        "substitutable provider (same-cycle JMA or prior-cycle icon_global via previous_runs) "
+        "counts as capturable, so the PARTIAL posterior that dropped it is detected as upgradeable"
     )
 
 
@@ -271,6 +291,143 @@ def test_queue_does_not_coverage_skip_an_upgrade_reseed(tmp_path, monkeypatch) -
     assert len(request_written) == 1
 
 
+def test_queue_skips_seed_older_than_current_family_posterior(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE forecast_posteriors (
+                source_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                source_cycle_time TEXT,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                queue_mod.SOURCE_ID,
+                "Beijing",
+                "2026-06-12",
+                "high",
+                "2026-06-11T12:00:00+00:00",
+                "2026-06-11T20:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(queue_mod, "_seed_already_covered", lambda **_kw: False)
+    built: list[str] = []
+
+    def _fake_builder(seed, *, base_dir):
+        built.append(str(seed.get("city")))
+        return types.SimpleNamespace(
+            ok=True, status="READY", reason_codes=("OK",), request={"stub": True}
+        )
+
+    monkeypatch.setattr(
+        queue_mod, "build_replacement_forecast_materialization_request", _fake_builder
+    )
+
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    seed = {**_minimal_seed(upgrade=False), "source_cycle_time": "2026-06-11T06:00:00+00:00"}
+    (seed_dir / "old-cycle.json").write_text(json.dumps(seed), encoding="utf-8")
+
+    processed, failed, _reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=forecast_db,
+        limit=10,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert built == []
+    assert not (request_dir / "old-cycle.json").exists()
+    sidecar = next((tmp_path / "seed_processed").glob("*.receipt.json"))
+    receipt = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert receipt["status"] == "SKIPPED_SOURCE_CYCLE_REGRESSION"
+    assert receipt["reason_codes"] == ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"]
+
+
+def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE forecast_posteriors (
+                source_id TEXT,
+                runtime_layer TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                training_allowed INTEGER,
+                dependency_source_run_ids_json TEXT
+            );
+            CREATE TABLE readiness_state (
+                strategy_key TEXT,
+                status TEXT,
+                provenance_json TEXT,
+                dependency_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors VALUES (?, 'live', 'Beijing', '2026-06-12', 'high', 0, ?)
+            """,
+            (
+                queue_mod.SOURCE_ID,
+                json.dumps({"baseline_b0": "b0-run", "openmeteo_ifs9_anchor": "old-om-run"}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO readiness_state VALUES (?, 'READY', ?, ?)
+            """,
+            (
+                queue_mod.STRATEGY_KEY,
+                json.dumps({"city": "Beijing", "target_date": "2026-06-12", "temperature_metric": "high"}),
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {"role": "baseline_b0", "source_run_id": "b0-run"},
+                            {"role": "openmeteo_ifs9_anchor", "source_run_id": "old-om-run"},
+                        ]
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    fresh_anchor_seed = {**_minimal_seed(upgrade=False), "openmeteo_source_run_id": "new-om-run"}
+    stale_anchor_seed = {**_minimal_seed(upgrade=False), "openmeteo_source_run_id": "old-om-run"}
+
+    assert queue_mod._seed_already_covered(
+        forecast_db=forecast_db, seed=fresh_anchor_seed
+    ) is False
+    assert queue_mod._seed_already_covered(
+        forecast_db=forecast_db, seed=stale_anchor_seed
+    ) is True
+
+
 def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     tmp_path, monkeypatch
 ) -> None:
@@ -333,3 +490,56 @@ def test_queue_processes_held_cycle_advance_seed_before_nonheld_seed(
     assert built == ["Kuala Lumpur"]
     assert (request_dir / held_seed.name).exists()
     assert not (request_dir / nonheld_seed.name).exists()
+
+
+def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request = {
+        "city": "London",
+        "target_date": "2026-06-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-24T12:00:00+00:00",
+        "computed_at": "2026-06-24T20:20:45+00:00",
+        "baseline_source_run_id": "b0-run",
+        "aifs_source_run_id": "aifs-run",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "aifs_samples_json": "samples.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    request_path = request_dir / "London.2026-06-25.high.timeout.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+
+    def _timeout_runner(argv):
+        raise subprocess.TimeoutExpired(cmd=list(argv), timeout=1.5, output="", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_timeout_runner,
+    )
+
+    assert report.status == "FAILED"
+    assert report.failed_count == 1
+    assert not request_path.exists()
+    assert len(report.failed_files) == 1
+    failed_request = Path(report.failed_files[0])
+    assert failed_request.exists()
+    sidecar = json.loads(
+        failed_request.with_suffix(failed_request.suffix + ".receipt.json").read_text()
+    )
+    assert sidecar["returncode"] == 124
+    assert sidecar["timeout_seconds"] == 1.5
+    assert sidecar["reason_codes"] == [
+        "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+    ]

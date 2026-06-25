@@ -119,8 +119,9 @@ def test_miscalibrated_cell_abstains_and_kills_the_trade(monkeypatch):
     bad_table: dict[str, tuple[int, float]] = {}
     for side in ("YES", "NO"):
         for pos in ("modal", "nonmodal"):
-            for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
-                bad_table[f"high|L1|{side}|{pos}|qb{qb}"] = (500, 0.05)
+            for precision in ("fine_nest", "coarse_global"):
+                for qb in range(len(guard_mod.QLCB_BUCKET_EDGES) - 1):
+                    bad_table[f"high|L1|{side}|{pos}|qb{qb}|{precision}"] = (500, 0.05)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", bad_table)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
 

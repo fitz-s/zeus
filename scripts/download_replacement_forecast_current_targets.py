@@ -118,7 +118,22 @@ def _precision_metadata(city: str, target_date: str, *, anchor_sigma_c: float) -
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    body = json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n"
+    # Validate the exact bytes we are about to publish. A malformed raw payload
+    # is worse than a missing payload because manifest discovery will keep
+    # reusing it for every held-position reseed.
+    json.loads(body)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _json_file_valid(path: Path) -> bool:
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+        return True
+    except Exception:
+        return False
 
 
 def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest) -> Path:
@@ -243,12 +258,11 @@ def _resolve_anchor_payload(
     partial-run). Returns ``(payload, transport_provenance)``. Raises
     ``BucketTransportNotAdmissible`` only when NO rung can serve this city THIS cycle (so the
     caller skips the city, never the batch). Genuine defects still raise loudly:
-      * rung 1: only HTTP 400 (run-not-yet-served) degrades to rung 2; any other single-runs
-        status (auth, 4xx, schema) re-raises.
-      * rung 2: three outcomes degrade to rung 3 — the meta REFUSAL (ValueError: provider
-        declares an older run; never weakened), a transport error (provider unreachable), and
-        a 5xx (provider server-side unavailability, e.g. intermittent 502 on meta.json). A 4xx
-        on meta is a client-side defect and re-raises.
+      * rung 1: HTTP 400 (run-not-yet-served), 429, and 5xx degrade to rung 2; auth/client
+        defects re-raise.
+      * rung 2: meta REFUSAL (ValueError: provider declares an older run; never weakened),
+        transport errors, provider rate limits, quota cooldown, retry exhaustion, and 5xx
+        degrade to rung 3. Other 4xx responses on meta are client-side defects and re-raise.
       * rung 3: serves only cross-check-whitelisted cities for the bucket-declared wanted run
         with every needed timestep present; otherwise BucketTransportNotAdmissible.
     """
@@ -256,33 +270,58 @@ def _resolve_anchor_payload(
         fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped,
     )
 
+    def _is_transient_provider_failure(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            "429" in text
+            or "too many requests" in text
+            or "quota exhausted" in text
+            or "temporarily blocked" in text
+            or "cooldown" in text
+            or "exhausted retries" in text
+            or "rate limit" in text
+        )
+
+    def _exception_summary(exc: Exception) -> str:
+        return f"{type(exc).__name__}: {str(exc)[:160]}"
+
     # Rung 1: run-pinned single-runs (strongest provenance).
     single_runs_exc: Exception
     try:
-        payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+        payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, fast_fail_429=True)
         return payload, {
             "openmeteo_endpoint": "single_runs_api",
             "run_authority": "run_pinned_single_runs",
         }
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code != 400:
-            raise  # only run-not-yet-served (400) degrades; everything else is loud
+        status_code = exc.response.status_code
+        if status_code != 400 and status_code != 429 and status_code < 500:
+            raise
         # `except ... as` unbinds the name at block exit; persist it for rungs 2/3.
+        single_runs_exc = exc
+    except RuntimeError as exc:
+        if not _is_transient_provider_failure(exc):
+            raise
         single_runs_exc = exc
 
     # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
     try:
-        payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(request)
-        provenance = dict(meta_provenance)
-        provenance["single_runs_fallback_reason"] = (
-            f"HTTP 400 run not yet served: {str(single_runs_exc)[:160]}"
+        payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
+            request, fast_fail_429=True
         )
+        provenance = dict(meta_provenance)
+        provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
         return payload, provenance
     except httpx.HTTPStatusError as meta_status_exc:
-        # 5xx = provider server-side unavailability (degrade to rung 3); 4xx = our defect (raise).
-        if meta_status_exc.response.status_code < 500:
+        # 429/5xx = provider-side unavailability (degrade to rung 3); other 4xx = our defect.
+        status_code = meta_status_exc.response.status_code
+        if status_code != 429 and status_code < 500:
             raise
         rung2_reason: Exception = meta_status_exc
+    except RuntimeError as meta_runtime_exc:
+        if not _is_transient_provider_failure(meta_runtime_exc):
+            raise
+        rung2_reason = meta_runtime_exc
     except (ValueError, httpx.TransportError) as meta_exc:
         # ValueError = meta REFUSAL (older run; never weakened); TransportError = provider
         # unreachable. Both degrade to rung 3 (the bucket is independent infrastructure).
@@ -374,7 +413,7 @@ def download_current_target_raw_inputs(
         # whole batch. The city is recorded as skipped and the loop continues; it falls to
         # a higher rung next tick. This preserves — never weakens — the rung-2 refusal:
         # a non-admissible city simply gets no artifact this cycle.
-        if not payload_path.exists():
+        if (not payload_path.exists()) or (not _json_file_valid(payload_path)):
             # Transport ladder (operator directive 2026-06-11, K4.0b(f)): rung 1 run-pinned
             # single-runs → rung 2 meta-stamped standard → rung 3 S3 bucket partial-run.
             # _resolve_anchor_payload encapsulates the whole ladder and returns

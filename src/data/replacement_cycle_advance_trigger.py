@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.data.replacement_forecast_readiness import SOURCE_ID
@@ -50,6 +50,7 @@ _LOG = logging.getLogger("zeus.replacement_cycle_advance_trigger")
 UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
+_HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
 
 
 def _parse_cycle(value: object) -> datetime | None:
@@ -61,6 +62,19 @@ def _parse_cycle(value: object) -> datetime | None:
         return None
 
 
+def normalize_observation_version(value: object) -> str | None:
+    """Canonicalize an observation-version timestamp to a fixed-width UTC ISO string
+    ``YYYY-MM-DDTHH:MM:SS+00:00`` so lexicographic comparison equals INSTANT comparison across
+    timezone offsets and ``Z``/``+00:00``/fractional-second spellings (consult REQ-20260623-184115
+    HIGH: raw-ISO string compare can churn on equal instants and SUPPRESS truly-newer offset
+    instants). Returns None when unparseable — callers treat that as "no recorded version" so a
+    pre-normalization marker heals to the normalized form on the next write."""
+    parsed = _parse_cycle(value)
+    if parsed is None:
+        return None
+    return parsed.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
 def consumed_cycle_dt(value: str) -> datetime:
     """Parse a consumed/target cycle ISO string back to a UTC datetime for comparison. The verdict
     serializes cycles to ISO; the family-scope gate compares against them, so we round-trip here.
@@ -69,6 +83,14 @@ def consumed_cycle_dt(value: str) -> datetime:
     if parsed is None:
         raise ValueError(f"unparseable consumed cycle: {value!r}")
     return parsed
+
+
+def _fresh_enough_to_retry_held_reheal(enqueued_at: object, *, now: datetime | None = None) -> bool:
+    """Bound same-scope held re-heal retries so one failed materialization cannot flood the queue."""
+    parsed = _parse_cycle(enqueued_at)
+    if parsed is None:
+        return True
+    return (now or datetime.now(tz=UTC)).astimezone(UTC) - parsed >= _HELD_REHEAL_COOLDOWN
 
 
 def _per_leg_max_cycle(conn: sqlite3.Connection, source_id: str) -> datetime | None:
@@ -97,6 +119,7 @@ def family_materializable_cycle(
     city: str,
     target_date: str,
     metric: str,
+    city_timezone: str | None = None,
     expected_identity,
     latest_manifest,
 ) -> tuple[datetime | None, tuple[tuple[str, str], ...]]:
@@ -119,6 +142,7 @@ def family_materializable_cycle(
             data_version=identity.data_version,
             city=city,
             target_date=target_date,
+            city_timezone=city_timezone,
         )
         if man is None:
             missing.append((role, str(identity.source_id)))
@@ -210,37 +234,18 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
         required_chain_cols = {"chain_state", "chain_shares", "chain_cost_basis_usd"}
         if not required_chain_cols.issubset(cols):
             return set()
-        if {"order_status", "exit_reason"}.issubset(cols):
-            rows = conn_trades.execute(
-                """
-                SELECT DISTINCT city, target_date, temperature_metric
-                FROM position_current
-                WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
-                  AND COALESCE(chain_state, '') = 'synced'
-                  AND COALESCE(chain_shares, 0) > 0
-                  AND COALESCE(chain_cost_basis_usd, 0) > 0
-                  AND city IS NOT NULL AND target_date IS NOT NULL
-                  AND temperature_metric IS NOT NULL
-                  AND NOT (
-                        COALESCE(phase, '') = 'pending_exit'
-                    AND COALESCE(order_status, '') = 'backoff_exhausted'
-                    AND COALESCE(exit_reason, '') = 'MARKET_CLOSED_AWAITING_SETTLEMENT'
-                  )
-                """
-            ).fetchall()
-        else:
-            rows = conn_trades.execute(
-                """
-                SELECT DISTINCT city, target_date, temperature_metric
-                FROM position_current
-                WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
-                  AND COALESCE(chain_state, '') = 'synced'
-                  AND COALESCE(chain_shares, 0) > 0
-                  AND COALESCE(chain_cost_basis_usd, 0) > 0
-                  AND city IS NOT NULL AND target_date IS NOT NULL
-                  AND temperature_metric IS NOT NULL
-                """
-            ).fetchall()
+        rows = conn_trades.execute(
+            """
+            SELECT DISTINCT city, target_date, temperature_metric
+            FROM position_current
+            WHERE COALESCE(phase, '') IN ('active', 'day0_window', 'pending_exit')
+              AND COALESCE(chain_state, '') = 'synced'
+              AND COALESCE(chain_shares, 0) > 0
+              AND COALESCE(chain_cost_basis_usd, 0) > 0
+              AND city IS NOT NULL AND target_date IS NOT NULL
+              AND temperature_metric IS NOT NULL
+            """
+        ).fetchall()
     except Exception as exc:  # noqa: BLE001
         # FINDING 2 / MEDIUM (external review 2026-06-12): a held-family read FAILURE silently
         # dropped held-position priority — the families whose stale belief most directly risks
@@ -272,17 +277,29 @@ def _already_enqueued(
     metric: str,
     target_cycle_iso: str,
     allow_missing_seed_file_reenqueue: bool = False,
+    day0_observed_extreme_observation_time: str | None = None,
 ) -> bool:
     """True iff a real re-materialization seed already exists for this exact target cycle.
 
     A ``CYCLE_LEG_ARTIFACT_MISSING`` row is a visible, typed gap marker, not a terminal enqueue.
     Returning False for that row lets the next tick heal it when the same target cycle's artifact
     finally lands; ``_record_enqueue`` updates the marker in place under the UNIQUE bound.
+
+    OBSERVATION-VERSION RE-ENQUEUE (same-day exit-blindness fix 2026-06-23): for a held/day0
+    reseed, ``day0_observed_extreme_observation_time`` is the fresh observed running-max version.
+    The model cycle (``target_cycle_time``) does NOT advance intraday on the settlement day, so
+    keying idempotency on it alone freezes the day0-conditioned posterior while the observed
+    extreme climbs/plateaus (Toronto NO@24 -98.94% incident). When the supplied observation
+    version is strictly NEWER than (or the marker has no recorded) observation version, return
+    False so the fresh observation re-materializes the posterior — even though the model-cycle
+    seed still exists. Supplying no observation version (non-day0 / future-date reseed) preserves
+    the original model-cycle idempotency unchanged.
     """
     try:
         row = conn.execute(
             """
-            SELECT seed_file, reason FROM cycle_advance_enqueues
+            SELECT seed_file, reason, held_position, day0_observed_extreme_observation_time, enqueued_at
+            FROM cycle_advance_enqueues
             WHERE city = ? AND target_date = ? AND metric = ? AND target_cycle_time = ?
             LIMIT 1
             """,
@@ -296,7 +313,34 @@ def _already_enqueued(
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
         return False
-    if allow_missing_seed_file_reenqueue and seed_file and not Path(seed_file).exists():
+    if day0_observed_extreme_observation_time is not None:
+        incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
+        recorded_version = normalize_observation_version(
+            row["day0_observed_extreme_observation_time"] if hasattr(row, "keys") else row[3]
+        )
+        # Both normalized to fixed-width UTC ISO => lexicographic compare == instant compare.
+        if incoming_version is not None and (
+            recorded_version is None or incoming_version > recorded_version
+        ):
+            return False
+    # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held (money-at-risk) marker whose seed
+    # was built then processed/moved out of the live queue but produced NO posterior — the
+    # single_runs serving race materializes BLOCKED on REQUIREMENTS_NOT_MET — must NOT suppress
+    # re-enqueue forever, else the held belief freezes (Panama City 2026-06-22 stuck 13h+) ->
+    # BELIEF_AUTHORITY_FAULT fail-closed HOLD -> reversal exit starved ("observe but not act").
+    # Auto-enable the missing-seed re-enqueue for held rows, mirroring the day0 escape hatch.
+    # Bounded by the upstream needs_advance/coverage gate, so a successfully materialized cycle
+    # (posterior present) never reaches here to churn; a still-PRESENT pending seed also suppresses.
+    held = bool((row["held_position"] if hasattr(row, "keys") else row[2]) or 0)
+    if (allow_missing_seed_file_reenqueue or held) and seed_file and not Path(seed_file).exists():
+        # A moved seed file is normal after the queue processed it. Re-enqueueing immediately every
+        # poll tick creates a live backlog of identical failed work. Only Day0 observation-version
+        # advancement bypasses this cooldown above; otherwise retry the same scope/cycle after the
+        # cooling period or when a newer model cycle changes the idempotency key.
+        if held and not allow_missing_seed_file_reenqueue:
+            enqueued_at = row["enqueued_at"] if hasattr(row, "keys") else row[4]
+            if not _fresh_enough_to_retry_held_reheal(enqueued_at):
+                return True
         return False
     return True
 
@@ -351,9 +395,15 @@ def _record_enqueue(
     seed_file: str | None,
     reason: str | None = None,
     replace_existing_seed_file: bool = False,
+    day0_observed_extreme_observation_time: str | None = None,
 ) -> bool:
     """Write the idempotency marker. Returns True iff this call inserted the row (False = a
     concurrent/prior enqueue already recorded it, via the UNIQUE index INSERT OR IGNORE).
+
+    ``day0_observed_extreme_observation_time`` records the OBSERVATION VERSION this enqueue was
+    built at (same-day exit-blindness fix 2026-06-23). It advances the marker so a later held/day0
+    reseed at the SAME model cycle but a NEWER observed running-max version is re-enqueued by
+    ``_already_enqueued`` instead of frozen.
 
     ``reason`` carries a typed status for the row. None for a normal successful enqueue (the
     presence of seed_file is the success signal); a typed string (FINDING 2) when the row instead
@@ -361,13 +411,19 @@ def _record_enqueue(
     blocked family is VISIBLE in the queue rather than an invisible manifest_missing skip. Both
     share the SAME UNIQUE(scope, target_cycle) bound, so a gap row and a later success row for the
     same (scope, target-cycle) cannot both exist — the gap heals into the success on the next tick."""
+    # Persist the observation version in canonical fixed-width UTC ISO so the marker comparison in
+    # _already_enqueued (and the monotone replacement guard below) is instant-accurate, not
+    # spelling-sensitive (consult REQ-20260623-184115 HIGH).
+    day0_observed_extreme_observation_time = normalize_observation_version(
+        day0_observed_extreme_observation_time
+    )
     before = conn.total_changes
     conn.execute(
         """
         INSERT OR IGNORE INTO cycle_advance_enqueues
             (enqueued_at, city, target_date, metric, consumed_cycle_time, target_cycle_time,
-             held_position, seed_file, reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             held_position, seed_file, reason, day0_observed_extreme_observation_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             datetime.now(tz=UTC).isoformat(),
@@ -379,13 +435,19 @@ def _record_enqueue(
             1 if held_position else 0,
             seed_file,
             reason,
+            day0_observed_extreme_observation_time,
         ),
     )
     if conn.total_changes > before:
         return True
     if seed_file:
         update_before = conn.total_changes
-        if replace_existing_seed_file:
+        # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held re-enqueue must REPLACE an
+        # existing seed-built marker (the moved/BLOCKED row), pairing with the _already_enqueued
+        # held re-heal above. Without this, INSERT OR IGNORE no-ops and the default NULL-seed gap
+        # UPDATE below cannot rewrite a seed-bearing held row, so the re-heal never completes and
+        # the held belief stays frozen.
+        if replace_existing_seed_file or held_position:
             conn.execute(
                 """
                 UPDATE cycle_advance_enqueues
@@ -393,11 +455,20 @@ def _record_enqueue(
                        consumed_cycle_time = ?,
                        held_position = ?,
                        seed_file = ?,
-                       reason = ?
+                       reason = ?,
+                       day0_observed_extreme_observation_time = COALESCE(?, day0_observed_extreme_observation_time)
                  WHERE city = ?
                    AND target_date = ?
                    AND metric = ?
                    AND target_cycle_time = ?
+                   -- MONOTONE day0 version guard (consult REQ-20260623-184115 HIGH): an out-of-order
+                   -- OLDER observation-version writer must NOT regress the marker/seed after a newer
+                   -- one won. Non-day0 writers (version NULL) keep the held re-heal behaviour.
+                   AND (
+                       ? IS NULL
+                       OR day0_observed_extreme_observation_time IS NULL
+                       OR ? > day0_observed_extreme_observation_time
+                   )
                 """,
                 (
                     datetime.now(tz=UTC).isoformat(),
@@ -405,10 +476,13 @@ def _record_enqueue(
                     1 if held_position else 0,
                     seed_file,
                     reason,
+                    day0_observed_extreme_observation_time,
                     city,
                     target_date,
                     metric,
                     target_cycle_iso,
+                    day0_observed_extreme_observation_time,
+                    day0_observed_extreme_observation_time,
                 ),
             )
             return conn.total_changes > update_before
@@ -419,7 +493,8 @@ def _record_enqueue(
                    consumed_cycle_time = ?,
                    held_position = ?,
                    seed_file = ?,
-                   reason = ?
+                   reason = ?,
+                   day0_observed_extreme_observation_time = COALESCE(?, day0_observed_extreme_observation_time)
              WHERE city = ?
                AND target_date = ?
                AND metric = ?
@@ -433,6 +508,7 @@ def _record_enqueue(
                 1 if held_position else 0,
                 seed_file,
                 reason,
+                day0_observed_extreme_observation_time,
                 city,
                 target_date,
                 metric,
@@ -584,11 +660,16 @@ def enqueue_cycle_advance_reseeds(
             # freshest cycle, which can be a FALSE advance signal when a leg's raw artifact is
             # missing for THIS family at that cycle. Re-check materializability AT FAMILY SCOPE.
             try:
+                from src.config import cities_by_name  # noqa: PLC0415
+
+                city_cfg = cities_by_name.get(city)
+                city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
                 family_cycle, missing_legs = family_materializable_cycle(
                     manifests,
                     city=city,
                     target_date=target_date,
                     metric=metric,
+                    city_timezone=city_timezone,
                     expected_identity=expected_replacement_dependency_identity_by_role,
                     latest_manifest=_latest_manifest,
                 )
@@ -843,6 +924,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 metric=metric,
                 target_cycle_iso=target_cycle_iso,
                 allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
+                day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
             ):
                 if held_position:
                     report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
@@ -895,6 +977,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 seed_file=str(seed_file),
                 reason="MISSING_LIVE_POSTERIOR",
                 replace_existing_seed_file=has_day0_observed_extreme,
+                day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
             )
             conn.commit()
             report["enqueued"] = bool(inserted)
@@ -921,6 +1004,7 @@ def enqueue_single_family_cycle_advance_reseed(
             metric=metric,
             target_cycle_iso=target_cycle_iso,
             allow_missing_seed_file_reenqueue=has_day0_observed_extreme,
+            day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
         ):
             if held_position:
                 report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
@@ -972,6 +1056,7 @@ def enqueue_single_family_cycle_advance_reseed(
             held_position=held_position,
             seed_file=str(seed_file),
             replace_existing_seed_file=has_day0_observed_extreme,
+            day0_observed_extreme_observation_time=day0_observed_extreme_observation_time,
         )
         conn.commit()
         report["enqueued"] = bool(inserted)
@@ -1025,12 +1110,17 @@ def _build_and_write_advance_seed(
     materializer's monotone guard admits it (request cycle >= current posterior cycle). Mirrors the
     fusion-upgrade trigger's _build_and_write_upgrade_seed (single seed-build shape)."""
     expected = expected_identity(metric)
+    from src.config import cities_by_name  # noqa: PLC0415
+
+    city_cfg = cities_by_name.get(city)
+    city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
     openmeteo = latest_manifest(
         manifests,
         source_id=expected["openmeteo_ifs9_anchor"].source_id,
         data_version=expected["openmeteo_ifs9_anchor"].data_version,
         city=city,
         target_date=target_date,
+        city_timezone=city_timezone,
     )
     if openmeteo is None:
         return None

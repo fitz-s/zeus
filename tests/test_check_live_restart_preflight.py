@@ -16,6 +16,16 @@ from scripts import check_live_restart_preflight as preflight
 from src.decision import qlcb_reliability_guard as guard_mod
 
 
+def _qlcb_meta() -> dict[str, object]:
+    return {
+        "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+        "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
+        "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
+        "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+        "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
+    }
+
+
 def _init_trade_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -96,7 +106,11 @@ def _patch_paths(monkeypatch, tmp_path):
     settings.write_text(
         json.dumps(
             {
-                "edli": {"real_order_submit_enabled": True},
+                "edli": {
+                    "live_execution_mode": "edli_live",
+                    "reactor_mode": "live",
+                    "real_order_submit_enabled": True,
+                },
                 "feature_flags": {"qkernel_spine_enabled": True},
             }
         )
@@ -152,9 +166,10 @@ def _patch_paths(monkeypatch, tmp_path):
     qlcb_artifact.write_text(
         json.dumps(
             {
+                "meta": _qlcb_meta(),
                 "cells": {
-                    "high|L1|YES|modal|qb1": {"n": 100, "hit_rate": 0.80},
-                    "high|L1|NO|nonmodal|qb1": {"n": 100, "hit_rate": 0.80},
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                    "high|L1|NO|nonmodal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
                 }
             }
         )
@@ -394,6 +409,48 @@ def test_preflight_blocks_present_invalid_qlcb_artifact(monkeypatch, tmp_path):
     qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
     assert qlcb["ok"] is False
     assert qlcb["evidence"]["status"] == "ACTIVE_INVALID"
+
+
+def test_preflight_blocks_shape_valid_stale_qlcb_artifact(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    (state_dir / "qlcb_oof_reliability.json").write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "source": "/tmp/multilead_forecasts.json previous-runs corpus",
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                },
+            }
+        )
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
+    assert qlcb["ok"] is False
+    assert qlcb["evidence"]["status"] == "STALE_SEMANTICS"
 
 
 def _init_sidecar_surfaces(conn, *, now: datetime):
@@ -717,6 +774,120 @@ def test_preflight_blocks_dust_projection_that_would_reload_as_pending_exit(monk
     assert pending["evidence"]["risky"][0]["risk"] == "dust_projection_needs_backoff_exhausted_reload_repair"
 
 
+def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'exit-filled-pos', 'pending_exit', 'Seoul', '2026-06-26', 'low',
+            'Will the lowest temperature in Seoul be 18°C on June 26?',
+            'buy_no', 15.5, 15.5, 'backoff_exhausted', 'FAMILY_DIRECT_SELL_DOMINATES_HOLD',
+            19, '2026-06-24T17:40:08+00:00', 0.60, 1, 0.70, 1,
+            '2026-06-24T17:45:21+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-exit', 'exit-filled-pos', 'EXIT', 'FILLED', 'ord-exit', 15.5,
+            '2026-06-24T15:34:59+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-exit', 'MATCHED', '15.5', '0.70', '2026-06-24T15:34:59+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "command_recovery_full_exit_fill_close"
+    assert tolerated["repair_evidence"]["filled_size"] == 15.5
+
+
+def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'retry-pos', 'pending_exit', 'Houston', '2026-06-24', 'high',
+            'Will the highest temperature in Houston be between 92-93°F on June 24?',
+            'buy_no', 36.0, 36.0, 'filled', 'CI_SEPARATED_REVERSAL',
+            4, '2026-06-24T18:22:42+00:00', 0.055, 1, 0.53, 1,
+            '2026-06-24T17:42:42+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-exit', 'retry-pos', 'EXIT', 'REJECTED', '', 36.0,
+            '2026-06-24T17:42:42+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_retry_resume"
+    assert tolerated["repair_evidence"]["command_state"] == "REJECTED"
+
+
 def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tmp_path):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
@@ -760,6 +931,156 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
 
 
+def test_non_day0_monitor_projection_does_not_cover_stale_live_belief(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    label = "Will the highest temperature in Seattle be between 82-83°F on June 26?"
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'active-pos', 'active', 'Seattle', '2026-06-26', 'high',
+            ?, 'buy_no', 9.0, 9.0, 'filled', NULL, 0, NULL,
+            0.84, 1, 0.72, 1, '2026-06-24T11:01:17+00:00'
+        )
+        """,
+        (label,),
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'active-pos', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "applied_validations": [
+                        "replacement_posterior",
+                        "belief_source=forecast_posteriors;basis=source_cycle_time;fresh",
+                    ]
+                }
+            ),
+        ),
+    )
+    stale = datetime.now(timezone.utc) - timedelta(hours=72)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-26', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            stale.isoformat(),
+            stale.isoformat(),
+            json.dumps({label: 0.15}),
+        ),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.row_factory = sqlite3.Row
+    rows = trade.execute("SELECT * FROM position_current").fetchall()
+    trade.close()
+    forecasts.close()
+    monkeypatch.setattr(preflight, "_single_family_reseed_repair_evidence", lambda item: None)
+
+    result = preflight._belief_check(rows)
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "stale_live_belief"
+    covered = result.evidence["covered"][0]
+    assert covered["fresh"] is False
+    assert covered["freshness_basis"] != "monitor_projection_readthrough"
+
+
+def test_active_position_day0_monitor_projection_covers_stale_forecast_belief(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    label = "Will the highest temperature in Houston be 98°F on June 24?"
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'active-day0-pos', 'active', 'Houston', '2026-06-24', 'high',
+            ?, 'buy_no', 9.0, 9.0, 'filled', NULL, 0, NULL,
+            0.9999, 1, 0.998, 1, ?
+        )
+        """,
+        (label, datetime.now(timezone.utc).isoformat()),
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'active-day0-pos', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "applied_validations": [
+                        "belief_source=day0_observation_remaining_window",
+                        "day0_observation_remaining_window",
+                    ]
+                }
+            ),
+        ),
+    )
+    stale = datetime.now(timezone.utc) - timedelta(hours=72)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Houston', '2026-06-24', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            stale.isoformat(),
+            stale.isoformat(),
+            json.dumps({label: 0.15}),
+        ),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.row_factory = sqlite3.Row
+    rows = trade.execute("SELECT * FROM position_current").fetchall()
+    trade.close()
+    forecasts.close()
+
+    result = preflight._belief_check(rows)
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    covered = result.evidence["covered"][0]
+    assert covered["position_id"] == "active-day0-pos"
+    assert covered["freshness_basis"] == "active_day0_monitor_projection"
+    assert covered["monitor_projection"]["source"] == "day0_monitor_observation_authority"
+
+
 def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
     monkeypatch, tmp_path
 ):
@@ -787,7 +1108,7 @@ def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
             last_monitor_market_price_is_fresh, updated_at,
             condition_id, token_id, no_token_id
         ) VALUES (
-            'karachi-pos', 'day0_window', 'Karachi', '2026-06-19', 'high',
+            'karachi-pos', 'active', 'Karachi', '2026-06-19', 'high',
             ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
             0.84, 1, 0.72, 1, '2026-06-18T23:00:00+00:00',
             'cond-karachi', 'tok-karachi-yes', 'tok-karachi-no'
@@ -874,7 +1195,7 @@ def test_preflight_blocks_missing_belief_repairable_but_not_materialized(
             last_monitor_market_price_is_fresh, updated_at,
             condition_id, token_id, no_token_id
         ) VALUES (
-            'sh-pos', 'day0_window', 'Shanghai', '2026-06-19', 'high',
+            'sh-pos', 'active', 'Shanghai', '2026-06-19', 'high',
             ?, 'buy_no', 5.0, 5.0, 'filled', NULL, 0, NULL,
             0.84, 0, 0.72, 1, '2026-06-19T01:00:00+00:00',
             'cond-sh', 'tok-sh-yes', 'tok-sh-no'
@@ -1477,6 +1798,46 @@ def test_preflight_blocks_armed_live_when_reactor_mode_live_no_submit(monkeypatc
     assert result["ok"] is False
     submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
     assert submit["ok"] is False
+    assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
+
+
+def test_preflight_blocks_missing_live_execution_mode_instead_of_legacy_default(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+    preflight.SETTINGS_PATH.write_text(
+        json.dumps(
+            {
+                "edli": {
+                    "real_order_submit_enabled": True,
+                    "reactor_mode": "live",
+                },
+                "feature_flags": {"qkernel_spine_enabled": True},
+            }
+        )
+    )
+
+    result = preflight.evaluate()
+
+    submit = next(c for c in result["checks"] if c["name"] == "submit_authority_config")
+    assert submit["ok"] is False
+    assert submit["evidence"]["edli.live_execution_mode"] == "missing"
+    assert submit["evidence"]["known_execution_mode"] is False
     assert any(c["name"] == "submit_authority_config" for c in result["blockers"])
 
 

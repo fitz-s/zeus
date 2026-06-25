@@ -1105,6 +1105,62 @@ def test_batch_orderbook_prefetch_uses_live_proven_large_chunks(monkeypatch):
     assert summary["prefetched_orderbook_count"] > 50
 
 
+def test_unbounded_family_refresh_batches_complete_groups_per_tick(monkeypatch):
+    """max_outcomes=0 must not prefetch every stale family in one live tick.
+
+    The family-completion path needs complete YES/NO sibling coverage, but live
+    redecision can hand it many families at once. The scheduler should process a
+    bounded set of complete family groups and leave the rest for the next tick,
+    not prefetch hundreds of books and leave no time for SQLite writes.
+    """
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "4")
+
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(list(ms.cities_by_name.keys())[:4], start=1)
+    ]
+    capture_calls: list[str] = []
+    batch_token_counts: list[int] = []
+
+    def _batch_books(token_ids: list[str]) -> dict[str, dict]:
+        batch_token_counts.append(len(token_ids))
+        return {
+            token_id: {
+                "market": token_id,
+                "asset_id": token_id,
+                "bids": [{"price": "0.55", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+            }
+            for token_id in token_ids
+        }
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        capture_calls.append(str(decision.tokens.get("market_id") or ""))
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.side_effect = _batch_books
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=20.0,
+            max_outcomes=0,
+        )
+
+    assert summary["executable_snapshot_candidate_count"] == 8
+    assert summary["selected_executable_snapshot_count"] == 4
+    assert summary["prefetched_orderbook_count"] == 4
+    assert batch_token_counts == [4]
+    assert len(capture_calls) == 4
+    assert summary["truncated"] == 1
+    assert summary["budget_truncated_city_count"] == 2
+
+
 def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):
     """Tiny prefetch window MUST still fire ONE batch POST /books, not fall back
     to a per-token GET /book storm.

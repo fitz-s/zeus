@@ -101,8 +101,8 @@ def test_anchor_fetch_uses_shared_openmeteo_client(monkeypatch) -> None:
     )
     calls = []
 
-    def fake_fetch(url, params, *, timeout, max_retries, endpoint_label):
-        calls.append((url, params, timeout, max_retries, endpoint_label))
+    def fake_fetch(url, params, *, timeout, max_retries, endpoint_label, fast_fail_429=False):
+        calls.append((url, params, timeout, max_retries, endpoint_label, fast_fail_429))
         return {"hourly": {"time": [], "temperature_2m": []}}
 
     monkeypatch.setattr("src.data.openmeteo_client.fetch", fake_fetch)
@@ -116,6 +116,7 @@ def test_anchor_fetch_uses_shared_openmeteo_client(monkeypatch) -> None:
     assert calls[0][2] == 7.0
     assert calls[0][3] == 2
     assert calls[0][4] == "openmeteo_ecmwf_ifs9_single_runs_anchor"
+    assert calls[0][5] is False
 
 
 def test_anchor_artifact_manifest_preserves_run_pinned_request_and_metric_identity(tmp_path) -> None:

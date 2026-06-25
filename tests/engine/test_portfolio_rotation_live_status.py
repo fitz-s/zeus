@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from src.engine.cycle_runtime import _emit_portfolio_rotation_live_status
+from src.engine.cycle_runtime import _emit_portfolio_rotation_evaluation_status
 
 
 class _Logger:
@@ -68,6 +68,7 @@ def _create_world_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE world.no_trade_regret_events (
             event_id TEXT,
+            rejection_stage TEXT,
             rejection_reason TEXT,
             city TEXT,
             target_date TEXT,
@@ -86,7 +87,7 @@ def _create_world_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_path) -> None:
+def test_portfolio_rotation_evaluation_status_reports_positive_value_without_actuator(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -113,7 +114,7 @@ def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_pat
     conn.execute(
         """
         INSERT INTO world.no_trade_regret_events VALUES (
-            'evt-1', 'KELLY_REJECTED:corr_budget', 'Madrid', '2026-06-08',
+            'evt-1', 'KELLY', 'KELLY_REJECTED:corr_budget', 'Madrid', '2026-06-08',
             'high', 'Will the highest temperature in Madrid be 34°C on June 8?',
             'buy_no', 0.88, 0.55, 1.0, 0.20, 'candidate-token',
             'candidate-condition', '2026-06-07T06:25:00+00:00'
@@ -122,9 +123,12 @@ def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_pat
     )
     summary: dict = {}
 
-    _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "evaluated:rotate_candidate_ready"
+    assert (
+        summary["portfolio_rotation_evaluation_status"]
+        == "evaluated:positive_rotation_value_no_cross_family_actuator"
+    )
     assert summary["portfolio_rotation_held_positions_evaluated"] == 1
     assert summary["portfolio_rotation_candidates_evaluated"] == 1
     best = summary["portfolio_rotation_best"]
@@ -133,7 +137,58 @@ def test_portfolio_rotation_live_status_reports_rotation_candidate_ready(tmp_pat
     assert best["net_improvement_usd"] > 0.0
 
 
-def test_portfolio_rotation_live_status_holds_without_positive_candidate(tmp_path) -> None:
+def test_portfolio_rotation_counts_monitor_owned_positive_candidate(tmp_path) -> None:
+    world_path = tmp_path / "world.db"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    _create_main_schema(conn)
+    _create_world_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'pos-1', 'trade-1', 'active', 'Shanghai', '2026-06-25', 'high',
+            'Will the highest temperature in Shanghai be 31°C on June 25?',
+            'buy_no', 5.6, 0.20, 1, 0.22, 1, 'held-yes-token', 'held-no-token', 'held-condition'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'pos-1', 'MONITOR_REFRESHED', '2026-06-07T06:20:00+00:00', ?
+        )
+        """,
+        (json.dumps({"last_monitor_best_bid": 0.22}),),
+    )
+    conn.execute(
+        """
+        INSERT INTO world.no_trade_regret_events VALUES (
+            'evt-sh-buy-yes', 'TRADE_SCORE',
+            'EVENT_BOUND_CANDIDATE_REJECTED:OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED',
+            'Shanghai', '2026-06-25', 'high',
+            'Will the highest temperature in Shanghai be 25°C on June 25?',
+            'buy_yes', 0.9616, 0.6712, 1.0, 0.4327, 'candidate-yes-token',
+            'candidate-condition', '2026-06-07T06:25:00+00:00'
+        )
+        """
+    )
+    summary: dict = {}
+
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=_deps())
+
+    assert summary["portfolio_rotation_candidates_evaluated"] == 1
+    assert (
+        summary["portfolio_rotation_evaluation_status"]
+        == "evaluated:positive_rotation_value_no_cross_family_actuator"
+    )
+    best = summary["portfolio_rotation_best"]
+    assert best["candidate_event_id"] == "evt-sh-buy-yes"
+    assert best["candidate_direction"] == "buy_yes"
+    assert best["net_improvement_usd"] > 0.0
+
+
+def test_portfolio_rotation_evaluation_status_holds_without_positive_candidate(tmp_path) -> None:
     world_path = tmp_path / "world.db"
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -159,16 +214,16 @@ def test_portfolio_rotation_live_status_holds_without_positive_candidate(tmp_pat
     )
     summary: dict = {}
 
-    _emit_portfolio_rotation_live_status(conn, summary, deps=_deps())
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "evaluated:no_capital_constrained_positive_candidates"
+    assert summary["portfolio_rotation_evaluation_status"] == "evaluated:no_capital_constrained_positive_candidates"
     assert summary["portfolio_rotation_held_positions_evaluated"] == 1
     assert summary["portfolio_rotation_candidates_evaluated"] == 0
 
 
-def test_portfolio_rotation_live_status_is_noop_without_connection() -> None:
+def test_portfolio_rotation_evaluation_status_is_noop_without_connection() -> None:
     summary: dict = {}
 
-    _emit_portfolio_rotation_live_status(None, summary, deps=_deps())
+    _emit_portfolio_rotation_evaluation_status(None, summary, deps=_deps())
 
-    assert summary["portfolio_rotation_live_status"] == "unavailable:no_connection"
+    assert summary["portfolio_rotation_evaluation_status"] == "unavailable:no_connection"

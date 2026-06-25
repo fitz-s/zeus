@@ -135,6 +135,33 @@ def _risk_allocator_order_type_allows_intent(
     return False
 
 
+def _exit_order_type(selected_order_type: str) -> str:
+    """Role-scoped exit order-type: an exit is IOC, never all-or-nothing.
+
+    The global allocator returns ``FOK`` for a TAKER decision (governor.
+    select_global_order_type), but its own docstring states the intended
+    semantics is "immediate-or-cancel" — which is ``FAK`` (fill-and-kill /
+    IOC), not ``FOK`` (fill-or-kill / atomic). For an EXIT that distinction is
+    money-path-critical: once we have DECIDED to exit, a partial fill out beats
+    zero fill. FOK on a thin/dying book means the whole sell is killed, the
+    position never realizes, and recoverable value bleeds to ~0 (live evidence
+    2026-06-24: Houston 92-93F NO, exit_retry_count=6, market 0.356->0.076,
+    every retry "order couldn't be fully filled. FOK orders are fully filled or
+    killed").
+
+    The exit lifecycle re-derives shares from chain truth each retry and parks
+    sub-min remainders as dust, so FAK partial fills converge. Resting types
+    (GTC/GTD — a maker-resting exit on a deep book) are returned unchanged; only
+    the FOK all-or-nothing hazard is rewritten. Taker ENTRY semantics are NOT
+    affected — this coercion is applied only on the exit submit seam.
+    """
+
+    normalized = str(selected_order_type or "").strip().upper()
+    if normalized == "FOK":
+        return "FAK"
+    return normalized
+
+
 _ENTRY_DUPLICATE_TERMINAL_PHASES = frozenset(
     {"voided", "economically_closed", "settled", "quarantined", "admin_closed"}
 )
@@ -1008,6 +1035,17 @@ def _venue_submit_status(result: dict) -> str:
     ).upper()
 
 
+def _normalised_order_side(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def _venue_submit_side(result: dict, *, side: str | None = None) -> str:
+    explicit = _normalised_order_side(side)
+    if explicit:
+        return explicit
+    return _normalised_order_side(_first_submit_value(result, "side"))
+
+
 def _decimal_or_none(value: object) -> Decimal | None:
     try:
         parsed = Decimal(str(value))
@@ -1092,18 +1130,26 @@ def _venue_submit_matched_size(
     result: dict,
     *,
     fallback_size: float | Decimal | None = None,
+    side: str | None = None,
 ) -> str:
     for key in (
         "matched_size",
         "matchedSize",
         "size_matched",
         "sizeMatched",
-        "takingAmount",
-        "taking_amount",
     ):
         value = _first_submit_value(result, key)
         if value not in (None, ""):
             return str(value)
+    side_value = _venue_submit_side(result, side=side)
+    amount_keys = (
+        ("makingAmount", "making_amount")
+        if side_value == "SELL"
+        else ("takingAmount", "taking_amount")
+    )
+    value = _first_submit_value(result, *amount_keys)
+    if value not in (None, ""):
+        return str(value)
     status = _venue_submit_status(result)
     if status in {"MATCHED", "FILLED"} and fallback_size is not None:
         return str(fallback_size)
@@ -1115,15 +1161,22 @@ def _venue_submit_remaining_size(
     fallback_size: float | Decimal,
     *,
     matched_size: str | None = None,
+    side: str | None = None,
 ) -> str:
     for key in ("remaining_size", "remainingSize"):
         value = _first_submit_value(result, key)
         if value not in (None, ""):
             return str(value)
     status = _venue_submit_status(result)
-    matched = _decimal_or_none(matched_size if matched_size is not None else _venue_submit_matched_size(result))
+    matched = _decimal_or_none(
+        matched_size
+        if matched_size is not None
+        else _venue_submit_matched_size(result, side=side)
+    )
     fallback = _decimal_or_none(fallback_size)
     if status in {"MATCHED", "FILLED"} and matched is not None:
+        if matched > Decimal("0"):
+            return "0"
         if fallback is not None and fallback > matched:
             return _decimal_text(fallback - matched)
         return "0"
@@ -1138,10 +1191,13 @@ def _venue_submit_fill_price(
     result: dict,
     *,
     fallback_price: float | Decimal,
+    side: str | None = None,
 ) -> str:
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
+        if _venue_submit_side(result, side=side) == "SELL":
+            return _decimal_text(taking / making)
         return _decimal_text(making / taking)
     for key in ("avgPrice", "avg_price", "fillPrice", "fill_price", "price"):
         value = _first_submit_value(result, key)
@@ -3288,7 +3344,11 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        # Exit is IOC, never all-or-nothing: coerce a TAKER FOK selection to FAK
+        # so a thin/dying book realizes a partial exit instead of killing the
+        # whole sell (live 2026-06-24: Houston FOK rejects, market 0.356->0.076).
+        selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        order_type = _exit_order_type(selected_order_type)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
         collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)
@@ -3494,7 +3554,11 @@ def execute_exit_order(
                                 risk_allocator_decision,
                                 reduce_only=True,
                             ),
-                            _capability_component("order_type_selection", order_type=order_type),
+                            _capability_component(
+                                "order_type_selection",
+                                order_type=order_type,
+                                selected_order_type=selected_order_type,
+                            ),
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,
@@ -3977,8 +4041,12 @@ def execute_exit_order(
                 venue_order_id=order_id,
                 command_id=command_id,
                 state=_venue_submit_order_fact_state(result),
-                remaining_size=_venue_submit_remaining_size(result, shares),
-                matched_size=_venue_submit_matched_size(result),
+                remaining_size=_venue_submit_remaining_size(
+                    result,
+                    shares,
+                    side="SELL",
+                ),
+                matched_size=_venue_submit_matched_size(result, side="SELL"),
                 source="REST",
                 observed_at=ack_time,
                 # C4 telemetry-truth: REST ACK response carries no server matchTime;
@@ -5138,14 +5206,15 @@ def _live_order(
                 venue_ack_time=ack_time,
             )
         order_fact_state = _venue_submit_order_fact_state(result)
-        matched_size = _venue_submit_matched_size(result, fallback_size=shares)
+        matched_size = _venue_submit_matched_size(result, fallback_size=shares, side="BUY")
         remaining_size = _venue_submit_remaining_size(
             result,
             shares,
             matched_size=matched_size,
+            side="BUY",
         )
         fill_event_type: str | None = None
-        fill_price = _venue_submit_fill_price(result, fallback_price=intent.limit_price)
+        fill_price = _venue_submit_fill_price(result, fallback_price=intent.limit_price, side="BUY")
         fill_trade_id: str | None = None
         fill_tx_hash = next(iter(_venue_submit_transaction_hashes(result)), None)
 
@@ -5172,6 +5241,7 @@ def _live_order(
                         point_matched = _venue_submit_matched_size(
                             fill_evidence,
                             fallback_size=matched_size,
+                            side="BUY",
                         )
                         if _positive_decimal_or_none(point_matched):
                             matched_size = point_matched
@@ -5179,10 +5249,12 @@ def _live_order(
                                 fill_evidence,
                                 shares,
                                 matched_size=matched_size,
+                                side="BUY",
                             )
                         fill_price = _venue_submit_fill_price(
                             fill_evidence,
                             fallback_price=intent.limit_price,
+                            side="BUY",
                         )
                         fill_tx_hash = next(
                             iter(_venue_submit_transaction_hashes(fill_evidence)),

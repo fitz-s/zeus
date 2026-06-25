@@ -156,6 +156,13 @@ _DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
 # the Monte-Carlo resolution of the robust edge lower bound.
 SPINE_BAND_DRAWS: Optional[int] = None
 
+# The qkernel's per-candidate band tail must share the live family-error budget.
+# If this stays hard-coded at 5% while the live submit gate runs BH/FDR at a
+# different q, the spine can discard point-positive candidates before FDR sees
+# them. Keep the fallback conservative for config faults, but use edge.fdr_alpha
+# on the live path.
+_DEFAULT_SPINE_BAND_ALPHA: float = 0.05
+
 # SINGLE TRUTH (legacy bias-maze strip 2026-06-17): the spine center IS the raw precise
 # multi-model fused center from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
 # latest cycle per model). There is NO settlement-residual de-bias layer and NO bias flag.
@@ -195,6 +202,25 @@ def qkernel_spine_enabled() -> bool:
         return bool(settings["feature_flags"].get("qkernel_spine_enabled", False))
     except Exception:  # noqa: BLE001 — fail-closed to legacy on any config fault
         return False
+
+
+def _qkernel_spine_band_alpha() -> float:
+    """Tail probability used for qkernel edge/DeltaU bands.
+
+    The selected proof's false-edge p-value is later consumed by the existing
+    family BH/FDR gate. Using the same configured q here prevents a stricter
+    hidden pre-FDR filter from making the family FDR surface unreachable.
+    """
+
+    try:
+        from src.config import settings
+
+        value = float(settings["edge"]["fdr_alpha"])
+    except (KeyError, TypeError, ValueError):  # fail-safe to the historical conservative tail
+        return _DEFAULT_SPINE_BAND_ALPHA
+    if not (0.0 < value < 0.5):
+        return _DEFAULT_SPINE_BAND_ALPHA
+    return value
 
 
 # ===========================================================================
@@ -981,6 +1007,7 @@ def decide_family_via_spine(
         _engine_kwargs: dict[str, Any] = {}
         if SPINE_BAND_DRAWS is not None:
             _engine_kwargs["n_band_draws"] = int(SPINE_BAND_DRAWS)
+        _engine_kwargs["band_alpha"] = _qkernel_spine_band_alpha()
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
             day0_reader=_NoDay0Reader(),
@@ -1352,38 +1379,18 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
                 break
         except Exception:  # noqa: BLE001
             continue
-    cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
-    edge_lcb = float(selected.edge_lcb)
-    payoff_q_lcb = edge_lcb + cost_value
+    qkernel_execution_economics = _candidate_qkernel_execution_economics_payload(
+        decision,
+        selected_decision,
+        selected=selected,
+    )
+    if qkernel_execution_economics is None:
+        return None
+    edge_lcb = float(qkernel_execution_economics["edge_lcb"])
     false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
     if false_edge_rate is None:
         return None
-    qkernel_execution_economics: dict[str, Any] = {
-        "source": "qkernel_spine",
-        "decision_id": getattr(decision, "decision_id", None),
-        "receipt_hash": getattr(decision, "receipt_hash", None),
-        "candidate_id": selected.candidate_id,
-        "route_id": selected.route_id,
-        "payoff_q_lcb": payoff_q_lcb,
-        "edge_lcb": edge_lcb,
-        "point_ev": float(selected.point_ev),
-        "delta_u_at_min": float(selected.delta_u_at_min),
-        "optimal_stake_usd": str(selected.optimal_stake_usd),
-        "optimal_delta_u": float(selected.optimal_delta_u),
-        "q_dot_payoff": float(selected.q_dot_payoff),
-        "cost": cost_value,
-        "false_edge_rate": false_edge_rate,
-    }
-    if selected_decision is not None:
-        qkernel_execution_economics.update(
-            {
-                "side": selected_decision.route.side,
-                "bin_id": selected_decision.route.bin_id,
-                "q_lcb_guard_basis": selected_decision.q_lcb_guard_basis,
-                "q_lcb_guard_abstained": bool(selected_decision.q_lcb_guard_abstained),
-                "q_lcb_guard_cell_key": selected_decision.q_lcb_guard_cell_key,
-            }
-        )
+    qkernel_execution_economics["false_edge_rate"] = false_edge_rate
     overlay: dict[str, Any] = {
         # The selected qkernel candidate is licensed by the conservative vector
         # edge and robust utility, not by scalar point EV. Keep the score on the
@@ -1391,6 +1398,10 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
+        # qkernel has re-ranked this proof under the settlement/payoff family law.
+        # A legacy scalar admission veto on the pre-spine proof must not survive
+        # into the receipt/opportunity-book admission predicate.
+        "missing_reason": None,
         "p_value": false_edge_rate,
         "passed_prefilter": edge_lcb > 0.0,
     }
@@ -1398,6 +1409,89 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
         return None
+
+
+def _candidate_qkernel_execution_economics_payload(
+    decision: FamilyDecision,
+    candidate_decision: Any | None,
+    *,
+    selected: Any | None = None,
+) -> dict[str, Any] | None:
+    """Compact qkernel economics certificate for one enumerated candidate.
+
+    This is receipt/regret evidence for both selected and no-trade candidates. It
+    records the vector payoff economics the qkernel actually ranked on, instead of
+    forcing operators to infer qkernel decisions from legacy scalar trade_score.
+    """
+    if candidate_decision is None and selected is None:
+        return None
+    selected = selected if selected is not None else getattr(candidate_decision, "economics", None)
+    route = getattr(candidate_decision, "route", None) if candidate_decision is not None else None
+    if selected is None or route is None:
+        if selected is None:
+            return None
+    try:
+        cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
+        edge_lcb = float(selected.edge_lcb)
+        payload: dict[str, Any] = {
+            "source": "qkernel_spine",
+            "decision_id": getattr(decision, "decision_id", None),
+            "receipt_hash": getattr(decision, "receipt_hash", None),
+            "candidate_id": selected.candidate_id,
+            "route_id": selected.route_id,
+            "payoff_q_lcb": edge_lcb + cost_value,
+            "edge_lcb": edge_lcb,
+            "point_ev": float(selected.point_ev),
+            "delta_u_at_min": float(selected.delta_u_at_min),
+            "optimal_stake_usd": str(selected.optimal_stake_usd),
+            "optimal_delta_u": float(selected.optimal_delta_u),
+            "q_dot_payoff": float(selected.q_dot_payoff),
+            "cost": cost_value,
+        }
+        if route is not None and candidate_decision is not None:
+            payload.update(
+                {
+                    "side": route.side,
+                    "bin_id": route.bin_id,
+                    "q_lcb_guard_basis": candidate_decision.q_lcb_guard_basis,
+                    "q_lcb_guard_abstained": bool(candidate_decision.q_lcb_guard_abstained),
+                    "q_lcb_guard_cell_key": candidate_decision.q_lcb_guard_cell_key,
+                    "direction_law_ok": bool(
+                        getattr(candidate_decision, "direction_law_ok", False)
+                    ),
+                    "coherence_allows": bool(
+                        getattr(candidate_decision, "coherence_allows", False)
+                    ),
+                    "robust_trade_score": float(
+                        getattr(candidate_decision, "robust_trade_score", 0.0) or 0.0
+                    ),
+                }
+            )
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return payload
+
+
+def qkernel_candidate_economics_by_bin_side(
+    decision: FamilyDecision | None,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Return qkernel economics keyed by ``(bin_id, side)`` for receipt projection."""
+    if decision is None:
+        return {}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate_decision in getattr(decision, "candidate_decisions", ()) or ():
+        payload = _candidate_qkernel_execution_economics_payload(
+            decision,
+            candidate_decision,
+        )
+        if payload is None:
+            continue
+        bin_id = str(payload.get("bin_id") or "").strip()
+        side = str(payload.get("side") or "").strip()
+        if not bin_id or side not in {"YES", "NO"}:
+            continue
+        out[(bin_id, side)] = payload
+    return out
 
 
 def _qkernel_false_edge_rate(

@@ -57,6 +57,14 @@ from dataclasses import dataclass
 # spread, edge measured with an unlicensed tail q). Maker resting stays allowed.
 TAKER_MAX_RELATIVE_SPREAD = 0.25
 
+# Relative spread is the right kill-switch for genuinely wide books (for
+# example Milan 0.009/0.016: 7 ticks wide), but it misclassifies one-tick penny
+# books such as 0.001/0.002 as "66% wide" even though crossing pays exactly one
+# tick of spread. Keep the relative guard, but do not let it override a
+# one-tick absolute spread; the conservative all-in <= q_lcb/q_exec_lcb law below
+# still decides whether that cross is profitable enough to submit.
+TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS = 0.001
+
 # Conservative resting-fill prior for maker EV. PROVENANCE (2026-06-10 deep verify
 # /tmp/deep_verify_report.md Verification B): this 0.10 is an UNCONDITIONED point prior
 # (basis=GUESS), NOT a recalibrated bid+tick fill rate. The live resting facts are still too
@@ -171,6 +179,7 @@ TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END = 360.0
 
 # Policy verdicts (travel on receipts; the settlement loop groups by these).
 POLICY_REST_DEFAULT = "REST_DEFAULT"
+POLICY_TAKER_EDGE_CLEARS_BOUND = "TAKER_EDGE_CLEARS_BOUND"
 POLICY_HOLD_REST_IN_PROGRESS = "HOLD_REST_IN_PROGRESS"
 POLICY_TAKER_ESCALATED_AFTER_REST = "TAKER_ESCALATED_AFTER_REST"
 POLICY_TAKER_EVENT_END_NEAR = "TAKER_EVENT_END_NEAR"
@@ -212,6 +221,9 @@ def taker_spread_guard_reason(
     best_ask: float | None,
     *,
     max_relative_spread: float = TAKER_MAX_RELATIVE_SPREAD,
+    max_absolute_spread_for_cross: float | None = (
+        TAKER_MAX_ABSOLUTE_SPREAD_FOR_ONE_TICK_CROSS
+    ),
 ) -> str | None:
     """Reason the TAKER lane is forbidden, or None when crossing is allowed.
 
@@ -222,6 +234,12 @@ def taker_spread_guard_reason(
     if spread is None:
         return f"{TAKER_SPREAD_GUARD_REASON}:spread=unmeasurable:max={max_relative_spread:.2f}"
     if spread > max_relative_spread:
+        bid = float(best_bid)
+        ask = float(best_ask)
+        absolute_spread = ask - bid
+        max_absolute = _finite(max_absolute_spread_for_cross)
+        if max_absolute is not None and absolute_spread <= max_absolute + 1e-12:
+            return None
         return f"{TAKER_SPREAD_GUARD_REASON}:spread={spread:.4f}:max={max_relative_spread:.2f}"
     return None
 
@@ -340,6 +358,9 @@ class ModeConsistentEv:
     # K4.0 REST-THEN-CROSS provenance (None on the legacy one-shot path):
     policy: str | None = None  # POLICY_* verdict that produced chosen_mode
     escalation_deadline_minutes: float | None = None  # set on REST_DEFAULT decisions
+    # P0-1 (2026-06-23) execution-conditioned bound supplied to the taker cap
+    # (None = plain q_lcb, today's behavior). Travels for settlement-loop audit.
+    q_exec_lcb: float | None = None
 
 
 def select_mode_consistent_ev(
@@ -439,6 +460,7 @@ def select_mode_consistent_ev(
 def select_rest_then_cross_mode(
     *,
     q_lcb: float,
+    q_exec_lcb: float | None = None,
     taker_all_in_cost: float | None,
     p_fill_taker: float,
     best_bid: float | None,
@@ -521,9 +543,16 @@ def select_rest_then_cross_mode(
     # guard and the REST_DEFAULT doctrine (a favorable all-in alone does NOT license
     # an immediate cross — the Karachi antibody) remain in force above this.
     _q = float(q_lcb)
+    # P0-1 (2026-06-23) EXECUTION-(PRICE)-CONDITIONED TIGHTENING. q_exec_lcb is the caller's
+    # settlement-evidenced corrected bound (the selection-curse realized-NO-rate at this price —
+    # src/decision/selection_curse_bound.py, supplied by event_reactor_adapter._event_bound_q_exec_lcb)
+    # and can ONLY lower the admissibility bound, never raise it (min with _q). None => plain q_lcb
+    # (identity, today's exact behavior). Honors the same HARD LAW as FIX B: this only makes the
+    # taker lane STRICTER, never loosens it.
+    _exec_bound = _q if q_exec_lcb is None else min(_q, float(q_exec_lcb))
     _taker_cost = _finite(taker_all_in_cost)
     taker_clears_conservative_bound = (
-        _taker_cost is not None and _taker_cost <= _q + 1e-9
+        _taker_cost is not None and _taker_cost <= _exec_bound + 1e-9
     )
     taker_admissible = (
         mode_ev.ev_taker is not None
@@ -545,6 +574,7 @@ def select_rest_then_cross_mode(
             placement=PLACEMENT_MAKER,
             policy=policy,
             escalation_deadline_minutes=deadline,
+            q_exec_lcb=q_exec_lcb,
         )
 
     def _as_taker(policy: str) -> ModeConsistentEv:
@@ -555,6 +585,7 @@ def select_rest_then_cross_mode(
             placement=PLACEMENT_TAKER,
             policy=policy,
             escalation_deadline_minutes=None,
+            q_exec_lcb=q_exec_lcb,
         )
 
     # 1. ANTIBODY: an unexpired same-family rest forbids ANY new order.
@@ -609,6 +640,23 @@ def select_rest_then_cross_mode(
     if escalated_after_rest and not taker_admissible:
         return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
 
-    # 6b. THE DEFAULT: the genuine FIRST rest for a family (no prior cancelled-unfilled
-    #    rest) rests post_only GTC with the measured escalation deadline.
+    # 6a'. GTC-FIRST RESTORE (operator goal 2026-06-23 "3 GTC fills, not taker"): the
+    #    2026-06-23 "cross-when-admissible" override (POLICY_TAKER_EDGE_CLEARS_BOUND) is GATED
+    #    OFF for the fresh, far-from-event admissible case. The operator now explicitly prefers
+    #    capturing the spread as a GTC maker over paying spread+fee as a taker, accepting
+    #    fewer/delayed taker fills. Fresh admissible candidates therefore fall through to the
+    #    original K4.0 REST_DEFAULT (6b): rest an aggressive maker (bid+tick, top of book) and
+    #    escalate to a taker cross only at the deadline (rule 3, TAKER_ESCALATED_AFTER_REST) —
+    #    so a maker fill captures the spread when the market trades into our top-of-book rest,
+    #    and the cross is the fallback when it does not. The immediate-cross exception lanes are
+    #    PRESERVED above: event-end-near (rule 4) and fleeting large edge < event_end_floor..6h
+    #    (rule 5) still cross, because near settlement a rest cannot complete. The ~3.5% maker
+    #    fill rate that motivated the 06-23 override was churn-bound (78/88 cancelled before
+    #    fill by BOOK_MOVED/VALUE_REFRESH); GTC viability is being re-measured on the live chain
+    #    under this restore. (Reversible: restore `if taker_admissible: return _as_taker(
+    #    POLICY_TAKER_EDGE_CLEARS_BOUND)` here to re-enable immediate cross-when-admissible.)
+
+    # 6b. FALLBACK: the cross is inadmissible (cannot clear the conservative bound at the fresh
+    #    ask, or the spread is too wide) — rest post_only GTC at the maker limit with the measured
+    #    escalation deadline; it fills only if the market comes to us, else cleanly no-trades.
     return _as_maker(POLICY_REST_DEFAULT, deadline=float(escalation_deadline_minutes))

@@ -125,6 +125,30 @@ def test_redecision_event_compiles_to_no_submit_decision_certificate():
 
     assert result.status == "VERIFIED"
     assert result.no_submit_certificate is not None
+    assert result.no_submit_certificate.payload["decision_source"] == "forecast"
+
+
+def test_day0_carrier_using_forecast_graph_compiles_as_forecast_no_submit():
+    """Trigger carrier type must not relabel the verified forecast certificate graph.
+
+    DAY0_EXTREME_UPDATED can enter the same forecast no-submit compiler after
+    the live adapter builds forecast/calibration/belief parents for the family.
+    The verifier accepts the graph as forecast no-submit scope, so stamping the
+    trigger as ``day0_or_other`` rejects the receipt before the real no-trade
+    reason can persist.
+    """
+    event = _event(event_type="DAY0_EXTREME_UPDATED")
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    receipt = _receipt(event.event_id)
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=build_test_no_submit_proof_bundle(event, receipt, decision_time=decision_time),
+    )
+
+    assert result.status == "VERIFIED"
+    assert result.no_submit_certificate is not None
+    assert result.no_submit_certificate.payload["decision_source"] == "forecast"
 
 
 def test_no_submit_decision_certificate_generated_time_semantics():

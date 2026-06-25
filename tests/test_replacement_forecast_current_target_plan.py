@@ -48,7 +48,8 @@ def _create_db(path) -> None:
                 temperature_metric TEXT NOT NULL,
                 dependency_source_run_ids_json TEXT,
                 trade_authority_status TEXT NOT NULL,
-                training_allowed INTEGER NOT NULL
+                training_allowed INTEGER NOT NULL,
+                runtime_layer TEXT NOT NULL DEFAULT 'live'
             )
             """
         )
@@ -129,12 +130,12 @@ def _create_db(path) -> None:
                 temperature_metric, dependency_source_run_ids_json,
                 trade_authority_status, training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
                 'Paris', '2026-06-09', 'high',
-                '{"baseline_b0":"baseline-current-Paris"}',
-                'LIVE_AUTHORITY', 0
+                '{"baseline_b0":"baseline-current-Paris","openmeteo_ifs9_anchor":"openmeteo-current-Paris"}',
+                'live', 0
             )
             """
         )
@@ -145,12 +146,12 @@ def _create_db(path) -> None:
                 temperature_metric, dependency_source_run_ids_json,
                 trade_authority_status, training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
                 'Madrid', '2026-06-09', 'high',
-                '{"baseline_b0":"baseline-stale-Madrid"}',
-                'LIVE_AUTHORITY', 0
+                '{"baseline_b0":"baseline-stale-Madrid","openmeteo_ifs9_anchor":"openmeteo-current-Madrid"}',
+                'live', 0
             )
             """
         )
@@ -162,8 +163,15 @@ def _create_db(path) -> None:
             """,
             (
                 "ready-paris",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-                json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "baseline-current-Paris"}]}),
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {"role": "baseline_b0", "source_run_id": "baseline-current-Paris"},
+                            {"role": "openmeteo_ifs9_anchor", "source_run_id": "openmeteo-current-Paris"},
+                        ]
+                    }
+                ),
                 json.dumps({"city": "Paris", "target_date": "2026-06-09", "temperature_metric": "high"}),
             ),
         )
@@ -175,8 +183,15 @@ def _create_db(path) -> None:
             """,
             (
                 "ready-madrid-stale",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
-                json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "baseline-stale-Madrid"}]}),
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
+                json.dumps(
+                    {
+                        "dependencies": [
+                            {"role": "baseline_b0", "source_run_id": "baseline-stale-Madrid"},
+                            {"role": "openmeteo_ifs9_anchor", "source_run_id": "openmeteo-current-Madrid"},
+                        ]
+                    }
+                ),
                 json.dumps({"city": "Madrid", "target_date": "2026-06-09", "temperature_metric": "high"}),
             ),
         )
@@ -184,18 +199,7 @@ def _create_db(path) -> None:
         # provenance antibody). Write a real file for the "present" London artifacts.
         present_artifact = Path(path).parent / "present_artifact.grib2"
         present_artifact.write_bytes(b"GRIB")
-        for source_id, product_id, data_version in (
-            (
-                "ecmwf_aifs_ens",
-                "ecmwf_aifs_ens_sampled_2t_6h_v1",
-                "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
-            ),
-            (
-                "openmeteo_ecmwf_ifs_9km",
-                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
-                "openmeteo_ecmwf_ifs9_anchor_localday_high",
-            ),
-        ):
+        for city in ("London", "Paris"):
             conn.execute(
                 """
                 INSERT INTO raw_forecast_artifacts (
@@ -203,11 +207,19 @@ def _create_db(path) -> None:
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    source_id,
-                    product_id,
-                    data_version,
+                    "openmeteo_ecmwf_ifs_9km",
+                    "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                    "openmeteo_ecmwf_ifs9_anchor_localday_high",
                     str(present_artifact),
-                    json.dumps({"cities": ["London"], "target_dates": ["2026-06-09"]}),
+                    json.dumps(
+                        {
+                            "city": city,
+                            "cities": [city],
+                            "target_date": "2026-06-09",
+                            "target_dates": ["2026-06-09"],
+                            "source_run_id": f"openmeteo-current-{city}",
+                        }
+                    ),
                 ),
             )
         conn.commit()
@@ -228,17 +240,195 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert plan.status == "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE"
     assert plan.target_count == 3
     assert plan.covered_count == 1
-    # AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): missing_aifs_manifest_count is
-    # permanently 0 (AIFS is no longer a manifest the gate waits on) and aifs_download_targets is
-    # empty (AIFS is never downloaded). Seeding now gates on the OPENMETEO manifest alone: London
-    # (both present) stays seedable; Madrid (no openmeteo manifest in this fixture) is still NOT
-    # seedable and is the lone openmeteo_download target.
+    # Seeding gates on the OpenMeteo anchor manifest and coverage requires the same
+    # anchor source_run_id in both posterior and readiness. London (manifest present,
+    # no posterior) is seedable; Madrid (no OpenMeteo manifest) is the download target.
     assert plan.can_seed_count == 1
-    assert plan.missing_aifs_manifest_count == 0
     assert plan.missing_openmeteo_manifest_count == 1
     assert [row["city"] for row in download_plan["seedable_targets"]] == ["London"]
-    assert [row["city"] for row in download_plan["aifs_download_targets"]] == []
     assert [row["city"] for row in download_plan["openmeteo_download_targets"]] == ["Madrid"]
+
+
+def test_current_target_plan_can_require_openmeteo_manifest_cycle(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+        required_openmeteo_source_cycle_time="2026-06-07T06:00:00+00:00",
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+    paris = next(row for row in plan.rows if row.city == "Paris")
+
+    assert london.openmeteo_manifest_count == 0
+    assert london.missing_openmeteo_manifest is True
+    assert london.can_seed is False
+    assert paris.openmeteo_manifest_count == 0
+    assert paris.covered is False
+    assert plan.missing_openmeteo_manifest_count >= 2
+
+
+def test_current_target_plan_rejects_openmeteo_manifest_without_target_day_samples(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    payload = tmp_path / "london_partial_payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "hourly": {
+                    "time": ["2026-06-08T00:00", "2026-06-08T01:00"],
+                    "temperature_2m": [12.0, 13.0],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    precision = tmp_path / "precision.json"
+    precision.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                        "openmeteo_endpoint": "single_runs_api",
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "forecast_hours": 120,
+                        "source_run_id": "openmeteo-current-London",
+                        "openmeteo_payload_json": str(payload),
+                        "precision_metadata_json": str(precision),
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.openmeteo_manifest_count == 0
+    assert london.missing_openmeteo_manifest is True
+    assert london.can_seed is False
+
+
+def test_current_target_plan_counts_openmeteo_manifest_with_target_day_samples(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    payload = tmp_path / "london_covering_payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "hourly": {
+                    "time": ["2026-06-09T00:00", "2026-06-09T12:00"],
+                    "temperature_2m": [14.0, 18.0],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    precision = tmp_path / "precision.json"
+    precision.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            UPDATE raw_forecast_artifacts
+            SET product_metadata_json = ?
+            WHERE product_metadata_json LIKE '%London%'
+            """,
+            (
+                json.dumps(
+                    {
+                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                        "openmeteo_endpoint": "single_runs_api",
+                        "city": "London",
+                        "cities": ["London"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "forecast_hours": 120,
+                        "source_run_id": "openmeteo-current-London",
+                        "openmeteo_payload_json": str(payload),
+                        "precision_metadata_json": str(precision),
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    london = next(row for row in plan.rows if row.city == "London")
+
+    assert london.openmeteo_manifest_count == 1
+    assert london.can_seed is True
+
+
+def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_baseline(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    newer_artifact = Path(db).parent / "newer_paris_artifact.json"
+    newer_artifact.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            INSERT INTO raw_forecast_artifacts (
+                source_id, product_id, data_version, artifact_path, product_metadata_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+                "openmeteo_ecmwf_ifs9_anchor_localday_high",
+                str(newer_artifact),
+                json.dumps(
+                    {
+                        "city": "Paris",
+                        "cities": ["Paris"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "source_cycle_time": "2026-06-07T06:00:00+00:00",
+                        "requested_source_available_at": "2026-06-07T12:00:00+00:00",
+                        "source_run_id": "openmeteo-newer-Paris",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    paris = next(row for row in plan.rows if row.city == "Paris")
+
+    assert paris.baseline_source_run_id == "baseline-current-Paris"
+    assert paris.openmeteo_source_run_id == "openmeteo-newer-Paris"
+    assert paris.posterior_count == 0
+    assert paris.readiness_count == 0
+    assert paris.covered is False
+    assert paris.can_seed is True
 
 
 def test_current_target_plan_does_not_treat_blocked_replacement_readiness_as_covered(tmp_path) -> None:
@@ -248,32 +438,28 @@ def test_current_target_plan_does_not_treat_blocked_replacement_readiness_as_cov
     try:
         conn.execute("UPDATE readiness_state SET status = 'BLOCKED' WHERE readiness_id = 'ready-paris'")
         present_artifact = Path(db).parent / "present_artifact.grib2"  # written by _create_db
-        for source_id, product_id, data_version in (
-            (
-                "ecmwf_aifs_ens",
-                "ecmwf_aifs_ens_sampled_2t_6h_v1",
-                "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
-            ),
+        conn.execute(
+            """
+            INSERT INTO raw_forecast_artifacts (
+                source_id, product_id, data_version, artifact_path, product_metadata_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
             (
                 "openmeteo_ecmwf_ifs_9km",
                 "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
                 "openmeteo_ecmwf_ifs9_anchor_localday_high",
-            ),
-        ):
-            conn.execute(
-                """
-                INSERT INTO raw_forecast_artifacts (
-                    source_id, product_id, data_version, artifact_path, product_metadata_json
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    source_id,
-                    product_id,
-                    data_version,
-                    str(present_artifact),
-                    json.dumps({"cities": ["Paris"], "target_dates": ["2026-06-09"]}),
+                str(present_artifact),
+                json.dumps(
+                    {
+                        "city": "Paris",
+                        "cities": ["Paris"],
+                        "target_date": "2026-06-09",
+                        "target_dates": ["2026-06-09"],
+                        "source_run_id": "openmeteo-current-Paris",
+                    }
                 ),
-            )
+            ),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -299,10 +485,9 @@ def test_current_target_plan_ignores_artifact_rows_whose_file_is_deleted(tmp_pat
     Models the real incident exactly: London is seedable with files on disk; delete the file
     (leave the DB row) and London must flip to missing_openmeteo_manifest so the gate re-downloads.
 
-    AIFS DROPPED (operator directive 2026-06-17 "drop aifs"): the re-download trigger is now carried
-    by the OPENMETEO manifest alone (missing_aifs_manifest is permanently False — AIFS is no longer a
-    leg the gate waits on). The DB<->disk provenance invariant (a deleted file flips the target back
-    to needs-download, so the gate re-fetches) is preserved via the openmeteo manifest.
+    The DB<->disk provenance invariant (a deleted file flips the target back
+    to needs-download, so the gate re-fetches) is preserved via the OpenMeteo
+    manifest.
     """
     db = tmp_path / "forecasts.db"
     _create_db(db)
@@ -325,9 +510,6 @@ def test_current_target_plan_ignores_artifact_rows_whose_file_is_deleted(tmp_pat
     assert london_after.missing_openmeteo_manifest is True, "gate must see missing -> re-download"
     assert london_after.can_seed is False
     assert after.missing_openmeteo_manifest_count >= 1
-    # AIFS leg is permanently non-blocking now.
-    assert london_after.missing_aifs_manifest is False
-    assert after.missing_aifs_manifest_count == 0
 
 
 def test_current_target_plan_does_not_seed_after_local_target_day_starts(tmp_path) -> None:
@@ -455,10 +637,10 @@ def test_current_target_plan_blocks_when_source_run_dependency_schema_is_missing
                 source_id, product_id, data_version, city, target_date,
                 temperature_metric, trade_authority_status, training_allowed
             ) VALUES (
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
-                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
-                'Madrid', '2026-06-09', 'high', 'LIVE_AUTHORITY', 0
+                'openmeteo_ecmwf_ifs9_bayes_fusion',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+                'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+                'Madrid', '2026-06-09', 'high', 'live', 0
             )
             """
         )
@@ -470,7 +652,7 @@ def test_current_target_plan_blocks_when_source_run_dependency_schema_is_missing
             """,
             (
                 "ready-old",
-                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                "openmeteo_ecmwf_ifs9_bayes_fusion",
                 json.dumps({"city": "Madrid", "target_date": "2026-06-09", "temperature_metric": "high"}),
             ),
         )

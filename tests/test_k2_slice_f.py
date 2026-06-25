@@ -255,3 +255,46 @@ class TestQueryTransitionalPositionHints:
         finally:
             db_logger.removeHandler(collector)
             db_logger.setLevel(old_level)
+
+    def test_filters_recent_noise_before_rank_limit(self):
+        from src.state.db import _query_transitional_position_hints
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE position_events (
+                position_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT,
+                occurred_at TEXT NOT NULL,
+                sequence_no INTEGER NOT NULL
+            )
+            """
+        )
+        for idx in range(100):
+            conn.execute(
+                """
+                INSERT INTO position_events
+                    (position_id, event_type, payload_json, occurred_at, sequence_no)
+                VALUES (?, 'MONITOR_REFRESHED', '{}', ?, ?)
+                """,
+                ("trade1", f"2026-06-25T12:{idx % 60:02d}:00+00:00", 1000 + idx),
+            )
+        conn.execute(
+            """
+            INSERT INTO position_events
+                (position_id, event_type, payload_json, occurred_at, sequence_no)
+            VALUES
+                ('trade1', 'POSITION_OPEN_INTENT', '{}', '2026-06-25T10:00:00+00:00', 1),
+                ('trade1', 'ENTRY_ORDER_FILLED', '{"entry_fill_verified": true}', '2026-06-25T10:05:00+00:00', 2),
+                ('trade1', 'EXIT_ORDER_REJECTED', '{"status": "retry_pending"}', '2026-06-25T10:10:00+00:00', 3)
+            """
+        )
+
+        result = _query_transitional_position_hints(conn, ["trade1"])
+
+        assert result["trade1"]["order_posted_at"] == "2026-06-25T10:00:00+00:00"
+        assert result["trade1"]["entered_at"] == "2026-06-25T10:05:00+00:00"
+        assert result["trade1"]["entry_fill_verified"] is True
+        assert result["trade1"]["exit_state"] == "retry_pending"

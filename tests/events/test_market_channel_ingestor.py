@@ -53,6 +53,26 @@ def _metadata(token_id: str = "token-1", *, outcome_label: str = "YES") -> dict[
     }
 
 
+def test_execution_feasibility_schema_indexes_token_created_at():
+    conn = sqlite3.connect(":memory:")
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    ensure_table(conn)
+
+    indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list('execution_feasibility_evidence')").fetchall()
+    }
+    assert "idx_execution_feasibility_evidence_token_created" in indexes
+    columns = [
+        row[2]
+        for row in conn.execute(
+            "PRAGMA index_info('idx_execution_feasibility_evidence_token_created')"
+        ).fetchall()
+    ]
+    assert columns == ["token_id", "created_at"]
+
+
 def test_book_buy_uses_best_ask():
     book = quote_book_from_depth_json(
         yes_depth_json='{"asks":[{"price":"0.52","size":"10"}],"bids":[{"price":"0.48","size":"10"}]}',
@@ -379,6 +399,46 @@ def test_rest_seed_deadline_stops_before_fetching_more_tokens():
         ).fetchone()[0]
         == 0
     )
+
+
+def test_rest_seed_preserves_ordered_priority_tokens():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "newer-token": _metadata("newer-token")["newer-token"],
+        "stale-token": _metadata("stale-token")["stale-token"],
+        "missing-token": _metadata("missing-token")["missing-token"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+    )
+    fetch_calls: list[str] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["missing-token", "stale-token", "newer-token"],
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    )
+
+    assert written == 3
+    assert fetch_calls == ["missing-token", "stale-token", "newer-token"]
 
 
 def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressively():

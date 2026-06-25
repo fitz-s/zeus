@@ -455,6 +455,12 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
             ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
     """)
     conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_live_family_cycle
+            ON forecast_posteriors(product_id, city, target_date, temperature_metric,
+                                   source_cycle_time, computed_at, posterior_id)
+            WHERE runtime_layer = 'live'
+    """)
+    conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
             ON forecast_posteriors(posterior_identity_hash)
             WHERE posterior_identity_hash IS NOT NULL
@@ -581,6 +587,13 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     _existing_rmf_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(raw_model_forecasts)").fetchall()
     }
+    if "trade_authority_status" in _existing_rmf_cols:
+        # raw_model_forecasts is a raw current/history input table, not a posterior authority table.
+        # Old live DBs carried a DIAGNOSTIC_ONLY-only column that made live production rows look
+        # experimental and invited downstream authority confusion. The executable authority lives
+        # on forecast_posteriors.runtime_layer/q_mode; raw rows keep training_allowed=0.
+        conn.execute("ALTER TABLE raw_model_forecasts DROP COLUMN trade_authority_status")
+        _existing_rmf_cols.remove("trade_authority_status")
     _rmf_product_identity_alters = (
         ("source_id", "TEXT"),
         ("source_family", "TEXT"),
@@ -616,6 +629,17 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_product_identity
             ON raw_model_forecasts(city, metric, lead_days, endpoint, model_domain_hash, target_date)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_current_family_cycle_members
+            ON raw_model_forecasts(city, target_date, metric, source_cycle_time,
+                                   source_available_at, model)
+            WHERE endpoint = 'single_runs' AND forecast_value_c IS NOT NULL
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_endpoint_family_cycle_members
+            ON raw_model_forecasts(endpoint, city, target_date, metric, source_cycle_time,
+                                   source_available_at, model)
+    """)
     # BLOCKER 4 (operator-sharpened) — forward-only widened uniqueness for PRE-EXISTING DBs.
     # SQLite cannot ALTER the table-level UNIQUE constraint of an already-created table without a
     # full table rebuild; a CREATE UNIQUE INDEX IF NOT EXISTS adds the SAME widened uniqueness
@@ -636,7 +660,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # RawModelForecastRequestConflict AND writes one row here, recording BOTH the existing and the
     # incoming request identity. This converts the pre-fix SILENT INSERT-OR-IGNORE drop into a
     # loud, forensically-attributable event (Fitz Constraint #3 immune system: an antibody, not an
-    # alert). SHADOW research surface only — never an order/training truth table.
+    # alert). This is a non-execution audit ledger, never an order/training truth table.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_model_forecast_request_conflicts (
             conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -722,8 +746,16 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
     # CYCLE_LEG_ARTIFACT_MISSING:<source>:<cycle>) instead of silently incrementing manifest_missing
     # — making the ALWAYS-DECIDABLE-violating gap visible rather than an invisible skip. Idempotent
     # ADD COLUMN for existing DBs.
+    # day0_observed_extreme_observation_time (same-day exit-blindness fix 2026-06-23): the OBSERVATION
+    # VERSION the marker was last enqueued at. The model cycle (target_cycle_time) does NOT advance
+    # intraday on the settlement day, so model-cycle idempotency alone freezes the day0-conditioned
+    # posterior (Toronto NO@24 -98.94% incident). Recording the observation version lets the held/day0
+    # reseed re-materialize on each fresh observed running-max version (climb OR plateau) without
+    # touching the non-day0 model-cycle idempotency. See
+    # docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md.
     for alter_sql in [
         "ALTER TABLE cycle_advance_enqueues ADD COLUMN reason TEXT",
+        "ALTER TABLE cycle_advance_enqueues ADD COLUMN day0_observed_extreme_observation_time TEXT",
     ]:
         try:
             conn.execute(alter_sql)

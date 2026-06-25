@@ -6,6 +6,8 @@
 Design §4.2: trading daemon must validate schema readiness at boot:
 - World DB schema currency failure after 5-min retry → SystemExit (FATAL)
 - Forecast DB schema currency failure after 5-min retry → SystemExit (FATAL)
+- Live boot proves canonical DB schema first; missing live-required hot indexes
+  trigger the idempotent repair helper, then the read-only proof is repeated.
 - Stale legacy JSON sentinels no longer gate live startup after forecast-live split
 """
 
@@ -37,6 +39,7 @@ class TestWorldSchemaReadyCheck:
         monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
         monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 2)
         monkeypatch.setattr(main_module, "_startup_world_db_schema_prepare", lambda: "3")
+        monkeypatch.setattr(main_module, "_startup_world_db_hot_index_prepare", lambda: "3")
         monkeypatch.setattr(
             main_module,
             "_startup_world_db_schema_ready_check",
@@ -84,8 +87,22 @@ class TestWorldSchemaReadyCheck:
         fn = self._get_fn()
         fn()
 
-    def test_world_schema_ready_check_uses_canonical_table_presence(self, tmp_path, monkeypatch):
-        """World schema proof comes from canonical table presence in zeus-world.db."""
+    def test_world_schema_ready_check_uses_canonical_table_and_hot_index_presence(self, tmp_path, monkeypatch):
+        """World schema proof comes from canonical table and hot-index presence."""
+        import sqlite3
+
+        import src.state.db as db_module
+        from src.main import _startup_world_db_schema_ready_check
+
+        world_db = tmp_path / "zeus-world.db"
+        with sqlite3.connect(world_db) as conn:
+            db_module.init_schema(conn)
+        monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+
+        assert _startup_world_db_schema_ready_check() == "ready"
+
+    def test_world_schema_ready_check_rejects_missing_hot_indexes(self, tmp_path, monkeypatch):
+        """A table-only world DB is not live-ready when hot decision indexes are absent."""
         import sqlite3
 
         import src.state.db as db_module
@@ -98,7 +115,8 @@ class TestWorldSchemaReadyCheck:
             conn.execute("CREATE TABLE trade_decisions (id INTEGER PRIMARY KEY)")
         monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
 
-        assert _startup_world_db_schema_ready_check() == "ready"
+        with pytest.raises(RuntimeError, match="missing live-required indexes"):
+            _startup_world_db_schema_ready_check()
 
     def test_stale_forecasts_sentinel_ignored_when_forecasts_db_schema_current(self, tmp_path, monkeypatch):
         """Legacy forecasts_schema_ready.json no longer gates live startup."""
@@ -164,8 +182,8 @@ class TestWorldSchemaReadyCheck:
         assert "zeus-forecasts.db" in msg
         assert "forecast-live" in msg
 
-    def test_forecasts_schema_ready_check_uses_canonical_table_presence(self, tmp_path, monkeypatch):
-        """Forecast schema proof comes from canonical table presence in zeus-forecasts.db."""
+    def test_forecasts_schema_ready_check_uses_live_required_schema_presence(self, tmp_path, monkeypatch):
+        """Forecast schema proof includes canonical tables and live-required hot-path indexes."""
         import sqlite3
 
         import src.state.db as db_module
@@ -176,6 +194,16 @@ class TestWorldSchemaReadyCheck:
             conn.execute("CREATE TABLE ensemble_snapshots (id INTEGER PRIMARY KEY)")
             conn.execute("CREATE TABLE settlement_outcomes (id INTEGER PRIMARY KEY)")
             conn.execute("CREATE TABLE source_run (id INTEGER PRIMARY KEY)")
+            conn.execute("CREATE TABLE forecast_posteriors (city TEXT)")
+            conn.execute("CREATE TABLE raw_model_forecasts (city TEXT)")
+            conn.execute(
+                "CREATE INDEX idx_forecast_posteriors_live_family_cycle "
+                "ON forecast_posteriors(city)"
+            )
+            conn.execute(
+                "CREATE INDEX idx_raw_model_forecasts_endpoint_family_cycle_members "
+                "ON raw_model_forecasts(city)"
+            )
         monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db)
 
         assert _startup_forecasts_schema_ready_check() == "ready"
@@ -198,8 +226,8 @@ class TestWorldSchemaReadyCheck:
             "conn = get_world_connection()"
         )
 
-    def test_world_schema_prepare_runs_before_structural_proof(self, monkeypatch):
-        """Live boot must run init_schema prepare step before read-only structural proof."""
+    def test_live_boot_skips_prepare_when_read_only_schema_proof_passes(self, monkeypatch):
+        """Live boot does not run schema DDL repair when read-only proof is already ready."""
         import src.control.freshness_gate as fg_module
         import src.main as main_module
 
@@ -213,6 +241,11 @@ class TestWorldSchemaReadyCheck:
         )
         monkeypatch.setattr(
             main_module,
+            "_startup_world_db_hot_index_prepare",
+            lambda: calls.append("hot_index_prepare") or "prepared",
+        )
+        monkeypatch.setattr(
+            main_module,
             "_startup_world_db_schema_ready_check",
             lambda: calls.append("read_only_proof") or "18",
         )
@@ -220,7 +253,34 @@ class TestWorldSchemaReadyCheck:
 
         main_module._startup_db_schema_ready_check()
 
-        assert calls == ["prepare", "read_only_proof"]
+        assert calls == ["read_only_proof"]
+
+    def test_live_boot_repairs_world_schema_then_rechecks(self, monkeypatch):
+        """Missing hot indexes are repaired automatically before live startup proceeds."""
+        import src.control.freshness_gate as fg_module
+        import src.main as main_module
+
+        calls: list[str] = []
+        monkeypatch.setattr(fg_module, "BOOT_RETRY_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(fg_module, "BOOT_RETRY_MAX_ATTEMPTS", 1)
+
+        def ready_check():
+            calls.append("read_only_proof")
+            if calls.count("read_only_proof") == 1:
+                raise RuntimeError("world DB missing live-required indexes")
+            return "ready"
+
+        monkeypatch.setattr(
+            main_module,
+            "_startup_world_db_hot_index_prepare",
+            lambda: calls.append("hot_index_prepare") or "prepared",
+        )
+        monkeypatch.setattr(main_module, "_startup_world_db_schema_ready_check", ready_check)
+        monkeypatch.setattr(main_module, "_startup_forecasts_schema_ready_check", lambda: "ready")
+
+        main_module._startup_db_schema_ready_check()
+
+        assert calls == ["read_only_proof", "hot_index_prepare", "read_only_proof"]
 
     def test_world_schema_prepare_runs_init_schema_unconditionally(self, tmp_path, monkeypatch):
         """init_schema runs unconditionally — no version gating; returns 'prepared'."""
@@ -327,12 +387,8 @@ class TestWorldSchemaReadyCheck:
             conn.close()
 
 
-def test_world_db_schema_prepare_calls_init_schema_unconditionally(monkeypatch, tmp_path):
-    """Antibody (2026-06-13): init_schema runs UNCONDITIONALLY at every boot — no version
-    gating. The old early-return on user_version==43 made every ensure_table migration
-    added without a version bump UNREACHABLE on live DBs (the nullable-disposition rebuild
-    never executed -> fill-bridge retry storm). B2 design: no version counter; pure idempotent
-    init_schema on every prepare call. Return value is always 'prepared'."""
+def test_world_db_schema_prepare_remains_explicit_operator_repair(monkeypatch, tmp_path):
+    """The repair helper may run init_schema, but live boot must not call it."""
     import sqlite3
 
     import src.main as main_module
@@ -352,9 +408,8 @@ def test_world_db_schema_prepare_calls_init_schema_unconditionally(monkeypatch, 
 
     result = main_module._startup_world_db_schema_prepare()
     assert result == "prepared", (
-        "_startup_world_db_schema_prepare must return 'prepared' (no version counter)"
+        "_startup_world_db_schema_prepare must return 'prepared' for explicit repair"
     )
     assert calls == ["init"], (
-        "init_schema must run unconditionally — no version gating; "
-        "idempotent ensure_table migrations must always execute"
+        "explicit schema repair still runs init_schema; live boot guards separately"
     )

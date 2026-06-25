@@ -300,8 +300,14 @@ def test_unresolvable_tz_candidate_not_archived_failclosed():
     )
 
 
-def test_expired_sweep_candidate_query_uses_fsr_target_date_index():
-    """The expired sweep must not scan all opportunity_events for target_date JSON."""
+def test_expired_sweep_candidate_query_uses_processing_status_index():
+    """The expired sweep must be driven by the active processing set.
+
+    Live has millions of terminal event/processing rows but only a small
+    pending/processing set. Driving this maintenance sweep from the event
+    target-date index can pin the trading reactor on historical provenance;
+    first bound by consumer/status, then inspect target dates in Python.
+    """
     conn = _world_conn(factory=CaptureConnection)
     store = EventStore(conn)
     for i, td in enumerate(
@@ -312,13 +318,20 @@ def test_expired_sweep_candidate_query_uses_fsr_target_date_index():
         )
     conn.execute("ANALYZE")
 
-    index_names = {
+    event_index_names = {
         row[0]
         for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='opportunity_events'"
         ).fetchall()
     }
-    assert "idx_opportunity_events_fsr_target_date" in index_names
+    processing_index_names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='opportunity_event_processing'"
+        ).fetchall()
+    }
+    assert "idx_opportunity_events_fsr_target_date" in event_index_names
+    assert "idx_opportunity_event_processing_status" in processing_index_names
 
     conn.executed_sql.clear()
     store.archive_expired_candidates(decision_time=_DECISION_TIME)
@@ -326,15 +339,15 @@ def test_expired_sweep_candidate_query_uses_fsr_target_date_index():
         (sql, params)
         for sql, params in conn.executed_sql
         if "json_extract(e.payload_json, '$.target_date') AS target_date" in sql
-        and "INDEXED BY idx_opportunity_events_fsr_target_date" in sql
+        and "INDEXED BY idx_opportunity_event_processing_status" in sql
     )
 
     plan = _plan_text(conn, candidate_sql, candidate_params)
-    assert "IDX_OPPORTUNITY_EVENTS_FSR_TARGET_DATE" in plan, (
-        f"expired sweep candidate query must use target_date expression index, got: {plan!r}"
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan, (
+        f"expired sweep candidate query must use active-status index, got: {plan!r}"
     )
-    assert "SCAN E" not in plan and "SCAN OPPORTUNITY_EVENTS" not in plan, (
-        f"expired sweep candidate query must not full-scan opportunity_events, got: {plan!r}"
+    assert "SCAN P" not in plan and "SCAN OPPORTUNITY_EVENT_PROCESSING" not in plan, (
+        f"expired sweep candidate query must not full-scan processing rows, got: {plan!r}"
     )
 
 

@@ -96,6 +96,23 @@ _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
     }
 )
 _EXIT_STATE_HINT_VALUES = frozenset(state.value for state in ExitState if state.value)
+_TRANSITIONAL_HINT_EVENT_TYPES = frozenset(
+    {
+        "POSITION_OPEN_INTENT",
+        "ENTRY_ORDER_POSTED",
+        "ENTRY_ORDER_FILLED",
+        "DAY0_WINDOW_ENTERED",
+        "ADMIN_VOIDED",
+        "EXIT_RETRY_RELEASED",
+        *_EXIT_LIFECYCLE_EVENT_TYPES,
+    }
+)
+_TRANSITIONAL_HINT_PAYLOAD_KEYS = (
+    "entry_fill_verified",
+    "admin_exit_reason",
+    "day0_entered_at",
+)
+_TRANSITIONAL_HINT_ROWS_PER_POSITION = 40
 
 # T1E: configurable busy-timeout (ms → s). Default 30000ms = 30s per T0_SQLITE_POLICY.md.
 # ZEUS_DB_BUSY_TIMEOUT_MS env var is in milliseconds; sqlite3.connect(timeout=) takes seconds.
@@ -245,6 +262,32 @@ def _connect(
     return conn
 
 
+def _connect_read_only(db_path: Path) -> sqlite3.Connection:
+    """Low-level read-only SQLite connection with bounded lock wait.
+
+    Read-only helpers must not create the DB, run write-oriented pragmas, inherit
+    the live writer timeout, or permit accidental mutation through a misleading
+    connection name.
+    """
+
+    timeout_ms = int(os.environ.get("ZEUS_DB_READ_BUSY_TIMEOUT_MS", "1000"))
+    conn = sqlite3.connect(
+        f"file:{db_path.resolve()}?mode=ro",
+        uri=True,
+        timeout=max(0.001, timeout_ms / 1000.0),
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute("PRAGMA foreign_keys=ON")
+    cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
+    conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+    mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
+    conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+    _install_connection_functions(conn)
+    conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+    return conn
+
+
 def get_trade_connection(
     *, write_class: WriteClass | str | None = None,
 ) -> sqlite3.Connection:
@@ -254,7 +297,7 @@ def get_trade_connection(
 
 def get_trade_connection_read_only() -> sqlite3.Connection:
     """Read-only trade DB connection (write_class=None)."""
-    return get_trade_connection(write_class=None)
+    return _connect_read_only(_zeus_trade_db_path())
 
 
 def get_world_connection(
@@ -286,7 +329,7 @@ def get_world_connection_read_only() -> sqlite3.Connection:
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return get_world_connection(write_class=None)
+    return _connect_read_only(ZEUS_WORLD_DB_PATH)
 
 
 def get_forecasts_connection_read_only() -> sqlite3.Connection:
@@ -294,7 +337,7 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return get_forecasts_connection(write_class=None)
+    return _connect_read_only(ZEUS_FORECASTS_DB_PATH)
 
 
 # --------------------------------------------------------------------------
@@ -3160,6 +3203,18 @@ def init_schema(
     from src.state.schema.settlement_attribution_schema import ensure_table as _ensure_settlement_attribution_table
     _ensure_settlement_attribution_table(conn)
 
+    # Exit-timing grade ledger (2026-06-22, lifecycle consult): the orthogonal
+    # exit-decision attribution axis (exit_alpha vs counterfactual hold). Sole
+    # writer = src/analysis/exit_timing_attribution.py.
+    from src.state.schema.exit_timing_attribution_schema import ensure_table as _ensure_exit_timing_attribution_table
+    _ensure_exit_timing_attribution_table(conn)
+
+    # Family-rebalance lifecycle lease (2026-06-22, lifecycle consult): the
+    # concurrency guard (one active rebalance per family) for D1 fill-up / D2
+    # shift-bin. Sole writer = src/strategy/family_rebalance.py (lease manager).
+    from src.state.schema.family_rebalance_intents_schema import ensure_table as _ensure_family_rebalance_intents_table
+    _ensure_family_rebalance_intents_table(conn)
+
     # EDLI redemption (2026-05-25): proof-carrying decision certificate ledger.
     from src.state.schema.decision_certificates_schema import ensure_tables as _ensure_decision_certificate_tables
     _ensure_decision_certificate_tables(conn)
@@ -5069,6 +5124,8 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
             f"init_schema_trade_only: DDL did not create expected trade-class tables: {sorted(_missing)}"
         )
 
+    conn.commit()
+
     # NOTE: The 66 non-trade-class tables that pre-PR-S4b init_schema(trade_conn)
     # created on zeus_trades.db (including shadow_signals with 27k rows,
     # probability_trace_fact with 33k rows, availability_fact with 24k rows) are
@@ -5078,10 +5135,50 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # per dispatch: "DO NOT migrate data. DO NOT touch state/*.db."
 
 
+_FORECASTS_LIVE_REQUIRED_INDEXES: frozenset[str] = frozenset(
+    {
+        "idx_forecast_posteriors_live_family_cycle",
+        "idx_raw_model_forecasts_endpoint_family_cycle_members",
+    }
+)
+
+
 def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
-    """B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled; this check is now a no-op.
-    Schema drift is detected via content-hash fingerprint (scripts/check_schema_fingerprint.py).
-    Retained for call-site compatibility."""
+    """Assert the forecasts DB has live-required schema surfaces.
+
+    B2 (2026-05-28) removed the old schema-version counter; this assertion is the
+    lightweight runtime guard that prevents read-only live boot from declaring a
+    partially migrated forecasts DB "ready". Full DDL repair remains owned by
+    ``init_schema_forecasts`` on the forecast ingest daemon.
+    """
+
+    indexes = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    missing_indexes = sorted(_FORECASTS_LIVE_REQUIRED_INDEXES - indexes)
+    if missing_indexes:
+        raise RuntimeError(
+            "forecasts DB missing live-required indexes: "
+            f"{missing_indexes}; run init_schema_forecasts before live trading"
+        )
+
+    for table in ("forecast_posteriors", "raw_model_forecasts"):
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone() is None:
+            continue
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "trade_authority_status" in columns:
+            raise RuntimeError(
+                f"forecasts DB table {table} still has retired trade_authority_status column"
+            )
 
 
 _CALIBRATION_DECISION_GROUP_DDL = """
@@ -9740,6 +9837,8 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
         )
         chain_state = str(row["chain_state"] or "unknown")
         exit_state = str(hints.get("exit_state") or "none")
+        if phase != "pending_exit":
+            exit_state = "none"
         entry_fill_verified = bool(
             hints.get("entry_fill_verified", False)
             or fill_economics["entry_fill_verified"]
@@ -9918,6 +10017,8 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "entry_ci_width": "0.0",
         "exit_retry_count": "0",
         "next_exit_retry_at": "NULL",
+        "exit_reason": "NULL",
+        "admin_exit_reason": "NULL",
         "last_monitor_prob_is_fresh": "0",
         "last_monitor_market_price_is_fresh": "0",
     }
@@ -9959,6 +10060,9 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         trade_id = str(row["trade_id"] or row["position_id"] or "")
         phase = str(row["phase"] or "")
         hints = transitional_hints.get(trade_id, {})
+        exit_state_hint = str(hints.get("exit_state") or "")
+        if phase != "pending_exit":
+            exit_state_hint = ""
         fill_economics = _position_current_effective_entry_economics(
             row,
             fill_hints.get(trade_id),
@@ -10017,8 +10121,9 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "env": explicit_env,
                 "entered_at": str(hints.get("entered_at") or ""),
                 "day0_entered_at": str(hints.get("day0_entered_at") or ""),
-                "exit_state": str(hints.get("exit_state") or ""),
-                "admin_exit_reason": str(hints.get("admin_exit_reason") or ""),
+                "exit_state": exit_state_hint,
+                "exit_reason": str(row["exit_reason"] or ""),
+                "admin_exit_reason": str(row["admin_exit_reason"] or hints.get("admin_exit_reason") or ""),
                 "entry_fill_verified": bool(
                     hints.get("entry_fill_verified", False)
                     or fill_economics["entry_fill_verified"]
@@ -10753,14 +10858,39 @@ def _query_transitional_position_hints(
     columns = _table_columns(conn, "position_events")
     placeholders = ", ".join("?" for _ in trade_ids)
     if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+        event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
+        payload_predicate = " OR ".join("payload_json LIKE ?" for _ in _TRANSITIONAL_HINT_PAYLOAD_KEYS)
+        params = (
+            *trade_ids,
+            *_TRANSITIONAL_HINT_EVENT_TYPES,
+            *(f"%{key}%" for key in _TRANSITIONAL_HINT_PAYLOAD_KEYS),
+            _TRANSITIONAL_HINT_ROWS_PER_POSITION,
+        )
         rows = conn.execute(
             f"""
-            SELECT position_id AS trade_key, event_type, payload_json AS payload, occurred_at
-            FROM position_events
-            WHERE position_id IN ({placeholders})
+            WITH ranked AS (
+                SELECT position_id AS trade_key,
+                       event_type,
+                       payload_json AS payload,
+                       occurred_at,
+                       sequence_no,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY position_id
+                           ORDER BY occurred_at DESC, sequence_no DESC
+                       ) AS rn
+                FROM position_events
+                WHERE position_id IN ({placeholders})
+                  AND (
+                      event_type IN ({event_placeholders})
+                      OR {payload_predicate}
+                  )
+            )
+            SELECT trade_key, event_type, payload, occurred_at
+            FROM ranked
+            WHERE rn <= ?
             ORDER BY occurred_at DESC, sequence_no DESC
             """,
-            trade_ids,
+            params,
         ).fetchall()
     else:
         logger.warning("position_events table missing expected columns"); return {}

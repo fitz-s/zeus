@@ -88,6 +88,7 @@ EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS = 600.0
 FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
+MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
@@ -581,25 +582,28 @@ def _execution_feasibility_exposure_freshness(
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
 
 
-def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResult:
+def _full_family_executable_substrate_redecision_check(rows: list[sqlite3.Row]) -> CheckResult:
     now = datetime.now(timezone.utc)
     evidence: dict[str, Any] = {
         "table": "executable_market_snapshots",
         "max_age_seconds": EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS,
+        "restart_blocking": False,
+        "price_exit_authority": "execution_feasibility_evidence",
+        "scope": "full_family_redecision_shift_fillup",
     }
     if not rows:
         evidence["scoped_exposure_count"] = 0
         evidence["row_count"] = "not_scanned_no_open_exposures"
         return CheckResult(
-            "executable_substrate_freshness",
+            "full_family_executable_substrate_redecision_coverage",
             True,
-            "no open exposures require executable market substrate",
+            "no open exposures require full-family executable substrate",
             evidence,
         )
     with _connect_live_ro() as conn:
         if not _table_exists(conn, "main", "executable_market_snapshots"):
             return CheckResult(
-                "executable_substrate_freshness",
+                "full_family_executable_substrate_redecision_coverage",
                 False,
                 "executable market snapshot table is missing",
                 evidence,
@@ -631,14 +635,14 @@ def _executable_substrate_freshness_check(rows: list[sqlite3.Row]) -> CheckResul
     age_ok = 0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS
     evidence["age_seconds"] = age
     evidence["freshness_deadline_ok"] = deadline_ok
-    ok = (age_ok or deadline_ok) and not exposure_results["risky"]
+    ok = True
     return CheckResult(
-        "executable_substrate_freshness",
+        "full_family_executable_substrate_redecision_coverage",
         ok,
         (
-            "executable market substrate is fresh for open exposures"
+            "full-family executable substrate table exists; stale rows are reported as redecision coverage risk, not restart exit blocker"
             if ok
-            else "executable market substrate is stale/missing for open exposures"
+            else "full-family executable substrate table is missing"
         ),
         evidence,
     )
@@ -876,7 +880,10 @@ def _posterior_summary() -> CheckResult:
     if latest_dt is not None:
         age_hours = (now - latest_dt).total_seconds() / 3600.0
     non_live = sum(int(row["rows"]) for row in runtime_rows if row["runtime_layer"] != "live")
-    ok = non_live == 0 and age_hours is not None and 0.0 <= age_hours <= 3.0
+    from src.engine.position_belief import monitor_belief_max_age_hours
+
+    max_age_hours = monitor_belief_max_age_hours()
+    ok = non_live == 0 and age_hours is not None and 0.0 <= age_hours <= max_age_hours
     return CheckResult(
         "live_posterior_freshness",
         ok,
@@ -886,7 +893,7 @@ def _posterior_summary() -> CheckResult:
             "latest_live_computed_at": latest["computed_at"] if latest else None,
             "latest_live_age_hours": age_hours,
             "non_live_rows": non_live,
-            "fresh_age_limit_hours": 3.0,
+            "fresh_age_limit_hours": max_age_hours,
         },
     )
 
@@ -1005,6 +1012,8 @@ def _verified_settlement_truth_for(rows: list[sqlite3.Row]) -> dict[tuple[str, s
 def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     risky: list[dict[str, Any]] = []
     tolerated: list[dict[str, Any]] = []
+    full_fill_repairable = _exit_full_fill_repairable_by_position()
+    retry_resumable = _exit_retry_resumable_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -1022,6 +1031,20 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         if reason == "MARKET_CLOSED_AWAITING_SETTLEMENT":
             tolerated.append(item)
+        elif str(row["position_id"] or "") in full_fill_repairable:
+            item = {
+                **item,
+                "restart_resolution": "command_recovery_full_exit_fill_close",
+                "repair_evidence": full_fill_repairable[str(row["position_id"] or "")],
+            }
+            tolerated.append(item)
+        elif str(row["position_id"] or "") in retry_resumable:
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_retry_resume",
+                "repair_evidence": retry_resumable[str(row["position_id"] or "")],
+            }
+            tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
             tolerated.append(item)
             if order_status != "backoff_exhausted":
@@ -1036,6 +1059,115 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
     )
+
+
+def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "venue_trade_facts")
+            and _table_exists(conn, "main", "position_current")
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            SELECT pc.position_id,
+                   cmd.command_id,
+                   cmd.venue_order_id,
+                   cmd.size AS command_size,
+                   COALESCE(pc.chain_shares, pc.shares, 0) AS position_shares,
+                   SUM(CAST(COALESCE(tf.filled_size, '0') AS REAL)) AS filled_size,
+                   SUM(CAST(COALESCE(tf.filled_size, '0') AS REAL)
+                       * CAST(COALESCE(tf.fill_price, '0') AS REAL)) AS fill_notional,
+                   GROUP_CONCAT(DISTINCT tf.state) AS trade_states,
+                   MAX(tf.observed_at) AS observed_at
+              FROM position_current pc
+              JOIN venue_commands cmd
+                ON cmd.position_id = pc.position_id
+               AND cmd.intent_kind = 'EXIT'
+              JOIN venue_trade_facts tf
+                ON tf.command_id = cmd.command_id
+               AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+             WHERE pc.phase = 'pending_exit'
+             GROUP BY pc.position_id, cmd.command_id, cmd.venue_order_id, cmd.size, pc.chain_shares, pc.shares
+            """
+        ).fetchall()
+    repairable: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            filled_size = float(row["filled_size"] or 0.0)
+            command_size = float(row["command_size"] or 0.0)
+            position_shares = float(row["position_shares"] or 0.0)
+            fill_notional = float(row["fill_notional"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        target_size = max(command_size, position_shares)
+        if target_size <= 0.0 or filled_size + 1e-9 < target_size or fill_notional <= 0.0:
+            continue
+        repairable[str(row["position_id"])] = {
+            "command_id": row["command_id"],
+            "venue_order_id": row["venue_order_id"],
+            "filled_size": filled_size,
+            "target_size": target_size,
+            "avg_fill_price": fill_notional / filled_size if filled_size > 0 else None,
+            "trade_states": row["trade_states"],
+            "observed_at": row["observed_at"],
+        }
+    return repairable
+
+
+def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_current")
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE cmd.intent_kind = 'EXIT'
+            )
+            SELECT pc.position_id,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   latest_exit.command_id,
+                   latest_exit.state AS command_state,
+                   latest_exit.venue_order_id,
+                   latest_exit.updated_at AS command_updated_at
+              FROM position_current pc
+              JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+             WHERE pc.phase = 'pending_exit'
+               AND COALESCE(pc.exit_retry_count, 0) > 0
+               AND COALESCE(pc.next_exit_retry_at, '') != ''
+            """
+        ).fetchall()
+    resumable: dict[str, dict[str, Any]] = {}
+    terminal_no_resting = {"REJECTED", "EXPIRED", "FAILED", "CANCELED", "CANCELLED", "FILLED"}
+    for row in rows:
+        state = str(row["command_state"] or "").upper()
+        venue_order_id = str(row["venue_order_id"] or "")
+        if state not in terminal_no_resting:
+            continue
+        if state == "FILLED":
+            continue
+        resumable[str(row["position_id"])] = {
+            "command_id": row["command_id"],
+            "command_state": row["command_state"],
+            "venue_order_id": venue_order_id,
+            "exit_retry_count": row["exit_retry_count"],
+            "next_exit_retry_at": row["next_exit_retry_at"],
+            "command_updated_at": row["command_updated_at"],
+        }
+    return resumable
 
 
 def _single_family_reseed_repair_evidence(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -1099,6 +1231,88 @@ def _single_family_reseed_repair_evidence(item: dict[str, Any]) -> dict[str, Any
         return None
 
 
+def _latest_monitor_projection_evidence(
+    position_id: str,
+    *,
+    day0_required: bool,
+) -> dict[str, Any] | None:
+    """Return fresh monitor belief evidence from the trade event projection.
+
+    Non-Day0 held positions may refresh belief through the canonical replacement
+    read-through path before the durable forecast_posteriors row is re-materialized.
+    Day0 positions are stricter: only the observation remaining-window or absorbing
+    hard-fact monitor lanes count, never a forecast posterior stamped during the
+    settlement day.
+    """
+
+    now = datetime.now(timezone.utc)
+    try:
+        with _connect_live_ro() as conn:
+            row = conn.execute(
+                """
+                SELECT occurred_at, payload_json
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'MONITOR_REFRESHED'
+                 ORDER BY datetime(occurred_at) DESC, sequence_no DESC
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    occurred_at = str(row["occurred_at"] or "")
+    occurred_dt = _parse_dt(occurred_at)
+    if occurred_dt is None:
+        return None
+    age_seconds = (now - occurred_dt).total_seconds()
+    if age_seconds < 0.0 or age_seconds > MONITOR_PROJECTION_MAX_AGE_SECONDS:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except Exception:
+        payload = {}
+    validations_raw = payload.get("applied_validations") if isinstance(payload, dict) else None
+    validations = [str(item) for item in validations_raw] if isinstance(validations_raw, list) else []
+    if day0_required:
+        accepted = any(
+            item == "day0_observation_remaining_window"
+            or item == "day0_absorbing_hard_fact"
+            or item.startswith("belief_source=day0_observation_remaining_window")
+            or item.startswith("belief_source=day0_absorbing_hard_fact")
+            for item in validations
+        )
+        if not accepted:
+            return None
+        source = "day0_monitor_observation_authority"
+    else:
+        accepted = any(
+            item == "replacement_posterior"
+            or item.startswith("belief_source=forecast_posteriors")
+            for item in validations
+        )
+        if not accepted:
+            return None
+        source = "monitor_replacement_authority"
+    return {
+        "position_id": position_id,
+        "occurred_at": occurred_at,
+        "age_seconds": age_seconds,
+        "source": source,
+        "accepted_validations": [
+            item
+            for item in validations
+            if item == "replacement_posterior"
+            or item == "day0_observation_remaining_window"
+            or item == "day0_absorbing_hard_fact"
+            or item.startswith("belief_source=")
+        ][:6],
+        "max_age_seconds": MONITOR_PROJECTION_MAX_AGE_SECONDS,
+    }
+
+
 def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
 
@@ -1139,6 +1353,39 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
                 settlement_recoverable.append(evidence)
                 continue
             risky.append({**evidence, "risk": "settled_position_harvester_disabled"})
+            continue
+
+        if str(row["phase"] or "") == "day0_window":
+            monitor_evidence = _latest_monitor_projection_evidence(
+                str(row["position_id"] or ""),
+                day0_required=True,
+            )
+            if monitor_evidence is not None:
+                covered.append(
+                    {
+                        **item,
+                        "fresh": True,
+                        "freshness_basis": "day0_monitor_projection",
+                        "monitor_projection": monitor_evidence,
+                    }
+                )
+                continue
+            risky.append({**item, "risk": "day0_monitor_observation_belief_missing_or_stale"})
+            continue
+
+        active_day0_monitor_evidence = _latest_monitor_projection_evidence(
+            str(row["position_id"] or ""),
+            day0_required=True,
+        )
+        if active_day0_monitor_evidence is not None:
+            covered.append(
+                {
+                    **item,
+                    "fresh": True,
+                    "freshness_basis": "active_day0_monitor_projection",
+                    "monitor_projection": active_day0_monitor_evidence,
+                }
+            )
             continue
 
         belief = load_replacement_belief(
@@ -1212,10 +1459,11 @@ def evaluate() -> dict[str, Any]:
     quote_rows = _open_positions_requiring_executable_quote(rows)
     edli_cfg = cfg.get("edli") or {}
     reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
-    live_execution_mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
+    live_execution_mode = str(edli_cfg.get("live_execution_mode") or "missing")
     armed_live = live_execution_mode == "edli_live"
+    known_execution_mode = live_execution_mode in {"edli_live", "maker", "disabled"}
     real_submit_effective = real_submit and reactor_mode == "live"
-    submit_ok = (not armed_live) or real_submit_effective
+    submit_ok = known_execution_mode and ((not armed_live) or real_submit_effective)
     checks = [
         CheckResult(
             "live_trading_process_absent",
@@ -1228,11 +1476,15 @@ def evaluate() -> dict[str, Any]:
             submit_ok,
             "real order submit is enabled for armed live restart"
             if submit_ok
-            else "armed live restart but real order submit is not actually enabled (real_order_submit_enabled False or reactor_mode != live)",
+            else (
+                "live_execution_mode must be explicit (edli_live/maker/disabled), and "
+                "armed live restart requires real_order_submit_enabled with reactor_mode=live"
+            ),
             {
                 "edli.real_order_submit_enabled": real_submit,
                 "edli.reactor_mode": reactor_mode,
                 "edli.live_execution_mode": live_execution_mode,
+                "known_execution_mode": known_execution_mode,
                 "armed_live": armed_live,
                 "real_submit_effective": real_submit_effective,
             },
@@ -1244,7 +1496,7 @@ def evaluate() -> dict[str, Any]:
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
-        _executable_substrate_freshness_check(quote_rows),
+        _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
         _belief_check(rows),

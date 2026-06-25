@@ -1,8 +1,10 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-20 (lifecycle conversion fix: escalation arm-floor
-#   = screen maker-window; fixed stale 120-min-regime test; added screen-pulled
-#   RED-on-revert arming test)
+# Last reused or audited: 2026-06-21 (GAP-4 escalation-cross re-rest race fix:
+#   added TestEscalationCrossRerestRace — a post-escalation serial re-rest must
+#   not shadow the armed cross; double-submit safety preserved via the executor
+#   dedup backstop)
 # Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
+#   + docs/evidence/live_order_pathology/2026-06-21_escalation_cross_fix.md
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
 
 Pins the two seams the policy crosses:
@@ -215,6 +217,175 @@ class TestFamilyRestState:
             True,
             False,
         )
+
+
+class TestEscalationCrossRerestRace:
+    """GAP 4 ROOT FIX (2026-06-21): a just-posted re-rest must NOT shadow an
+    armed escalation from a PRIOR cancelled-unfilled rest of the SAME family.
+
+    Real-chain symptom (token 111133600: 5 cmds / 4 cancelled): a family
+    SERIALLY RE-RESTS. When a prior cancelled-unfilled aged rest has armed the
+    escalation cross AND a re-rest (posted AFTER that cancel) is currently LIVE,
+    the UNFIXED `_family_rest_state` returns (unexpired_rest=True, escalated=True),
+    and `select_rest_then_cross_mode` line 561 (HOLD) pre-empts line 571 (the
+    armed cross). The cross fired exactly ONCE since 06-19; ~$87/day admissible
+    captured-EV was suppressed.
+
+    THE FIX: an OPEN rest that post-dates the arming cancellation is a redundant
+    serial re-rest -> it does NOT set unexpired_rest, so the function returns
+    (False, True) and the armed cross gets its turn. A genuine live rest with NO
+    prior armed escalation still sets unexpired_rest=True (HOLD, unchanged).
+    Double-submit stays backstopped at submit by
+    `_entry_duplicate_same_token_component` (which blocks while the competing
+    command is in an OPEN state and allows only once it is CANCELLED-unfilled).
+    """
+
+    def test_armed_escalation_plus_post_cancel_rerest_does_not_hold(self):
+        """THE BUG. A prior rest cancelled UNFILLED past the arm floor (arms
+        escalated), then a re-rest is posted AFTER that cancel and is currently
+        LIVE. The armed cross must win: (unexpired_rest=False, escalated=True)."""
+        conn = _db()
+        # Rest #1: posted 40 min ago, rested a genuine maker window, then cancelled
+        # UNFILLED 12 min after posting (>= 5-min arm floor) -> arms escalation.
+        r1_created = NOW - timedelta(minutes=40)
+        r1_cancelled_at = r1_created + timedelta(minutes=12)
+        _add(
+            conn,
+            command_id="c1",
+            venue_order_id="o1",
+            created_at=r1_created,
+            command_state="CANCELLED",
+            facts=[
+                ("LIVE", "0", r1_created + timedelta(seconds=5)),
+                ("CANCEL_CONFIRMED", "0", r1_cancelled_at),
+            ],
+        )
+        # Rest #2 (the redundant serial re-rest): posted AFTER rest#1's cancel and
+        # currently LIVE on the book (the just-posted re-rest of the race).
+        r2_created = r1_cancelled_at + timedelta(minutes=1)
+        _add(
+            conn,
+            command_id="c2",
+            venue_order_id="o2",
+            created_at=r2_created,
+            command_state="ACKED",
+            facts=[("LIVE", "0", r2_created + timedelta(seconds=5))],
+        )
+        assert adapter._family_rest_state(
+            conn, family=_family(), decision_time=NOW
+        ) == (False, True)
+
+    def test_post_cancel_rerest_with_no_fact_yet_does_not_hold(self):
+        """The re-rest is ACKED but has no venue fact yet (the in-flight no-fact
+        lane that the UNFIXED code also treats as an unexpired rest). When it
+        post-dates an armed escalation it is still a redundant re-rest -> the
+        armed cross wins: (False, True)."""
+        conn = _db()
+        r1_created = NOW - timedelta(minutes=40)
+        r1_cancelled_at = r1_created + timedelta(minutes=12)
+        _add(
+            conn,
+            command_id="c1",
+            venue_order_id="o1",
+            created_at=r1_created,
+            command_state="CANCELLED",
+            facts=[("CANCEL_CONFIRMED", "0", r1_cancelled_at)],
+        )
+        r2_created = r1_cancelled_at + timedelta(minutes=1)
+        _add(
+            conn,
+            command_id="c2",
+            venue_order_id="o2",
+            created_at=r2_created,
+            command_state="ACKED",
+            facts=[],  # acknowledged, no order fact yet
+        )
+        assert adapter._family_rest_state(
+            conn, family=_family(), decision_time=NOW
+        ) == (False, True)
+
+    def test_genuine_first_live_rest_no_prior_escalation_still_holds(self):
+        """SAFETY: a genuine FIRST live rest with NO prior cancelled-unfilled rest
+        (escalated would be False) still HOLDs: (unexpired_rest=True, escalated=False).
+        The Karachi rest-first antibody + single-flight is intact."""
+        conn = _db()
+        _add(
+            conn,
+            command_id="c1",
+            venue_order_id="o1",
+            created_at=NOW - timedelta(minutes=10),
+            command_state="ACKED",
+            facts=[("LIVE", "0", NOW - timedelta(minutes=9))],
+        )
+        assert adapter._family_rest_state(
+            conn, family=_family(), decision_time=NOW
+        ) == (True, False)
+
+    def test_live_rest_predating_the_arming_cancel_still_holds(self):
+        """SAFETY (double-submit): a genuine live rest that was posted BEFORE the
+        arming cancellation (created_at <= arm time) is NOT a post-escalation
+        re-rest — it is a real in-flight order that could fill. It must still set
+        unexpired_rest=True (HOLD) so no cross competes with a live, pre-existing
+        order on the book: (True, True)."""
+        conn = _db()
+        # An aged cancelled-unfilled rest arms escalation, cancelled at arm_time.
+        r1_created = NOW - timedelta(minutes=40)
+        r1_cancelled_at = r1_created + timedelta(minutes=12)
+        _add(
+            conn,
+            command_id="c1",
+            venue_order_id="o1",
+            created_at=r1_created,
+            command_state="CANCELLED",
+            facts=[
+                ("LIVE", "0", r1_created + timedelta(seconds=5)),
+                ("CANCEL_CONFIRMED", "0", r1_cancelled_at),
+            ],
+        )
+        # A separate live rest posted BEFORE the arming cancel (created_at < arm
+        # time): a genuine pre-existing live order, NOT a redundant re-rest.
+        r2_created = r1_created + timedelta(minutes=2)  # before r1_cancelled_at
+        _add(
+            conn,
+            command_id="c2",
+            venue_order_id="o2",
+            created_at=r2_created,
+            command_state="ACKED",
+            facts=[("LIVE", "0", r2_created + timedelta(seconds=5))],
+        )
+        assert adapter._family_rest_state(
+            conn, family=_family(), decision_time=NOW
+        ) == (True, True)
+
+    def test_no_armed_escalation_open_rerest_still_holds(self):
+        """SAFETY: if there is NO armed escalation (the only cancelled rest is
+        below the arm floor), a live rest still HOLDs — the post-escalation
+        exemption requires a genuinely armed escalation to release the HOLD."""
+        conn = _db()
+        # Cancelled UNFILLED only 1 min after posting: below the 5-min arm floor
+        # -> escalated=False (no real maker window).
+        c1_created = NOW - timedelta(minutes=30)
+        _add(
+            conn,
+            command_id="c1",
+            venue_order_id="o1",
+            created_at=c1_created,
+            command_state="CANCELLED",
+            facts=[("CANCEL_CONFIRMED", "0", c1_created + timedelta(minutes=1))],
+        )
+        # A live re-rest posted after that sub-floor cancel.
+        r2_created = c1_created + timedelta(minutes=2)
+        _add(
+            conn,
+            command_id="c2",
+            venue_order_id="o2",
+            created_at=r2_created,
+            command_state="ACKED",
+            facts=[("LIVE", "0", r2_created + timedelta(seconds=5))],
+        )
+        assert adapter._family_rest_state(
+            conn, family=_family(), decision_time=NOW
+        ) == (True, False)
 
 
 class TestFreshSeamSubordination:

@@ -14,13 +14,15 @@
     bound on a thin sample is conservative AND the N_MIN gate fires).
   * an UNKNOWN cell with no artifact ⇒ INERT pass-through (q_safe == band_q_lcb, trade=True,
     NOT abstained) — byte-identical to pre-guard behavior.
-  * a MISSING cell inside an active artifact ⇒ abstain; an active live artifact cannot silently
-    authorize a side/bin it did not grade.
+  * a MISSING/thin fine bucket inside an active artifact ⇒ first coarsen into a same-family
+    q_lcb right-tail cell; abstain only when the same side/lead/bin-position/precision family
+    still lacks N_MIN evidence.
 
 Reverting the guard to "serve band.q_lcb unconditionally" makes the abstain cases RED.
 """
 from __future__ import annotations
 
+import json
 import math
 
 from src.decision import qlcb_reliability_guard as guard_mod
@@ -46,7 +48,7 @@ def test_well_calibrated_cell_serves_min_band_and_Lg():
     # band_q_lcb of 0.72 (bucket [0.7, 0.8) -> floor 0.7). L_g for 0.85 over n=500 is ~0.82.
     band_q_lcb = 0.72
     bucket_idx, bucket_floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|YES|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}|coarse_global"
     table = {key: (500, 0.85)}
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
@@ -66,7 +68,7 @@ def test_miscalibrated_deep_cell_deflates_to_wilson_not_zero():
     # does not add a binary veto. Route cost decides whether that deflated q still trades.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|YES|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}|coarse_global"
     table = {key: (500, 0.55)}
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
@@ -82,7 +84,7 @@ def test_thin_cell_abstains_even_with_high_point_rate():
     # n < N_MIN -> the N_MIN gate fires regardless of the point hit-rate -> abstain.
     band_q_lcb = 0.72
     bucket_idx, _floor = qlcb_bucket(band_q_lcb)
-    key = f"high|L1|YES|modal|qb{bucket_idx}"
+    key = f"high|L1|YES|modal|qb{bucket_idx}|coarse_global"
     table = {key: (N_MIN - 1, 1.0)}  # perfect but thin
     v = apply_guard(
         band_q_lcb=band_q_lcb, metric="high", lead_days=1.0,
@@ -124,8 +126,8 @@ def test_injected_active_empty_table_abstains():
 
 
 def test_missing_cell_inside_active_table_abstains():
-    # Once an artifact is active, an unseen side-aware cell is not authority.
-    active_table = {"high|L1|YES|modal|qb1": (500, 0.5)}
+    # Once an artifact is active, an unseen side-aware family is not authority.
+    active_table = {"high|L1|YES|modal|qb1|coarse_global": (500, 0.5)}
     v = apply_guard(
         band_q_lcb=0.76,
         metric="high",
@@ -140,10 +142,42 @@ def test_missing_cell_inside_active_table_abstains():
     assert v.q_safe == 0.0
 
 
+def test_missing_high_bucket_uses_same_family_pooled_tail():
+    # Shanghai-style center YES: the exact high q_lcb bucket can be sparse/missing,
+    # but lower high-confidence buckets in the SAME metric/lead/side/modal/precision
+    # family provide enough OOF evidence. The guard serves the pooled Wilson lower
+    # bound instead of hard-zeroing the candidate.
+    table = {
+        "high|L2_3|YES|modal|qb5|coarse_global": (64, 0.3125),
+        "high|L2_3|YES|modal|qb6|coarse_global": (23, 0.391304347826087),
+        "high|L2_3|YES|modal|qb7|coarse_global": (10, 0.4),
+        "high|L2_3|YES|modal|qb8|coarse_global": (9, 0.4444444444444444),
+        "high|L2_3|YES|modal|qb9|coarse_global": (4, 0.25),
+        "high|L2_3|YES|modal|qb15|coarse_global": (1, 0.0),
+    }
+
+    v = apply_guard(
+        band_q_lcb=0.65,
+        metric="high",
+        lead_days=2.0,
+        side="YES",
+        bin_position="modal",
+        reliability_table=table,
+        reliability_artifact_active=True,
+    )
+
+    assert v.basis == "OOF_WILSON_95_POOLED_TAIL"
+    assert v.abstained is False
+    assert v.trade is True
+    assert v.n_g >= N_MIN
+    assert 0.20 < v.q_safe < 0.65
+    assert "->tail_qb" in v.cell_key
+
+
 def test_side_specific_cell_required_for_no_claim():
     band_q_lcb = 0.72
     bucket_idx, _bucket_floor = qlcb_bucket(band_q_lcb)
-    yes_only = {f"high|L1|YES|nonmodal|qb{bucket_idx}": (500, 0.90)}
+    yes_only = {f"high|L1|YES|nonmodal|qb{bucket_idx}|coarse_global": (500, 0.90)}
     no_missing = apply_guard(
         band_q_lcb=band_q_lcb,
         metric="high",
@@ -154,7 +188,7 @@ def test_side_specific_cell_required_for_no_claim():
     )
     assert no_missing.abstained is True
 
-    no_table = {f"high|L1|NO|nonmodal|qb{bucket_idx}": (500, 0.90)}
+    no_table = {f"high|L1|NO|nonmodal|qb{bucket_idx}|coarse_global": (500, 0.90)}
     no_licensed = apply_guard(
         band_q_lcb=band_q_lcb,
         metric="high",
@@ -194,4 +228,60 @@ def test_present_malformed_artifact_is_active_fail_closed(tmp_path, monkeypatch)
     status = guard_mod.reliability_artifact_status()
     assert status["active"] is True
     assert status["status"] == "ACTIVE_INVALID"
+    guard_mod.reset_reliability_cache()
+
+
+def test_shape_valid_artifact_without_live_semantic_meta_is_stale(tmp_path, monkeypatch):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "source": "/tmp/multilead_forecasts.json previous-runs corpus",
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    status = guard_mod.reliability_artifact_status()
+    v = apply_guard(band_q_lcb=0.08, metric="high", lead_days=1.0, bin_position="modal")
+
+    assert status["status"] == "STALE_SEMANTICS"
+    assert status["cell_count"] == 0
+    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
+    assert v.abstained is True
+    guard_mod.reset_reliability_cache()
+
+
+def test_file_artifact_with_live_semantic_meta_is_active_valid(tmp_path, monkeypatch):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
+                    "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
+                    "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+                    "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {"n": 100, "hit_rate": 0.80},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    status = guard_mod.reliability_artifact_status()
+
+    assert status["status"] == "ACTIVE_VALID"
+    assert status["cell_count"] == 1
     guard_mod.reset_reliability_cache()

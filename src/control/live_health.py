@@ -28,6 +28,7 @@ FORECAST_PIPELINE_HEALTH_JOBS = (
     "replacement_forecast_download",
     "replacement_forecast_live_materialize",
 )
+LEGACY_CRON_RUN_MODE_PREFIX = "run_mode:"
 
 
 def _state_dir(override: Optional[Path]) -> Path:
@@ -127,6 +128,41 @@ def _forecast_pipeline_surface(scheduler_health: Optional[dict]) -> dict:
             "checked_jobs": checked,
         }
     return {"ok": True, "issue": None, "checked_jobs": checked}
+
+
+def _live_execution_mode() -> str:
+    try:
+        from src.config import settings
+
+        edli = settings.get("edli", {}) if hasattr(settings, "get") else {}
+        if isinstance(edli, dict):
+            return str(edli.get("live_execution_mode") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _run_mode_health_entries(scheduler_health: dict, *, live_execution_mode: str) -> list[tuple[str, dict]]:
+    """Return run-mode health rows relevant to the active scheduler topology.
+
+    In ``edli_live`` the legacy cron modes are not registered by ``src.main``. Old durable
+    ``run_mode:*`` rows may remain in scheduler_jobs_health.json, but consuming them as current
+    liveness turns history into a live signal. In ``legacy_cron`` those rows are active and remain
+    part of the surface.
+    """
+
+    entries: list[tuple[str, dict]] = []
+    include_legacy_mode_rows = live_execution_mode == "legacy_cron"
+    for key, value in scheduler_health.items():
+        key_str = str(key)
+        if not isinstance(value, dict):
+            continue
+        if key_str in {"_run_mode", "run_mode"}:
+            entries.append((key_str, value))
+            continue
+        if include_legacy_mode_rows and key_str.startswith(LEGACY_CRON_RUN_MODE_PREFIX):
+            entries.append((key_str, value))
+    return entries
 
 
 def _business_plane_surface(status_summary: Optional[dict]) -> dict:
@@ -467,11 +503,10 @@ def compute_composite_live_health(
         # mode-specific keys such as "run_mode:opening_hunt" after catching
         # exceptions. Mode-specific failures are the business-plane authority:
         # the generic wrapper can still be OK because _run_mode swallows errors.
-        entries = []
-        for key, value in sj_data.items():
-            if key in {"_run_mode", "run_mode"} or str(key).startswith("run_mode:"):
-                if isinstance(value, dict):
-                    entries.append((str(key), value))
+        entries = _run_mode_health_entries(
+            sj_data,
+            live_execution_mode=_live_execution_mode(),
+        )
         failed_entries = [
             (key, value)
             for key, value in entries

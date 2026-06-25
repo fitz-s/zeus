@@ -357,6 +357,112 @@ class TestDurableFillBridgeScan:
         assert "short-mf1d" in provenance["payload_json"]
         assert position_id in provenance["payload_json"]
 
+    def test_existing_position_command_link_noop_does_not_require_strategy_identity(self):
+        """Already-linked historical aggregates must not re-parse entry strategy.
+
+        Live regression: old confirmed-fill aggregates had enough command identity
+        for command-link convergence but lacked strategy_key/event_type in
+        PreSubmitRevalidated. The already-bridged scan path re-ran the full
+        position identity parser anyway, emitted EDLI_BRIDGE_STRATEGY_MISSING on
+        every reconcile cycle, and let that historical repair lane starve fresh
+        user-channel liveness.
+        """
+        from src.events.edli_position_bridge import (
+            edli_bridge_position_id,
+            sync_venue_command_position_link_for_edli_fill,
+        )
+
+        conn = _make_conn()
+        aggregate_id = "evtMF1e:fiMF1e"
+        execution_command_id = "edli_exec_cmd:evtMF1e:fiMF1e"
+        _insert_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": "evtMF1e",
+                "final_intent_id": "fiMF1e",
+                "condition_id": "0xCONDITION",
+                "token_id": "0xNOTOKEN",
+                "direction": "buy_no",
+                "city": "Tokyo",
+                "target_date": "2026-06-02",
+                "bin_label": "high_29_30",
+                "metric": "high",
+                "unit": "C",
+                "market_id": "mkt-MF1",
+            },
+            source_authority="decision_kernel",
+        )
+        _insert_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="ExecutionCommandCreated",
+            payload={"execution_command_id": execution_command_id},
+            source_authority="engine_adapter",
+        )
+        _insert_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="UserTradeObserved",
+            payload={
+                "fill_authority_state": "FILL_CONFIRMED",
+                "trade_status": "CONFIRMED",
+                "filled_size": 120.0,
+                "avg_fill_price": 0.42,
+                "venue_order_id": "vo-MF1e",
+            },
+            source_authority="user_channel",
+        )
+        position_id = edli_bridge_position_id(aggregate_id)
+        conn.execute(
+            """INSERT INTO position_current
+               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
+               VALUES (?, 'active', ?, 'opening_inertia', '2026-06-01T00:00:00+00:00', 'high')""",
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at, updated_at,
+                review_required_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+            """,
+            (
+                "cmd-mf1e",
+                "snap-mf1e",
+                "env-mf1e",
+                position_id,
+                execution_command_id,
+                "idem-mf1e",
+                "ENTRY",
+                "mkt-MF1",
+                "0xNOTOKEN",
+                "BUY",
+                120.0,
+                0.42,
+                "vo-MF1e",
+                "FILLED",
+                "2026-06-01T00:00:00+00:00",
+                "2026-06-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+        repaired = sync_venue_command_position_link_for_edli_fill(
+            conn,
+            aggregate_id,
+            position_id=position_id,
+            now=datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc),
+        )
+
+        assert repaired is False
+
     def test_non_confirmed_fill_is_not_bridged(self):
         """A MATCHED-only aggregate (no FILL_CONFIRMED) must NOT be bridged — the
         scan keys strictly on FILL_CONFIRMED so pending fills do not leak into

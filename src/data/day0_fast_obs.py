@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -68,7 +69,6 @@ _T_GROUP_RE = re.compile(r"\bT\d{8}\b")
 #: Minimum seconds between live HTTP fetches (the AWC cache updates ~1/min;
 #: the reactor cycle can be faster — do not hammer a free government API).
 DEFAULT_MIN_FETCH_INTERVAL_S = 90.0
-
 #: Maximum cache age (seconds) at which the fast lane may serve the ENTRY gate
 #: (monitor fallback — Option B). Kills are staleness-safe; entries are not.
 #: At 15 min the cache is still fresh enough that the running extreme it
@@ -81,6 +81,45 @@ FAST_LANE_ENTRY_MAX_CACHE_AGE_S = 900.0  # 15 minutes
 # matches the historical calibration surface.
 PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS = 1.0
 PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS = 12.0
+
+
+def _positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is invalid; using %.1fs", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is invalid; using %d", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+DEFAULT_METAR_FETCH_TIMEOUT_S = _positive_float_env(
+    "ZEUS_DAY0_METAR_FETCH_TIMEOUT_SECONDS",
+    4.0,
+)
+
+DAY0_ANOMALY_CHECK_BUDGET_S = _positive_float_env(
+    "ZEUS_DAY0_ANOMALY_CHECK_BUDGET_SECONDS",
+    8.0,
+)
+DAY0_ANOMALY_CHECK_MAX_CITIES = _positive_int_env(
+    "ZEUS_DAY0_ANOMALY_CHECK_MAX_CITIES",
+    6,
+)
 
 
 @dataclass(frozen=True)
@@ -197,7 +236,7 @@ def fetch_metar_reports(
     stations: Iterable[str],
     *,
     hours: float = 36.0,
-    timeout: float = 15.0,
+    timeout: float = DEFAULT_METAR_FETCH_TIMEOUT_S,
     endpoint: str = AVIATIONWEATHER_METAR_ENDPOINT,
 ) -> list[MetarReport]:
     """One batched fetch for all stations. Fail-soft: any error returns []."""
@@ -656,6 +695,7 @@ class FastObsPrefetch:
     freshness_status: str
     cache_age_s: Optional[float]
     decision_time: datetime
+    anomaly_actions: tuple = ()
 
 
 @dataclass
@@ -901,11 +941,15 @@ class Day0FastObsEmitter:
         *,
         cities: list[Any],
         decision_time: datetime,
-        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], None]] = None,
+        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], Any]] = None,
+        anomaly_check_budget_s: Optional[float] = None,
+        anomaly_check_max_cities: Optional[int] = None,
     ) -> FastObsPrefetch:
         """HTTP phase: resolve eligible cities, fetch METAR (throttled), run the
         (WU-HTTP) anomaly cross-check. NO DB writes — safe to run OUTSIDE the
-        world-write mutex (P0-2). Fail-soft everywhere."""
+        world-write mutex (P0-2). Any anomaly result is returned as a durable
+        action for emit_prefetched to apply with the already-open world_conn.
+        Fail-soft everywhere."""
         eligible: list[tuple[Any, FastObsSource, str]] = []
         for city in cities:
             source = fast_obs_source_for_city(city)
@@ -937,19 +981,74 @@ class Day0FastObsEmitter:
                 status, cache_age,
             )
         if reports and anomaly_check is not None and anomaly_input_ok:
+            anomaly_actions = []
+            checks_started = 0
+            budget_s = (
+                DAY0_ANOMALY_CHECK_BUDGET_S
+                if anomaly_check_budget_s is None
+                else max(0.0, anomaly_check_budget_s)
+            )
+            max_checks = (
+                DAY0_ANOMALY_CHECK_MAX_CITIES
+                if anomaly_check_max_cities is None
+                else max(0, anomaly_check_max_cities)
+            )
+            started_monotonic = time.monotonic()
             for city, _source, target_date in eligible:
+                if max_checks <= 0:
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_SKIPPED_BUDGET max_checks=%d budget_s=%.3f",
+                        max_checks,
+                        budget_s,
+                    )
+                    break
+                if checks_started >= max_checks:
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_BUDGET_EXHAUSTED checked=%d eligible=%d "
+                        "elapsed_s=%.3f budget_s=%.3f reason=max_checks",
+                        checks_started,
+                        len(eligible),
+                        time.monotonic() - started_monotonic,
+                        budget_s,
+                    )
+                    break
+                if (
+                    budget_s > 0.0
+                    and checks_started > 0
+                    and (time.monotonic() - started_monotonic) >= budget_s
+                ):
+                    logger.warning(
+                        "DAY0_FAST_OBS_ANOMALY_CHECK_BUDGET_EXHAUSTED checked=%d eligible=%d "
+                        "elapsed_s=%.3f budget_s=%.3f reason=elapsed",
+                        checks_started,
+                        len(eligible),
+                        time.monotonic() - started_monotonic,
+                        budget_s,
+                    )
+                    break
                 try:
                     extremes = running_extremes_for_local_day(
                         reports, city=city, target_date=target_date,
                         as_of=decision_time.astimezone(UTC),
                     )
                     if extremes.sample_count:
-                        anomaly_check(city, extremes, reports)
+                        checks_started += 1
+                        action = anomaly_check(city, extremes, reports)
+                        if action is not None:
+                            anomaly_actions.append(action)
                 except Exception as exc:  # noqa: BLE001 — detector must never block the lane
                     logger.warning(
                         "DAY0_FAST_OBS_ANOMALY_CHECK_FAILED city=%s exc=%s: %s",
                         getattr(city, "name", "?"), type(exc).__name__, exc,
                     )
+            return FastObsPrefetch(
+                tuple(eligible),
+                tuple(reports),
+                status,
+                cache_age,
+                decision_time,
+                tuple(anomaly_actions),
+            )
         return FastObsPrefetch(tuple(eligible), tuple(reports), status, cache_age, decision_time)
 
     def emit_prefetched(
@@ -977,7 +1076,16 @@ class Day0FastObsEmitter:
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
         from src.contracts.settlement_semantics import SettlementSemantics
         from src.signal.day0_obs_latency import staleness_budget_minutes
+        from src.data.day0_oracle_anomaly import apply_day0_oracle_anomaly_action
 
+        for action in getattr(prefetch, "anomaly_actions", ()) or ():
+            try:
+                apply_day0_oracle_anomaly_action(action, conn=world_conn)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "DAY0_ORACLE_ANOMALY_EMIT_ACTION_FAILED action=%r exc=%s: %s",
+                    action, type(exc).__name__, exc,
+                )
         if not prefetch.eligible or not prefetch.reports:
             return 0
         reports = list(prefetch.reports)
@@ -1127,7 +1235,7 @@ class Day0FastObsEmitter:
         decision_time: datetime,
         received_at: str,
         limit: int = 50,
-        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], None]] = None,
+        anomaly_check: Optional[Callable[[Any, FastObsExtremes, list[MetarReport]], Any]] = None,
     ) -> int:
         """Compatibility wrapper: prefetch (HTTP) + emit (DB) in one call.
 

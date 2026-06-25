@@ -10,9 +10,10 @@
 """SINGLE-AUTHORITY current-value serving for the replacement multi-model fusion.
 
 ``read_current_instrument_values`` is the ONE function that decides, per provider, whether its
-CURRENT value for a (city, metric, target_date, source_cycle_time) scope is served from its
-``single_runs`` row (the forward live capture — always preferred) or substituted from its
-``previous_runs`` row at the SAME natural key. Both the materializer's q path
+CURRENT value for a (city, metric, target_date, selected source_cycle_time) scope is served from
+its ``single_runs`` row (the forward live capture — always preferred) or from the newest
+persisted ``previous_runs`` row that was actually available no later than the selected cycle.
+Both the materializer's q path
 (``_read_persisted_current_capture`` is a thin shape-adapter over this function) and the
 fusion-upgrade trigger's capturable-set computation call it, so "what can be fused" can never
 drift between the two sites (single-builder; registry member #10).
@@ -20,14 +21,16 @@ drift between the two sites (single-builder; registry member #10).
 THE GENERALIZED RULE (supersedes the gem-only exception, which becomes one instance of it):
 
   1. A model's single_runs row at the selected cycle ALWAYS wins (forward capture priority).
-  2. A model with NO single_runs row but a previous_runs row at the SAME natural key is served
-     from that previous_runs row, BRANDED ``served_via="previous_runs"`` — never silently. The
+  2. A model with NO single_runs row at the selected cycle may be served from the newest
+     persisted row for the same model/city/metric/target_date whose ``source_cycle_time`` is not
+     after the selected cycle, BRANDED by its real ``served_via`` and ``served_cycle`` — never
+     silently. The
      substituted value is the SAME physical product the model's walk-forward de-bias history is
      fit on (previous_runs at this lead), so the de-bias and the lead-bucket residual variance
      already price the older run honestly: NO manual down-weighting exists anywhere — a
      substituted instrument's precision weight derives from its own lead-bucket history exactly
      like a forward-captured one.
-  3. A model absent from BOTH endpoints at the cycle stays dropped (exactly as today).
+  3. A model absent from BOTH endpoints at or before the selected cycle stays dropped.
 
 K-DECISION on the eligibility guard (task constraint 3, judged + documented): the substitution
 does NOT try to distinguish "structurally unpublished at this cycle" (JMA at 06Z) from
@@ -38,7 +41,7 @@ Instead the freshness horizon admits both: the previous_runs row must sit at the
 source_cycle_time (the primary freshness anchor — a different cycle's row never leaks, pinned
 since edc598b440) AND its capture must be recent relative to that cycle
 (``PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS``). A transiently-failed provider is therefore
-served from its freshest previous run too — 没有新的就用老的: serving the one-run-older value
+served from its freshest possessed run too — 没有新的就用老的: serving the one-run-older value
 of the SAME de-biased product beats dropping the instrument and inflating sigma, and the honest
 ``served_via`` provenance + the lead-bucketed residual variance carry the cost. The horizon is
 belt-and-suspenders against anomalous stale-keyed rows (e.g. a backfill captured a day after
@@ -68,7 +71,7 @@ class ServedInstrumentValue:
     value_c: float
     raw_model_forecast_id: int
     served_via: str            # SERVED_VIA_SINGLE_RUNS | SERVED_VIA_PREVIOUS_RUNS
-    served_cycle: str          # the served row's source_cycle_time (== the selected cycle)
+    served_cycle: str          # the served row's source_cycle_time (<= the selected cycle)
     captured_at: str | None    # the served row's capture timestamp (None on stripped schemas)
     age_hours: float           # captured_at − source_cycle_time, hours (0.0 when unknowable)
     lead_days: int | None      # the served row's lead bucket — the SAME bucket its history uses
@@ -120,11 +123,10 @@ def read_current_instrument_values(
     substituted from their previous_runs row at the SAME natural key when the freshness horizon
     admits it; models absent from both stay absent (dropped by the fusion exactly as today).
 
-    LEAD_DAYS IS NOT A FILTER (preserved from the 2026-06-09 fix): the natural key
-    (city, metric, target_date, source_cycle_time) uniquely identifies the forecast; lead_days
-    is derived and is only REPORTED (it names the history lead bucket the instrument's de-bias
-    and residual variance are fit on). Fail-soft: any DB error -> empty dict (treated as missing
-    capture; never raises into the q path).
+    LEAD_DAYS IS NOT A FILTER (preserved from the 2026-06-09 fix): the selected cycle is the
+    freshness ceiling, while the served row reports its own real lead bucket (which names the
+    history residual variance that prices that older/current value). Fail-soft: any DB error ->
+    empty dict (treated as missing capture; never raises into the q path).
     """
     try:
         columns = {
@@ -150,15 +152,20 @@ def read_current_instrument_values(
     else:
         order_clause = "raw_model_forecast_id DESC"
 
-    def _rows(endpoint: str) -> list:
+    def _rows(endpoint: str, *, exact_cycle: bool) -> list:
         try:
+            cycle_predicate = "source_cycle_time = ?" if exact_cycle else "source_cycle_time < ?"
             return conn.execute(
                 f"""
-                SELECT raw_model_forecast_id, model, forecast_value_c, lead_days{captured_select}
+                SELECT raw_model_forecast_id, model, forecast_value_c, lead_days,
+                       source_cycle_time{captured_select}
                 FROM raw_model_forecasts
                 WHERE city = ? AND metric = ? AND target_date = ?
-                  AND source_cycle_time = ? AND endpoint = ?
-                ORDER BY model, lead_days, {order_clause}
+                  AND {cycle_predicate} AND endpoint = ?
+                ORDER BY model,
+                         source_cycle_time DESC,
+                         lead_days,
+                         {order_clause}
                 """,
                 (city, metric, target_date, source_cycle_time_iso, endpoint),
             ).fetchall()
@@ -166,46 +173,33 @@ def read_current_instrument_values(
             return []
 
     out: dict[str, ServedInstrumentValue] = {}
-    # (1) forward single_runs capture — always wins. First row per model = freshest row (DESC
-    #     ORDER BY captured_at NULLS LAST, raw_model_forecast_id; `if model in out` skips rest).
-    for row in _rows(SERVED_VIA_SINGLE_RUNS):
-        try:
-            rid = int(row[0])
-            model = str(row[1])
-            value = float(row[2])
-            lead = None if row[3] is None else int(row[3])
-            captured = str(row[4]) if has_captured_at and row[4] is not None else None
-        except Exception:
-            continue
-        if model in out:
-            continue
-        age = _age_hours_or_none(captured, source_cycle_time_iso)
-        out[model] = ServedInstrumentValue(
-            value_c=value, raw_model_forecast_id=rid, served_via=SERVED_VIA_SINGLE_RUNS,
-            served_cycle=source_cycle_time_iso, captured_at=captured,
-            age_hours=0.0 if age is None else age, lead_days=lead,
-        )
-    # (2) previous_runs substitution for models the forward capture does not serve at this cycle
-    #     (没有新的就用老的 generalization of the gem exception; BRANDED, never silent).
-    for row in _rows(SERVED_VIA_PREVIOUS_RUNS):
-        try:
-            rid = int(row[0])
-            model = str(row[1])
-            value = float(row[2])
-            lead = None if row[3] is None else int(row[3])
-            captured = str(row[4]) if has_captured_at and row[4] is not None else None
-        except Exception:
-            continue
-        if model in out:
-            continue
-        age = _age_hours_or_none(captured, source_cycle_time_iso)
-        # Freshness horizon: an unknowable age fails OPEN (the same-cycle natural key is the
-        # primary anchor); a parsed age beyond the horizon rejects the anomalous stale row.
-        if age is not None and age > float(max_substitution_age_hours):
-            continue
-        out[model] = ServedInstrumentValue(
-            value_c=value, raw_model_forecast_id=rid, served_via=SERVED_VIA_PREVIOUS_RUNS,
-            served_cycle=source_cycle_time_iso, captured_at=captured,
-            age_hours=0.0 if age is None else age, lead_days=lead,
-        )
+
+    def _serve(endpoint: str, *, exact_cycle: bool) -> None:
+        for row in _rows(endpoint, exact_cycle=exact_cycle):
+            try:
+                rid = int(row[0])
+                model = str(row[1])
+                value = float(row[2])
+                lead = None if row[3] is None else int(row[3])
+                served_cycle = str(row[4])
+                captured = str(row[5]) if has_captured_at and row[5] is not None else None
+            except Exception:
+                continue
+            if model in out:
+                continue
+            age = _age_hours_or_none(captured, served_cycle)
+            if endpoint == SERVED_VIA_PREVIOUS_RUNS and age is not None and age > float(max_substitution_age_hours):
+                continue
+            out[model] = ServedInstrumentValue(
+                value_c=value, raw_model_forecast_id=rid, served_via=endpoint,
+                served_cycle=served_cycle, captured_at=captured,
+                age_hours=0.0 if age is None else age, lead_days=lead,
+            )
+
+    # Priority is about possession time first, then endpoint quality:
+    # exact-cycle single_runs > exact-cycle previous_runs > newest prior single_runs > newest prior previous_runs.
+    _serve(SERVED_VIA_SINGLE_RUNS, exact_cycle=True)
+    _serve(SERVED_VIA_PREVIOUS_RUNS, exact_cycle=True)
+    _serve(SERVED_VIA_SINGLE_RUNS, exact_cycle=False)
+    _serve(SERVED_VIA_PREVIOUS_RUNS, exact_cycle=False)
     return out

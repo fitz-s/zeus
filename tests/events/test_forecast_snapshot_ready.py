@@ -435,6 +435,32 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
     assert json.loads(payload)["completeness_status"] == "COMPLETE"
 
 
+def test_build_committed_snapshot_events_does_not_write_world_rows():
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_chicago_2026_05_24(forecasts_conn)
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+    )
+
+    assert len(events) == 1
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    written = EventWriter(world_conn).write_many(events)
+    assert len(written) == 1
+    assert written[0].inserted is True
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+
+
 def _seed_committed_chicago_2026_05_24(forecasts_conn) -> None:
     """Insert a COMPLETE/LIVE_ELIGIBLE Chicago high coverage for target 2026-05-24
     (the same shape as test_scan_committed_snapshots_emits_from_source_run_coverage)."""
@@ -618,6 +644,79 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
     assert payload["track"] == "replacement_0_1_openmeteo_bayes_fusion"
     assert payload["member_count"] == 3
     assert payload["expected_members"] == 3
+
+
+def test_restricted_redecision_counts_raw_members_only_for_screened_family(monkeypatch):
+    """A screened redecision must not raw-member scan every latest posterior family."""
+
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
+        lambda: True,
+    )
+    counted: list[tuple[str, str, str]] = []
+
+    def _fake_count(_conn, row, *, decision_iso):
+        counted.append((row["city"], row["target_local_date"], row["temperature_metric"]))
+        return 3
+
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._raw_model_member_count_for_posterior_row",
+        _fake_count,
+    )
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+            q_ucb_json, posterior_method, dependency_source_run_ids_json,
+            provenance_json, runtime_layer, training_allowed
+        ) VALUES (
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+            ?, '2026-05-24', 'high',
+            '2026-05-24T00:00:00+00:00',
+            '2026-05-24T04:15:00+00:00',
+            ?,
+            '{"bin:28":0.42}', NULL, NULL,
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            '[]', '{}', 'live', 0
+        )
+        """,
+        [
+            ("Chicago", "2026-05-24T04:16:00+00:00"),
+            ("Denver", "2026-05-24T04:17:00+00:00"),
+        ],
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+
+    results = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:18:00+00:00",
+        source="cycle-1",
+        event_type="EDLI_REDECISION_PENDING",
+        restrict_to_families={("Chicago", "2026-05-24", "high")},
+        phase_filter_exempt_families={("Chicago", "2026-05-24", "high")},
+    )
+
+    assert len(results) == 1
+    assert counted == [("Chicago", "2026-05-24", "high")]
+    import json
+
+    payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
+    assert payload["city"] == "Chicago"
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():

@@ -45,6 +45,8 @@ there is no warm thread at all.
 
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -167,21 +169,66 @@ def test_warm_exception_does_not_crash_boot_and_submit_stays_fail_closed(monkeyp
 # STRUCTURAL OVERLAP — warm spawn after heartbeat & before schema gate; join
 # immediately before the wallet gate. This is the RED anchor on 38ddec092e.
 # ---------------------------------------------------------------------------
-def test_main_overlaps_wallet_warm_with_db_boot_work():
+def test_main_does_not_start_wallet_warm_before_scheduler():
     source = Path(main_mod.__file__).read_text()
     body = source[source.index("def main():"):]
 
     heartbeat = body.index("_start_venue_heartbeat_loop_if_needed()")
-    warm_spawn = body.index("_start_boot_wallet_warm()")
     schema_gate = body.index("_startup_world_schema_ready_check()")
-    warm_join = body.index("_join_boot_wallet_warm(")
     wallet_gate = body.index("_startup_wallet_check(")
+    scheduler_start = body.index("BlockingScheduler")
 
-    # Heartbeat stays before the wallet RPC (heartbeat-before-boot-http invariant).
-    assert heartbeat < warm_spawn, "warm wallet RPC spawned before venue heartbeat"
-    # Warm spawns BEFORE the DB-bound boot work so they overlap.
-    assert warm_spawn < schema_gate, "warm not spawned before the schema-ready DB gate"
-    # The DB-bound boot work runs between spawn and join (the overlap window).
-    assert schema_gate < warm_join, "schema gate not inside the warm/join overlap window"
-    # Join happens immediately before the deterministic wallet gate.
-    assert warm_join < wallet_gate, "warm thread not joined before the wallet gate"
+    assert heartbeat < schema_gate, "venue heartbeat supervisor must configure before DB boot"
+    assert schema_gate < wallet_gate, "wallet gate should stay after DB boot checks"
+    assert "_start_boot_wallet_warm()" not in body[:scheduler_start], (
+        "main() must not start wallet/CLOB warm before scheduler startup"
+    )
+
+
+def test_startup_data_health_check_uses_existence_probes_for_large_tables(monkeypatch):
+    """Startup reminders must not full-scan large live tables before scheduler boot."""
+
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Conn:
+        def __init__(self):
+            self.sql: list[str] = []
+
+        def execute(self, sql):
+            self.sql.append(sql)
+            if "COUNT(DISTINCT city) FROM forecast_skill" in sql:
+                return _Cursor([len(main_mod.cities_by_name)])
+            if "COUNT(DISTINCT city) FROM model_bias" in sql:
+                return _Cursor([len(main_mod.cities_by_name)])
+            if "COUNT(*) FROM model_bias" in sql:
+                return _Cursor([0])
+            return _Cursor((1,))
+
+    fake_validation = types.SimpleNamespace(
+        run_validation=lambda: {"valid": True, "mismatches": []}
+    )
+    monkeypatch.setitem(sys.modules, "scripts.validate_assumptions", fake_validation)
+
+    conn = _Conn()
+    main_mod._startup_data_health_check(conn)
+
+    large_tables = {
+        "asos_wu_offsets",
+        "observation_instants",
+        "diurnal_curves",
+        "diurnal_peak_prob",
+        "temp_persistence",
+        "solar_daily",
+    }
+    for table in large_tables:
+        assert any(
+            f"SELECT 1 FROM {table} LIMIT 1" in sql for sql in conn.sql
+        ), f"{table} should use bounded existence probe"
+        assert not any(
+            f"SELECT COUNT(*) FROM {table}" in sql for sql in conn.sql
+        ), f"{table} must not be full-counted during startup"

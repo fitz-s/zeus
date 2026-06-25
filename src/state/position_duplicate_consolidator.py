@@ -396,8 +396,6 @@ def consolidate(conn: sqlite3.Connection) -> dict:
     No-op on healthy state (no token has >1 open-phase rows). Raises on
     internal inconsistency (target row vanished mid-consolidation).
     """
-    chain_by_token = _load_chain_shares_by_token(conn)
-    chain_snapshot_used = bool(chain_by_token)
     duplicates = _enumerate_duplicates(conn)
     report = {
         "scanned_tokens": len(duplicates),
@@ -406,10 +404,14 @@ def consolidate(conn: sqlite3.Connection) -> dict:
         "voided_positions": [],
         "merged_tokens": [],
         "merged_positions": [],
-        "chain_snapshot_used": chain_snapshot_used,
+        "chain_snapshot_used": False,
     }
     if not duplicates:
         return report
+
+    chain_by_token = _load_chain_shares_by_token(conn)
+    chain_snapshot_used = bool(chain_by_token)
+    report["chain_snapshot_used"] = chain_snapshot_used
 
     sp = f"sp_f109_consolidate_{secrets.token_hex(6)}"
     conn.execute(f"SAVEPOINT {sp}")
@@ -522,8 +524,18 @@ def consolidate_token(conn: sqlite3.Connection, token_id: str) -> dict:
     references a token that still holds duplicates. Returns the same shape
     as consolidate() but scoped to one token.
     """
-    chain_by_token = _load_chain_shares_by_token(conn)
-    duplicates = [(t, rows) for t, rows in _enumerate_duplicates(conn) if t == str(token_id)]
+    rows = _row_dicts_for_token(conn, str(token_id))
+    triples = [
+        (
+            _norm_identity(row.get("position_id")),
+            _float_or_none(row.get("shares")) or 0.0,
+            _norm_identity(row.get("first_at")) or "9999",
+        )
+        for row in rows
+    ]
+    triples = [triple for triple in triples if triple[0]]
+    triples.sort(key=lambda t: t[2])
+    duplicates = [(str(token_id), triples)] if len(triples) > 1 else []
     report = {
         "scanned_tokens": len(duplicates),
         "overbook_tokens": [],
@@ -531,15 +543,17 @@ def consolidate_token(conn: sqlite3.Connection, token_id: str) -> dict:
         "voided_positions": [],
         "merged_tokens": [],
         "merged_positions": [],
-        "chain_snapshot_used": bool(chain_by_token),
+        "chain_snapshot_used": False,
     }
     if not duplicates:
         return report
 
+    chain_by_token = _load_chain_shares_by_token(conn)
+    report["chain_snapshot_used"] = bool(chain_by_token)
+
     sp = f"sp_f109_token_{secrets.token_hex(6)}"
     conn.execute(f"SAVEPOINT {sp}")
     try:
-        triples = duplicates[0][1]
         db_sum = sum(t[1] for t in triples)
         # MAJ-2 fix (2026-05-17 phase critic): token-absence != chain=0.
         # Detect and classify DIVERGENT, do NOT default to overbook.

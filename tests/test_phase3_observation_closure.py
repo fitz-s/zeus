@@ -92,9 +92,9 @@ class TestProviderClosureLowSoFar(unittest.TestCase):
 
         fake_wu_payload = {
             "observations": [
-                {"temp": 68.0, "valid_time_gmt": 1776333600},  # 2026-04-16 06:00 ET
-                {"temp": 75.0, "valid_time_gmt": 1776355200},  # 2026-04-16 12:00 ET
-                {"temp": 72.0, "valid_time_gmt": 1776376800},  # 2026-04-16 18:00 ET
+                {"temp": 68.0, "valid_time_gmt": 1776333600, "obs_id": "KLGA"},  # 2026-04-16 06:00 ET
+                {"temp": 75.0, "valid_time_gmt": 1776355200, "obs_id": "KLGA"},  # 2026-04-16 12:00 ET
+                {"temp": 72.0, "valid_time_gmt": 1776376800, "obs_id": "KLGA"},  # 2026-04-16 18:00 ET
             ]
         }
 
@@ -105,6 +105,7 @@ class TestProviderClosureLowSoFar(unittest.TestCase):
         mock_city.timezone = "America/New_York"
         mock_city.settlement_unit = "F"
         mock_city.wu_station = "KLGA"
+        mock_city.settlement_source_type = "wu_icao"
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -278,9 +279,9 @@ class TestProviderReturnsTypedContext(unittest.TestCase):
 
         fake_wu_payload = {
             "observations": [
-                {"temp": 68.0, "valid_time_gmt": 1776333600},  # 2026-04-16 06:00 ET
-                {"temp": 75.0, "valid_time_gmt": 1776355200},  # 2026-04-16 12:00 ET
-                {"temp": 72.0, "valid_time_gmt": 1776376800},  # 2026-04-16 18:00 ET
+                {"temp": 68.0, "valid_time_gmt": 1776333600, "obs_id": "KLGA"},  # 2026-04-16 06:00 ET
+                {"temp": 75.0, "valid_time_gmt": 1776355200, "obs_id": "KLGA"},  # 2026-04-16 12:00 ET
+                {"temp": 72.0, "valid_time_gmt": 1776376800, "obs_id": "KLGA"},  # 2026-04-16 18:00 ET
             ]
         }
         mock_city = MagicMock()
@@ -290,6 +291,7 @@ class TestProviderReturnsTypedContext(unittest.TestCase):
         mock_city.timezone = "America/New_York"
         mock_city.settlement_unit = "F"
         mock_city.wu_station = "KLGA"
+        mock_city.settlement_source_type = "wu_icao"
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -327,7 +329,7 @@ class TestProviderReturnsTypedContext(unittest.TestCase):
         """
         ctx_cls = self._import_context()
         try:
-            from src.data.observation_client import _fetch_wu_observation
+            from src.data.observation_client import WU_OBS_TIMEOUT_SECONDS, _fetch_wu_observation
         except ImportError:
             self.fail("_fetch_wu_observation not importable from observation_client")
 
@@ -337,8 +339,8 @@ class TestProviderReturnsTypedContext(unittest.TestCase):
 
         fake_wu_payload = {
             "observations": [
-                {"temp": 68.0, "valid_time_gmt": 1776333600},
-                {"temp": 75.0, "valid_time_gmt": 1776355200},
+                {"temp": 68.0, "valid_time_gmt": 1776333600, "obs_id": "KLGA"},
+                {"temp": 75.0, "valid_time_gmt": 1776355200, "obs_id": "KLGA"},
             ]
         }
         mock_city = MagicMock()
@@ -356,13 +358,14 @@ class TestProviderReturnsTypedContext(unittest.TestCase):
         target_day = date(2026, 4, 16)
         reference_local = datetime(2026, 4, 16, 18, 0, 0, tzinfo=tz)
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.get", return_value=mock_resp) as mock_get:
             result = _fetch_wu_observation(
                 mock_city,
                 target_day=target_day,
                 reference_local=reference_local,
                 tz=tz,
             )
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], WU_OBS_TIMEOUT_SECONDS)
 
         if result is not None:
             self.assertIsInstance(

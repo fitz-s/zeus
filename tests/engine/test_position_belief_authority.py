@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -42,6 +42,7 @@ from src.engine.position_belief import (
     ReplacementBelief,
     load_replacement_belief,
 )
+from src.types.metric_identity import MetricIdentity
 
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
@@ -75,6 +76,17 @@ def forecasts_db(tmp_path):
             coverage_status TEXT,
             captured_at TEXT,
             source_available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_metadata_json TEXT
         )
         """
     )
@@ -123,6 +135,30 @@ def _insert_raw(db_path, *, source_cycle_time, city="Karachi",
             coverage_status,
             captured_at,
             source_available_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_raw_artifact(db_path, *, source_cycle_time, city="Karachi",
+                         target_date="2026-06-12", metric="high",
+                         captured_at=None, source_available_at=None):
+    conn = sqlite3.connect(db_path)
+    metadata = {
+        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+    }
+    conn.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?,?,?,?,?)",
+        (
+            "openmeteo_ecmwf_ifs_9km",
+            source_cycle_time,
+            captured_at,
+            source_available_at,
+            json.dumps(metadata),
         ),
     )
     conn.commit()
@@ -269,6 +305,18 @@ class TestLoadReplacementBelief:
         assert belief is not None
         assert belief.fresh is False
 
+    def test_default_monitor_freshness_matches_restart_preflight_three_hours(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=4)).isoformat(),
+            q={BIN: 0.242},
+        )
+        belief = _load(forecasts_db)
+        assert belief is not None
+        assert DEFAULT_MAX_AGE_HOURS == pytest.approx(3.0)
+        assert belief.fresh is False
+
     def test_source_cycle_clock_controls_live_schema_freshness(self, forecasts_db):
         """Live posteriors stay lawful by the shared source-cycle horizon, not
         the old 9h computed_at monitor clock."""
@@ -313,6 +361,54 @@ class TestLoadReplacementBelief:
         assert "latest_raw_cycle_time=" in validation
         assert "raw_cycle_lag_h=6.00" in validation
         assert validation.endswith(";stale")
+
+    def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
+        """Anchor artifacts are upstream live inputs; monitor freshness cannot
+        stay green just because BAYES_PRECISION_FUSION raw rows have not caught
+        up to the same cycle yet."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        _insert_raw_artifact(
+            forecasts_db,
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            captured_at=(NOW - timedelta(hours=5, minutes=30)).isoformat(),
+            source_available_at=(NOW - timedelta(hours=5, minutes=45)).isoformat(),
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is False
+        assert belief.freshness_basis == "source_cycle_time_raw_forecast_artifacts_lag"
+        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
+        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+
+    def test_raw_artifact_cycle_is_family_scoped(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        _insert_raw_artifact(
+            forecasts_db,
+            city="Lahore",
+            source_cycle_time=(NOW - timedelta(hours=6)).isoformat(),
+            captured_at=(NOW - timedelta(hours=5, minutes=30)).isoformat(),
+            source_available_at=(NOW - timedelta(hours=5, minutes=45)).isoformat(),
+        )
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
 
     def test_source_cycle_clock_still_fails_closed_after_bound(self, forecasts_db):
         _insert(
@@ -508,6 +604,55 @@ class TestMonitorPrimaryAuthority:
         assert "day0_observation_remaining_window" in refresh_pos.applied_validations
         assert is_fresh is True
 
+    def test_day0_observation_dominates_even_fresh_replacement_belief(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(
+            pb,
+            "load_replacement_belief",
+            lambda **kw: (_ for _ in ()).throw(
+                AssertionError("Day0 monitor must not read forecast posterior first")
+            ),
+        )
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.64, ["day0_observation"]
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        monkeypatch.setattr(
+            mr,
+            "_refresh_ens_member_counting",
+            lambda **kw: (_ for _ in ()).throw(AssertionError("ENS fallback must not run")),
+        )
+        pos = self._pos()
+        pos.state = "active"
+        pos.target_date = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Asia/Shanghai", "settlement_source_type": "wu_icao"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.64)
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert "day0_observation_remaining_window" in refresh_pos.applied_validations
+        assert is_fresh is True
+
     def test_hko_day0_window_uses_day0_observation_lane(self, monkeypatch):
         import src.engine.monitor_refresh as mr
         import src.engine.position_belief as pb
@@ -556,6 +701,131 @@ class TestMonitorPrimaryAuthority:
         )
         assert "day0_observation_remaining_window" in refresh_pos.applied_validations
         assert is_fresh is True
+
+    def test_noaa_target_day_uses_day0_observation_lane(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+        import src.engine.position_belief as pb
+
+        monkeypatch.setattr(
+            pb,
+            "load_replacement_belief",
+            lambda **kw: (_ for _ in ()).throw(
+                AssertionError("NOAA Day0 monitor must not start from replacement belief")
+            ),
+        )
+        observed = []
+
+        def fake_day0_refresh(**kw):
+            observed.append(kw["position"].entry_method)
+            mr._set_monitor_probability_fresh(kw["position"], True)
+            return 0.68, ["day0_observation"]
+
+        monkeypatch.setattr(mr, "_refresh_day0_observation", fake_day0_refresh)
+        pos = self._pos()
+        pos.city = "Moscow"
+        pos.state = "day0_window"
+        pos.target_date = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+        city = type(
+            "City",
+            (),
+            {"timezone": "Europe/Moscow", "settlement_source_type": "noaa"},
+        )()
+
+        prob, refresh_pos, is_fresh = mr.monitor_probability_refresh(
+            pos,
+            conn=None,
+            city=city,
+            target_d=datetime.now(ZoneInfo("Europe/Moscow")).date(),
+        )
+
+        assert observed == [EntryMethod.DAY0_OBSERVATION.value]
+        assert prob == pytest.approx(0.68)
+        assert (
+            refresh_pos.selected_method
+            == mr.SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+        )
+        assert is_fresh is True
+
+    def test_noaa_day0_observation_reads_canonical_ogimet_surface(self, monkeypatch):
+        import src.engine.monitor_refresh as mr
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE observation_instants (
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                timezone_name TEXT NOT NULL,
+                utc_timestamp TEXT NOT NULL,
+                temp_current REAL,
+                running_max REAL,
+                running_min REAL,
+                authority TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, timezone_name, utc_timestamp,
+                temp_current, running_max, running_min, authority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
+                    "Europe/Moscow", "2026-06-25T00:00:00+00:00",
+                    None, 16.0, 14.0, "VERIFIED",
+                ),
+                (
+                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
+                    "Europe/Moscow", "2026-06-25T01:00:00+00:00",
+                    None, 18.0, 13.0, "VERIFIED",
+                ),
+                (
+                    "Moscow", "2026-06-25", "ogimet_metar_uuww",
+                    "Europe/Moscow", "2026-06-25T02:00:00+00:00",
+                    None, 17.0, 13.5, "VERIFIED",
+                ),
+            ],
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection_read_only",
+            lambda: conn,
+        )
+        city = type(
+            "City",
+            (),
+            {
+                "name": "Moscow",
+                "timezone": "Europe/Moscow",
+                "settlement_unit": "C",
+                "settlement_source_type": "noaa",
+            },
+        )()
+
+        obs = mr._fetch_day0_observation(city, date(2026, 6, 25))
+
+        assert obs.source == "ogimet_metar_uuww"
+        assert obs.high_so_far == pytest.approx(18.0)
+        assert obs.low_so_far == pytest.approx(13.0)
+        assert obs.current_temp != obs.current_temp
+        assert obs.observation_time == "2026-06-25T02:00:00+00:00"
+        assert obs.coverage_status == "LOW_COVERAGE"
+        assert mr._day0_observation_source_rejection_reason(
+            city,
+            obs,
+            consumer_label="held-position monitor refresh",
+        ) is None
+        assert mr._day0_observation_quality_rejection_reason(
+            city,
+            obs,
+            MetricIdentity.from_raw("high"),
+            decision_time=datetime(2026, 6, 25, 2, 10, tzinfo=timezone.utc),
+            allow_incomplete_window_bound=True,
+        ) is None
 
     def test_day0_monitor_accepts_incomplete_window_only_as_bound(self, monkeypatch):
         import src.engine.monitor_refresh as mr

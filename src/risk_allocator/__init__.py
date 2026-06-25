@@ -1,6 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-06-22
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A2.yaml
+#                  + docs/evidence/live_order_pathology/2026-06-22_governor_scope_lattice_decision.md
 """Risk allocation package."""
 
 from src.risk_allocator.governor import (
@@ -11,8 +12,10 @@ from src.risk_allocator.governor import (
     GovernorState,
     PortfolioGovernor,
     RiskAllocator,
+    UnknownSideEffectScope,
     assert_global_allocation_allows,
     assert_global_submit_allows,
+    classify_unknown_side_effect_scope,
     clear_global_allocator,
     configure_global_allocator,
     configure_global_governor_state,
@@ -34,8 +37,10 @@ __all__ = [
     "GovernorState",
     "PortfolioGovernor",
     "RiskAllocator",
+    "UnknownSideEffectScope",
     "assert_global_allocation_allows",
     "assert_global_submit_allows",
+    "classify_unknown_side_effect_scope",
     "clear_global_allocator",
     "configure_global_allocator",
     "configure_global_governor_state",

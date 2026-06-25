@@ -15,7 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from src.state.db import get_connection, init_schema, init_schema_forecasts
+from src.state.db import (
+    get_connection,
+    get_forecasts_connection_read_only,
+    init_schema,
+    init_schema_forecasts,
+)
 
 
 def _create_opportunity_fact_table(conn):
@@ -102,6 +107,35 @@ def _create_execution_fact_table(conn):
         """
     )
     conn.commit()
+
+
+def test_forecasts_read_only_connection_enforces_query_only(tmp_path, monkeypatch):
+    import src.state.db as db_module
+
+    db_path = tmp_path / "zeus-forecasts.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+
+    conn = get_forecasts_connection_read_only()
+    try:
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO probe (id) VALUES (1)")
+    finally:
+        conn.close()
+
+
+def test_forecasts_read_only_connection_does_not_create_missing_db(tmp_path, monkeypatch):
+    import src.state.db as db_module
+
+    db_path = tmp_path / "missing-forecasts.db"
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+
+    with pytest.raises(sqlite3.OperationalError):
+        get_forecasts_connection_read_only()
+    assert not db_path.exists()
 
 
 def _create_outcome_fact_table(conn):
@@ -1499,6 +1533,31 @@ def test_load_portfolio_enables_audit_logging(tmp_path):
     assert state.audit_logging_enabled is True
 
 
+def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    conn.close()
+
+    reopened = sqlite3.connect(trade_db)
+    try:
+        indexes = {
+            row[1]
+            for row in reopened.execute(
+                "PRAGMA index_list('execution_feasibility_evidence')"
+            ).fetchall()
+        }
+    finally:
+        reopened.close()
+
+    assert "idx_execution_feasibility_evidence_token_created" in indexes
+
+
 def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):
     from src.state.portfolio import load_portfolio
     from src.state.db import get_connection, init_schema
@@ -1520,6 +1579,41 @@ def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):
 
     assert len(state.positions) == 1
     assert getattr(state.positions[0].exit_state, "value", state.positions[0].exit_state) == ""
+
+
+def test_portfolio_loader_ignores_exit_backoff_hint_for_day0_held_position(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "day0-backoff-hint.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="day0-held-after-exit-backoff",
+        phase="day0_window",
+        order_status="backoff_exhausted",
+        shares=2.5,
+        submitted_size_usd=1.5,
+        projected_cost_basis_usd=1.5,
+        entry_price=0.60,
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="day0-held-after-exit-backoff",
+        event_type="EXIT_ORDER_REJECTED",
+        status="backoff_exhausted",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    conn.commit()
+
+    loader_view = query_portfolio_loader_view(conn)
+    status_view = query_position_current_status_view(conn)
+    conn.close()
+
+    position = loader_view["positions"][0]
+    assert position["state"] == "day0_window"
+    assert position["exit_state"] == ""
+    assert status_view["positions"][0]["exit_state"] == "none"
+    assert status_view["exit_state_counts"] == {"none": 1}
 
 
 def test_position_current_views_use_fill_authority_current_open_economics(tmp_path):
@@ -1605,6 +1699,7 @@ def test_portfolio_loader_view_projects_runtime_monitor_columns(tmp_path):
            SET entry_ci_width = 0.12,
                exit_retry_count = 3,
                next_exit_retry_at = '2026-04-01T00:10:00+00:00',
+               exit_reason = 'MARKET_CLOSED_AWAITING_SETTLEMENT',
                last_monitor_prob = 0.64,
                last_monitor_prob_is_fresh = 1,
                last_monitor_market_price = 0.43,
@@ -1622,6 +1717,7 @@ def test_portfolio_loader_view_projects_runtime_monitor_columns(tmp_path):
     assert loader_position["entry_ci_width"] == pytest.approx(0.12)
     assert loader_position["exit_retry_count"] == 3
     assert loader_position["next_exit_retry_at"] == "2026-04-01T00:10:00+00:00"
+    assert loader_position["exit_reason"] == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert loader_position["last_monitor_prob"] == pytest.approx(0.64)
     assert loader_position["last_monitor_prob_is_fresh"] is True
     assert loader_position["last_monitor_market_price"] == pytest.approx(0.43)

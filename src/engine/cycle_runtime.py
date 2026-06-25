@@ -175,8 +175,8 @@ def _freeze_entries_after_shoulder_ledger_failure(error: str, *, logger) -> str 
 # entry-vs-exit statistical symmetry.
 #
 # Excluded triggers and their rationale:
-# - SETTLEMENT_IMMINENT / WHALE_TOXICITY / MODEL_DIVERGENCE_PANIC /
-#   FLASH_CRASH_PANIC / RED_FORCE_EXIT / VIG_EXTREME — force-majeure exits
+# - SETTLEMENT_IMMINENT / WHALE_TOXICITY / FLASH_CRASH_PANIC /
+#   RED_FORCE_EXIT / VIG_EXTREME — force-majeure exits
 #   driven by market-mechanics or risk-layer mandates, not statistical
 #   inference. Symmetry with a statistical entry burden is not a coherent
 #   question.
@@ -2782,6 +2782,7 @@ def _emit_monitor_refreshed_canonical_if_available(
     exit_decision=None,
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
+    final_exit_trigger: str | None = None,
 ) -> bool:
     if conn is None:
         return True
@@ -2803,6 +2804,7 @@ def _emit_monitor_refreshed_canonical_if_available(
             exit_decision=exit_decision,
             final_should_exit=final_should_exit,
             final_exit_reason=final_exit_reason,
+            final_exit_trigger=final_exit_trigger,
         )
         append_many_and_project(conn, events, projection)
     except Exception as exc:
@@ -2819,12 +2821,23 @@ def _emit_monitor_refreshed_canonical_if_available(
 _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
     {
         "CI_SEPARATED_REVERSAL",
-        "MODEL_DIVERGENCE_PANIC",
         "FLASH_CRASH_PANIC",
         "VIG_EXTREME",
         "EDGE_REVERSAL",
     }
 )
+
+_FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
+_FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_FRACTION = 0.0025
+
+
+def _family_direct_sell_advantage_threshold_usd(sell_value: float) -> float:
+    if not math.isfinite(sell_value) or sell_value <= 0.0:
+        return _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD
+    return max(
+        _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD,
+        sell_value * _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_FRACTION,
+    )
 
 
 def _family_monitor_key(pos) -> tuple[str, str, str] | None:
@@ -2969,6 +2982,10 @@ def _apply_family_monitor_overlay(
     payload["family_hold_value_usd"] = hold_value
     payload["family_direct_sell_value_usd"] = sell_value
     payload["family_value_edge_usd"] = hold_value - sell_value
+    sell_advantage = sell_value - hold_value
+    sell_advantage_threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
+    payload["family_direct_sell_advantage_usd"] = sell_advantage
+    payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
         if hold_value + 1e-9 >= sell_value:
@@ -2983,12 +3000,43 @@ def _apply_family_monitor_overlay(
             )
             return False, "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
 
+    # A high bid over a conservative belief is not a reversal by itself. Promote
+    # hold->sell here only when the held-side belief has fallen below entry.
+    _entry_belief = getattr(pos, "p_posterior", None)
+    _cur_belief = getattr(pos, "last_monitor_prob", None)
+    _belief_reversed_below_entry = (
+        _entry_belief is not None
+        and _cur_belief is not None
+        and math.isfinite(float(_entry_belief))
+        and math.isfinite(float(_cur_belief))
+        and float(_cur_belief) < float(_entry_belief)
+    )
+    if (not should_exit) and sell_advantage > sell_advantage_threshold and _belief_reversed_below_entry:
+        payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+        payload["promoted_exit_reason"] = exit_reason
+        payload["belief_reversed_below_entry"] = True
+        setattr(pos, "_monitor_family_redecision", payload)
+        validations = list(getattr(pos, "applied_validations", []) or [])
+        validations.append("family_direct_sell_dominates_hold_exit")
+        pos.applied_validations = list(dict.fromkeys(validations))
+        summary["family_redecision_hold_exits_promoted"] = (
+            summary.get("family_redecision_hold_exits_promoted", 0) + 1
+        )
+        return True, "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+
     payload["decision"] = "FAMILY_OVERLAY_NO_OVERRIDE"
     setattr(pos, "_monitor_family_redecision", payload)
     summary["family_redecision_overlay_evaluated"] = (
         summary.get("family_redecision_overlay_evaluated", 0) + 1
     )
     return should_exit, exit_reason
+
+
+def _effective_exit_trigger(exit_decision, exit_reason: str) -> str:
+    original_reason = str(getattr(exit_decision, "reason", "") or "")
+    if exit_reason and exit_reason != original_reason:
+        return str(exit_reason)
+    return str(getattr(exit_decision, "trigger", "") or exit_reason or "")
 
 
 def _dual_write_canonical_entry_if_available(
@@ -3689,6 +3737,7 @@ def execute_monitoring_phase(
         execute_exit,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        release_market_closed_pending_exit_hold,
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
 
@@ -3776,8 +3825,14 @@ def execute_monitoring_phase(
         )
         if pos.state == "pending_exit":
             if pos.exit_state == "backoff_exhausted":
-                summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
-                continue
+                if release_market_closed_pending_exit_hold(pos, conn=conn):
+                    portfolio_dirty = True
+                    summary["monitor_repaired_market_closed_pending_exit_hold"] = (
+                        summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
+                    )
+                else:
+                    summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
+                    continue
             if is_exit_cooldown_active(pos):
                 summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                 continue
@@ -3977,9 +4032,9 @@ def execute_monitoring_phase(
                     deferred_static_closed_market_info = closed_market_info
                     closed_market_info = None
             if closed_market_info is not None:
-                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+                from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_awaiting_settlement(
+                mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
@@ -4137,8 +4192,8 @@ def execute_monitoring_phase(
                     summary=summary,
                 )
 
+            exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
             if should_exit:
-                exit_trigger = exit_decision.trigger or exit_reason
                 gate_allowed, gate_reason = _exit_evidence_gate_allows_statistical_exit(
                     conn=conn,
                     pos=pos,
@@ -4169,6 +4224,7 @@ def execute_monitoring_phase(
                 exit_decision=exit_decision,
                 final_should_exit=should_exit,
                 final_exit_reason=exit_reason,
+                final_exit_trigger=exit_trigger,
             )
             if not monitor_canonical_written:
                 summary["monitor_canonical_write_failed"] = (
@@ -4218,7 +4274,7 @@ def execute_monitoring_phase(
             summary["monitors"] += 1
 
             if should_exit:
-                pos.exit_trigger = exit_decision.trigger or exit_reason
+                pos.exit_trigger = exit_trigger
                 pos.exit_reason = exit_reason
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
@@ -4266,9 +4322,9 @@ def execute_monitoring_phase(
                 deferred_static_closed_market_info is not None
                 and not ExitContext._is_finite(getattr(exit_context, "best_bid", None))
             ):
-                from src.execution.exit_lifecycle import mark_market_closed_awaiting_settlement
+                from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_awaiting_settlement(
+                mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(
@@ -4333,12 +4389,12 @@ def execute_monitoring_phase(
                 boundary="position_monitor",
             )
 
-    _emit_portfolio_rotation_live_status(conn, summary, deps=deps)
+    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=deps)
     _release_monitor_write_lock_boundary(
         conn,
         summary,
         deps,
-        boundary="portfolio_rotation_live_status",
+        boundary="portfolio_rotation_evaluation_status",
     )
     return portfolio_dirty, tracker_dirty
 
@@ -4648,7 +4704,11 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
         rejection_stage = str(_row_get(row, "rejection_stage", "") or "").strip()
         rejection_reason = str(_row_get(row, "rejection_reason", "") or "").strip()
         if rejection_stage not in {"KELLY", "LIVE_CAP", ""} and not (
-            "KELLY" in rejection_reason or "CAP" in rejection_reason or "BUDGET" in rejection_reason
+            "KELLY" in rejection_reason
+            or "CAP" in rejection_reason
+            or "BUDGET" in rejection_reason
+            or "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED" in rejection_reason
+            or "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED" in rejection_reason
         ):
             continue
         q_lcb = _finite_probability_or_none(_row_get(row, "q_lcb_5pct"))
@@ -4682,11 +4742,16 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
     return candidates, skipped
 
 
-def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
-    """Evaluate live portfolio rotation posture from current held and candidate evidence."""
+def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> None:
+    """Evaluate portfolio rotation value without implying executable live action.
+
+    Actual same-family fill-up/shift actions are driven by EDLI_REDECISION_PENDING
+    in the event reactor. This summary is read-side evidence only; it must not say
+    a rotation is live-ready when no cross-family rotation actuator consumes it.
+    """
 
     if conn is None:
-        summary["portfolio_rotation_live_status"] = "unavailable:no_connection"
+        summary["portfolio_rotation_evaluation_status"] = "unavailable:no_connection"
         return
     now_fn = getattr(deps, "_utcnow", None)
     try:
@@ -4707,10 +4772,10 @@ def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
     if candidate_missing:
         summary["portfolio_rotation_candidate_input_gaps"] = candidate_missing[:10]
     if not holds:
-        summary["portfolio_rotation_live_status"] = "evaluated:no_held_positions_with_fresh_rotation_inputs"
+        summary["portfolio_rotation_evaluation_status"] = "evaluated:no_held_positions_with_fresh_rotation_inputs"
         return
     if not candidates:
-        summary["portfolio_rotation_live_status"] = "evaluated:no_capital_constrained_positive_candidates"
+        summary["portfolio_rotation_evaluation_status"] = "evaluated:no_capital_constrained_positive_candidates"
         return
 
     from src.strategy.portfolio_rotation import best_rotation
@@ -4727,9 +4792,11 @@ def _emit_portfolio_rotation_live_status(conn, summary: dict, *, deps) -> None:
         require_fill_lcb=True,
     )
     if decision is None:
-        summary["portfolio_rotation_live_status"] = "evaluated:hold_value_dominant"
+        summary["portfolio_rotation_evaluation_status"] = "evaluated:hold_value_dominant"
         return
-    summary["portfolio_rotation_live_status"] = "evaluated:rotate_candidate_ready"
+    summary["portfolio_rotation_evaluation_status"] = (
+        "evaluated:positive_rotation_value_no_cross_family_actuator"
+    )
     summary["portfolio_rotation_best"] = {
         "hold_position_id": decision.hold.position_id,
         "hold_city": decision.hold.city,

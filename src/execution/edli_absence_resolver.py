@@ -561,6 +561,28 @@ def boot_auto_resolve_stuck_unknowns(blocking_reasons: list[str]) -> bool:
     # writes nothing unless EVERY pending aggregate proves absent (its proofs are
     # built before any write), so falling through to presence is state-clean.
     try:
+        from src.execution.command_recovery import (
+            reconcile_edli_acknowledged_venue_command_sync,
+        )
+        from src.state.db import trade_connection_with_world_flocked
+
+        with trade_connection_with_world_flocked(write_class="live") as conn:
+            ack_summary = reconcile_edli_acknowledged_venue_command_sync(conn)
+            conn.commit()
+        logger.warning("boot EDLI acknowledged-command sync: %s", ack_summary)
+        if int(ack_summary.get("advanced", 0)) > 0:
+            ro = get_world_connection_read_only()
+            try:
+                if _readiness_counts(ro) == (0, 0):
+                    return True
+            finally:
+                ro.close()
+    except Exception as exc:  # noqa: BLE001 — local mirror failed -> continue ladder
+        logger.warning(
+            "boot EDLI acknowledged-command sync refused (%s); attempting pre-submit orphan resolution",
+            exc,
+        )
+    try:
         rc0 = resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=logger.warning)
         if rc0 == 0:
             return True

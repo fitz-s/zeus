@@ -54,7 +54,7 @@ from src.data.executable_forecast_reader import read_executable_forecast
 from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.data.forecast_source_registry import calibration_source_id_for_lookup
 from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, get_sibling_outcomes
-from src.data.observation_client import get_current_observation
+from src.data.observation_client import Day0ObservationContext, get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
     DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE,
@@ -393,6 +393,48 @@ def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
 _BELIEF_STALE_FAULT_THRESHOLD = 3
 _belief_stale_cycles: dict[str, int] = {}
 
+# LAYER 2 belief-debt ledger (2026-06-21 held-belief freeze fix). When the
+# synchronous same-authority read-through CANNOT honestly recompute a held
+# family's belief (no current single_runs / no on-disk anchor artifact), the
+# fail-closed HOLD is correct but MUST be durably recorded so it is never a silent
+# permanent freeze. We track (family -> first_failed_at, attempts) in process and
+# stamp the structured marker onto the position's applied_validations, which
+# cycle_runtime persists to position_events (TRADES state, INV-37 — the monitor
+# writes only order-lifecycle state). The existing same-family reseed enqueue is
+# the repair lane; the read-through retries every cycle, so the debt is RETRYABLE.
+_belief_debt_first_failed_at: dict[str, str] = {}
+_belief_debt_attempts: dict[str, int] = {}
+
+
+def _record_belief_debt(pos: "Position", *, city: str, target_date: str, metric: str, reason: str) -> str:
+    """Stamp a durable, retryable belief-debt marker on the position.
+
+    Returns the marker string (also appended to applied_validations). The marker
+    carries family + reason + first_failed_at + attempt count so a held position
+    can never be silently frozen — the operator/audit can query position_events
+    for ``belief_debt`` and the read-through retries it next cycle.
+    """
+    from datetime import datetime, timezone
+
+    key = f"{city}|{target_date}|{metric}|{getattr(pos, 'trade_id', '') or id(pos)}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    first = _belief_debt_first_failed_at.setdefault(key, now_iso)
+    attempts = _belief_debt_attempts.get(key, 0) + 1
+    _belief_debt_attempts[key] = attempts
+    marker = (
+        f"belief_debt;city={city};target_date={target_date};metric={metric};"
+        f"reason={reason};first_failed_at={first};attempts={attempts}"
+    )
+    _append_monitor_validation(pos, marker)
+    return marker
+
+
+def _clear_belief_debt(*, city: str, target_date: str, metric: str, pos: "Position") -> None:
+    """A successful read-through clears the family's belief-debt counters."""
+    key = f"{city}|{target_date}|{metric}|{getattr(pos, 'trade_id', '') or id(pos)}"
+    _belief_debt_first_failed_at.pop(key, None)
+    _belief_debt_attempts.pop(key, None)
+
 
 def _track_belief_staleness(pos: Position) -> None:
     key = str(getattr(pos, "trade_id", "") or id(pos))
@@ -499,6 +541,220 @@ def _enqueue_single_family_belief_reseed_failsoft(
         logger.warning(
             "monitor belief reseed FAILED (fail-soft) city=%s target_date=%s metric=%s exc=%s",
             city, target_date, metric, exc,
+        )
+        return None
+
+
+def _freshest_family_seed_on_disk(*, city: str, target_date: str, metric: str):
+    """Return (Path, payload) of the freshest on-disk materialization seed for the
+    family, or None. Reads ONLY already-written seed files (pending + processed) —
+    NO seed is written, NO network fetch, NO DB write. The seed carries the
+    Open-Meteo anchor payload + precision metadata paths the read-through needs.
+
+    The seed name is ``{city}.{target_date}.{metric}.{stamp}.json``; we pick the
+    lexicographically-latest stamp (ISO-ordered) across the configured seed dirs.
+    """
+    import json as _json
+    from pathlib import Path
+
+    try:
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        cfg = _replacement_forecast_live_materialization_queue_config()
+    except Exception:  # noqa: BLE001 — lane not configured / import failure -> not eligible
+        return None
+    # Normalize the family file-name segments the seed builder uses (spaces -> '_').
+    city_seg = str(city).replace(" ", "_")
+    prefix = f"{city_seg}.{target_date}.{metric}."
+    candidate_dirs = [
+        cfg.get("seed_dir"),
+        cfg.get("seed_processed_dir"),
+        cfg.get("processed_dir"),
+    ]
+    candidates: list[tuple[str, Path]] = []
+    for d in candidate_dirs:
+        if not d:
+            continue
+        base = Path(str(d))
+        if not base.exists():
+            continue
+        try:
+            for path in base.glob(f"{prefix}*.json"):
+                name = path.name
+                if name.endswith(".receipt.json"):
+                    continue
+                # Compare by the trailing stamp portion (ISO timestamps sort lexically).
+                stamp = name[len(prefix):]
+                candidates.append((stamp, path))
+        except OSError:
+            continue
+    for _stamp, path in sorted(candidates, reverse=True):
+        try:
+            payload = _json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if not _seed_payload_covers_target_local_day(seed_path=path, payload=payload):
+            continue
+        return path, payload
+    return None
+
+
+def _seed_payload_covers_target_local_day(*, seed_path, payload: dict) -> bool:
+    """True iff a held-belief seed can extract its requested local day."""
+    from pathlib import Path
+
+    try:
+        target = date.fromisoformat(str(payload.get("target_date") or "").strip())
+        city_timezone = str(payload.get("city_timezone") or "").strip()
+        payload_text = str(payload.get("openmeteo_payload_json") or "").strip()
+        if not city_timezone or not payload_text:
+            return False
+        openmeteo_payload_path = Path(payload_text)
+        if not openmeteo_payload_path.is_absolute():
+            openmeteo_payload_path = Path(seed_path).parent / openmeteo_payload_path
+        openmeteo_payload = json.loads(openmeteo_payload_path.read_text(encoding="utf-8"))
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (
+            extract_openmeteo_ecmwf_ifs9_localday_anchor,
+        )
+
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            openmeteo_payload,
+            city_timezone=city_timezone,
+            target_local_date=target,
+            min_hourly_samples=1,
+            require_full_localday=False,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _attempt_held_belief_readthrough(
+    pos: "Position", *, city, target_d, metric: str,
+    decision_now: datetime | None = None,
+) -> float | None:
+    """LAYER 2 — synchronous single-family read-through recompute (held-belief freeze fix).
+
+    Recompute THIS held family's replacement posterior via the SAME canonical
+    Bayes-precision fusion the live write path uses, against whatever single_runs
+    are CURRENTLY persisted, WITHOUT writing forecast_posteriors. Returns the
+    fresh HELD-SIDE probability for the position's bin, or None when the family
+    cannot be honestly recomputed (no on-disk anchor seed / no current single_runs
+    / not live-eligible). Fewer providers ⇒ honestly wider fusion CI (correct).
+
+    ``decision_now`` is the CURRENT monitor cycle instant (the decision time for
+    this recompute).  The arrival guard inside the Bayes-precision fusion admits
+    only single_runs whose ``source_available_at <= decision_now``, so it MUST be
+    the live clock — not the seed's original ``computed_at`` (which could be hours
+    earlier, causing every recently-arrived single_run to be excluded and the
+    recompute to collapse to STALE_HISTORY_ONLY / live_eligible=False).  The seed's
+    ``source_cycle_time`` (the forecast cycle hour, e.g. "06:00 UTC") is kept
+    verbatim: it identifies WHICH cycle's single_runs to fuse, not a wall-clock.
+
+    Testability: ``decision_now`` defaults to ``None`` (→ ``datetime.now(UTC)``).
+    Pass an explicit value in tests to make the arrival-guard behaviour deterministic.
+
+    INV-37: reads forecasts via a dedicated READ-ONLY forecasts-MAIN connection
+    (``get_forecasts_connection_read_only``) — the SAME pattern this module already
+    uses for bare ``raw_model_forecasts`` reads — NEVER the trades lifecycle conn
+    (whose MAIN is zeus_trades, where the fusion's bare forecast-table names would
+    not resolve) and NEVER an independent WRITE connection. Writes nothing.
+
+    Fail-soft: ANY error / missing input returns None so the caller fail-closes to
+    HOLD + belief_debt (never a fabricated belief, never a monitor crash).
+    """
+    try:
+        target_date = str(getattr(pos, "target_date", "") or "")
+        if not target_date:
+            return None
+        seed = _freshest_family_seed_on_disk(
+            city=str(pos.city), target_date=target_date, metric=metric
+        )
+        if seed is None:
+            return None
+        seed_path, seed_payload = seed
+
+        from src.data.replacement_forecast_materialization_request_builder import (
+            build_materialize_request_dataclass,
+            build_replacement_forecast_materialization_request,
+        )
+
+        build = build_replacement_forecast_materialization_request(
+            seed_payload, base_dir=seed_path.parent
+        )
+        if not build.ok or build.request is None:
+            return None
+        request = build_materialize_request_dataclass(
+            build.request, base_dir=seed_path.parent
+        )
+
+        # ARRIVAL-GUARD DECISION INSTANT FIX (real-chain verified 2026-06-21):
+        # The seed's ``computed_at`` is the seed's BUILD time (e.g. 12:09:08 for
+        # Panama City's 12Z seed).  The Bayes-precision fusion's arrival guard
+        # excludes single_runs whose ``source_available_at > computed_at``; for
+        # frozen families the relevant single_runs arrived AFTER the seed's build
+        # time (e.g. 06:00-cycle at 14:10) — so using the seed's stale computed_at
+        # fuses ZERO multi-model extras → STALE_HISTORY_ONLY → live_eligible=False
+        # → read-through returns None → the freeze is reproduced, not cured.
+        # Fix: the DECISION INSTANT for this read-through recompute is NOW (the
+        # live monitor cycle), so all single_runs available at that instant are
+        # admitted.  source_cycle_time (the forecast cycle, "06:00 UTC") is kept
+        # verbatim — it is NOT a wall-clock and must NOT be advanced.
+        _now = decision_now if decision_now is not None else datetime.now(timezone.utc)
+        request = replace(request, computed_at=_now)
+
+        from src.data.replacement_forecast_materializer import (
+            compute_replacement_posterior_readonly,
+        )
+        from src.state.db import get_forecasts_connection_read_only
+
+        fc_conn = get_forecasts_connection_read_only()
+        try:
+            fc_conn.row_factory = sqlite3.Row
+            # Enforce the read-only contract at the SQLite level, not just by the
+            # factory's name (critic 2026-06-21, MEDIUM-1): query_only turns the
+            # no-write guarantee from convention into enforcement. Any inadvertent
+            # write through this connection — e.g. a future edit to a reader deep in
+            # the fusion call tree — raises instead of silently corrupting forecast
+            # truth during the live monitor loop. The compute path is provably
+            # write-free today; this is defense-in-depth on a live 51GB forecasts DB.
+            fc_conn.execute("PRAGMA query_only=ON")
+            result = compute_replacement_posterior_readonly(fc_conn, request)
+        finally:
+            fc_conn.close()
+        if result is None or not result.live_eligible:
+            return None
+        # Index the held bin by its venue range-label, exactly like load_replacement_belief.
+        from src.engine.position_belief import _match_bin  # noqa: PLC0415
+
+        matched = _match_bin(result.q, str(pos.bin_label))
+        if matched is None:
+            return None
+        _bin_key, q_yes = matched
+        if not (0.0 <= float(q_yes) <= 1.0):
+            return None
+        held = _held_side_probability_from_yes_bin_probability(
+            float(q_yes), str(getattr(pos.direction, "value", pos.direction))
+        )
+        if not (0.0 <= float(held) <= 1.0):
+            return None
+        logger.info(
+            "monitor held-belief READ-THROUGH recompute OK city=%s target_date=%s metric=%s "
+            "providers=%d/%d q_held=%.4f (exit organ regains fresh same-authority belief)",
+            pos.city, target_date, metric,
+            result.decorrelated_providers_served, result.decorrelated_providers_expected,
+            float(held),
+        )
+        return float(held)
+    except Exception as exc:  # noqa: BLE001 — read-through MUST NOT crash the monitor
+        logger.warning(
+            "monitor held-belief read-through FAILED (fail-soft -> fail-close) "
+            "city=%s target_date=%s metric=%s exc=%s",
+            getattr(pos, "city", "?"), getattr(pos, "target_date", "?"), metric, exc,
         )
         return None
 
@@ -1599,10 +1855,98 @@ def _city_supports_executable_day0_observation(city) -> bool:
 
 def _fetch_day0_observation(city: Position | object, target_d: date):
     reference_time = datetime.now(timezone.utc)
+    if str(getattr(city, "settlement_source_type", "") or "").strip() == "noaa":
+        canonical = _fetch_canonical_day0_observation_from_instants(
+            city,
+            target_d,
+            reference_time=reference_time,
+        )
+        if canonical is not None:
+            return canonical
+        raise ObservationUnavailableError(
+            f"Canonical Day0 observation unavailable for "
+            f"{getattr(city, 'name', '?')}/noaa/{target_d.isoformat()}"
+        )
     try:
         return get_current_observation(city, target_date=target_d, reference_time=reference_time)
     except TypeError:
         return get_current_observation(city)
+
+
+def _fetch_canonical_day0_observation_from_instants(
+    city: object,
+    target_d: date,
+    *,
+    reference_time: datetime,
+) -> Day0ObservationContext | None:
+    """Build an executable Day0 observation from canonical observation_instants.
+
+    NOAA-settled cities do not have an observation_client live fetcher, but their
+    settlement-station METAR rows are already persisted in the same canonical
+    surface used by hard-fact Day0 triggers. This adapter feeds that source into
+    the normal Day0Router math instead of falling back to stale replacement
+    posteriors.
+    """
+
+    try:
+        from src.data.day0_observation_reader import (
+            COVERAGE_NONE,
+            read_day0_observed_extrema,
+        )
+        from src.state.db import get_world_connection_read_only
+    except Exception:
+        return None
+
+    city_name = str(getattr(city, "name", "") or "")
+    timezone_name = str(getattr(city, "timezone", "") or "")
+    unit = str(getattr(city, "settlement_unit", "C") or "C")
+    if not city_name or not timezone_name:
+        return None
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        result = read_day0_observed_extrema(
+            conn,
+            city=city_name,
+            target_date=target_d.isoformat(),
+            timezone_name=timezone_name,
+            decision_time_utc=reference_time,
+        )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if result.coverage_status == COVERAGE_NONE or result.chosen_source is None:
+        return None
+    if result.high_so_far is None or result.low_so_far is None:
+        return None
+    observation_time = result.last_observation_time_utc
+    if not observation_time:
+        return None
+    current_temp = (
+        float(result.current_temp)
+        if result.current_temp is not None
+        else float("nan")
+    )
+    return Day0ObservationContext(
+        current_temp=current_temp,
+        high_so_far=float(result.high_so_far),
+        low_so_far=float(result.low_so_far),
+        source=str(result.chosen_source),
+        observation_time=observation_time,
+        unit=unit,
+        station_id=str(result.provenance.get("chosen_source") or result.chosen_source),
+        sample_count=int(result.row_count),
+        last_sample_time=observation_time,
+        coverage_status=str(result.coverage_status),
+        observation_available_at=str(result.decision_time_utc),
+        provider_reported_time="canonical_observation_instants",
+    )
 
 
 def _temperature_native_value_to_c(value: float, *, unit: str) -> float:
@@ -1613,6 +1957,145 @@ def _temperature_native_value_to_c(value: float, *, unit: str) -> float:
     if normalized == "F":
         return (number - 32.0) * 5.0 / 9.0
     raise ValueError(f"unsupported Day0 observed-extreme unit: {unit!r}")
+
+
+def _day0_observed_extreme_from_canonical_surface(
+    *,
+    city_name: str,
+    target_date: str,
+    metric_is_low: bool,
+    now: datetime | None = None,
+    world_conn: sqlite3.Connection | None = None,
+) -> tuple[float, str, int] | None:
+    """Observed running extreme + its observation version from the canonical settlement-grade
+    ``world.observation_instants`` surface — the SAME source the day0 hard-fact lane
+    (``day0_hard_fact_exit._durable_observation_instants_extremes``) and the
+    ``day0_extreme_updated`` trigger already treat as authoritative.
+
+    Same-day exit-blindness fix 2026-06-23: the monitor belief reseed previously sourced the
+    observed extreme ONLY from a live-provider fetch (``get_current_observation``) that routinely
+    fails on the settlement day ("All observation providers failed for <city>/<date>"), starving
+    the day0 conditioning while this canonical WU-hourly surface already held the verified running
+    extreme (Toronto NO@24 -98.94% incident). Returns ``(observed_native, observation_time_iso,
+    sample_count)``, or None when no VERIFIED WU row is available up to ``now``. ``world_conn`` is
+    injectable for tests; otherwise a private short-lived read-only world connection is opened and
+    closed (the position_belief read posture). See
+    docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md.
+    """
+    extreme_col = "running_min" if metric_is_low else "running_max"
+    agg = "MIN" if metric_is_low else "MAX"
+    now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    owns_conn = world_conn is None
+    if owns_conn:
+        try:
+            from src.state.db import get_world_connection_read_only
+
+            world_conn = get_world_connection_read_only()
+        except Exception:  # noqa: BLE001 — read posture is best-effort; reseed continues without it
+            return None
+    try:
+        # Prefer an ATTACHed authoritative ``world`` schema when present (composite connections);
+        # fall back to unqualified ``observation_instants`` for the production case where the world
+        # DB itself is opened as main (consult REQ-20260623-184115 LOW: precedence must not read a
+        # stale main table over an attached authoritative world one).
+        for table_ref in ("world.observation_instants", "observation_instants"):
+            try:
+                row = world_conn.execute(
+                    f"""
+                    SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
+                           MAX(utc_timestamp) AS obs_time,
+                           COUNT(*) AS n_rows
+                    FROM {table_ref}
+                    WHERE city = ?
+                      AND target_date = ?
+                      AND substr(local_timestamp, 1, 10) = target_date
+                      AND utc_timestamp <= ?
+                      AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                      AND COALESCE(causality_status, 'OK') = 'OK'
+                      AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                      AND {extreme_col} IS NOT NULL
+                    """,
+                    (city_name, target_date, now_iso),
+                ).fetchone()
+            except Exception:  # noqa: BLE001 — missing attachment/table fails soft to the next ref
+                continue
+            if row is None:
+                continue
+            extreme = row["extreme"] if hasattr(row, "keys") else row[0]
+            obs_time = row["obs_time"] if hasattr(row, "keys") else row[1]
+            n_rows = int((row["n_rows"] if hasattr(row, "keys") else row[2]) or 0)
+            if extreme is None or n_rows <= 0 or not obs_time:
+                continue
+            return float(extreme), str(obs_time), n_rows
+        return None
+    finally:
+        if owns_conn:
+            try:
+                world_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _compose_day0_observed_extreme(
+    *,
+    live: tuple[float, str, str, int] | None,
+    canonical: tuple[float, str, int] | None,
+    metric_is_low: bool,
+) -> tuple[float, str, str, int] | None:
+    """Compose live + canonical observed extremes by the ABSORBING LAW (consult
+    REQ-20260623-184115 BLOCKER): the canonical settlement-grade surface is a HARD bound; a live
+    reading may only IMPROVE the absorbing extreme (raise the high / lower the low), never undercut
+    it. Returns ``(observed_native, observation_time_iso, source, sample_count)`` for the dominant
+    source, with the LATER observation version on a tie so a fresh plateau still advances the
+    idempotency version. None when neither source is available. A stale/lower live value therefore
+    can NEVER suppress a higher canonical running extreme and materialise a fresh-but-wrong belief
+    (the 9h staleness guard cannot catch a semantically false but timestamp-fresh posterior).
+    ``live`` = (native, observation_time, source, sample_count); ``canonical`` = (native, time, n).
+    """
+    from src.data.replacement_cycle_advance_trigger import normalize_observation_version
+
+    candidates: list[tuple[float, str, str, int]] = []
+    if live is not None:
+        candidates.append((float(live[0]), str(live[1]), str(live[2]), int(live[3])))
+    if canonical is not None:
+        candidates.append(
+            (float(canonical[0]), str(canonical[1]), "durable_observation_instants", int(canonical[2]))
+        )
+    if not candidates:
+        return None
+    extreme = min(c[0] for c in candidates) if metric_is_low else max(c[0] for c in candidates)
+    dominant = [c for c in candidates if c[0] == extreme]
+    best = max(dominant, key=lambda c: normalize_observation_version(c[1]) or "")
+    return (extreme, best[1], best[2], best[3])
+
+
+def _apply_absorbing_floor_to_observed_extreme(
+    raw_live: float | None,
+    canonical_native: float | None,
+    *,
+    metric_is_low: bool,
+) -> float | None:
+    """Monotonic absorbing floor for the BELIEF's observed extreme (REQ-20260623-184115).
+
+    The day0 belief samples ``settle(max(observed_high_so_far, future_member_max))`` (high) /
+    ``min(...)`` (low), so the observed extreme is a hard floor/ceiling on the day's settle value.
+    A later, LOWER live high (an evening METAR/station revision) must NEVER undercut the canonical
+    running max — once the running max has exceeded a bin upper bound the bin is WON, and a lower
+    reading cannot re-open it. The hard-fact/reseed path already composes live+canonical by this
+    absorbing law (`_compose_day0_observed_extreme`); the belief was the last consumer still reading
+    the raw revisable live value (Chicago 2026-06-25: high revised down -> won 76-77 bin re-opened ->
+    belief 1.0->0.65 -> false SETTLEMENT_IMMINENT sale). Returns the absorbing extreme:
+    ``max(live, canonical)`` for high, ``min(live, canonical)`` for low; non-finite values are
+    dropped; ``raw_live`` is returned unchanged when no canonical floor is available.
+    """
+
+    candidates = [
+        v for v in (raw_live, canonical_native)
+        if v is not None and np.isfinite(float(v))
+    ]
+    if not candidates:
+        return raw_live
+    return min(candidates) if metric_is_low else max(candidates)
 
 
 def _day0_observed_extreme_reseed_payload(
@@ -1631,35 +2114,64 @@ def _day0_observed_extreme_reseed_payload(
         metric_id = MetricIdentity.from_raw(metric)
     except Exception:
         return {}
+    metric_is_low = metric_id.is_low()
+    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+
+    # LIVE candidate: a validated live-provider reading (lowest latency when providers serve).
+    live: tuple[float, str, str, int] | None = None
+    obs = None
     try:
         obs = _fetch_day0_observation(city_obj, target_d)
     except Exception as exc:
         logger.info(
-            "monitor belief reseed Day0 observation unavailable city=%s target_date=%s metric=%s exc=%s",
+            "monitor belief reseed Day0 live observation unavailable city=%s target_date=%s "
+            "metric=%s exc=%s (composing with canonical surface)",
             city, target_date, metric, exc,
         )
-        return {}
-    if obs is None:
-        return {}
-    if not _day0_observation_field(obs, "observation_time"):
-        return {}
-    source_rejection = _day0_observation_source_rejection_reason(
-        city_obj,
-        obs,
-        consumer_label="replacement belief reseed",
-    )
-    if source_rejection is not None:
-        logger.info(
-            "monitor belief reseed Day0 observation rejected city=%s target_date=%s metric=%s reason=%s",
-            city, target_date, metric, source_rejection,
+    if obs is not None and _day0_observation_field(obs, "observation_time"):
+        source_rejection = _day0_observation_source_rejection_reason(
+            city_obj,
+            obs,
+            consumer_label="replacement belief reseed",
         )
-        return {}
-    observed_native = _finite_day0_observation_float(
-        obs, "low_so_far" if metric_id.is_low() else "high_so_far"
+        if source_rejection is not None:
+            logger.info(
+                "monitor belief reseed Day0 live observation rejected city=%s target_date=%s "
+                "metric=%s reason=%s (composing with canonical surface)",
+                city, target_date, metric, source_rejection,
+            )
+        else:
+            live_native = _finite_day0_observation_float(
+                obs, "low_so_far" if metric_is_low else "high_so_far"
+            )
+            if live_native is not None:
+                try:
+                    live_sample = int(_day0_observation_field(obs, "sample_count", 0) or 0)
+                except Exception:
+                    live_sample = 0
+                live = (
+                    float(live_native),
+                    str(_day0_observation_field(obs, "observation_time", "") or ""),
+                    str(_day0_observation_field(obs, "source", "") or "live"),
+                    live_sample,
+                )
+
+    # CANONICAL candidate (ALWAYS read): the settlement-grade world.observation_instants surface
+    # the day0 hard-fact lane treats as authoritative. The live reading may only IMPROVE the
+    # absorbing extreme, never undercut this hard bound — a stale/lower live value cannot suppress
+    # the canonical running extreme and materialise a fresh-but-wrong belief (consult
+    # REQ-20260623-184115 BLOCKER). See docs/evidence/same_day_exit_blindness/.
+    canonical = _day0_observed_extreme_from_canonical_surface(
+        city_name=str(getattr(city_obj, "name", "") or city),
+        target_date=str(target_date),
+        metric_is_low=metric_is_low,
     )
-    if observed_native is None:
+    composed = _compose_day0_observed_extreme(
+        live=live, canonical=canonical, metric_is_low=metric_is_low
+    )
+    if composed is None:
         return {}
-    unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
+    observed_native, observation_time, source_label, sample_count = composed
     try:
         observed_c = _temperature_native_value_to_c(observed_native, unit=unit)
     except Exception as exc:
@@ -1669,14 +2181,10 @@ def _day0_observed_extreme_reseed_payload(
             city, target_date, metric, unit, exc,
         )
         return {}
-    try:
-        sample_count = int(_day0_observation_field(obs, "sample_count", 0) or 0)
-    except Exception:
-        sample_count = 0
     return {
         "day0_observed_extreme_c": float(observed_c),
-        "day0_observed_extreme_source": str(_day0_observation_field(obs, "source", "") or ""),
-        "day0_observed_extreme_observation_time": str(_day0_observation_field(obs, "observation_time", "") or ""),
+        "day0_observed_extreme_source": source_label,
+        "day0_observed_extreme_observation_time": observation_time,
         "day0_observed_extreme_sample_count": sample_count,
         "day0_observed_extreme_unit": unit,
     }
@@ -2045,6 +2553,31 @@ def _refresh_day0_observation(
     observed_high_so_far = _finite_day0_observation_float(obs, "high_so_far")
     observed_low_so_far = _finite_day0_observation_float(obs, "low_so_far")
     current_temp = _finite_day0_observation_float(obs, "current_temp")
+    # ABSORBING FLOOR (2026-06-25 "wrong exit"): the BELIEF's observed extreme must be MONOTONIC.
+    # day0_high_distribution samples max(observed_high_so_far, future_max), so a later LOWER live
+    # high (evening METAR/station revision) would drop the floor back into an already-WON max-bin and
+    # spuriously collapse the belief (Chicago 1.0->0.65 -> false SETTLEMENT_IMMINENT sale). The
+    # hard-fact/reseed path already composes live+canonical by the absorbing law (REQ-20260623-184115);
+    # the belief was the last consumer still on the raw revisable live value. Wire the SAME canonical
+    # running-extreme floor here (only the position's own metric — avoids a second world read).
+    _belief_metric_is_low = temperature_metric.is_low()
+    _belief_canonical_extreme = _day0_observed_extreme_from_canonical_surface(
+        city_name=str(getattr(city, "name", "") or ""),
+        target_date=str(target_d),
+        metric_is_low=_belief_metric_is_low,
+    )
+    if _belief_canonical_extreme is not None:
+        if _belief_metric_is_low:
+            observed_low_so_far = _apply_absorbing_floor_to_observed_extreme(
+                observed_low_so_far, _belief_canonical_extreme[0], metric_is_low=True
+            )
+        else:
+            observed_high_so_far = _apply_absorbing_floor_to_observed_extreme(
+                observed_high_so_far, _belief_canonical_extreme[0], metric_is_low=False
+            )
+    observation_source_for_value = str(_day0_observation_field(obs, "source", "") or "")
+    if current_temp is None and observation_source_for_value.startswith("ogimet_metar_"):
+        current_temp = float("nan")
     if current_temp is None:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [
@@ -2648,8 +3181,6 @@ def _day0_absorbing_hard_fact_overlay(
 ) -> tuple[float, Position, bool] | None:
     """Return exact monitor belief when a qualified Day0 hard fact is absorbing."""
 
-    if _position_state_value(pos) != "day0_window":
-        return None
     if not _is_position_target_local_day(pos, city, target_d):
         return None
     metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()
@@ -2716,6 +3247,92 @@ def _day0_absorbing_hard_fact_overlay(
     return float(belief.held_side_prob), hard_pos, True
 
 
+def _would_use_day0_monitor_lane(pos: Position, city, target_d) -> bool:
+    """Whether same-day monitor probability must be observation-aware Day0 belief."""
+
+    return (
+        pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
+        or (
+            _position_state_value(pos) == "day0_window"
+            and _city_supports_executable_day0_observation(city)
+        )
+        or (
+            _is_position_target_local_day(pos, city, target_d)
+            and _city_supports_executable_day0_observation(city)
+        )
+    )
+
+
+def _refresh_day0_monitor_probability(
+    pos: Position,
+    *,
+    conn,
+    city,
+    target_d,
+) -> tuple[float, Position, bool | None]:
+    """Refresh same-day held probability from Day0 observation remaining-window."""
+
+    registry = {
+        EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
+        EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
+    }
+    refresh_pos = pos
+    if pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
+        refresh_pos = copy.copy(pos)
+        refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
+    setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
+
+    # recompute_native_probability still carries a legacy current_p_market
+    # parameter for dispatch compatibility. Do not pass the just-refreshed
+    # executable quote through this seam.
+    probability_reference_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+    try:
+        current_p_posterior = recompute_native_probability(
+            refresh_pos,
+            current_p_market=probability_reference_price,
+            registry=registry,
+            conn=conn,
+            city=city,
+            target_d=target_d,
+        )
+    except ObservationUnavailableError:
+        _set_monitor_probability_fresh(refresh_pos, False)
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unavailable:replacement_belief_reseed",
+        )
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
+        )
+        return pos.p_posterior, refresh_pos, False
+
+    if getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True:
+        try:
+            _day0_metric = MetricIdentity.from_raw(
+                getattr(refresh_pos, "temperature_metric", None)
+            ).temperature_metric
+        except Exception:
+            _day0_metric = None
+        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
+    else:
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unavailable:replacement_belief_reseed",
+        )
+        _enqueue_single_family_belief_reseed_failsoft(
+            city=str(pos.city),
+            target_date=str(pos.target_date),
+            metric=resolve_position_metric(pos)[0],
+        )
+    return (
+        current_p_posterior,
+        refresh_pos,
+        getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None),
+    )
+
+
 def monitor_probability_refresh(
     pos: Position,
     *,
@@ -2742,6 +3359,14 @@ def monitor_probability_refresh(
     )
     if hard_fact_overlay is not None:
         return hard_fact_overlay
+
+    if _would_use_day0_monitor_lane(pos, city, target_d):
+        return _refresh_day0_monitor_probability(
+            pos,
+            conn=conn,
+            city=city,
+            target_d=target_d,
+        )
 
     from src.engine.position_belief import (
         SELECTED_METHOD_REPLACEMENT_POSTERIOR,
@@ -2779,22 +3404,6 @@ def monitor_probability_refresh(
     else:
         _append_monitor_validation(pos, "replacement_posterior_missing")
 
-    # Determine whether the fallthrough would use the day0 nowcast lane (a
-    # DISTINCT settlement-day observation authority that MUST remain) or the
-    # legacy ENS forecast-belief path (the CROSS-ERA substitution the regime law
-    # U1/U2 retires for replacement-managed positions).
-    _would_use_day0_lane = (
-        pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
-        or (
-            _position_state_value(pos) == "day0_window"
-            and _city_supports_executable_day0_observation(city)
-        )
-        or (
-            _is_position_target_local_day(pos, city, target_d)
-            and _city_supports_executable_day0_observation(city)
-        )
-    )
-
     # BELIEF-AUTHORITY FAULT (regime law U1/U2, 2026-06-12): a position whose
     # replacement belief is stale/missing must NOT have the gap papered over by
     # the legacy ENS forecast belief (the Denver 2026-06-12 incident: stale 0.79
@@ -2818,85 +3427,52 @@ def monitor_probability_refresh(
     # for their family, so widening never strands a held position with NO belief
     # source. The same-family reseed is the only repair lane; the ensemble
     # registry below is retained ONLY as applied-list telemetry.
-    if not _would_use_day0_lane:
-        _set_monitor_probability_fresh(pos, False)
-        _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
-        _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
-        _enqueue_single_family_belief_reseed_failsoft(
-            city=str(pos.city),
-            target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
-        )
-        # Return the stored entry-time posterior as the value carrier but with
-        # is_fresh=False so refresh_position records NaN current_p_posterior and
-        # the exit organ treats belief as unavailable (never a stale-as-fresh).
-        return pos.p_posterior, pos, False
-
-    registry = {
-        EntryMethod.ENS_MEMBER_COUNTING.value: _refresh_ens_member_counting,
-        EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
-    }
-    refresh_pos = pos
-    if _would_use_day0_lane and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-        if _city_supports_executable_day0_observation(city):
-            refresh_pos = copy.copy(pos)
-            refresh_pos.entry_method = EntryMethod.DAY0_OBSERVATION.value
-    setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
-
-    # recompute_native_probability still carries a legacy current_p_market
-    # parameter for dispatch compatibility. Do not pass the just-refreshed
-    # executable quote through this seam.
-    probability_reference_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
-    try:
-        current_p_posterior = recompute_native_probability(
-            refresh_pos,
-            current_p_market=probability_reference_price,
-            registry=registry,
-            conn=conn,
-            city=city,
-            target_d=target_d,
-        )
-    except ObservationUnavailableError:
-        _set_monitor_probability_fresh(refresh_pos, False)
-        _append_monitor_validation(
-            refresh_pos,
-            "day0_observation_unavailable:replacement_belief_reseed",
-        )
-        _enqueue_single_family_belief_reseed_failsoft(
-            city=str(pos.city),
-            target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
-        )
-        return pos.p_posterior, refresh_pos, False
-    if (
-        _would_use_day0_lane
-        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is True
-    ):
-        try:
-            _day0_metric = MetricIdentity.from_raw(
-                getattr(refresh_pos, "temperature_metric", None)
-            ).temperature_metric
-        except Exception:
-            _day0_metric = None
-        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
-    if (
-        _would_use_day0_lane
-        and getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None) is not True
-    ):
-        _append_monitor_validation(
-            refresh_pos,
-            "day0_observation_unavailable:replacement_belief_reseed",
-        )
-        _enqueue_single_family_belief_reseed_failsoft(
-            city=str(pos.city),
-            target_date=str(pos.target_date),
-            metric=resolve_position_metric(pos)[0],
-        )
-    return (
-        current_p_posterior,
-        refresh_pos,
-        getattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None),
+    _metric_for_family = resolve_position_metric(pos)[0]
+    # LAYER 2 (2026-06-21 held-belief freeze fix): BEFORE fail-closing, attempt a
+    # SYNCHRONOUS single-family read-through recompute of THIS family's replacement
+    # posterior via the SAME canonical fusion authority, using whatever single_runs
+    # are CURRENTLY persisted. This is NOT a loosening of the BELIEF_AUTHORITY_FAULT
+    # guard: it makes the belief FRESH legitimately (canonical fusion, honestly wider
+    # CI when fewer providers) instead of substituting the cold legacy ENS center.
+    # If it yields a fresh posterior, the exit organ regains a fresh same-authority
+    # belief THIS cycle (so CI_SEPARATED_REVERSAL can arm); if not, we fail-close as
+    # before AND record a durable, retryable belief_debt marker (never a silent freeze).
+    readthrough_prob = _attempt_held_belief_readthrough(
+        pos, city=city, target_d=target_d, metric=_metric_for_family
     )
+    if readthrough_prob is not None:
+        fresh_pos = replace(pos)
+        setattr(fresh_pos, "selected_method", SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(fresh_pos, SELECTED_METHOD_REPLACEMENT_POSTERIOR)
+        _append_monitor_validation(
+            fresh_pos,
+            "belief_source=forecast_posteriors_readthrough_recompute;basis=canonical_bayes_precision_fusion",
+        )
+        _set_monitor_probability_fresh(fresh_pos, True)
+        _clear_belief_debt(
+            city=str(pos.city), target_date=str(pos.target_date),
+            metric=_metric_for_family, pos=fresh_pos,
+        )
+        return float(readthrough_prob), fresh_pos, True
+    _set_monitor_probability_fresh(pos, False)
+    _append_monitor_validation(pos, "BELIEF_AUTHORITY_FAULT")
+    _append_monitor_validation(pos, "legacy_belief_substitution_suppressed")
+    # Durable, retryable belief-debt: the read-through could not honestly recompute
+    # (no current single_runs / no on-disk anchor) — record it so a held position is
+    # never silently frozen. The reseed below is the repair lane.
+    _record_belief_debt(
+        pos, city=str(pos.city), target_date=str(pos.target_date),
+        metric=_metric_for_family, reason="readthrough_inputs_insufficient",
+    )
+    _enqueue_single_family_belief_reseed_failsoft(
+        city=str(pos.city),
+        target_date=str(pos.target_date),
+        metric=_metric_for_family,
+    )
+    # Return the stored entry-time posterior as the value carrier but with
+    # is_fresh=False so refresh_position records NaN current_p_posterior and
+    # the exit organ treats belief as unavailable (never a stale-as-fresh).
+    return pos.p_posterior, pos, False
 
 
 def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext:

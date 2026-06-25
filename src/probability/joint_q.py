@@ -100,6 +100,9 @@ authority, not a fallback here.
 from __future__ import annotations
 
 import hashlib
+import json
+import math
+import os
 from dataclasses import dataclass
 from typing import Literal, Mapping
 
@@ -211,6 +214,92 @@ def _identity_hash(
 
 
 # ---------------------------------------------------------------------------
+# Honest q-SHAPE calibration — the FITTED settlement-frequency temper exponent.
+#
+# WHY (live order pathology 2026-06-21, docs/evidence/live_order_pathology/):
+#   The served predictive σ IS the realized walk-forward settlement RMSE
+#   (src/forecast/sigma_authority.py — the calibrated WIDTH). But a Normal with the
+#   correct VARIANCE still mis-matches the SHAPE of the realized settlement
+#   distribution: the realized frequency is THIN in the far / open-shoulder tail
+#   relative to a Gaussian. For an already-wide cell (Milan high, μ*≈36°C,
+#   σ≈2.0°C) the bare-Normal q over-states q(40°C)=2.78% and the >=42 open shoulder,
+#   where realized settlement frequency is ~0.5%. The sub-cent edge rule then
+#   mass-buys those impossible tail bins. Widening σ (k>1) or a uniform pedestal
+#   (w>0) push MORE mass INTO the tail (the wrong direction); the honest correction
+#   is a settlement-frequency SHAPE temper.
+#
+# THE TRANSFORM (operator law — make the bad output mathematically impossible, by
+#   the GENERATOR, not a downstream cap/haircut/floor):
+#
+#       q_tempered[i] = q_normal[i] ** gamma          # then the SAME q/q.sum() renorm
+#
+#   A single exponent γ ("settlement-frequency temper") reshapes the WHOLE mass
+#   vector before the one normalization. γ > 1 shrinks low-mass (far-tail / open
+#   shoulder) bins MORE than high-mass (center / near-ring) bins, so the over-stated
+#   tail mass is pulled toward center to match realized frequency; γ = 1.0 is the
+#   IDENTITY (byte-identical to the un-tempered Normal). On the Milan case γ≈1.3
+#   maps q(36)=22.5%, q(38)=11.9%, q(40)=1.76% (≈realized) and the open shoulder
+#   ~0.1% while the near-center ring (d1-2) is PRESERVED — the only real edge
+#   survives, the impossible tail gets an HONEST ≈0 q and fails the existing
+#   edge_lcb>0 gate naturally with NO new filter (it is calibration, not a cap).
+#
+#   MONOTONE-CONSERVATIVE on the open shoulder (Paris >=26 relationship invariant):
+#   γ ≥ 1 can only DECREASE a low-mass open-shoulder bin's RELATIVE mass after
+#   renormalization — it can never INFLATE a catch-all — so the catch-all coherence
+#   category the materializer guards is unconstructable here by construction.
+#
+# OPERATOR LAW ("没有一个人可以在没有数学支持下决定一个 hard coded value"): γ is FITTED by
+#   maximum likelihood to realized settlement frequency (the SAME proper-scoring-rule
+#   estimator the σ-scale artifact uses), never hand-set. It is read fail-soft from a
+#   per-settlement-unit-family artifact; ABSENT / unfitted / malformed → γ = 1.0
+#   (INERT, byte-identical). Mirrors src/data/replacement_forecast_materializer.py
+#   ::_replacement_sigma_scale_lookup (the established fitted-artifact read pattern).
+# ---------------------------------------------------------------------------
+
+_Q_SHAPE_TEMPER_FIT_PATH = "state/q_shape_temper_fit.json"
+
+
+def _q_shape_temper_lookup(unit: str) -> float:
+    """FITTED settlement-frequency temper exponent γ for a settlement-unit family.
+
+    Reads ``state/q_shape_temper_fit.json`` (written ONLY by the temper fitter — MLE
+    over settled cells) and returns ``gamma`` for the given settlement unit family
+    ('C' / 'F'). The temper q_adj(bin) = q_normal(bin) ** gamma (then the single
+    q/q.sum() renorm) pulls the over-stated far/open-shoulder tail mass toward center
+    to match realized settlement frequency.
+
+    Returns ``gamma`` where:
+      - artifact present AND family entry has ``fitted=True`` → ``gamma`` (clamped
+        finite and ``>= 1.0``; a fit may only TEMPER the tail toward center, never
+        FATTEN it — γ<1 would inflate the tail, the pathology this fixes).
+      - artifact missing / malformed / family absent / family ``fitted=False``
+        (REFUSED, e.g. a unit family with too few settled cells) → ``1.0`` IDENTITY
+        (byte-identical to the un-tempered Normal). FAIL-SOFT: any error → ``1.0``.
+        Never raises (a calibration-artifact fault must NEVER block a live decision).
+    """
+    try:
+        path = _Q_SHAPE_TEMPER_FIT_PATH
+        if not os.path.isabs(path):
+            repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            path = os.path.join(repo, _Q_SHAPE_TEMPER_FIT_PATH)
+        if not os.path.exists(path):
+            return 1.0
+        with open(path, "r", encoding="utf-8") as fh:
+            artifact = json.load(fh)
+        fam = (artifact.get("families") or {}).get(str(unit).upper())
+        if not isinstance(fam, dict) or not fam.get("fitted"):
+            return 1.0
+        gamma = float(fam.get("gamma", 1.0))
+        # Clamp to the honest domain: a temper may only pull the tail IN (γ >= 1.0).
+        # A non-finite / sub-1.0 value is inert (1.0) — the fix never FATTENS the tail.
+        if not (math.isfinite(gamma) and gamma >= 1.0):
+            return 1.0
+        return gamma
+    except Exception:
+        return 1.0
+
+
+# ---------------------------------------------------------------------------
 # build_joint_q — the ONE point-q integration (spec lines 523-541).
 # ---------------------------------------------------------------------------
 
@@ -293,9 +382,25 @@ def build_joint_q(pd: PredictiveDistribution, omega: OutcomeSpace) -> JointQ:
             )
         probs.append(p)
 
-    # ONE transform: clip to non-negative, then the SINGLE normalization. Sigma q
-    # == 1 by construction of this division (not by a separate renorm gate).
+    # ONE transform: clip to non-negative, apply the FITTED settlement-frequency
+    # SHAPE temper, then the SINGLE normalization. Sigma q == 1 by construction of
+    # this division (not by a separate renorm gate).
     q = np.clip(np.asarray(probs, dtype=float), 0.0, None)
+    # Honest q-SHAPE calibration (live order pathology 2026-06-21): q_adj = q ** gamma,
+    # where gamma is the FITTED settlement-frequency temper for this settlement-unit
+    # family (γ=1.0 IDENTITY when no fitted artifact — byte-identical to the bare
+    # Normal). γ>1 shrinks the over-stated far/open-shoulder tail mass MORE than the
+    # center/near-ring so the impossible tail gets an HONEST ≈0 q (matching realized
+    # settlement frequency) while the near-center ring edge is preserved. It is part of
+    # the ONE q transform (generator-level calibration), NOT a downstream cap/haircut,
+    # so the temper propagates identically to every JointQBand parameter draw (each is a
+    # build_joint_q call) — both the direction-law point q and the edge_lcb band samples
+    # see the honest tail. The temper is monotone-conservative on open-shoulder bins
+    # (γ≥1 can only reduce a low-mass bin's RELATIVE mass after renorm — never inflate a
+    # catch-all), so the Paris >=26 catch-all coherence category stays unconstructable.
+    _gamma = _q_shape_temper_lookup(omega.resolution.measurement_unit)
+    if _gamma != 1.0:
+        q = np.power(q, _gamma)
     total = float(q.sum())
     if not np.isfinite(total) or total <= 0.0:
         # A complete MECE partition over (-inf, +inf) with sigma > 0 always carries

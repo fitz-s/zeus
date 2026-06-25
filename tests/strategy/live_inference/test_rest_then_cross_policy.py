@@ -319,6 +319,41 @@ class TestFixBConservativeQlcbCapOnCross:
         assert decision.ev_taker is not None
         assert 0.70 <= 0.72  # cross all-in <= q_lcb (the HARD LAW)
 
+    def test_escalated_one_tick_penny_book_crosses_when_allin_clears_qlcb(self):
+        """A one-tick 0.001/0.002 book has a huge relative spread but only one
+        tick of absolute spread. Once the maker rest expires, a q_lcb-certified
+        edge must be able to cross instead of re-posting a permanent 0.001 bid."""
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.03,
+            taker_all_in_cost=0.0021,
+            p_fill_taker=1.0,
+            best_bid=0.001,
+            best_ask=0.002,
+            tick_size=0.001,
+            reservation=0.03,
+            escalated_after_rest=True,
+            minutes_to_event_end=20 * 60.0,
+        )
+        assert decision.chosen_mode == "TAKER"
+        assert decision.policy == POLICY_TAKER_ESCALATED_AFTER_REST
+        assert decision.taker_forbidden_reason is None
+
+    def test_escalated_multi_tick_penny_book_still_rejects_taker(self):
+        decision = select_rest_then_cross_mode(
+            q_lcb=0.03,
+            taker_all_in_cost=0.0041,
+            p_fill_taker=1.0,
+            best_bid=0.001,
+            best_ask=0.004,
+            tick_size=0.001,
+            reservation=0.03,
+            escalated_after_rest=True,
+            minutes_to_event_end=20 * 60.0,
+        )
+        assert decision.chosen_mode == "MAKER"
+        assert decision.policy == POLICY_MAKER_TAKER_FORBIDDEN
+        assert decision.chosen_ev == float("-inf")
+
     def test_event_end_near_with_allin_clearing_qlcb_crosses(self):
         """Near the event end, a fresh taker all-in that clears q_lcb crosses."""
         decision = select_rest_then_cross_mode(

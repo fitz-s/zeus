@@ -891,6 +891,26 @@ def _venue_command_row_for_execution_command_id(
         return None
 
 
+def _execution_command_id_from_bridge_events(events: list[tuple[str, dict[str, Any]]]) -> str:
+    """Return the EDLI execution command id without resolving trade strategy.
+
+    Command-link repair is a journal convergence operation for an already
+    materialized position. It must not re-run the full position identity parser:
+    historical bridge events can lack ``strategy_key`` / ``event_type`` while
+    still carrying enough command identity to prove that no link repair is
+    possible or required.
+    """
+
+    command = _latest_payload(events, "ExecutionCommandCreated") or {}
+    command_id = str(command.get("execution_command_id") or "").strip()
+    if command_id:
+        return command_id
+    for event_type, payload in reversed(events):
+        if event_type == "UserTradeObserved":
+            return str(payload.get("execution_command_id") or "").strip()
+    return ""
+
+
 def sync_venue_command_position_link_for_edli_fill(
     conn: sqlite3.Connection,
     aggregate_id: str,
@@ -911,10 +931,12 @@ def sync_venue_command_position_link_for_edli_fill(
     events = _aggregate_event_rows(conn, aggregate_id)
     if not events or not _has_confirmed_fill(events):
         return False
-    identity = _resolve_identity(events)
+    execution_command_id = _execution_command_id_from_bridge_events(events)
+    if not execution_command_id:
+        return False
     command_row = _venue_command_row_for_execution_command_id(
         conn,
-        identity.get("execution_command_id"),
+        execution_command_id,
     )
     command_id = str(_row_value(command_row, "command_id", 0) or "")
     if not command_id:
@@ -922,6 +944,16 @@ def sync_venue_command_position_link_for_edli_fill(
     canonical_position_id = str(position_id or edli_bridge_position_id(aggregate_id)).strip()
     if not canonical_position_id:
         return False
+    current_position_id = str(_row_value(command_row, "position_id", 1) or "")
+    if current_position_id == canonical_position_id:
+        return False
+    if current_position_id:
+        current_exists = conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
+            (current_position_id,),
+        ).fetchone()
+        if current_exists is not None:
+            return False
 
     from src.state.venue_command_repo import repair_command_position_link_if_orphaned
 

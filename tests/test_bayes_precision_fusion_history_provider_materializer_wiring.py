@@ -128,16 +128,15 @@ def _request() -> ReplacementForecastMaterializeRequest:
         target_date=date(2026, 6, 7), temperature_metric="high",
         baseline_source_run_id="b0-run", baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         baseline_source_available_at=_dt(2),
-        aifs_extraction=_aifs_extraction(), aifs_source_run_id="aifs-run", aifs_source_available_at=_dt(2, 30),
         openmeteo_anchor=_anchor(), openmeteo_source_run_id="om9-run", openmeteo_source_available_at=_dt(3),
         bins=_bins(), source_cycle_time=_dt(0), computed_at=_dt(4), expires_at=_dt(6),
-        anchor_artifact_id=None, aifs_artifact_id=None, openmeteo_precision_guard=_precision_guard(),
+        anchor_artifact_id=None, openmeteo_precision_guard=_precision_guard(),
     )
 
 
 def _row(conn, posterior_id: int):
     return conn.execute(
-        "SELECT q_json, posterior_identity_hash, posterior_config_hash, provenance_json "
+        "SELECT q_json, q_lcb_json, q_ucb_json, posterior_identity_hash, posterior_config_hash, provenance_json "
         "FROM forecast_posteriors WHERE posterior_id = ?", (posterior_id,),
     ).fetchone()
 
@@ -194,8 +193,9 @@ def _enable_capture(monkeypatch):
 
 def _disable_other_layers(monkeypatch):
     # Wave-2 item 7: the EB-bias layer is permanently deleted (center never shifted),
-    # so only the member-vote smoothing layer remains to neutralize here.
-    monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None)
+    # so only the member-vote smoothing layer remains to neutralize here when
+    # testing older branches. Newer live branches deleted that seam too.
+    monkeypatch.setattr(mod, "_replacement_member_vote_smoothing_alpha", lambda: None, raising=False)
 
 
 def _live_values():

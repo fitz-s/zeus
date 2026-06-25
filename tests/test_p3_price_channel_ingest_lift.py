@@ -297,6 +297,33 @@ def test_market_channel_seed_first_falls_back_to_candidates_without_open_positio
     ) == {"candidate-yes", "candidate-no"}
 
 
+def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
+    from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, created_at, schema_version
+        ) VALUES
+            ('newer', 'event-newer', 'cond', 'newer-token', 'YES', 'buy_yes',
+             '2026-06-24T08:00:00+00:00', '2026-06-24T08:00:00+00:00', 1),
+            ('stale', 'event-stale', 'cond', 'stale-token', 'YES', 'buy_yes',
+             '2026-06-24T07:30:00+00:00', '2026-06-24T07:30:00+00:00', 1)
+        """
+    )
+
+    ordered = _edli_order_token_ids_by_feasibility_age(
+        conn,
+        {"newer-token", "missing-token", "stale-token"},
+    )
+
+    assert ordered == ["missing-token", "stale-token", "newer-token"]
+
+
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
     from src.data import polymarket_client
     from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
@@ -340,7 +367,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         ) VALUES (
             'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
             'question-1', 'yes-token', 'no-token', 1, 1, 0,
-            '2026-06-21T00:00:00+00:00', '0.01', '5', '{}',
+                '2026-06-25T00:00:00+00:00', '0.01', '5', '{}',
             '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-19T10:00:00+00:00',
             '2026-06-19T10:05:00+00:00'
@@ -355,6 +382,11 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
 
     def _world_conn(*, write_class=None):  # noqa: ARG001
         return sqlite3.connect(world_path)
+
+    def _world_with_trades_required(*, write_class=None):  # noqa: ARG001
+        conn = sqlite3.connect(world_path)
+        conn.execute(f"ATTACH DATABASE '{trade_path}' AS trades")
+        return conn
 
     class FakePolymarketClient:
         def __enter__(self):
@@ -375,6 +407,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
 
     monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
     monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
 
     result = _edli_refresh_held_position_quote_evidence()
@@ -412,9 +445,9 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
             'regret-1', 'event-1', 'EXECUTOR_EXPRESSIBILITY',
             'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING',
             'BOOK_GAP', 'no-token', '2026-06-19T10:00:00+00:00',
-            'Paris', '2026-06-20', 'low', 'family-paris-low',
+            'Paris', '2026-06-25', 'low', 'family-paris-low',
             'Will the lowest temperature in Paris be 19C?', 'buy_no',
-            '2026-06-19T10:00:00+00:00', 1
+            '2026-06-24T10:00:00+00:00', 1
         )
         """
     )
@@ -435,7 +468,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         ) VALUES (
             'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
             'question-1', 'yes-token', 'no-token', 1, 1, 0,
-            '2026-06-21T00:00:00+00:00', '0.01', '5', '{}',
+            '2026-06-25T12:00:00+00:00', '0.01', '5', '{}',
             '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-19T10:00:00+00:00',
             '2026-06-19T10:05:00+00:00'
@@ -450,6 +483,11 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
 
     def _world_conn(*, write_class=None):  # noqa: ARG001
         return sqlite3.connect(world_path)
+
+    def _world_with_trades_required(*, write_class=None):  # noqa: ARG001
+        conn = sqlite3.connect(world_path)
+        conn.execute(f"ATTACH DATABASE '{trade_path}' AS trades")
+        return conn
 
     class FakePolymarketClient:
         def __enter__(self):
@@ -470,6 +508,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
 
     monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
     monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
 
     result = _edli_refresh_candidate_priority_quote_evidence(limit=4)

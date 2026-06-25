@@ -156,6 +156,81 @@ state_machines:
       - tests/test_order_truth_reducer.py
       - tests/test_exchange_reconcile.py
       - tests/money_path/test_002_execution_lifecycle_replay.py
+  live_manual_reconciliation_reason:
+    owner: scripts/reconcile_wellington_zombie_2026_06_22.py
+    description: >
+      Operator-authored reconciliation reason code for the Wellington zombie
+      pre-submit repair script. This is not a command lifecycle state; it is
+      provenance for a manually scoped live repair action and must remain
+      explicit in money-path CI because it can affect venue/local parity.
+    states:
+      - MANUAL_RECONCILE_ZOMBIE_PRE_SUBMIT
+    invariant_tests:
+      - tests/test_command_recovery.py
+      - tests/test_exchange_reconcile.py
+  command_recovery_reason:
+    owner: src/execution/command_recovery.py
+    description: >
+      Live command-recovery reason codes written during automated repair of
+      abandoned or projection-stalled trade commands. These are not venue
+      command states; they explain why recovery code mutated local projections
+      after reconciling against durable venue/order evidence.
+    states:
+      - ABANDONED_UNSUBMITTED_GHOST_RECONCILE
+      - TRADE_COMMAND_ACKED_WORLD_LEDGER_STALLED
+    invariant_tests:
+      - tests/test_command_recovery.py
+      - tests/execution/test_abandoned_unsubmitted_ghost_reconcile.py
+  family_rebalance_lease:
+    owner: src/state/schema/family_rebalance_intents_schema.py
+    description: >
+      Close-before-open family rebalance lease states for shift-bin decisions.
+      EXIT_* states block the family until the old leg exit outcome is known;
+      ENTRY_* states block until the new-bin entry side effect is known. These
+      states preserve the invariant that a shift never opens a replacement leg
+      before the old-leg exit is durably resolved.
+    states:
+      - EXIT_SUBMITTED
+      - EXIT_UNKNOWN
+      - EXIT_PARTIAL
+      - ENTRY_SUBMITTED
+      - ENTRY_UNKNOWN
+      - ENTRY_PARTIAL
+    invariant_tests:
+      - tests/strategy/test_shift_bin.py
+      - tests/strategy/test_shift_bin_wiring.py
+      - tests/engine/test_shift_bin_old_leg_exit.py
+      - tests/engine/test_shift_bin_reactor_integration.py
+  family_rebalance_block_reason:
+    owner: src/strategy/family_rebalance.py
+    description: >
+      Rebalance/fill-up/shift-bin block reason vocabulary. These are decision
+      reasons, not command states: they keep duplicate or side-effect-unknown
+      family exposure from re-entering while preserving the existing held/open
+      position truth.
+    states:
+      - UNOWNED_PENDING_OR_UNKNOWN_ENTRY
+      - SHIFT_BIN_EXIT_UNKNOWN_NO_DURABLE_COMMAND_RECOVERED
+      - PRESUBMIT_REREAD_NO_EXPOSURE_CONN
+      - PRESUBMIT_REREAD_POSITION_TRUTH_UNAVAILABLE
+      - PRESUBMIT_REREAD_POSITION_TRUTH_SCHEMA_INCOMPLETE
+    invariant_tests:
+      - tests/strategy/test_family_rebalance.py
+      - tests/strategy/test_fill_up_wiring.py
+      - tests/engine/test_fill_up_reactor_integration.py
+  city_skill_gate_reason:
+    owner: src/decision/city_skill_gate.py
+    description: >
+      City-skill gate rejection bases used by live admission. UNKNOWN_CITY
+      fails closed when a city cannot be matched to the fitted skill table;
+      THIN_TRACK fails closed when the city/metric track lacks enough skill
+      evidence. These are admission evidence labels, not lifecycle states.
+    states:
+      - CITY_SKILL_UNKNOWN_CITY
+      - CITY_SKILL_THIN_TRACK
+    invariant_tests:
+      - tests/decision/test_city_skill_gate.py
+      - tests/strategy/test_live_admission_calibrator_wiring.py
   lifecycle_phase:
     owner: src/state/lifecycle_manager.py
     states:
@@ -662,6 +737,9 @@ state_machines:
       - ENTRY_TAKER_QUALITY_FALLBACK_NO_PASSIVE_BID_BELOW_ASK
       - BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_DISABLED
       - BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_ENABLED
+      - EVENT_BOUND_CANDIDATE_REJECTED
+      - FILL_UP_NO_SUBMIT
+      - SHIFT_BIN_NO_SUBMIT
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_reactor.py

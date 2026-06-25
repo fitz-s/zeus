@@ -109,6 +109,66 @@ def test_pending_exit_retry_state_recovers_when_projection_has_no_exit_state_fie
     assert reloaded.exit_state == "retry_pending"
 
 
+def test_channel_not_ready_ws_gap_does_not_consume_retry_budget():
+    """ANTIBODY (2026-06-23 exit-execution diagnosis): a TRANSIENT submit-channel
+    gap (user-channel WS disconnect → m5_reconcile_required) must NOT march a
+    still-sellable position to backoff_exhausted/admin-close. The exit must keep
+    retrying so it can sell once the channel reconnects — the operator's "react to
+    reversal, sell before the market notices" mandate. Pre-fix, ws_gap rejections
+    burned the bounded exit-retry budget and abandoned correct reversal exits.
+    """
+    from src.execution.exit_lifecycle import _mark_exit_retry, MAX_EXIT_RETRIES
+
+    pos = _position(exit_retry_count=0)
+    err = "ws_gap=DISCONNECTED:websocket_disconnect;m5_reconcile_required=True"
+    for _ in range(MAX_EXIT_RETRIES + 5):
+        _mark_exit_retry(
+            pos,
+            reason=f"CI_SEPARATED_REVERSAL [SELL_ERROR: {err}]",
+            error=err,
+            conn=None,
+        )
+    assert pos.exit_retry_count == 0, (
+        "a transient ws_gap/m5_reconcile rejection must NOT consume the bounded "
+        "exit-retry budget; the position is still sellable once the channel returns"
+    )
+    assert pos.exit_state == "retry_pending", (
+        "channel-not-ready exit must stay retry_pending forever, never "
+        "backoff_exhausted (which abandons a sellable reversal exit)"
+    )
+    assert pos.next_exit_retry_at is not None
+
+
+def test_genuine_error_still_consumes_budget_to_backoff():
+    """Control: a genuine (non-channel) rejection still marches to backoff_exhausted
+    after MAX_EXIT_RETRIES — the fix must not disable the real terminal path."""
+    from src.execution.exit_lifecycle import _mark_exit_retry, MAX_EXIT_RETRIES
+
+    pos = _position(exit_retry_count=0)
+    for _ in range(MAX_EXIT_RETRIES):
+        _mark_exit_retry(pos, reason="X", error="some_persistent_rejection", conn=None)
+    assert pos.exit_retry_count == MAX_EXIT_RETRIES
+    assert pos.exit_state == "backoff_exhausted"
+
+
+def test_market_end_is_terminal_not_channel_not_ready():
+    """A market-ended SELL snapshot is genuinely un-sellable (settles), so it must
+    REMAIN budget-consuming — it must NOT be reclassified as a transient retry
+    (that would retry forever on a settled market)."""
+    from src.execution.exit_lifecycle import _mark_exit_retry, MAX_EXIT_RETRIES
+
+    pos = _position(exit_retry_count=0)
+    for _ in range(MAX_EXIT_RETRIES):
+        _mark_exit_retry(
+            pos,
+            reason="DAY0 [SELL_ERROR: executable_snapshot_market_end]",
+            error="executable_snapshot_market_end",
+            conn=None,
+        )
+    assert pos.exit_retry_count == MAX_EXIT_RETRIES
+    assert pos.exit_state == "backoff_exhausted"
+
+
 def test_legacy_row_without_retry_columns_defaults_to_zero():
     """Rows written before the migration load as count 0 / no cooldown."""
     reloaded = _position_from_projection_row(

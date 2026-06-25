@@ -40,6 +40,10 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def _indexes(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA index_list({table})").fetchall()}
+
+
 def test_replacement_live_support_tables_are_forecast_class_only() -> None:
     forecast_conn = sqlite3.connect(":memory:")
     apply_canonical_schema(forecast_conn, forecast_tables=True)
@@ -66,6 +70,18 @@ def test_replacement_live_support_tables_are_forecast_class_only() -> None:
     )
     assert "runtime_layer" in _columns(forecast_conn, "forecast_posteriors")
     assert "trade_authority_status" not in _columns(forecast_conn, "forecast_posteriors")
+    assert "idx_forecast_posteriors_live_family_cycle" in _indexes(
+        forecast_conn,
+        "forecast_posteriors",
+    )
+    assert "idx_raw_model_forecasts_current_family_cycle_members" in _indexes(
+        forecast_conn,
+        "raw_model_forecasts",
+    )
+    assert "idx_raw_model_forecasts_endpoint_family_cycle_members" in _indexes(
+        forecast_conn,
+        "raw_model_forecasts",
+    )
     assert {"market_snapshot_id", "allowed_direction", "allowed_q_lcb", "allowed_kelly_fraction", "veto_reason"} <= _columns(
         forecast_conn,
         "replacement_shadow_decisions",
@@ -182,6 +198,92 @@ def test_legacy_forecast_posteriors_live_status_migrates_to_runtime_layer() -> N
         "SELECT posterior_id, runtime_layer FROM forecast_posteriors ORDER BY posterior_id"
     ).fetchall()
     assert [tuple(row) for row in rows] == [(1, "live")]
+
+
+def test_legacy_raw_model_forecasts_diagnostic_status_column_is_removed() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL CHECK (metric IN ('high', 'low')),
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            lead_days INTEGER NOT NULL CHECK (lead_days >= 0),
+            forecast_value_c REAL NOT NULL,
+            endpoint TEXT NOT NULL CHECK (endpoint IN ('single_runs', 'previous_runs')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'DIAGNOSTIC_ONLY'
+                CHECK (trade_authority_status IN ('DIAGNOSTIC_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            source_id TEXT,
+            source_family TEXT,
+            product_id TEXT,
+            provider TEXT,
+            model_name TEXT,
+            request_params_json TEXT NOT NULL DEFAULT '{}',
+            request_url_hash TEXT,
+            raw_sha256 TEXT,
+            latitude_requested REAL,
+            longitude_requested REAL,
+            timezone_requested TEXT,
+            cell_selection TEXT,
+            elevation_param TEXT,
+            downscaling_policy TEXT,
+            endpoint_mode TEXT,
+            model_domain_hash TEXT,
+            coverage_status TEXT,
+            artifact_id INTEGER,
+            UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, captured_at, lead_days, forecast_value_c,
+            endpoint, training_allowed, source_id, source_family, product_id,
+            provider, model_name, request_params_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ecmwf_ifs",
+            "Shanghai",
+            "2026-06-26",
+            "high",
+            "2026-06-24T12:00:00Z",
+            "2026-06-24T18:00:00Z",
+            "2026-06-25T03:00:00Z",
+            2,
+            30.0,
+            "single_runs",
+            0,
+            "openmeteo:ecmwf_ifs",
+            "openmeteo",
+            "ecmwf_ifs:single_runs",
+            "openmeteo",
+            "ecmwf_ifs",
+            "{}",
+        ),
+    )
+
+    apply_canonical_schema(conn, forecast_tables=True)
+
+    assert "trade_authority_status" not in _columns(conn, "raw_model_forecasts")
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    row = conn.execute(
+        """
+        SELECT model, city, target_date, metric, forecast_value_c, training_allowed
+        FROM raw_model_forecasts
+        """
+    ).fetchone()
+    assert tuple(row) == ("ecmwf_ifs", "Shanghai", "2026-06-26", "high", 30.0, 0)
 
 
 def test_replacement_raw_artifacts_are_not_training_authority() -> None:

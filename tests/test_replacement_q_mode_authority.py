@@ -5,9 +5,9 @@
 #   materializer DERIVES an explicit replacement_q_mode into provenance_json, and the EDLI live
 #   seam (event_reactor_adapter._replacement_q_mode_live_eligibility) ADMITS real submit ONLY for
 #   the fused-Normal modes. Category killed: a posterior that silently fell back to the legacy
-#   member-vote soft-anchor q (fusion None / fused-q build failed / flag off) sizing live Kelly
-#   under a different probability regime than the release evidence assumes — distinguishable now
-#   ONLY by a data-class label the live gate enforces, not by a WARNING log.
+#   member-vote soft-anchor q, anchor-only current surrogate, fused-q build failure, or flag-off
+#   path sizing live Kelly under a different probability regime than the release evidence assumes
+#   — distinguishable now ONLY by a data-class label the live gate enforces, not by a WARNING log.
 #   P0 grandfather-revoked: old DB rows with q_shape="fused_normal_direct" and no explicit
 #   replacement_q_mode key are no longer live-eligible (FUSED_NORMAL_GRANDFATHER_REVOKED). They
 #   carry no q_lcb/q_ucb bounds and would mix fused-Normal q with Wilson/AIFS q_lcb — the
@@ -17,7 +17,8 @@
 These verify the INVARIANT that holds across the materializer -> live-gate boundary:
   - shadow accrual is ALWAYS preserved (a posterior row materializes even when fusion/fused-q
     fails), so the q-mode is the ONLY thing that gates live eligibility — not row existence.
-  - real submit is admitted IFF replacement_q_mode in {FUSED_NORMAL_FULL, FUSED_NORMAL_PARTIAL}
+  - real submit is admitted IFF replacement_q_mode is a live fused Normal carrier
+    {FUSED_NORMAL_FULL, FUSED_NORMAL_PARTIAL}
     (or a grandfathered fused_normal_direct row with no mode key).
   - the settlement sigma floor the EMOS path uses ALSO widens the fused-q sigma when present.
 """
@@ -71,15 +72,15 @@ class _BundleStub:
 
 def _materialize_provenance(conn) -> dict:
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
+    assert pid is not None
     return json.loads(_row(conn, pid)["provenance_json"])
 
 
 # =====================================================================================
 # FIX 1 — explicit q-mode + live gate
 # =====================================================================================
-def test_fusion_override_raises_shadow_accrues_capture_missing_gate_rejects(monkeypatch) -> None:
-    """Fusion override raises -> the posterior STILL materializes (shadow accrual preserved),
-    replacement_q_mode == BAYES_PRECISION_FUSION_CAPTURE_MISSING, and the live gate rejects it."""
+def test_fusion_override_raises_blocks_live_posterior(monkeypatch) -> None:
+    """Fusion override raises -> no live posterior is written; the q-mode gate rejects the mode."""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
@@ -91,17 +92,17 @@ def test_fusion_override_raises_shadow_accrues_capture_missing_gate_rejects(monk
     _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn, values=_full_live_values())
 
-    prov = _materialize_provenance(conn)  # MUST NOT raise — shadow row accrues
-    assert prov["replacement_q_mode"] == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
-    assert prov["q_shape"] == "aifs_member_votes_soft_anchor"
-    assert prov["capture_status"] == "STALE_HISTORY_ONLY"
+    assert mod._insert_posterior(conn, _request(), metric="high", anchor_id=1) is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
-    eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
+    eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub({
+        "replacement_q_mode": "BAYES_PRECISION_FUSION_CAPTURE_MISSING",
+    }))
     assert eligible is False
     assert mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 
 
-def test_fused_q_build_raises_mode_build_failed_gate_rejects(monkeypatch) -> None:
+def test_fused_q_build_raises_blocks_live_posterior(monkeypatch) -> None:
     """The fused-q construction itself raises (bin_probability_settlement boom) -> mode ==
     FUSED_Q_BUILD_FAILED (DISTINCT from flag-off SOFT_ANCHOR_FALLBACK), gate rejects."""
     _disable_other_layers(monkeypatch)
@@ -117,17 +118,12 @@ def test_fused_q_build_raises_mode_build_failed_gate_rejects(monkeypatch) -> Non
     _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn, values=_full_live_values())
 
-    prov = _materialize_provenance(conn)
-    assert prov["replacement_q_mode"] == "FUSED_Q_BUILD_FAILED"
-    # AIFS DROPPED (operator directive 2026-06-17): a total integrator failure (both the certified
-    # fused-q shape AND the fused-center-only Normal use bin_probability_settlement) must NEVER serve
-    # the cold 0.8-AIFS soft-anchor q — the row carries the honest uniform placeholder seed instead.
-    assert prov["q_shape"] != "aifs_member_votes_soft_anchor", "must NOT fail to the cold AIFS soft-anchor q"
-    assert prov["q_shape"] == "uniform_placeholder_pending_fused"
-    # a build failure must not leave a stale floor flag set
-    assert prov["settlement_sigma_floor_applied"] is False
+    assert mod._insert_posterior(conn, _request(), metric="high", anchor_id=1) is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
-    eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
+    eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub({
+        "replacement_q_mode": "FUSED_Q_BUILD_FAILED",
+    }))
     assert eligible is False
     assert mode == "FUSED_Q_BUILD_FAILED"
 
@@ -145,7 +141,8 @@ def test_happy_path_full_mode_gate_admits(monkeypatch) -> None:
     assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert prov["q_shape"] == "fused_normal_direct"
     assert prov["capture_status"] == "FULL_CURRENT"
-    assert prov["bayes_precision_fusion"]["decorrelated_providers_served"] == 5
+    bpf = prov["bayes_precision_fusion"]
+    assert bpf["decorrelated_providers_served"] == bpf["decorrelated_providers_expected"]
     assert prov["bayes_precision_fusion"]["decorrelated_providers_complete"] is True
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
@@ -178,6 +175,26 @@ def test_partial_mode_gate_admits(monkeypatch) -> None:
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is True
     assert mode == "FUSED_NORMAL_PARTIAL"
+
+
+def test_anchor_only_current_missing_capture_blocks_materialization(monkeypatch) -> None:
+    """Missing BPF current capture must not produce a live current-anchor Normal carrier."""
+    _disable_other_layers(monkeypatch)
+    _enable_fusion(monkeypatch)
+    _enable_fused_shape(monkeypatch)
+    conn = _conn()
+    _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
+
+    assert mod._insert_posterior(conn, _request(), metric="high", anchor_id=1) is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+
+    eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub({
+        "replacement_q_mode": "ANCHOR_ONLY_CURRENT",
+        "q_shape": "fused_normal_direct",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+    }))
+    assert eligible is False
+    assert mode == "ANCHOR_ONLY_CURRENT"
 
 
 def test_grandfathered_fused_row_without_mode_key_rejected() -> None:
@@ -215,7 +232,13 @@ def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
 
-    # Floor cell PRESENT (Paris JJA high has an empirical floor ~4.3C >> the ~1.x sigma_pred).
+    # Force a floor cell that must exceed the fused predictive sigma; relying on the generated
+    # local floor artifact makes this relationship drift with refits.
+    monkeypatch.setattr(
+        mod,
+        "_replacement_settlement_sigma_floor_lookup",
+        lambda request, *, metric: (4.5, None),
+    )
     conn_on = _conn()
     _seed_history(conn_on, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_on, values=_full_live_values())
@@ -348,8 +371,8 @@ def _check_live_gate(bundle) -> tuple[bool, str]:
         return False, f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{q_mode}"
     prov = getattr(bundle, "provenance_json", None) or {}
     q_shape = str(prov.get("q_shape") if isinstance(prov, Mapping) else "")
-    # Second gate: bounds required for fused_normal_direct shape rows that passed the first gate.
-    needs_bounds = q_shape == "fused_normal_direct"
+    # Second gate: bounds required for every live-eligible mode that passed the first gate.
+    needs_bounds = q_mode in {"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"}
     if needs_bounds:
         qlcb = getattr(bundle, "q_lcb", None) or {}
         qucb = getattr(bundle, "q_ucb", None) or {}
@@ -367,7 +390,7 @@ def _check_live_gate(bundle) -> tuple[bool, str]:
     return True, "OK"
 
 
-def test_bounds_failure_materializes_fused_normal_bounds_missing_mode(monkeypatch) -> None:
+def test_bounds_failure_blocks_live_posterior(monkeypatch) -> None:
     """PR#403: when the fused-q point succeeds but _build_fused_q_bounds raises, the mode MUST
     be FUSED_NORMAL_BOUNDS_MISSING (NOT FULL/PARTIAL). Shadow row still materializes (point q intact).
     Category killed: a FULL/PARTIAL row with NULL q_lcb_json was live-eligible before this fix,
@@ -384,21 +407,13 @@ def test_bounds_failure_materializes_fused_normal_bounds_missing_mode(monkeypatc
     _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn, values=_full_live_values())
 
-    prov = _materialize_provenance(conn)  # must NOT raise — shadow accrual preserved
-
-    # Point q shape is intact (the fused-Normal shape gain is not regressed).
-    assert prov["q_shape"] == "fused_normal_direct", (
-        "bounds failure must NOT roll back the fused q point"
-    )
-    # Mode is FUSED_NORMAL_BOUNDS_MISSING — distinct from FUSED_Q_BUILD_FAILED.
-    assert prov["replacement_q_mode"] == "FUSED_NORMAL_BOUNDS_MISSING", (
-        "bounds failure must produce FUSED_NORMAL_BOUNDS_MISSING, not FULL/PARTIAL"
-    )
-    assert prov["q_lcb_basis"] is None
-    assert prov["q_lcb_json_role"] == "absent_no_calibrated_lcb_available"
+    assert mod._insert_posterior(conn, _request(), metric="high", anchor_id=1) is None
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
 
     # Live gate (first check only — q_mode) rejects this mode.
-    eligible, mode = _q_mode_elig(_BundleStub(prov))
+    eligible, mode = _q_mode_elig(_BundleStub({
+        "replacement_q_mode": "FUSED_NORMAL_BOUNDS_MISSING",
+    }))
     assert eligible is False
     assert mode == "FUSED_NORMAL_BOUNDS_MISSING"
 
@@ -457,3 +472,29 @@ def test_happy_path_full_mode_with_bounds_passes_both_gates() -> None:
     eligible, reason = _check_live_gate(bundle)
     assert eligible is True
     assert reason == "OK"
+
+
+def test_anchor_only_current_rejected_by_first_gate_even_with_bounds() -> None:
+    prov = {
+        "q_shape": "fused_normal_direct",
+        "replacement_q_mode": "ANCHOR_ONLY_CURRENT",
+        "q_lcb_basis": None,
+    }
+    bundle = _BundleStubWithBounds(prov, q_lcb=None, q_ucb=None)
+    eligible, reason = _check_live_gate(bundle)
+    assert eligible is False
+    assert "REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#ANCHOR_ONLY_CURRENT" in reason
+
+    prov_ok = {
+        "q_shape": "fused_normal_direct",
+        "replacement_q_mode": "ANCHOR_ONLY_CURRENT",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+    }
+    bundle_ok = _BundleStubWithBounds(
+        prov_ok,
+        q_lcb={"bin_25": 0.12},
+        q_ucb={"bin_25": 0.2},
+    )
+    eligible_ok, reason_ok = _check_live_gate(bundle_ok)
+    assert eligible_ok is False
+    assert "REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#ANCHOR_ONLY_CURRENT" in reason_ok

@@ -360,6 +360,7 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     # belongs with the operator-invoked offline backfill cluster, not the residual.
     "scripts/task_2026-06-09_drop_dead_tables.py",  # pending_track_a6: one-shot DDL maintenance script; standalone operator tool, not daemon src/
     "scripts/migrations/normalize_observation_instants_z_suffix.py",  # operator_invoked: C3 tz-format fix; --dry-run default + SAVEPOINT; 498-row Z-suffix normalisation; daemon never imports
+    "scripts/reconcile_wellington_zombie_2026_06_22.py",  # operator_invoked: ONE-SHOT manual reconcile of the ad064baf never-submitted ghost (live_order_pathology 2026-06-22); --dry-run default, RW only on --commit, safety-checked (non-terminal + venue_order_id NULL + cap RESERVED); standalone CLI, daemon never imports. Superseded by command_recovery.reconcile_abandoned_unsubmitted_ghosts.
 })
 
 # Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;

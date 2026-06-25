@@ -59,10 +59,10 @@ from src.contracts.executable_cost_curve import (
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import (
-    CALIBRATED_NONMODAL_Q_FLOOR,
     NO_TRADE_NO_DIRECTION_LAW,
     NO_TRADE_NO_POSITIVE_EDGE,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
+    NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE,
     CandidateDecision,
     FamilyDecision,
     FamilyDecisionEngine,
@@ -95,7 +95,8 @@ from src.probability.event_resolution import (
 )
 from src.probability.instruments import Instrument
 from src.probability.joint_q import build_joint_q
-from src.probability.joint_q_band import build_joint_q_band
+from src.probability.joint_q import JointQ
+from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import (
     OutcomeBin,
     OutcomeSpace,
@@ -481,38 +482,22 @@ def test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it():
     no_b27 = build_candidate_route(
         candidate_id="n27", instrument=_inst("NO", "b27"), route_cost=_rc("NO", "b27"), omega=space
     )
-    # YES on the forecast bin is always legal regardless of its point-q (it IS the modal bin).
-    assert direction_law_ok(yes_b25, forecast_bin=fbin, point_q=0.6) is True
-    # NO is legal ONLY off the forecast bin (NO direction unchanged by the 2026-06-15 relax).
-    assert direction_law_ok(no_b25, forecast_bin=fbin, point_q=0.6) is False
-    assert direction_law_ok(no_b27, forecast_bin=fbin, point_q=0.02) is True
-    # Non-modal YES (b27): legal IFF point-q reaches the settlement-validated calibrated floor.
-    # Below the floor (the far tail with no settlement coverage) it stays modal-only-illegal;
-    # at/above the floor it is admitted as a calibrated Arrow-Debreu claim (relax 2026-06-15).
-    assert (
-        direction_law_ok(yes_b27, forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR - 0.01)
-        is False
-    )
-    assert (
-        direction_law_ok(yes_b27, forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR)
-        is True
-    )
+    # Structural direction-law YES is clean only on the forecast bin; non-forecast YES needs
+    # the selector's side-aware empirical OOF license before it can trade.
+    assert direction_law_ok(yes_b25, forecast_bin=fbin) is True
+    # NO is legal ONLY off the forecast bin (NO direction unchanged).
+    assert direction_law_ok(no_b25, forecast_bin=fbin) is False
+    assert direction_law_ok(no_b27, forecast_bin=fbin) is True
+    # A non-modal YES is not structurally direction-law-clean.
+    assert direction_law_ok(yes_b27, forecast_bin=fbin) is False
 
 
-def test_nonmodal_yes_in_calibrated_domain_is_admitted_far_tail_still_modal_only():
-    """RED-on-revert for the 2026-06-15 settlement-justified direction-law relax.
+def test_buy_yes_structural_direction_law_does_not_use_point_q():
+    """Direction-law status is structural; empirical licensing lives in the selector.
 
-    The modal-only YES rule (pre-2026-06-15) suppressed settlement-CALIBRATED non-modal YES
-    candidates: 6,450 settled non-modal bin-obs grade the non-modal tail in (0.05,0.35] at
-    pred/real 1.05× (docs/evidence/qkernel_rebuild/nonmodal_bin_calibration_2026-06-15.md F1),
-    while the modal bin the rule trusts grades 1.28× over-dispersed (F2) — the premise was
-    inverted. The relax admits a non-modal YES whose point-q is INSIDE the validated
-    calibrated domain (>= CALIBRATED_NONMODAL_Q_FLOOR), and keeps the far tail (below the
-    floor, no settlement coverage, where the over-dispersed served σ + the conservative
-    edge_lcb quantile amplify rather than shield) modal-only.
-
-    A reversion to the modal-only rule (``return route.bin_id == forecast_bin`` for YES) makes
-    the calibrated-domain assertion RED: the in-domain non-modal YES would flip to illegal.
+    RED-on-revert: re-introducing a direct ``point_q >= floor`` branch into
+    ``direction_law_ok`` flips the non-forecast assertions below to True and bypasses the
+    side-aware OOF reliability license.
     """
     fbin = "b25"
 
@@ -524,20 +509,14 @@ def test_nonmodal_yes_in_calibrated_domain_is_admitted_far_tail_still_modal_only
             omega=_outcome_space(_case()),
         )
 
-    # In-domain non-modal YES (point-q at/above the calibrated floor) — ADMITTED by the relax,
-    # REFUSED by a modal-only revert. This is the load-bearing RED-on-revert assertion.
-    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin, point_q=0.22) is True
-    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin, point_q=0.10) is True
-    assert (
-        direction_law_ok(yes_on("b26"), forecast_bin=fbin, point_q=CALIBRATED_NONMODAL_Q_FLOOR)
-        is True
-    )
-    # Far-tail non-modal YES (point-q below the validated floor) — STILL modal-only-illegal:
-    # the settlement evidence does not reach here and edge_lcb amplifies the over-dispersed σ.
-    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin, point_q=0.02) is False
-    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin, point_q=0.0004) is False
-    # The forecast (modal) bin YES is always legal; its point-q is irrelevant.
-    assert direction_law_ok(yes_on("b25"), forecast_bin=fbin, point_q=0.0) is True
+    # The forecast bin YES is structurally clean.
+    assert direction_law_ok(yes_on("b25"), forecast_bin=fbin) is True
+    # Non-forecast YES remains structurally non-clean; selector-level OOF evidence can license it.
+    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b26"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin) is False
 
 
 # Small helpers for the primitive check above.
@@ -602,6 +581,31 @@ def _hand_decision(
     )
 
 
+def _hand_joint_q_and_band(space: OutcomeSpace, q_by_bin: Mapping[str, float]) -> tuple[JointQ, JointQBand]:
+    q = np.asarray([float(q_by_bin.get(b.bin_id, 0.0)) for b in space.bins], dtype=float)
+    q = q / q.sum()
+    joint = JointQ(
+        omega=space,
+        q=q,
+        q_by_bin_id={b.bin_id: float(v) for b, v in zip(space.bins, q)},
+        predictive_distribution_id="hand-pd",
+        q_source="SETTLEMENT_STATION_NORMAL_V1",
+        q_sum=float(q.sum()),
+        identity_hash="hand-joint-q",
+    )
+    samples = np.repeat(q.reshape(1, -1), 8, axis=0)
+    band = JointQBand(
+        joint_q=joint,
+        samples=samples,
+        q_lcb=q,
+        q_ucb=q,
+        alpha=0.05,
+        basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        sample_hash="hand-band",
+    )
+    return joint, band
+
+
 # ===========================================================================
 # SPEC RED-on-revert #1: filter chain order + utility-density selection (not the scalar).
 # ===========================================================================
@@ -661,7 +665,7 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         yr = route_set.direct_yes.get(t)
         if yr is not None and yr.executable:
             sizing[(t, "YES")] = _yes_sizing(
-                space, t, q_point=float(qb), q_lcb=max(float(qb) - 0.03, 0.001),
+                space, t, q_point=float(qb), q_lcb=max(float(qb) - 0.03, 0.0),
                 price=str(round(float(yr.avg_cost.value), 3)),
             )
 
@@ -721,15 +725,13 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         )
     )
 
-    # Post-2026-06-15 relax: a non-modal YES whose point-q is INSIDE the settlement-validated
-    # calibrated domain (point_q >= CALIBRATED_NONMODAL_Q_FLOOR) is now direction-law-LEGAL.
-    # b24 is an adjacent ring bin with point_q ~0.22 (well above the 0.05 floor), so its YES is
-    # admitted as a calibrated Arrow-Debreu claim — it is no longer suppressed by the rule.
+    # MODAL-ONLY YES (2026-06-23 revert): a non-modal YES is direction-law-ILLEGAL regardless of
+    # its point-q. b24 is an adjacent ring bin (well-massed, ~0.22) but it is NOT the forecast
+    # (modal) bin, so its YES is rejected by the direction law — buy_yes only on the predicted bin.
     yes_b24 = [d for d in decision.candidate_decisions if d.route.side == "YES" and d.route.bin_id == "b24"]
-    assert yes_b24 and yes_b24[0].direction_law_ok is True
-    assert (
-        decision.candidate_decisions  # the b24 point-q clears the validated floor
-        and jq.q_by_bin_id["b24"] >= CALIBRATED_NONMODAL_Q_FLOOR
+    assert yes_b24 and yes_b24[0].direction_law_ok is False, (
+        "non-modal YES (b24) must be direction-law-illegal after the modal-only revert, "
+        "even with ample point-q"
     )
 
 
@@ -811,6 +813,130 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
     assert selected is low_cost
 
 
+def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
+    """Shanghai correction mirror: an inferior selected NO yields to dominant center YES."""
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.80),
+        edge_lcb=0.04,
+        optimal_delta_u=0.05,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("50"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.08,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, center_yes],
+        forecast_bin="b25",
+    )
+
+    assert selected is center_yes
+
+
+def test_symmetric_center_yes_dominance_does_not_force_weaker_yes():
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.40),
+        edge_lcb=0.12,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.50,
+        optimal_stake_usd=Decimal("5"),
+    )
+    weak_center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.02,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, weak_center_yes],
+        forecast_bin="b25",
+    )
+
+    assert selected is selected_no
+
+
+def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():
+    """Shanghai correction: choose the cheaper center YES for the same upside.
+
+    The selected single NO can have higher apparent utility density, but the
+    family expression formed by the two adjacent NOs is a guaranteed floor plus
+    the same center-bin upside as BUY_YES. If that expression ties up more
+    capital and has no better edge density, the optimizer should canonicalize to
+    center YES instead of letting repeated cycles assemble the costly NO pair.
+    """
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.11,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("5"),
+    )
+    sibling_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b26", cost=0.80),
+        edge_lcb=0.10,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.80,
+        optimal_stake_usd=Decimal("5"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.53,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, center_yes, sibling_no],
+        forecast_bin="b25",
+    )
+
+    assert selected is center_yes
+    pair_payoff = selected_no.route.payoff_vector + sibling_no.route.payoff_vector
+    assert np.all(pair_payoff - np.min(pair_payoff) >= center_yes.route.payoff_vector)
+    assert float(center_yes.economics.cost.value) < (
+        float(selected_no.economics.cost.value) + float(sibling_no.economics.cost.value)
+    )
+
+
 def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
     """The terminal total-utility objective only applies when explicitly requested."""
     case = _case()
@@ -863,6 +989,107 @@ def test_select_rejects_unknown_selection_objective():
             predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
             selection_objective="scalar_score",  # type: ignore[arg-type]
         )
+
+
+def test_adjacent_no_pair_comparator_does_not_block_capital_efficient_center_yes(monkeypatch):
+    """Shanghai correction: compare adjacent NO pair, but do not blindly prefer it."""
+    case = _case()
+    space = _outcome_space(case)
+    joint_q, band = _hand_joint_q_and_band(
+        space,
+        {"b24": 0.10, "b25": 0.80, "b26": 0.10},
+    )
+    selected = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.80 - 0.27,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("5"),
+    )
+    no24 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.90 - 0.79,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.11,
+    )
+    no26 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b26", cost=0.80),
+        edge_lcb=0.90 - 0.80,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    comparisons = engine._portfolio_comparisons(
+        selected_decision=selected,
+        scored=(selected, no24, no26),
+        joint_q=joint_q,
+        band=band,
+        forecast_bin="b25",
+    )
+
+    assert len(comparisons) == 1
+    assert comparisons[0].portfolio_type == "ADJACENT_NO_PAIR"
+    assert comparisons[0].dominates_selected is False
+
+
+def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(monkeypatch):
+    """If a non-executable portfolio is superior, the engine has evidence to refuse a weaker leg."""
+    case = _case()
+    space = _outcome_space(case)
+    joint_q, band = _hand_joint_q_and_band(
+        space,
+        {"b24": 0.10, "b25": 0.80, "b26": 0.10},
+    )
+    selected = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.79),
+        edge_lcb=0.80 - 0.79,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.01,
+        optimal_stake_usd=Decimal("20"),
+    )
+    no24 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.30),
+        edge_lcb=0.90 - 0.30,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.60,
+    )
+    no26 = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b26", cost=0.30),
+        edge_lcb=0.90 - 0.30,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.60,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    comparisons = engine._portfolio_comparisons(
+        selected_decision=selected,
+        scored=(selected, no24, no26),
+        joint_q=joint_q,
+        band=band,
+        forecast_bin="b25",
+    )
+
+    assert len(comparisons) == 1
+    comparison = comparisons[0]
+    assert comparison.dominates_selected is True
+    assert comparison.edge_lcb_density > comparison.selected_edge_lcb_density
+    assert comparison.point_ev_density > comparison.selected_point_ev_density
+    assert comparison.leg_candidate_ids == (no24.economics.candidate_id, no26.economics.candidate_id)
 
 
 # ===========================================================================
@@ -1074,6 +1301,111 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
         ), decision.no_trade_reason
 
 
+def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monkeypatch):
+    """Pooled-tail OOF evidence is live empirical evidence, not a second-class receipt.
+
+    This pins the Shanghai-class failure mode: a center/modal YES can have valid same-side
+    OOF support after sparse-bucket pooling, but the coherence layer used to accept only the
+    exact ``OOF_WILSON_95`` basis. That left a model-superiority receipt stranded below the
+    market-coherence gate and structurally favored NO routes. The pooled basis may license
+    only a direction-law-legal modal YES with positive guarded edge/Delta-U; it does not
+    bypass the modal-only-YES constraint tested below.
+    """
+
+    from src.decision.qlcb_reliability_guard import GuardVerdict
+
+    case = _case()
+    space = _outcome_space(case)
+    model_set = _model_set([24.6, 25.0, 25.4], case)
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, model_set, _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    assert forecast_bin_id(jq) == "b25"
+
+    def factory(bin_id: str) -> MarketBook:
+        if bin_id == "b25":
+            return _market_book(
+                bin_id,
+                yes_bid=0.001,
+                yes_ask=0.001,
+                no_bid=0.999,
+                no_ask=0.999,
+                size=5000.0,
+            )
+        return _market_book(
+            bin_id,
+            yes_bid=0.090,
+            yes_ask=0.100,
+            no_bid=0.900,
+            no_ask=0.910,
+            size=5000.0,
+        )
+
+    def _pooled_tail_license(**kwargs):
+        if kwargs["side"] != "YES" or kwargs["bin_position"] != "modal":
+            return GuardVerdict(
+                q_safe=0.0,
+                trade=False,
+                abstained=True,
+                cell_key="test_non_target_abstain",
+                L_g=0.0,
+                n_g=0,
+                bucket_floor=0.0,
+                basis="OOF_WILSON_95_MISSING_CELL",
+            )
+        return GuardVerdict(
+            q_safe=0.20,
+            trade=True,
+            abstained=False,
+            cell_key="high|L1|YES|modal|qb10->tail_qb6+",
+            L_g=0.20,
+            n_g=64,
+            bucket_floor=0.20,
+            basis="OOF_WILSON_95_POOLED_TAIL",
+        )
+
+    monkeypatch.setattr(fde_mod, "_apply_qlcb_guard", _pooled_tail_license)
+    fb = _family_book(space, factory)
+    matrix = _matrix(space)
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    sizing = {
+        ("b25", "YES"): _yes_sizing(
+            space,
+            "b25",
+            q_point=float(jq.q_by_bin_id["b25"]),
+            q_lcb=0.20,
+            price="0.050",
+        ),
+    }
+
+    engine = _engine(monkeypatch=monkeypatch, model_set=model_set, obs=_no_obs(), family_book=fb)
+    decision = engine.decide(
+        case,
+        space,
+        snapshots={},
+        portfolio=exposure,
+        matrix=matrix,
+        captured_at_utc=_CAPTURED,
+        sizing_candidates=sizing,
+        max_stake_usd=Decimal("1000"),
+        shares_for_routing=Decimal("100"),
+    )
+
+    assert decision.market_coherence is not None
+    assert "b25" not in decision.market_coherence.offending_bins
+    selected = decision.selected
+    assert selected is not None
+    selected_decision = next(
+        d for d in decision.candidate_decisions if d.economics.candidate_id == selected.candidate_id
+    )
+    assert selected_decision.route.side == "YES"
+    assert selected_decision.route.bin_id == "b25"
+    assert selected_decision.direction_law_ok is True
+    assert selected_decision.coherence_allows is True
+    assert selected_decision.q_lcb_guard_basis == "OOF_WILSON_95_POOLED_TAIL"
+
+
 # ===========================================================================
 # SPEC RED-on-revert #4: direction-law override requires side-aware OOF evidence.
 # ===========================================================================
@@ -1081,7 +1413,7 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
 def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
     """A candidate cannot bypass direction law on edge alone.
 
-    The prior relaxation admitted NO-only candidates with edge_lcb>0 when an OOF guard
+    The prior relaxation admitted only one side with edge_lcb>0 when an OOF guard
     licensed them, while a positive-edge YES with the same guard burden still died at
     direction-law admission. That recreated an all-NO live bias. The override now requires
     an active, non-abstaining side-aware OOF verdict for the exact claim, and applies that
@@ -1204,7 +1536,10 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
     assert selected3 is not None
     assert selected3.route.side == "YES"
     assert selected3.route.bin_id == non_modal_bin_id
-    assert selected3.direction_law_ok is False
+    assert selected3.direction_law_ok is False, (
+        "expected direction_law_ok=False on the selected candidate — the test proves the "
+        "admission is via the side-aware YES OOF license, not bare direction-law legality"
+    )
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):

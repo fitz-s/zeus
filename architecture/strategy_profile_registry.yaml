@@ -193,7 +193,7 @@ center_buy:
   allowed_bin_topology: [finite_range]
   metric_support:
     high: live
-    low:  blocked
+    low:  live
   kelly_default_multiplier: 1.0
   kelly_phase_overrides:
     pre_trading: 0.0

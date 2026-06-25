@@ -324,7 +324,7 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
     )
-    assert not main_module._edli_confirmation_refresh_needs_family_freshness_filter(
+    assert main_module._edli_confirmation_refresh_needs_family_freshness_filter(
         {
             "status": "refreshed",
             "executable_substrate_coverage_status": "PARTIAL",
@@ -510,14 +510,12 @@ def test_held_position_monitor_does_not_pause_live_decision_line():
             "edli_redecision_screen",
             "EDLI market-substrate warm",
             "EDLI market-channel substrate refresh",
-            "new_listing_scout",
         }
         for job_name in live_decision_jobs:
             assert main_module._defer_for_held_position_monitor(job_name) is False
 
         discretionary_jobs = {
             "market_discovery",
-            "afternoon_snapshot_capture",
             "EDLI mainstream warm",
         }
         for job_name in discretionary_jobs:
@@ -529,6 +527,24 @@ def test_held_position_monitor_does_not_pause_live_decision_line():
             main_module._held_position_monitor_active.set()
         if was_bootstrap_complete:
             main_module._held_position_monitor_bootstrap_complete.set()
+
+
+def test_trading_daemon_does_not_host_new_listing_discovery():
+    """New listing discovery is a substrate-observer responsibility, not a live
+    trading-daemon scheduler job.
+
+    The trading daemon must not run Gamma universe discovery or stage hidden
+    producer state while the decision line is trying to consume fresh substrate.
+    """
+
+    src = inspect.getsource(main_module)
+
+    assert "_new_listing_scout_cycle" not in src
+    assert 'id="new_listing_scout"' not in src
+    assert "_afternoon_snapshot_capture_cycle" not in src
+    assert 'id="afternoon_snapshot_capture"' not in src
+    assert "find_weather_markets_or_raise" not in src
+    assert "ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN" not in src
 
 
 def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):

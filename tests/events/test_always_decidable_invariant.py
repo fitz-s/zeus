@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
@@ -156,8 +156,9 @@ def test_snapshot_block_invokes_refresher_then_event_processes_next_cycle():
     assert calls == [("Chicago", "2026-05-25", "high")]
     assert r1.snapshot_refreshes == 1
 
-    # Cycle 2: substrate now fresh -> the event PROCESSES (no longer a no-opportunity window).
-    r2 = reactor.process_pending(decision_time=_DT)
+    # Cycle 2 after the retry floor: substrate now fresh -> the event PROCESSES
+    # (no longer a no-opportunity window).
+    r2 = reactor.process_pending(decision_time=_DT + timedelta(seconds=61))
     assert r2.processed == 1
     assert _status(conn, event.event_id) == "processed"
 

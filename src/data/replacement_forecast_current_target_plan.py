@@ -30,6 +30,7 @@ class ReplacementForecastCurrentTargetPlanRow:
     readiness_count: int
     openmeteo_manifest_count: int
     baseline_source_run_id: str | None = None
+    openmeteo_source_run_id: str | None = None
     day0_observed_extreme_required: bool = False
 
     @property
@@ -60,6 +61,7 @@ class ReplacementForecastCurrentTargetPlanRow:
             "readiness_count": self.readiness_count,
             "openmeteo_manifest_count": self.openmeteo_manifest_count,
             "baseline_source_run_id": self.baseline_source_run_id,
+            "openmeteo_source_run_id": self.openmeteo_source_run_id,
             "day0_observed_extreme_required": self.day0_observed_extreme_required,
             "covered": self.covered,
             "can_seed": self.can_seed,
@@ -131,6 +133,277 @@ def _supports_source_run_targets(conn: sqlite3.Connection) -> bool:
         "computed_at",
     }
     return required.issubset(_columns(conn, "source_run_coverage"))
+
+
+def _json_object(text: object) -> dict[str, object]:
+    if not isinstance(text, str) or not text.strip():
+        return {}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _row_value(row: sqlite3.Row, key: str) -> object | None:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _openmeteo_source_run_id(metadata: Mapping[str, object]) -> str | None:
+    value = metadata.get("source_run_id")
+    if value is None or not str(value).strip():
+        return None
+    return str(value).strip()
+
+
+def _path_from_metadata_path(
+    path_text: object,
+    *,
+    base_dir: Path,
+) -> Path | None:
+    if path_text is None or not str(path_text).strip():
+        return None
+    path = Path(str(path_text))
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
+
+
+def _openmeteo_payload_covers_target_local_day(
+    metadata: Mapping[str, object],
+    *,
+    artifact_path: str,
+    city_timezone: str | None,
+    target_date: str,
+) -> bool:
+    """Return whether an explicit Open-Meteo payload has target-local-day samples.
+
+    ``raw_forecast_artifacts`` rows can point at a manifest whose metadata says a
+    target date is in horizon while the on-disk payload is a clipped partial
+    response. That false positive makes the downloader skip the fresh cycle and
+    lets the materializer fail later with "insufficient Open-Meteo hourly
+    samples inside target local day". Only explicit ``openmeteo_payload_json``
+    payloads are checked here so old fixture/dummy artifacts keep their legacy
+    existence-only semantics.
+    """
+
+    if not city_timezone:
+        return True
+    payload_path = _path_from_metadata_path(
+        metadata.get("openmeteo_payload_json"),
+        base_dir=Path(artifact_path).parent,
+    )
+    if payload_path is None:
+        return True
+    if not payload_path.exists():
+        return False
+    try:
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            extract_openmeteo_ecmwf_ifs9_localday_anchor,
+        )
+
+        wanted = date.fromisoformat(str(target_date).strip())
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    try:
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            payload,
+            city_timezone=city_timezone,
+            target_local_date=wanted,
+            min_hourly_samples=1,
+            require_full_localday=False,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _openmeteo_manifest_coverage(
+    conn: sqlite3.Connection,
+    *,
+    raw_artifact_columns: set[str],
+    metadata_column: str | None,
+    source_id: str,
+    data_version: str,
+    city: str,
+    target_date: str,
+    city_timezone: str | None = None,
+    required_source_cycle_time: str | None = None,
+) -> tuple[int, str | None]:
+    if metadata_column is None:
+        return 0, None
+    optional_columns = [
+        col
+        for col in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")
+        if col in raw_artifact_columns
+    ]
+    select_optional = "".join(f", {col}" for col in optional_columns)
+    cycle_predicates: list[str] = []
+    cycle_params: list[str] = []
+    if required_source_cycle_time:
+        if "source_cycle_time" in raw_artifact_columns:
+            cycle_predicates.append("source_cycle_time = ?")
+            cycle_params.append(required_source_cycle_time)
+        cycle_predicates.append(f"json_extract({metadata_column}, '$.source_cycle_time') = ?")
+        cycle_params.append(required_source_cycle_time)
+    cycle_clause = ""
+    if cycle_predicates:
+        cycle_clause = f" AND ({' OR '.join(cycle_predicates)})"
+    rows = conn.execute(
+        f"""
+        SELECT artifact_path, {metadata_column} AS metadata_json{select_optional}
+        FROM raw_forecast_artifacts
+        WHERE source_id = ?
+          AND data_version = ?
+          AND artifact_path IS NOT NULL
+          AND artifact_path != ''
+          AND (
+            json_extract({metadata_column}, '$.city') = ?
+            OR EXISTS (
+                SELECT 1
+                FROM json_each({metadata_column}, '$.cities')
+                WHERE value = ?
+            )
+          )
+          AND (
+            json_extract({metadata_column}, '$.target_date') = ?
+            OR EXISTS (
+                SELECT 1
+                FROM json_each({metadata_column}, '$.target_dates')
+                WHERE value = ?
+            )
+          )
+          {cycle_clause}
+        """,
+        (
+            source_id,
+            data_version,
+            city,
+            city,
+            target_date,
+            target_date,
+            *cycle_params,
+        ),
+    ).fetchall()
+    candidates: list[tuple[tuple[str, str, str, str], str | None]] = []
+    for manifest in rows:
+        artifact_path = str(manifest["artifact_path"] or "")
+        if not artifact_path or not os.path.exists(artifact_path):
+            continue
+        metadata = _json_object(manifest["metadata_json"])
+        if not _openmeteo_payload_covers_target_local_day(
+            metadata,
+            artifact_path=artifact_path,
+            city_timezone=city_timezone,
+            target_date=target_date,
+        ):
+            continue
+        source_run_id = _openmeteo_source_run_id(metadata)
+        source_cycle_time = str(
+            _row_value(manifest, "source_cycle_time")
+            or metadata.get("source_cycle_time")
+            or ""
+        )
+        source_available_at = str(
+            _row_value(manifest, "source_available_at")
+            or metadata.get("source_available_at")
+            or metadata.get("requested_source_available_at")
+            or ""
+        )
+        captured_at = str(
+            _row_value(manifest, "captured_at")
+            or metadata.get("captured_at")
+            or _row_value(manifest, "recorded_at")
+            or ""
+        )
+        candidates.append(
+            (
+                (source_cycle_time, source_available_at, captured_at, artifact_path),
+                source_run_id,
+            )
+        )
+    if not candidates:
+        return 0, None
+    latest = max(candidates, key=lambda item: item[0])
+    return len(candidates), latest[1]
+
+
+def _replacement_coverage_counts_for_dependencies(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    baseline_source_run_id: str | None,
+    openmeteo_source_run_id: str | None,
+    posterior_tradeable_grade_clause: str,
+    readiness_status_clause: str,
+) -> tuple[int, int]:
+    if not baseline_source_run_id or not openmeteo_source_run_id:
+        return 0, 0
+    posterior_count = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM forecast_posteriors p
+            WHERE p.source_id = ?
+              AND p.training_allowed = 0
+              AND p.runtime_layer = 'live'
+              AND p.city = ?
+              AND p.target_date = ?
+              AND p.temperature_metric = ?
+              {posterior_tradeable_grade_clause}
+              AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = ?
+              AND json_extract(p.dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?
+            """,
+            (
+                SOURCE_ID,
+                city,
+                target_date,
+                temperature_metric,
+                baseline_source_run_id,
+                openmeteo_source_run_id,
+            ),
+        ).fetchone()[0]
+    )
+    readiness_count = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM readiness_state r
+            WHERE r.strategy_key = ?
+              AND json_extract(r.provenance_json, '$.city') = ?
+              AND json_extract(r.provenance_json, '$.target_date') = ?
+              AND json_extract(r.provenance_json, '$.temperature_metric') = ?
+              {readiness_status_clause}
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_each(r.dependency_json, '$.dependencies')
+                  WHERE json_extract(value, '$.role') = 'baseline_b0'
+                    AND json_extract(value, '$.source_run_id') = ?
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM json_each(r.dependency_json, '$.dependencies')
+                  WHERE json_extract(value, '$.role') = 'openmeteo_ifs9_anchor'
+                    AND json_extract(value, '$.source_run_id') = ?
+              )
+            """,
+            (
+                SOURCE_ID,
+                city,
+                target_date,
+                temperature_metric,
+                baseline_source_run_id,
+                openmeteo_source_run_id,
+            ),
+        ).fetchone()[0]
+    )
+    return posterior_count, readiness_count
 
 
 def _blocked_plan(reason_code: str) -> ReplacementForecastCurrentTargetPlan:
@@ -246,6 +519,7 @@ def build_replacement_forecast_current_target_plan(
     min_target_date: date | str | None = None,
     require_raw_artifacts: bool = True,
     now_utc: datetime | None = None,
+    required_openmeteo_source_cycle_time: datetime | str | None = None,
 ) -> ReplacementForecastCurrentTargetPlan:
     """Return current market targets and the replacement artifacts needed for them."""
 
@@ -258,6 +532,13 @@ def build_replacement_forecast_current_target_plan(
         if isinstance(min_target_date, date)
         else str(min_target_date or _ref_clock.date().isoformat())
     )
+    required_openmeteo_cycle_iso: str | None = None
+    if isinstance(required_openmeteo_source_cycle_time, datetime):
+        required_openmeteo_cycle_iso = (
+            required_openmeteo_source_cycle_time.astimezone(timezone.utc).isoformat()
+        )
+    elif required_openmeteo_source_cycle_time is not None:
+        required_openmeteo_cycle_iso = str(required_openmeteo_source_cycle_time)
     if not db_path.exists():
         return ReplacementForecastCurrentTargetPlan(
             status="BLOCKED",
@@ -302,11 +583,15 @@ def build_replacement_forecast_current_target_plan(
         if not {"city", "target_date", "temperature_metric", "source_id", "data_version"}.issubset(posterior_columns):
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_POSTERIOR_SCHEMA_MISSING")
         readiness_columns = _columns(conn, "readiness_state")
+        raw_artifact_columns: set[str] = set()
         metadata_column = None
-        if require_raw_artifacts:
+        if "raw_forecast_artifacts" in tables:
             raw_artifact_columns = _columns(conn, "raw_forecast_artifacts")
             metadata_column = _raw_artifact_metadata_column(raw_artifact_columns)
-            if metadata_column is None or not {"source_id", "data_version", "artifact_path"}.issubset(raw_artifact_columns):
+            if require_raw_artifacts and (
+                metadata_column is None
+                or not {"source_id", "data_version", "artifact_path"}.issubset(raw_artifact_columns)
+            ):
                 raise ValueError("raw_forecast_artifacts schema lacks manifest metadata columns")
         source_run_targets = _supports_source_run_targets(conn)
         posterior_source_run_clause = ""
@@ -512,6 +797,7 @@ def build_replacement_forecast_current_target_plan(
             openmeteo_expected = expected["openmeteo_ifs9_anchor"]
             city = str(row["city"])
             target_date = str(row["target_date"])
+            baseline_source_run_id = row["baseline_source_run_id"]
             day0_observed_extreme_required = _day0_observed_extreme_required(
                 city=city,
                 target_date=target_date,
@@ -519,70 +805,48 @@ def build_replacement_forecast_current_target_plan(
                 now_utc=evaluation_now_utc,
             )
             openmeteo_count = 0
-            if not require_raw_artifacts:
+            openmeteo_source_run_id = None
+            if metadata_column is not None:
+                openmeteo_count, openmeteo_source_run_id = _openmeteo_manifest_coverage(
+                    conn,
+                    raw_artifact_columns=raw_artifact_columns,
+                    metadata_column=metadata_column,
+                    source_id=openmeteo_expected.source_id,
+                    data_version=openmeteo_expected.data_version,
+                    city=city,
+                    target_date=target_date,
+                    city_timezone=timezone_by_city.get(city),
+                    required_source_cycle_time=required_openmeteo_cycle_iso,
+                )
+            elif not require_raw_artifacts:
                 openmeteo_count = 1
-            elif metadata_column is not None:
-                manifest_rows = conn.execute(
-                    f"""
-                    SELECT source_id, data_version, artifact_path
-                    FROM raw_forecast_artifacts
-                    WHERE (
-                        source_id = ? AND data_version = ?
-                    )
-                      AND artifact_path IS NOT NULL
-                      AND artifact_path != ''
-                      AND (
-                        json_extract({metadata_column}, '$.city') = ?
-                        OR EXISTS (
-                            SELECT 1
-                            FROM json_each({metadata_column}, '$.cities')
-                            WHERE value = ?
-                        )
-                      )
-                      AND (
-                        json_extract({metadata_column}, '$.target_date') = ?
-                        OR EXISTS (
-                            SELECT 1
-                            FROM json_each({metadata_column}, '$.target_dates')
-                            WHERE value = ?
-                        )
-                      )
-                    """,
-                    (
-                        openmeteo_expected.source_id,
-                        openmeteo_expected.data_version,
-                        city,
-                        city,
-                        target_date,
-                        target_date,
-                    ),
-                ).fetchall()
-                # DB<->disk provenance antibody (Fitz #4): a raw_forecast_artifacts row whose
-                # artifact_path file no longer exists on disk must NOT count as coverage. The
-                # download-skip gate (replacement_forecast_production._download_replacement_
-                # forecast_current_targets_if_needed) skips fetching when
-                # missing_*_manifest_count == 0; trusting a dangling DB row (file deleted, row
-                # survived) makes it skip the fetch while disk-based seed discovery finds
-                # nothing -> deadlock -> readiness expires -> zero trades. Count only artifacts
-                # actually present on disk, the same authority seed discovery uses.
-                for manifest in manifest_rows:
-                    artifact_path = str(manifest["artifact_path"] or "")
-                    if not artifact_path or not os.path.exists(artifact_path):
-                        continue
-                    source_id = str(manifest["source_id"])
-                    data_version = str(manifest["data_version"])
-                    if source_id == openmeteo_expected.source_id and data_version == openmeteo_expected.data_version:
-                        openmeteo_count += 1
+            posterior_count = int(row["posterior_count"])
+            readiness_count = int(row["readiness_count"])
+            if source_run_targets and openmeteo_source_run_id:
+                posterior_count, readiness_count = _replacement_coverage_counts_for_dependencies(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                    baseline_source_run_id=str(baseline_source_run_id or ""),
+                    openmeteo_source_run_id=openmeteo_source_run_id,
+                    posterior_tradeable_grade_clause=posterior_tradeable_grade_clause,
+                    readiness_status_clause=readiness_status_clause,
+                )
+            elif source_run_targets and metadata_column is not None:
+                posterior_count = 0
+                readiness_count = 0
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
                     city=city,
                     target_date=target_date,
                     temperature_metric=metric,
                     market_bin_count=int(row["market_bin_count"]),
-                    posterior_count=int(row["posterior_count"]),
-                    readiness_count=int(row["readiness_count"]),
+                    posterior_count=posterior_count,
+                    readiness_count=readiness_count,
                     openmeteo_manifest_count=openmeteo_count,
-                    baseline_source_run_id=row["baseline_source_run_id"],
+                    baseline_source_run_id=baseline_source_run_id,
+                    openmeteo_source_run_id=openmeteo_source_run_id,
                     day0_observed_extreme_required=day0_observed_extreme_required,
                 )
             )

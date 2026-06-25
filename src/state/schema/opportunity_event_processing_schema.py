@@ -26,7 +26,20 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_event_processing_status
     ON opportunity_event_processing(consumer_name, processing_status, updated_at)
 """
 
+CREATE_PENDING_RETRY_FLOOR_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_opportunity_event_processing_pending_retry_floor
+    ON opportunity_event_processing(consumer_name, processing_status, claimed_at, updated_at, event_id)
+"""
+
+CREATE_STALE_CLAIM_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_opportunity_event_processing_stale_claim
+    ON opportunity_event_processing(consumer_name, processing_status, claimed_at, event_id)
+    WHERE claimed_at IS NOT NULL
+"""
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_STATUS_INDEX_SQL)
+    conn.execute(CREATE_PENDING_RETRY_FLOOR_INDEX_SQL)
+    conn.execute(CREATE_STALE_CLAIM_INDEX_SQL)

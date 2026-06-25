@@ -183,6 +183,123 @@ def test_no_client_call_while_any_connection_open(monkeypatch, tmp_path):
         )
 
 
+def test_live_tick_scope_defers_heavy_recovery_passes(monkeypatch, tmp_path):
+    """The order-daemon cadence reconciles in-flight commands without full sweep work."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-live-tick")
+    h._advance_to_submitting(seed_conn, command_id="cmd-live-tick", venue_order_id="vord-live-tick")
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-live-tick": {"orderID": "vord-live-tick", "status": "LIVE"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["deferred_full_sweep"] is True
+    assert summary["scanned"] == 1
+    assert "partial_remainders" not in summary
+    assert "recorded_maker_fill_economics" not in summary
+
+
+def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monkeypatch, tmp_path):
+    """Live cadence may defer heavy client sweeps, but must not leave confirmed
+    cancel/no-fill pending-entry ghosts in the money path."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.venue_command_repo import append_event
+
+    db_path = tmp_path / "recovery-live-tick-cancelled.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-cancelled", size=10.35, price=0.60)
+    h._advance_to_acked(
+        seed_conn,
+        command_id="cmd-cancelled",
+        venue_order_id="vord-cancelled",
+    )
+    h._seed_pending_entry_projection(
+        seed_conn,
+        position_id="pos-001",
+        order_id="vord-cancelled",
+    )
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-cancelled",
+        order_id="vord-cancelled",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10.35",
+        source="REST",
+    )
+    append_event(
+        seed_conn,
+        command_id="cmd-cancelled",
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-04-26T00:04:00Z",
+        payload={"venue_order_id": "vord-cancelled"},
+    )
+    append_event(
+        seed_conn,
+        command_id="cmd-cancelled",
+        event_type="CANCEL_ACKED",
+        occurred_at="2026-04-26T00:05:00Z",
+        payload={"venue_order_id": "vord-cancelled", "venue_status": "CANCELED"},
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(recorder)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["deferred_full_sweep"] is True
+    assert summary["cancel_ack_terminal_no_fill_facts"]["advanced"] == 1
+    assert summary["terminal_order_facts"]["advanced"] == 1
+    check = sqlite3.connect(str(db_path))
+    check.row_factory = sqlite3.Row
+    try:
+        current = check.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status "
+            "FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+    finally:
+        check.close()
+
+
 def test_no_connection_spans_more_than_one_pass(monkeypatch, tmp_path):
     """R2: every connection's open..close window contains at most one sub-pass.
 

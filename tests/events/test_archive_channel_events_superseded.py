@@ -631,22 +631,37 @@ def test_fetch_pending_query_uses_processing_status_index():
 
     conn.executed_sql.clear()
     store.fetch_pending(decision_time=decision_time, limit=90)
-    # Locate fetch_pending's main claim query by its stable signature: it joins
-    # the processing table via the active-status index and computes the per-city
-    # round-robin rank (_city_round). Format-robust — does not depend on the
-    # SELECT-list being on one line (the query is now a CTE: WITH candidates ...).
-    fetch_sql, fetch_params = next(
+    # Locate fetch_pending's two active-working-set queries by stable signatures.
+    # The hot path now reads processing rows first, then point-reads events by
+    # event_id; per-city round-robin rank is computed in Python so SQLite does not
+    # materialize a ROW_NUMBER/json_extract temp sort over the live working set.
+    pending_sql, pending_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "INDEXED BY idx_opportunity_event_processing_status" in sql
-        and "_city_round" in sql
+        if "INDEXED BY idx_opportunity_event_processing_pending_retry_floor" in sql
+        and "p.claimed_at <= ?" in sql
+        and "p.processing_status = 'pending'" in sql
+    )
+    stale_sql, stale_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "INDEXED BY idx_opportunity_event_processing_stale_claim" in sql
+        and "p.processing_status = 'processing'" in sql
     )
 
-    plan_text = _plan_text(conn, fetch_sql, fetch_params)
+    plan_text = _plan_text(conn, pending_sql, pending_params) + "\n" + _plan_text(
+        conn, stale_sql, stale_params
+    )
 
-    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan_text, (
-        f"fetch_pending must use active-status index, got: {plan_text!r}"
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_PENDING_RETRY_FLOOR" in plan_text, (
+        f"fetch_pending pending branch must use retry-floor index, got: {plan_text!r}"
+    )
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STALE_CLAIM" in plan_text, (
+        f"fetch_pending stale-processing branch must use stale-claim index, got: {plan_text!r}"
     )
     assert "SCAN P" not in plan_text, (
         f"fetch_pending must not full-scan opportunity_event_processing, got: {plan_text!r}"
     )
+    hot_sql = pending_sql.upper() + "\n" + stale_sql.upper()
+    assert "ROW_NUMBER" not in hot_sql
+    assert "JSON_EXTRACT" not in hot_sql

@@ -87,18 +87,24 @@ def test_no_function_opens_a_paired_world_and_trade_live_connection():
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
-def test_refresh_uses_world_connection_with_trades_flocked(func_name):
-    """The bounded refresh functions must route the cross-DB write through the
-    sanctioned single-connection ATTACH helper."""
+def test_refresh_uses_non_flocked_world_connection_with_trades(func_name):
+    """Bounded REST refresh functions must use one ATTACHed connection without
+    holding cross-process writer flocks across orderbook fetches."""
     node = _func_node(func_name)
     called = {
         sub.func.id
         for sub in ast.walk(node)
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
     }
-    assert "world_connection_with_trades_flocked" in called, (
-        f"{func_name} must use world_connection_with_trades_flocked (INV-37 single "
-        f"connection with zeus_trades.db ATTACHed)."
+    assert "get_world_connection_with_trades_required" in called, (
+        f"{func_name} must use get_world_connection_with_trades_required: one "
+        f"world-main connection with zeus_trades.db ATTACHed."
+    )
+    assert "world_connection_with_trades_flocked" not in called, (
+        f"{func_name} must not use world_connection_with_trades_flocked: "
+        f"seed_rest_books_in_chunks performs REST fetches before each DB write "
+        f"chunk, and holding writer flocks across that network window starves "
+        f"live redecision snapshot refresh."
     )
 
 

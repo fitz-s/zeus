@@ -49,6 +49,56 @@ def _git_head_at_boot() -> str:
 
 _PROCESS_GIT_HEAD = _git_head_at_boot()
 
+_FORECAST_BOOT_REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
+    "forecast_posteriors": frozenset(
+        {
+            "city",
+            "target_date",
+            "temperature_metric",
+            "source_cycle_time",
+            "q_json",
+            "q_lcb_json",
+            "runtime_layer",
+            "recorded_at",
+        }
+    ),
+    "raw_forecast_artifacts": frozenset(
+        {
+            "source_id",
+            "product_id",
+            "data_version",
+            "source_cycle_time",
+            "captured_at",
+            "artifact_path",
+        }
+    ),
+    "raw_model_forecasts": frozenset(
+        {
+            "model",
+            "city",
+            "target_date",
+            "metric",
+            "source_cycle_time",
+            "source_available_at",
+            "forecast_value_c",
+            "endpoint",
+        }
+    ),
+    "readiness_state": frozenset({"strategy_key", "status", "dependency_json", "provenance_json"}),
+    "source_run_coverage": frozenset(
+        {"source_run_id", "source_id", "city", "target_local_date", "temperature_metric"}
+    ),
+    "job_run": frozenset({"job_run_id"}),
+    "cycle_advance_enqueues": frozenset({"seed_file", "held_position", "enqueued_at"}),
+}
+
+_FORECAST_BOOT_REQUIRED_INDEXES: frozenset[str] = frozenset(
+    {
+        "idx_forecast_posteriors_live_family_cycle",
+        "idx_raw_model_forecasts_endpoint_family_cycle_members",
+    }
+)
+
 FORECAST_LIVE_DAILY_HIGH_JOB_ID = "forecast_live_opendata_daily_mx2t6"       # 00z trigger
 FORECAST_LIVE_DAILY_HIGH_12Z_JOB_ID = "forecast_live_opendata_daily_mx2t6_12z"  # 12z trigger
 FORECAST_LIVE_DAILY_LOW_JOB_ID = "forecast_live_opendata_daily_mn2t6"        # 00z trigger
@@ -206,6 +256,47 @@ def _write_forecast_live_heartbeat(
 
 def _heartbeat_tick() -> None:
     _write_forecast_live_heartbeat()
+
+
+def _forecast_boot_schema_ready(conn: Any) -> bool:
+    """Fast live-boot schema admission for the forecast daemon.
+
+    ``init_schema_forecasts`` remains the repair path for missing schema. On an
+    already-migrated 36GB live forecast DB, running the full idempotent DDL
+    sequence before heartbeat can block the daemon from reaching scheduler
+    readiness. This check admits only the tables/columns the forecast-live jobs
+    need before skipping the full ensure.
+    """
+
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            ).fetchall()
+        }
+        for table, required_columns in _FORECAST_BOOT_REQUIRED_SCHEMA.items():
+            if table not in tables:
+                return False
+            columns = {
+                str(row["name"] if hasattr(row, "keys") else row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not required_columns.issubset(columns):
+                return False
+            if "trade_authority_status" in columns:
+                return False
+        indexes = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        if not _FORECAST_BOOT_REQUIRED_INDEXES.issubset(indexes):
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -1227,7 +1318,11 @@ def main() -> None:
     bypass_dead_proxy_env_vars()
     conn = get_forecasts_connection(write_class="bulk")
     try:
-        init_schema_forecasts(conn)
+        if _forecast_boot_schema_ready(conn):
+            logger.info("forecast-live schema fast-check passed; skipping full init_schema_forecasts")
+        else:
+            logger.info("forecast-live schema fast-check incomplete; running init_schema_forecasts")
+            init_schema_forecasts(conn)
         assert_schema_current_forecasts(conn)
         conn.commit()
     finally:

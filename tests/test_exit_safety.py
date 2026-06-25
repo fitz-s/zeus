@@ -741,6 +741,65 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert json.loads(event["payload_json"])["semantic_event"] == "PARTIAL_FILL_OBSERVED"
 
 
+def test_pending_exit_status_poll_releases_db_transaction_before_venue_io(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-pending-exit-lock-boundary",
+        market_id="mkt-pending-exit-lock-boundary",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        last_exit_order_id="ord-pending-exit-lock-boundary",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-pending-exit-lock-boundary",
+        last_monitor_market_price=0.45,
+        last_monitor_best_bid=0.44,
+    )
+    portfolio = PortfolioState(positions=[position])
+    _insert_exit_command(
+        conn,
+        command_id="cmd-pending-exit-lock-boundary",
+        position_id=position.trade_id,
+        size=20.0,
+        price=0.44,
+        venue_order_id="ord-pending-exit-lock-boundary",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET price = price WHERE command_id = ?",
+        ("cmd-pending-exit-lock-boundary",),
+    )
+    assert conn.in_transaction
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-pending-exit-lock-boundary"
+            assert conn.in_transaction is False
+            return {"status": "LIVE"}
+
+        def get_orderbook(self, token_id):
+            assert token_id == YES_TOKEN
+            assert conn.in_transaction is False
+            return {"bids": [{"price": "0.44", "size": "10"}], "asks": []}
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+
+
 def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
@@ -2358,6 +2417,160 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     loaded = next(row for row in loader_view["positions"] if row["trade_id"] == position.trade_id)
     assert loaded["state"] == "pending_exit"
     assert loaded["exit_state"] == "backoff_exhausted"
+
+
+def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
+    from src.execution.exit_lifecycle import release_market_closed_pending_exit_hold
+    from src.contracts.semantic_types import ExitState
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-market-closed-hold",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="pending_exit",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status=ExitState.BACKOFF_EXHAUSTED,
+        exit_state="backoff_exhausted",
+        exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        exit_retry_count=3,
+    )
+
+    assert release_market_closed_pending_exit_hold(position, conn=conn) is True
+
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+    assert position.exit_reason == ""
+    assert position.exit_retry_count == 0
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "day0_window",
+        "order_status": "filled",
+        "exit_reason": "",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "MONITOR_REFRESHED"
+    assert event["phase_after"] == "day0_window"
+    assert event["venue_status"] is None
+    assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+    assert payload["exit_order_submitted"] is False
+    assert payload["exit_failure"] is False
+
+
+def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
+    from src.contracts.semantic_types import ExitState
+    from src.engine.lifecycle_events import (
+        build_monitor_refreshed_canonical_write,
+        build_position_current_projection,
+    )
+    from src.state.portfolio import Position
+
+    held = Position(
+        trade_id="pos-day0-held-stale-backoff",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="day0_window",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status=ExitState.BACKOFF_EXHAUSTED,
+        exit_state="",
+        exit_reason="",
+    )
+    assert build_position_current_projection(held)["order_status"] == "filled"
+    events, projection = build_monitor_refreshed_canonical_write(
+        held,
+        sequence_no=1,
+        phase_after="day0_window",
+        source_module="test",
+    )
+    assert projection["order_status"] == "filled"
+    assert events[0]["venue_status"] == "filled"
+    from src.state.db import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    stale_projection = dict(projection)
+    stale_projection["order_status"] = "backoff_exhausted"
+    upsert_position_current(conn, stale_projection)
+    append_many_and_project(conn, events, projection)
+    current = conn.execute(
+        "SELECT order_status FROM position_current WHERE position_id = ?",
+        (held.trade_id,),
+    ).fetchone()
+    assert current["order_status"] == "filled"
+
+    pending_exit = Position(
+        trade_id="pos-pending-exit-real-backoff",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="pending_exit",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status=ExitState.BACKOFF_EXHAUSTED,
+        exit_state=ExitState.BACKOFF_EXHAUSTED,
+        exit_reason="EXIT_CHAIN_DUST_STILL_HELD",
+    )
+    assert build_position_current_projection(pending_exit)["order_status"] == "backoff_exhausted"
 
 
 def test_exit_snapshot_capture_fails_closed_on_unverified_market_scan(conn, monkeypatch):
