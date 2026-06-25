@@ -26,6 +26,9 @@ removing the belief_debt record makes (2) fail.
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -157,6 +160,88 @@ def test_readthrough_does_not_itself_decide_an_exit(monkeypatch):
     assert prob == pytest.approx(0.80)
     from src.state.portfolio import Position
     assert isinstance(refresh_pos, Position)
+
+
+def test_readthrough_restamps_expired_seed_ttl_to_decision_now(
+    monkeypatch,
+    tmp_path,
+):
+    """An expired on-disk seed must not poison the live read-through request.
+
+    The source-cycle identity remains from the seed, but computed_at/expires_at
+    are monitor-decision-time fields in this read-only path. Regression target:
+    live monitor logs with ``expires_at must be after computed_at``.
+    """
+    import tests.test_replacement_forecast_materializer as base
+    import src.data.replacement_forecast_materialization_request_builder as rb
+    import src.data.replacement_forecast_materializer as mat
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    monitor_now = datetime(2026, 6, 25, 14, 58, tzinfo=timezone.utc)
+    expired_seed_payload = {
+        "city": "Karachi",
+        "target_date": "2026-06-12",
+        "temperature_metric": "high",
+        "computed_at": "2026-06-12T00:00:00+00:00",
+        "expires_at": "2026-06-12T03:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        mr,
+        "_freshest_family_seed_on_disk",
+        lambda **kw: (tmp_path / "Karachi.2026-06-12.high.seed.json", expired_seed_payload),
+    )
+    monkeypatch.setattr(mr, "_seed_payload_covers_target_local_day", lambda **kw: True)
+    monkeypatch.setattr(mr, "_held_side_probability_from_yes_bin_probability", lambda q, direction: 1.0 - q)
+    monkeypatch.setattr(mr, "_match_bin", lambda q, label: (BIN, q[BIN]), raising=False)
+    monkeypatch.setattr(
+        "src.engine.position_belief.monitor_belief_max_age_hours",
+        lambda: 3.0,
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_build(payload, *, base_dir):
+        captured["payload"] = dict(payload)
+        computed_at = datetime.fromisoformat(str(payload["computed_at"]))
+        expires_at = datetime.fromisoformat(str(payload["expires_at"]))
+        assert computed_at == monitor_now
+        assert expires_at == monitor_now + timedelta(hours=3)
+        return SimpleNamespace(ok=True, request=dict(payload))
+
+    def fake_dataclass(request_json, *, base_dir):
+        return base._request(
+            source_cycle_time=datetime(2026, 6, 25, 12, tzinfo=timezone.utc),
+            computed_at=datetime.fromisoformat(str(request_json["computed_at"])),
+            expires_at=datetime.fromisoformat(str(request_json["expires_at"])),
+        )
+
+    def fake_compute(conn, request):
+        captured["request"] = request
+        assert request.computed_at == monitor_now
+        assert request.expires_at == monitor_now + timedelta(hours=3)
+        return SimpleNamespace(
+            live_eligible=True,
+            q={BIN: 0.25},
+            decorrelated_providers_served=2,
+            decorrelated_providers_expected=3,
+        )
+
+    monkeypatch.setattr(rb, "build_replacement_forecast_materialization_request", fake_build)
+    monkeypatch.setattr(rb, "build_materialize_request_dataclass", fake_dataclass)
+    monkeypatch.setattr(mat, "compute_replacement_posterior_readonly", fake_compute)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
+
+    held_prob = mr._attempt_held_belief_readthrough(
+        _pos(),
+        city=object(),
+        target_d=None,
+        metric="high",
+        decision_now=monitor_now,
+    )
+
+    assert held_prob == pytest.approx(0.75)
+    assert captured["payload"]["computed_at"] == monitor_now.isoformat()
 
 
 def test_freshest_seed_skips_payload_without_target_local_day(tmp_path, monkeypatch):

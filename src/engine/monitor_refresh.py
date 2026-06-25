@@ -678,13 +678,25 @@ def _attempt_held_belief_readthrough(
             return None
         seed_path, seed_payload = seed
 
+        # The on-disk seed is a source/anchor envelope, not the monitor decision
+        # instant. Re-use its source-cycle identity, but stamp the read-only
+        # request with the current monitor clock so arrival/freshness guards do
+        # not compare a new decision time to an expired seed TTL.
+        _now = decision_now if decision_now is not None else datetime.now(timezone.utc)
+        from src.engine.position_belief import monitor_belief_max_age_hours
+
+        readthrough_ttl_h = max(0.01, float(monitor_belief_max_age_hours()))
+        readthrough_payload = dict(seed_payload)
+        readthrough_payload["computed_at"] = _now.isoformat()
+        readthrough_payload["expires_at"] = (_now + timedelta(hours=readthrough_ttl_h)).isoformat()
+
         from src.data.replacement_forecast_materialization_request_builder import (
             build_materialize_request_dataclass,
             build_replacement_forecast_materialization_request,
         )
 
         build = build_replacement_forecast_materialization_request(
-            seed_payload, base_dir=seed_path.parent
+            readthrough_payload, base_dir=seed_path.parent
         )
         if not build.ok or build.request is None:
             return None
@@ -704,8 +716,11 @@ def _attempt_held_belief_readthrough(
         # live monitor cycle), so all single_runs available at that instant are
         # admitted.  source_cycle_time (the forecast cycle, "06:00 UTC") is kept
         # verbatim — it is NOT a wall-clock and must NOT be advanced.
-        _now = decision_now if decision_now is not None else datetime.now(timezone.utc)
-        request = replace(request, computed_at=_now)
+        request = replace(
+            request,
+            computed_at=_now,
+            expires_at=_now + timedelta(hours=readthrough_ttl_h),
+        )
 
         from src.data.replacement_forecast_materializer import (
             compute_replacement_posterior_readonly,
