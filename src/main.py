@@ -7745,6 +7745,102 @@ def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
     return prefetch
 
 
+def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
+    """Money-path families that should drive Day0 hourly-vector refresh order."""
+
+    families: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(raw: Iterable[tuple[object, object, object]]) -> None:
+        for city, target_date, metric in raw or ():
+            key = _substrate_refresh_family_key(city, target_date, metric)
+            if key and all(key) and key not in seen:
+                seen.add(key)
+                families.append(key)
+
+    try:
+        world_ro = get_world_connection_read_only()
+        try:
+            rows = _pending_family_rows_for_refresh(
+                world_ro,
+                consumer_name="edli_reactor_v1",
+                event_window_limit=int(os.environ.get("ZEUS_DAY0_HOURLY_PRIORITY_EVENT_WINDOW_LIMIT", "2000")),
+            )
+        finally:
+            world_ro.close()
+        add(
+            (
+                row[0],
+                row[1],
+                row[2],
+            )
+            for row in rows
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edli_day0_hourly_refresh: pending-family priority read failed: %s", exc)
+
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        trade_ro = get_trade_connection_read_only()
+        try:
+            add(_open_rest_family_rows_for_refresh(trade_ro))
+        finally:
+            trade_ro.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edli_day0_hourly_refresh: open-rest priority read failed: %s", exc)
+
+    add(sorted(_edli_current_held_position_family_keys()))
+    return families
+
+
+def _edli_order_day0_hourly_refresh_cities(
+    cities: list[Any],
+    *,
+    decision_time: datetime,
+    priority_families: Iterable[tuple[str, str, str]],
+) -> tuple[list[Any], int]:
+    """Put same-local-day money-path cities before the static universe sweep."""
+
+    by_name_key = {
+        _substrate_refresh_family_text_key(getattr(city, "name", "")): city
+        for city in cities
+        if str(getattr(city, "name", "") or "").strip()
+    }
+    priority_city_keys: list[str] = []
+    seen_priority: set[str] = set()
+    for city_name, target_date, metric in priority_families or ():
+        if metric not in {"high", "low"}:
+            continue
+        city = by_name_key.get(_substrate_refresh_family_text_key(city_name))
+        if city is None:
+            continue
+        try:
+            local_date = decision_time.astimezone(ZoneInfo(str(getattr(city, "timezone")))).date().isoformat()
+        except Exception:  # noqa: BLE001
+            continue
+        if str(target_date or "").strip() != local_date:
+            continue
+        key = _substrate_refresh_family_text_key(getattr(city, "name", ""))
+        if key and key not in seen_priority:
+            seen_priority.add(key)
+            priority_city_keys.append(key)
+
+    ordered: list[Any] = []
+    emitted: set[str] = set()
+    for key in priority_city_keys:
+        city = by_name_key.get(key)
+        if city is not None:
+            ordered.append(city)
+            emitted.add(key)
+    for city in cities:
+        key = _substrate_refresh_family_text_key(getattr(city, "name", ""))
+        if key not in emitted:
+            ordered.append(city)
+            emitted.add(key)
+    return ordered, len(priority_city_keys)
+
+
 @_scheduler_job("edli_day0_hourly_refresh")
 def _edli_day0_hourly_refresh_cycle() -> None:
     """Refresh Day0 high-resolution hourly vectors off the trading reactor cadence.
@@ -7766,16 +7862,30 @@ def _edli_day0_hourly_refresh_cycle() -> None:
         from src.config import runtime_cities as _rc
         from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
 
-        written = maybe_refresh_day0_hourly_vectors(
+        decision_time = datetime.now(timezone.utc)
+        priority_families = _edli_day0_hourly_priority_families()
+        ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
             _rc(),
-            decision_time=datetime.now(timezone.utc),
+            decision_time=decision_time,
+            priority_families=priority_families,
+        )
+        configured_max_cities = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3"))
+        max_cities = max(configured_max_cities, priority_city_count)
+        written = maybe_refresh_day0_hourly_vectors(
+            ordered_cities,
+            decision_time=decision_time,
             budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
-            max_cities=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")),
+            max_cities=max_cities,
             timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
             persist_lock_blocking=False,
         )
-        if written:
-            logger.info("edli_day0_hourly_refresh: vectors_written=%d", written)
+        if written or priority_city_count:
+            logger.info(
+                "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d max_cities=%d",
+                written,
+                priority_city_count,
+                max_cities,
+            )
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
 

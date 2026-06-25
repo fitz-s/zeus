@@ -517,18 +517,19 @@ def maybe_refresh_day0_hourly_vectors(
         name = str(getattr(city, "name", "") or "")
         if not name:
             continue
-        with _REFRESH_LOCK:
-            last = _LAST_REFRESH_MONOTONIC.get(name, 0.0)
-            if now_monotonic - last < float(interval_s):
-                continue
-            _LAST_REFRESH_MONOTONIC[name] = now_monotonic
         try:
+            tz = ZoneInfo(str(getattr(city, "timezone")))
+            target_date = decision_time.astimezone(tz).date().isoformat()
+            refresh_key = f"{name}|{target_date}"
+            with _REFRESH_LOCK:
+                last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
+                if now_monotonic - last < float(interval_s):
+                    continue
+                _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
             models = day0_hourly_models_for_city(city)
             if not models:
                 continue
             checked += 1
-            tz = ZoneInfo(str(getattr(city, "timezone")))
-            target_date = decision_time.astimezone(tz).date().isoformat()
             try:
                 vectors, request_hash = fetch_day0_hourly_vectors(
                     city, models=models, now=decision_time, timeout_s=timeout_s
@@ -549,7 +550,7 @@ def maybe_refresh_day0_hourly_vectors(
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             if isinstance(exc, BlockingIOError):
                 with _REFRESH_LOCK:
-                    _LAST_REFRESH_MONOTONIC.pop(name, None)
+                    _LAST_REFRESH_MONOTONIC.pop(locals().get("refresh_key", name), None)
             logger.warning(
                 "DAY0_HOURLY_VECTORS_REFRESH_FAILED city=%s exc=%s: %s",
                 name, type(exc).__name__, exc,

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-25
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -58,6 +58,13 @@ def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
         lat=48.8566, lon=2.3522,
+    )
+
+
+def _wellington():
+    return SimpleNamespace(
+        name="Wellington", timezone="Pacific/Auckland", settlement_unit="C",
+        lat=-41.2865, lon=174.7762,
     )
 
 
@@ -496,3 +503,49 @@ class TestRequestHashProvenance:
         assert captured["models"] == ["ecmwf_ifs"]
         assert captured["request_hash"] == "sha256:globalhash"
         assert captured["vector_models"] == ["ecmwf_ifs"]
+
+    def test_refresh_throttle_is_target_date_scoped_at_local_midnight(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        captured_dates = []
+
+        def fake_fetch(city, *, models=None, now=None, timeout_s=None):
+            return [_vector(model="ecmwf_ifs")], "sha256:datehash"
+
+        def fake_persist(vectors, *, target_date, request_hash, **kw):
+            captured_dates.append(target_date)
+            return len(vectors)
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        before_midnight_utc = datetime(2026, 6, 25, 11, 59, tzinfo=UTC)
+        after_midnight_utc = datetime(2026, 6, 25, 12, 1, tzinfo=UTC)
+
+        n1 = hv.maybe_refresh_day0_hourly_vectors(
+            [_wellington()],
+            decision_time=before_midnight_utc,
+            interval_s=1800.0,
+        )
+        n2 = hv.maybe_refresh_day0_hourly_vectors(
+            [_wellington()],
+            decision_time=after_midnight_utc,
+            interval_s=1800.0,
+        )
+
+        assert (n1, n2) == (1, 1)
+        assert captured_dates == ["2026-06-25", "2026-06-26"]
+
+    def test_scheduler_orders_same_local_day_money_path_cities_first(self):
+        import src.main as main
+
+        ordered, priority_count = main._edli_order_day0_hourly_refresh_cities(
+            [_paris(), _wellington()],
+            decision_time=datetime(2026, 6, 25, 12, 47, tzinfo=UTC),
+            priority_families=[("Wellington", "2026-06-26", "high")],
+        )
+
+        assert priority_count == 1
+        assert [c.name for c in ordered] == ["Wellington", "Paris"]
