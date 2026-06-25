@@ -359,6 +359,7 @@ def _executor_rejection_is_pre_submit(reason: str) -> bool:
     return text.startswith(
         (
             "entry_cooldown:",
+            "entries_paused:",
             "duplicate_entry_same_token:",
             "executable_snapshot_gate:",
             "pre_submit_collateral_reservation_failed:",

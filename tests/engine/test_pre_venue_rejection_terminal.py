@@ -125,6 +125,7 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
     "reason",
     [
         "entry_cooldown:same_token_entry_cooling_down",
+        "entries_paused:operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix",
         "duplicate_entry_same_token:open_position_same_token",
     ],
 )

@@ -1642,6 +1642,50 @@ class EventStore:
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
 
+    def requeue_misclassified_local_pre_submit_rejections(self, *, batch_limit: int = 100) -> int:
+        """Recover processed events poisoned by old local pre-submit reject receipts.
+
+        A historical executor-boundary bug mapped local ``entries_paused:*``
+        rejects to venue ``REJECTED`` receipts. That wrote a fake
+        ``VenueSubmitAttempted`` plus ``SubmitRejected(pre_submit_rejection=0)``
+        into the live-order aggregate, then consumed the opportunity event as
+        processed. The fixed boundary emits ``PRE_SUBMIT_ERROR`` with no venue
+        attempt; this recovery only revives the old malformed shape so the
+        normal reactor path can re-decide it.
+        """
+
+        self._require_world_event_tables()
+        limit = max(1, min(int(batch_limit or 100), 1000))
+        now = _utc_now()
+        recent_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        cur = self.conn.execute(
+            """
+            WITH malformed AS (
+                SELECT DISTINCT json_extract(payload_json, '$.event_id') AS event_id
+                  FROM edli_live_order_events loe
+                  JOIN opportunity_events e
+                    ON e.event_id = json_extract(loe.payload_json, '$.event_id')
+                 WHERE loe.event_type = 'SubmitRejected'
+                   AND COALESCE(json_extract(loe.payload_json, '$.reason_code'), '') LIKE 'entries_paused:%'
+                   AND COALESCE(json_extract(loe.payload_json, '$.pre_submit_rejection'), 0) = 0
+                   AND COALESCE(json_extract(loe.payload_json, '$.venue_order_id'), '') = ''
+                   AND e.created_at >= ?
+                 LIMIT ?
+            )
+            UPDATE opportunity_event_processing
+               SET processing_status = 'pending',
+                   claimed_at = NULL,
+                   processed_at = NULL,
+                   last_error = 'RECOVERED_MISCLASSIFIED_LOCAL_PRESUBMIT_REJECTION',
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND processing_status = 'processed'
+               AND event_id IN (SELECT event_id FROM malformed WHERE event_id IS NOT NULL)
+            """,
+            (recent_cutoff, limit, now, self.consumer_name),
+        )
+        return int(cur.rowcount or 0)
+
     def _mark_terminal(
         self,
         event_id: str,

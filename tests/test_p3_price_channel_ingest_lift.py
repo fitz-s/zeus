@@ -526,6 +526,107 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         check.close()
 
 
+def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_trade_only
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.executemany(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason,
+            regret_bucket, token_id, decision_time, city, target_date, metric,
+            family_id, bin_label, direction, created_at, schema_version
+        ) VALUES (?, ?, 'EXECUTOR_EXPRESSIBILITY',
+            'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING',
+            'BOOK_GAP', ?, '2026-06-25T16:00:00+00:00',
+            'Wellington', '2026-06-27', 'high', 'family-wellington-high',
+            'Will the highest temperature in Wellington be 12C?', 'buy_no',
+            ?, 1
+        )
+        """,
+        [
+            ("regret-new", "event-new", "zz-new-token", "2026-06-25T16:10:00+00:00"),
+            ("regret-old", "event-old", "aa-old-token", "2026-06-25T16:00:00+00:00"),
+        ],
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.executemany(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (?, ?, ?, 'weather-test', ?, ?,
+            ?, ?, 1, 1, 0, '2026-06-27T12:00:00+00:00', '0.01', '5',
+            '{}', '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-25T16:00:00+00:00',
+            '2026-06-25T16:05:00+00:00'
+        )
+        """,
+        [
+            ("snap-new", "gamma-new", "event-new", "0xnew", "question-new", "yes-new", "zz-new-token"),
+            ("snap-old", "gamma-old", "event-old", "0xold", "question-old", "yes-old", "aa-old-token"),
+        ],
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    def _world_with_trades_required(*, write_class=None):  # noqa: ARG001
+        conn = sqlite3.connect(world_path)
+        conn.execute(f"ATTACH DATABASE '{trade_path}' AS trades")
+        return conn
+
+    fetch_order: list[str] = []
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            fetch_order.append(token_id)
+            return {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=30.0)
+
+    assert result["candidate_quote_refresh_events"] == 2
+    assert fetch_order[:2] == ["zz-new-token", "aa-old-token"]
+
+
 # ===========================================================================
 # SUPERIORITY INVARIANTS (the lift makes the reduce_only-forever latch
 # unconstructable in the order daemon process)

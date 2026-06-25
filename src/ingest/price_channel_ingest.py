@@ -1354,7 +1354,7 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
     return filtered
 
 
-def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
+def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> list[str]:
     """Tokens the EDLI reactor has recently decided on — the candidate universe.
 
     These are the YES/NO tokens of opportunity families the reactor actually
@@ -1374,31 +1374,32 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     """
 
     if world_conn is None:
-        return set()
+        return []
     try:
         has_table = world_conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
         ).fetchone()
     except Exception:
-        return set()
+        return []
     if not has_table:
-        return set()
+        return []
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
     try:
         rows = world_conn.execute(
             """
-            SELECT DISTINCT token_id
+            SELECT token_id, MAX(created_at) AS latest_created_at
             FROM no_trade_regret_events
             WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
               AND created_at >= ?
-            ORDER BY created_at DESC
+            GROUP BY token_id
+            ORDER BY latest_created_at DESC
             LIMIT ?
             """,
             (cutoff, int(limit)),
         ).fetchall()
     except Exception:
-        return set()
-    return {str(r[0]) for r in rows if r and r[0]}
+        return []
+    return list(dict.fromkeys(str(r[0]) for r in rows if r and r[0]))
 
 
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
@@ -1435,13 +1436,18 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
 
 def _edli_order_token_ids_by_feasibility_age(
     trade_conn,
-    token_ids: set[str],
+    token_ids,
 ) -> list[str]:
     """Oldest/missing quote evidence first for bounded held-position refreshes."""
 
-    tokens = sorted({str(token_id) for token_id in token_ids if str(token_id or "").strip()})
+    if isinstance(token_ids, (set, frozenset)):
+        raw_tokens = sorted(str(token_id) for token_id in token_ids if str(token_id or "").strip())
+    else:
+        raw_tokens = [str(token_id) for token_id in token_ids if str(token_id or "").strip()]
+    tokens = list(dict.fromkeys(raw_tokens))
     if not tokens:
         return []
+    priority_index = {token: idx for idx, token in enumerate(tokens)}
     try:
         has_table = trade_conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
@@ -1471,6 +1477,7 @@ def _edli_order_token_ids_by_feasibility_age(
         key=lambda token: (
             latest_by_token.get(token) is not None,
             latest_by_token.get(token) or "",
+            priority_index[token],
             token,
         ),
     )
@@ -1479,7 +1486,7 @@ def _edli_order_token_ids_by_feasibility_age(
 def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
-    candidate_priority_token_ids: set[str],
+    candidate_priority_token_ids,
 ) -> set[str]:
     """REST-seed tokens that must be fresh before the broad market universe.
 
@@ -1689,9 +1696,13 @@ def _edli_refresh_candidate_priority_quote_evidence(
 
     trade_read = get_trade_connection(write_class=None)
     try:
+        ordered_candidate_token_ids = _edli_order_token_ids_by_feasibility_age(
+            trade_read,
+            candidate_token_ids,
+        )
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
-            token_ids=candidate_token_ids,
+            token_ids=ordered_candidate_token_ids,
         )
     finally:
         trade_read.close()
@@ -1729,8 +1740,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
             )
+            ordered_metadata_tokens = [
+                token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
+            ]
             written = service.seed_rest_books_in_chunks(
-                token_ids=set(token_metadata),
+                token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
                 world_mutex=_world_write_mutex(),
                 commit=_commit_atomic_cross_db,
@@ -1742,9 +1756,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "candidate_priority_token_ids": len(candidate_token_ids),
             "candidate_token_metadata": len(token_metadata),
             "candidate_quote_refresh_events": int(written),
+            "candidate_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
+            "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
     finally:
         conn.close()
@@ -1826,7 +1842,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
     # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
     # evidence row before the pre-submit witness reads it. The full latest-per-market
     # universe is captured up to the cap; candidates are never dropped by the cap.
-    candidate_priority_token_ids: set[str] = set()
+    candidate_priority_token_ids: list[str] = []
     world_read = get_world_connection(write_class=None)
     try:
         candidate_priority_limit = _edli_bounded_positive_int(

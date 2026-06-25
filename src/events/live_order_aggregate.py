@@ -416,12 +416,21 @@ class LiveOrderAggregateLedger:
         if event_type == "VenueSubmitAttempted":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
             self._require_command_binding(event_type, payload, command_row)
-            if self._latest_row_of_type(aggregate_id, "VenueSubmitAttempted") is not None:
-                raise LiveOrderAggregateError("VenueSubmitAttempted already exists for aggregate")
+            if self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAttempted",
+                int(command_row["event_sequence"]),
+            ) is not None:
+                raise LiveOrderAggregateError("VenueSubmitAttempted already exists for current command")
             return
         if event_type == "VenueSubmitAcknowledged":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
-            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAttempted",
+                int(command_row["event_sequence"]),
+                event_type,
+            )
             self._require_command_binding(event_type, payload, command_row)
             if not str(payload.get("venue_order_id") or "").strip():
                 raise LiveOrderAggregateError("VenueSubmitAcknowledged requires venue_order_id")
@@ -429,14 +438,24 @@ class LiveOrderAggregateLedger:
         if event_type == "SubmitRejected":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
             if not _is_pre_submit_rejection_payload(payload):
-                self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+                self._latest_row_of_type_after(
+                    aggregate_id,
+                    "VenueSubmitAttempted",
+                    int(command_row["event_sequence"]),
+                    event_type,
+                )
             self._require_command_binding(event_type, payload, command_row)
             if not str(payload.get("reason_code") or payload.get("reject_reason") or "").strip():
                 raise LiveOrderAggregateError("SubmitRejected requires reason_code")
             return
         if event_type == "SubmitUnknown":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
-            self._require_latest_row_of_type(aggregate_id, "VenueSubmitAttempted", event_type)
+            self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAttempted",
+                int(command_row["event_sequence"]),
+                event_type,
+            )
             self._require_command_binding(event_type, payload, command_row)
             return
         if event_type in {"UserOrderObserved", "UserTradeObserved"}:
@@ -461,12 +480,25 @@ class LiveOrderAggregateLedger:
                 raise LiveOrderAggregateError("CapTransitioned requires execution_receipt_hash")
             to_status = str(payload.get("to_status") or "")
             reason = str(payload.get("transition_reason") or payload.get("reason_code") or "")
-            if to_status == "PENDING_RECONCILE" and self._latest_row_of_type(aggregate_id, "SubmitUnknown") is None:
+            command_sequence = int(command_row["event_sequence"])
+            if to_status == "PENDING_RECONCILE" and self._latest_row_of_type_after(
+                aggregate_id,
+                "SubmitUnknown",
+                command_sequence,
+            ) is None:
                 raise LiveOrderAggregateError("CapTransitioned PENDING_RECONCILE requires SubmitUnknown")
-            if to_status == "CONSUMED" and self._latest_row_of_type(aggregate_id, "VenueSubmitAcknowledged") is None:
+            if to_status == "CONSUMED" and self._latest_row_of_type_after(
+                aggregate_id,
+                "VenueSubmitAcknowledged",
+                command_sequence,
+            ) is None:
                 raise LiveOrderAggregateError("CapTransitioned CONSUMED requires VenueSubmitAcknowledged")
             if to_status == "RELEASED" and reason != "SUBMIT_DISABLED":
-                if self._latest_row_of_type(aggregate_id, "SubmitRejected") is None and self._latest_row_of_type(aggregate_id, "Reconciled") is None:
+                if self._latest_row_of_type_after(
+                    aggregate_id,
+                    "SubmitRejected",
+                    command_sequence,
+                ) is None and self._latest_row_of_type(aggregate_id, "Reconciled") is None:
                     raise LiveOrderAggregateError("CapTransitioned RELEASED requires SubmitRejected or Reconciled")
             return
 
@@ -481,6 +513,31 @@ class LiveOrderAggregateLedger:
             """,
             (aggregate_id, event_type),
         ).fetchone()
+
+    def _latest_row_of_type_after(
+        self,
+        aggregate_id: str,
+        event_type: str,
+        min_event_sequence: int,
+        requiring_event_type: str | None = None,
+    ) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_type = ?
+              AND event_sequence > ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id, event_type, min_event_sequence),
+        ).fetchone()
+        if row is None and requiring_event_type is not None:
+            raise LiveOrderAggregateError(
+                f"{requiring_event_type} requires preceding {event_type}"
+            )
+        return row
 
     def _require_latest_row_of_type(self, aggregate_id: str, required_type: str, event_type: str) -> sqlite3.Row:
         row = self._latest_row_of_type(aggregate_id, required_type)

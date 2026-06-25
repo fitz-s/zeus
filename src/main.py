@@ -7518,7 +7518,26 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_orphan_processing_rows sweep failed "
             "(non-fatal; joined readers still ignore orphan IDs): %r",
             _orphan_sweep_exc,
-    )
+        )
+
+    try:
+        _step_started = time.monotonic()
+        _recovered = store.requeue_misclassified_local_pre_submit_rejections(
+            batch_limit=min(batch_limit, 1000),
+        )
+        _log_prune_step("requeue_misclassified_local_pre_submit_rejections", _step_started, _recovered)
+        if _recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d processed events that old executor-boundary "
+                "code misclassified as venue rejects for local entries_paused pre-submit blocks",
+                _recovered,
+            )
+    except Exception as _pre_submit_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: local pre-submit rejection recovery sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _pre_submit_recovery_exc,
+        )
 
     try:
         _step_started = time.monotonic()
