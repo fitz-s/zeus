@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 metadata:
   updated: '2026-06-23'
   owner: docs authority isolation rebuild
@@ -16,6 +16,7 @@ active_authority_docs:
   - docs/authority/zeus_database_runtime_authority.md
   - docs/authority/zeus_forecast_fusion_authority.md
   - docs/authority/zeus_docs_classification_authority.md
+  - docs/authority/zeus_runtime_artifact_authority.md
   - docs/authority/zeus_change_control_constitution.md
   - docs/authority/ARCHIVAL_RULES.md
 
@@ -70,6 +71,7 @@ entries:
   - {path: docs/authority/zeus_database_runtime_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
   - {path: docs/authority/zeus_forecast_fusion_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
   - {path: docs/authority/zeus_docs_classification_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
+  - {path: docs/authority/zeus_runtime_artifact_authority.md, plane: authority, doc_class: authority, authority: true, default_read: true}
   - {path: docs/authority/zeus_change_control_constitution.md, plane: authority, doc_class: authority, authority: true, default_read: false}
   - {path: docs/authority/ARCHIVAL_RULES.md, plane: authority, doc_class: authority, authority: true, default_read: true}
   - {path: docs/reference/AGENTS.md, plane: persistent_special, doc_class: reference_router, authority: false, default_read: true}
