@@ -12,25 +12,37 @@ If a historical file contains surviving law, promote the law into active authori
 
 ---
 
-## 2. Tracked Docs Subroots
+## 2. Active Authority Set
 
-| Directory | Class | Purpose | Default-read? |
-|---|---|---|---|
-| `authority/` | durable authority law | current architecture, delivery, governance, archival law | only routed active files |
-| `reference/` | canonical durable reference | domain/math/source/strategy/settlement/execution/risk/data/failure/module books | by task route |
-| `reference/modules/` | module reference | dense module books | only routed modules |
-| `operations/` | current pointers + active work homes | current-state/data/source pointers and active packages | pointer files only by default |
-| `runbooks/` | procedure | operator workflows | only for operation task |
-| `evidence/` | evidence | raw measurements, audits, receipts | no |
-| `reports/` | report/history | reviews, closeouts, authority history, diagnostic reports | no |
-| `archive/` | archive | cold historical bodies | no |
-| `rebuild/` | rebuild/history | implementation/rebuild notes and consult material | no |
-| `to-do-list/` | worklist | checklist/known gaps | no unless task routes there |
-| `artifacts/` | artifacts | evidence artifacts/inventories | no |
+| File | Purpose |
+|---|---|
+| `authority/zeus_current_architecture.md` | current durable architecture law |
+| `authority/zeus_current_delivery.md` | current durable delivery/change-control law |
+| `authority/zeus_forecast_fusion_authority.md` | forecast-fusion model-selection and city-profile law |
+| `authority/zeus_docs_classification_authority.md` | docs class/default-read/authority-reference separation law |
+| `authority/ARCHIVAL_RULES.md` | archive/evidence isolation law |
+| `authority/zeus_change_control_constitution.md` | deep governance constitution, non-default |
+
+Reference files are not authority. They explain authority, code, and manifests.
 
 ---
 
-## 3. Active Default-Read Set
+## 3. Tracked Docs Subroots
+
+| Directory | Class | Purpose | Default-read? |
+|---|---|---|---|
+| `authority/` | durable authority law | architecture, delivery, forecast-fusion, docs-classification, governance, archive law | routed active files |
+| `reference/` | canonical durable reference | domain/math/source/strategy/settlement/execution/risk/data/failure/module books | by task route; not authority |
+| `operations/` | current pointers + active work homes | current-state/data/source pointers and active packages | pointer files only |
+| `runbooks/` | procedure | operator workflows | only for operation task |
+| `evidence/` | evidence | raw measurements, audits, receipts | no |
+| `reports/` | report/history | reviews, closeouts, authority history | no |
+| `archive/` | archive | cold historical bodies | no |
+| `rebuild/` | rebuild/history | implementation/rebuild notes and consult material | no |
+
+---
+
+## 4. Active Default-Read Set
 
 A zero-context docs/money-path agent may enter these, in order, when relevant:
 
@@ -41,6 +53,8 @@ A zero-context docs/money-path agent may enter these, in order, when relevant:
 - `authority/AGENTS.md`;
 - `authority/zeus_current_architecture.md`;
 - `authority/zeus_current_delivery.md`;
+- `authority/zeus_forecast_fusion_authority.md` for forecast fusion/source/model-selection work;
+- `authority/zeus_docs_classification_authority.md` for docs classification/default-read work;
 - `authority/ARCHIVAL_RULES.md` for demotion/archive work;
 - `reference/AGENTS.md`;
 - `reference/zeus_prediction_market_quant_reference.md`;
@@ -51,7 +65,7 @@ Do not recursively read `operations/current/**`, `operations/task_*`, `evidence/
 
 ---
 
-## 4. Canonical References
+## 5. Canonical References
 
 | File | Purpose |
 |---|---|
@@ -67,22 +81,19 @@ Do not recursively read `operations/current/**`, `operations/task_*`, `evidence/
 | `reference/zeus_failure_modes_reference.md` | live-money failure modes |
 | `reference/modules/AGENTS.md` | module-book router |
 
-Specialized legacy references may remain for discoverability, but they are non-default unless current code/manifests support the task-specific claim.
-
 ---
 
-## 5. Historical Interface
+## 6. Historical Interface
 
-Use `archive_registry.md` first for demoted material. Only open archive/evidence/report/rebuild bodies when the task explicitly needs historical evidence, and label derived claims as historical evidence.
+Use `archive_registry.md` first for demoted material. Only open archive/evidence/report/rebuild bodies when the task explicitly needs historical evidence.
 
 Historical material must not be cited as present-tense law.
 
 ---
 
-## 6. Naming Rules
+## 7. Naming Rules
 
 - Use `lower_snake_case.md` for ordinary docs.
 - Exceptions: `AGENTS.md`, `README.md`.
 - New active packages belong under the operations current work home, not root.
 - Closed/superseded packages must be moved, indexed, or clearly non-default.
-- Avoid generic top-level names such as `plan.md` or `progress.md` outside active task folders.
