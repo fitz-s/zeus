@@ -99,7 +99,7 @@ def _insert_posterior(
             training_allowed,
         ),
     )
-    return int(conn.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0])
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
 
 def _readiness(*, posterior_id: int, baseline_run_id: str = "b0-run", posterior_available_at: datetime | None = None):
@@ -184,6 +184,29 @@ def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match
     assert result.bundle.q == pytest.approx({"cold": 0.2, "warm": 0.8})
     assert result.bundle.q_lcb == pytest.approx({"cold": 0.1, "warm": 0.7})
     assert result.bundle.runtime_layer == LIVE_RUNTIME_LAYER
+
+
+def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope_row() -> None:
+    conn = _conn()
+    certified_posterior_id = _insert_posterior(conn, computed_at=_dt(3, 5))
+    newer_posterior_id = _insert_posterior(conn, computed_at=_dt(3, 20))
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=certified_posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == certified_posterior_id
+    assert result.bundle.posterior_id != newer_posterior_id
 
 
 def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() -> None:

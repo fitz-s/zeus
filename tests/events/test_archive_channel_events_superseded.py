@@ -632,20 +632,24 @@ def test_fetch_pending_query_uses_processing_status_index():
     conn.executed_sql.clear()
     store.fetch_pending(decision_time=decision_time, limit=90)
     # Locate fetch_pending's main claim query by its stable signature: it joins
-    # the processing table via the active-status index and computes the per-city
-    # round-robin rank (_city_round). Format-robust — does not depend on the
-    # SELECT-list being on one line (the query is now a CTE: WITH candidates ...).
+    # the processing table via split active-status indexes and computes the
+    # per-city round-robin rank (_city_round). Format-robust — does not depend
+    # on the SELECT-list being on one line.
     fetch_sql, fetch_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
         if "INDEXED BY idx_opportunity_event_processing_status" in sql
+        and "INDEXED BY idx_opportunity_event_processing_stale_claim" in sql
         and "_city_round" in sql
     )
 
     plan_text = _plan_text(conn, fetch_sql, fetch_params)
 
     assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan_text, (
-        f"fetch_pending must use active-status index, got: {plan_text!r}"
+        f"fetch_pending pending branch must use active-status index, got: {plan_text!r}"
+    )
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STALE_CLAIM" in plan_text, (
+        f"fetch_pending stale-processing branch must use stale-claim index, got: {plan_text!r}"
     )
     assert "SCAN P" not in plan_text, (
         f"fetch_pending must not full-scan opportunity_event_processing, got: {plan_text!r}"

@@ -74,6 +74,26 @@ def _install_sigma_floor_artifact(monkeypatch, tmp_path, *, sigma_floor_c: float
     return path
 
 
+def test_qkernel_band_alpha_uses_live_fdr_budget(monkeypatch):
+    """The spine tail must not be a hidden stricter pre-FDR filter."""
+
+    from src.config import settings
+
+    old_edge = dict(settings["edge"])
+    monkeypatch.setitem(settings._data, "edge", {**old_edge, "fdr_alpha": 0.13})
+    assert bridge._qkernel_spine_band_alpha() == pytest.approx(0.13)
+
+
+def test_qkernel_band_alpha_invalid_config_falls_back(monkeypatch):
+    """A bad config value keeps the historical conservative tail."""
+
+    from src.config import settings
+
+    old_edge = dict(settings["edge"])
+    monkeypatch.setitem(settings._data, "edge", {**old_edge, "fdr_alpha": 0.65})
+    assert bridge._qkernel_spine_band_alpha() == pytest.approx(0.05)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — the SAME snapshot-row + _CandidateProof shape the reactor materializes.
 # ---------------------------------------------------------------------------

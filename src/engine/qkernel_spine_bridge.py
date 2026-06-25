@@ -156,6 +156,13 @@ _DIRECT_ROUTE_ID_PREFIXES = ("DIRECT_YES:", "DIRECT_NO:")
 # the Monte-Carlo resolution of the robust edge lower bound.
 SPINE_BAND_DRAWS: Optional[int] = None
 
+# The qkernel's per-candidate band tail must share the live family-error budget.
+# If this stays hard-coded at 5% while the live submit gate runs BH/FDR at a
+# different q, the spine can discard point-positive candidates before FDR sees
+# them. Keep the fallback conservative for config faults, but use edge.fdr_alpha
+# on the live path.
+_DEFAULT_SPINE_BAND_ALPHA: float = 0.05
+
 # SINGLE TRUTH (legacy bias-maze strip 2026-06-17): the spine center IS the raw precise
 # multi-model fused center from ``raw_model_forecasts`` (~7-13 decorrelated NWP providers,
 # latest cycle per model). There is NO settlement-residual de-bias layer and NO bias flag.
@@ -195,6 +202,25 @@ def qkernel_spine_enabled() -> bool:
         return bool(settings["feature_flags"].get("qkernel_spine_enabled", False))
     except Exception:  # noqa: BLE001 — fail-closed to legacy on any config fault
         return False
+
+
+def _qkernel_spine_band_alpha() -> float:
+    """Tail probability used for qkernel edge/DeltaU bands.
+
+    The selected proof's false-edge p-value is later consumed by the existing
+    family BH/FDR gate. Using the same configured q here prevents a stricter
+    hidden pre-FDR filter from making the family FDR surface unreachable.
+    """
+
+    try:
+        from src.config import settings
+
+        value = float(settings["edge"]["fdr_alpha"])
+    except (KeyError, TypeError, ValueError):  # fail-safe to the historical conservative tail
+        return _DEFAULT_SPINE_BAND_ALPHA
+    if not (0.0 < value < 0.5):
+        return _DEFAULT_SPINE_BAND_ALPHA
+    return value
 
 
 # ===========================================================================
@@ -981,6 +1007,7 @@ def decide_family_via_spine(
         _engine_kwargs: dict[str, Any] = {}
         if SPINE_BAND_DRAWS is not None:
             _engine_kwargs["n_band_draws"] = int(SPINE_BAND_DRAWS)
+        _engine_kwargs["band_alpha"] = _qkernel_spine_band_alpha()
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
             day0_reader=_NoDay0Reader(),

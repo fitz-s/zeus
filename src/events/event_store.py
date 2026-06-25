@@ -244,7 +244,20 @@ class EventStore:
         # fragment the city round-robin.
         rows = self.conn.execute(
             f"""
-            WITH candidates AS (
+            WITH eligible_processing AS (
+              SELECT p.event_id, p.attempt_count
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              WHERE p.consumer_name = ?
+                AND p.processing_status = 'pending'
+              UNION ALL
+              SELECT p.event_id, p.attempt_count
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_stale_claim
+              WHERE p.consumer_name = ?
+                AND p.processing_status = 'processing'
+                AND p.claimed_at IS NOT NULL
+                AND p.claimed_at <= ?
+            ),
+            candidates AS (
               SELECT
                 e.*,
                 p.attempt_count AS _p_attempt_count,
@@ -260,19 +273,10 @@ class EventStore:
                   ),
                   e.event_type
                 ) AS _city_key
-              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              FROM eligible_processing p
               JOIN opportunity_events e
                 ON e.event_id = p.event_id
-              WHERE p.consumer_name = ?
-                AND (
-                      p.processing_status = 'pending'
-                   OR (
-                      p.processing_status = 'processing'
-                      AND p.claimed_at IS NOT NULL
-                      AND p.claimed_at <= ?
-                   )
-                )
-                AND e.available_at <= ?
+              WHERE e.available_at <= ?
                 AND e.received_at <= ?
                 AND (e.expires_at IS NULL OR e.expires_at > ?)
                 AND e.event_type NOT IN (
@@ -342,6 +346,7 @@ class EventStore:
             LIMIT ?
             """,
             (
+                self.consumer_name,
                 self.consumer_name,
                 stale_processing_before,
                 parsed_decision_time.isoformat(),
