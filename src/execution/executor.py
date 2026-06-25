@@ -3347,9 +3347,8 @@ def execute_exit_order(
         # Exit is IOC, never all-or-nothing: coerce a TAKER FOK selection to FAK
         # so a thin/dying book realizes a partial exit instead of killing the
         # whole sell (live 2026-06-24: Houston FOK rejects, market 0.356->0.076).
-        order_type = _exit_order_type(
-            _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
-        )
+        selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
+        order_type = _exit_order_type(selected_order_type)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
         collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(conn)
@@ -3555,7 +3554,11 @@ def execute_exit_order(
                                 risk_allocator_decision,
                                 reduce_only=True,
                             ),
-                            _capability_component("order_type_selection", order_type=order_type),
+                            _capability_component(
+                                "order_type_selection",
+                                order_type=order_type,
+                                selected_order_type=selected_order_type,
+                            ),
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,

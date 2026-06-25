@@ -2219,7 +2219,7 @@ class TestExitOrderCommandSplit:
 
         assert capability["action"] == "EXIT"
         assert capability["intent_kind"] == "EXIT"
-        assert capability["order_type"] == "FOK"
+        assert capability["order_type"] == "FAK"
         assert capability["allowed"] is True
         assert len(capability["capability_id"]) == 32
         assert capability["command_id"] == row["command_id"]
@@ -2238,6 +2238,9 @@ class TestExitOrderCommandSplit:
         }
         assert components_by_name["decision_source_integrity"]["allowed"] is True
         assert components_by_name["decision_source_integrity"]["reason"] == "not_applicable_reduce_only"
+        order_type_selection = components_by_name["order_type_selection"]["details"]
+        assert order_type_selection["selected_order_type"] == "FOK"
+        assert order_type_selection["order_type"] == "FAK"
 
     def test_exit_pre_sdk_collateral_reservation_failure_writes_rejected_event(
         self,

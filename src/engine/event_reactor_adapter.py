@@ -6457,7 +6457,12 @@ def _aggregate_terminal_venue_command_releases_lock(
         execution_command_id = str(row[0] or "").strip() if row is not None else ""
         if not execution_command_id:
             return False
-        current_conn_state = _command_state_on_conn(live_cap_conn, execution_command_id)
+    except Exception:
+        return False
+
+    current_conn_state = _command_state_on_conn(live_cap_conn, execution_command_id)
+    trade_conn_state = None
+    try:
         from src.state.db import get_trade_connection_read_only
 
         trade_conn = get_trade_connection_read_only()
@@ -6469,7 +6474,7 @@ def _aggregate_terminal_venue_command_releases_lock(
             except Exception:
                 pass
     except Exception:
-        return False
+        trade_conn_state = None
     canonical_state = trade_conn_state or current_conn_state
     if canonical_state is None:
         return False
