@@ -232,21 +232,19 @@ class DecisionCompiler:
                 payload={
                     "event_id": event.event_id,
                     "event_type": event.event_type,
-                    # FORECAST no-submit scope = BOTH forecast-decision event types. EDLI_REDECISION_PENDING
-                    # (the price-driven re-decision lane introduced 2026-06-12) re-decides a forecast family
-                    # through THIS forecast compile path (forecast/calibration/belief parents above), so its
-                    # no-submit decision_source is "forecast", not "day0_or_other". The prior FSR-only label
-                    # made every EDLI_REDECISION no-submit fail verify_no_submit_decision ("unsupported
-                    # decision_source") -> certificate REJECTED -> receipt NEVER written. That silently killed
-                    # the edli_no_submit_receipts claim stream on 2026-06-12T12:12 (the day the redecision lane
-                    # became the dominant forecast-decision path), starving the q_lcb_settlement_coverage_gate
-                    # of its per-day claimed-q_lcb input -> proven NO over-confidence (78% claimed vs 60%
-                    # realized) ran uncorrected into live sizing. Mirrors reactor._FORECAST_DECISION_EVENT_TYPES.
-                    "decision_source": (
-                        "forecast"
-                        if event.event_type in ("FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING")
-                        else "day0_or_other"
-                    ),
+                    # This compiler emits the FORECAST no-submit certificate graph:
+                    # source-truth, topology, forecast authority, calibration,
+                    # belief, executable snapshot, quote, cost, pre-trade, FDR,
+                    # Kelly, and risk. Event types are trigger carriers; they do
+                    # not change the certificate graph being verified here.
+                    #
+                    # Live failure 2026-06-25: DAY0_EXTREME_UPDATED events that
+                    # reached this forecast graph were stamped "day0_or_other";
+                    # verify_no_submit_decision correctly accepts only forecast
+                    # no-submit scope, so the receipt was rejected before the real
+                    # no-trade/edge reason could persist. Keep the source aligned
+                    # with the verified parent set rather than the trigger name.
+                    "decision_source": "forecast",
                     "final_intent_id": proof_bundle.final_intent_id,
                     "side_effect_status": "NO_SUBMIT",
                     "proof_accepted": bool(proof_bundle.no_submit_projection.get("proof_accepted")),

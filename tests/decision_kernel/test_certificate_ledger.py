@@ -139,7 +139,7 @@ def test_ledger_rejects_no_submit_forecast_snapshot_causal_snapshot_mismatch():
     )
     ledger = DecisionCertificateLedger(_conn())
 
-    with pytest.raises(CertificateVerificationError, match="source_truth.snapshot_id"):
+    with pytest.raises(CertificateVerificationError, match="source_truth.*snapshot_id"):
         ledger.persist_all(parents + (no_submit,))
 
 
