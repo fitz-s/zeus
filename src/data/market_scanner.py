@@ -130,6 +130,25 @@ def _snapshot_capture_sqlite_lock_retries() -> int:
         return 2
 
 
+def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> int | None:
+    """Bound one family-completion refresh tick without splitting a family.
+
+    The max_outcomes=0 path is used by live redecision to refresh every sibling
+    in a weather family. With many held/open families this can expand to hundreds
+    of YES/NO sides, and the batch orderbook prefetch consumes the whole refresh
+    budget before SQLite gets a real write window. Cap only that unbounded family
+    path; ordinary per-city refresh already has its own max_outcomes cap.
+    """
+
+    if per_city_limit != 0:
+        return None
+    try:
+        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "66"))
+    except ValueError:
+        configured = 66
+    return configured if configured > 0 else None
+
+
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
 
@@ -4097,8 +4116,26 @@ def refresh_executable_market_substrate_snapshots(
     # any buy_no, so a tight live budget can repeatedly refresh a prefix of
     # one-sided conditions without any condition becoming fresh.
     selected_candidates: list[tuple] = []
+    candidate_cap_truncated_cities: set[str] = set()
     if per_city_limit == 0:
-        for group_list in per_group_sorted:
+        max_candidates = _snapshot_capture_max_candidates_per_tick(
+            per_city_limit=per_city_limit,
+        )
+        for group_index, group_list in enumerate(per_group_sorted):
+            if (
+                max_candidates is not None
+                and selected_candidates
+                and len(selected_candidates) + len(group_list) > max_candidates
+            ):
+                remaining = sum(len(group) for group in per_group_sorted[group_index:])
+                candidate_cap_truncated_cities.update(
+                    _snapshot_refresh_city_key(item[3])
+                    for group in per_group_sorted[group_index:]
+                    for item in group
+                )
+                cap_truncated += remaining
+                skipped += remaining
+                break
             selected_candidates.extend(group_list)
     else:
         max_slots = max((len(c) for c in per_group_sorted), default=0)
@@ -4114,7 +4151,7 @@ def refresh_executable_market_substrate_snapshots(
         for _recency, _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
     }
     inserted_cities: set[str] = set()
-    budget_truncated_cities: set[str] = set()
+    budget_truncated_cities: set[str] = set(candidate_cap_truncated_cities)
     # Start the wall-clock budget BEFORE the batch prefetch so the batch's own
     # latency is charged against the same envelope (advisor 2026-05-27: a
     # 50-token POST /books can take >1s; charging it keeps the deadline honest).
