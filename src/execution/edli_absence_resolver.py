@@ -271,17 +271,30 @@ SELECT
     usage.execution_command_id,
     usage.reserved_notional_usd,
     usage.created_at AS cap_created_at,
+    latest_command.event_sequence AS latest_command_sequence,
     regret.rejection_reason
 FROM edli_live_order_projection proj
 JOIN edli_live_cap_usage usage
   ON usage.event_id = proj.event_id
  AND usage.final_intent_id = proj.final_intent_id
  AND usage.reservation_status = 'RESERVED'
+JOIN (
+    SELECT aggregate_id, MAX(event_sequence) AS latest_command_sequence
+    FROM edli_live_order_events
+    WHERE event_type = 'ExecutionCommandCreated'
+    GROUP BY aggregate_id
+) latest
+  ON latest.aggregate_id = proj.aggregate_id
+JOIN edli_live_order_events latest_command
+  ON latest_command.aggregate_id = proj.aggregate_id
+ AND latest_command.event_sequence = latest.latest_command_sequence
+ AND latest_command.event_type = 'ExecutionCommandCreated'
 LEFT JOIN no_trade_regret_events regret
   ON regret.event_id = proj.event_id
  AND regret.rejection_reason LIKE ?
 WHERE proj.current_state = 'EXECUTION_COMMAND_CREATED'
   AND COALESCE(proj.pending_reconcile, 0) = 0
+  AND json_extract(latest_command.payload_json, '$.execution_command_id') = usage.execution_command_id
   AND NOT EXISTS (
       SELECT 1 FROM venue_commands command
       WHERE command.command_id = usage.execution_command_id
@@ -302,6 +315,7 @@ _PRE_SUBMIT_ORPHAN_SQL_TAIL = """
       SELECT 1 FROM edli_live_order_events attempted
       WHERE attempted.aggregate_id = proj.aggregate_id
         AND attempted.event_type = 'VenueSubmitAttempted'
+        AND attempted.event_sequence > latest.latest_command_sequence
   )
   AND NOT EXISTS (
       SELECT 1 FROM edli_live_order_events terminal
@@ -311,6 +325,7 @@ _PRE_SUBMIT_ORPHAN_SQL_TAIL = """
             'Reconciled', 'CapTransitioned', 'UserOrderObserved',
             'UserTradeObserved'
         )
+        AND terminal.event_sequence > latest.latest_command_sequence
   )
 ORDER BY usage.created_at ASC
 """

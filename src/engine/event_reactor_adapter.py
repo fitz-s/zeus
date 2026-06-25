@@ -1778,6 +1778,82 @@ def riskguard_allows_new_entries(*, get_current_level: Callable[[], RiskLevel]) 
     return _gate
 
 
+def _adapter_sql_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _adapter_attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    names: list[str] = []
+    for row in rows:
+        name = row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+        if name:
+            names.append(str(name))
+    return tuple(names) or ("main",)
+
+
+def _adapter_table_or_view_exists(conn: sqlite3.Connection, schema: str, name: str) -> bool:
+    schema_sql = _adapter_sql_identifier(schema)
+    row = conn.execute(
+        f"SELECT 1 FROM {schema_sql}.sqlite_master "
+        "WHERE type IN ('table', 'view') AND name = ? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | None:
+    """Return a control-plane pause reason before live-cap/command materialization.
+
+    The executor keeps the same gate as a final defense, but EDLI must read it
+    before reserving live cap or appending ``ExecutionCommandCreated``. Otherwise
+    an operator pause still creates durable command/cap artifacts and depends on
+    post-facto release recovery.
+    """
+
+    if conn is None:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    saw_authority = False
+    try:
+        schemas = _adapter_attached_schema_names(conn)
+    except sqlite3.Error as exc:
+        return f"entries_pause_control_unreadable:{type(exc).__name__}"
+    for schema in schemas:
+        if schema == "temp":
+            continue
+        try:
+            if not _adapter_table_or_view_exists(conn, schema, "control_overrides"):
+                continue
+            saw_authority = True
+            schema_sql = _adapter_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT value, issued_by, reason, issued_at, effective_until
+                FROM {schema_sql}.control_overrides
+                WHERE target_type = 'global'
+                  AND target_key = 'entries'
+                  AND action_type = 'gate'
+                  AND issued_at <= ?
+                  AND (effective_until IS NULL OR effective_until > ?)
+                ORDER BY precedence DESC, issued_at DESC, override_id DESC
+                LIMIT 1
+                """,
+                (now, now),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            return f"entries_pause_control_unreadable:{type(exc).__name__}"
+        if row is None:
+            continue
+        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "").strip().lower()
+        if value in {"true", "1", "yes", "on"}:
+            reason = row["reason"] if isinstance(row, sqlite3.Row) else row[2]
+            return str(reason or "entries_paused")
+    if saw_authority:
+        return None
+    return None
+
+
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
     """TradeScore is generated inside the event-bound no-submit adapter.
 
@@ -2329,6 +2405,15 @@ def event_bound_live_adapter_from_trade_conn(
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
+                entries_pause_reason = _entry_pause_blocks_live_submit(build_conn)
+                if entries_pause_reason is not None:
+                    return dataclass_replace(
+                        no_submit_receipt,
+                        submitted=False,
+                        side_effect_status="NO_SUBMIT",
+                        reason=f"entries_paused:{entries_pause_reason}",
+                        proof_accepted=False,
+                    )
                 # D1 FILL-UP PRE-SUBMIT REREAD (2026-06-22 lifecycle consult §"final
                 # gate"): for an APPROVED same-token fill-up, before any command build /
                 # venue call, re-read family exposure on fresh truth. If a NEW unowned /

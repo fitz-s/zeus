@@ -290,6 +290,136 @@ def test_pre_submit_orphan_resolver_releases_command_created_without_side_effect
         check.close()
 
 
+def test_pre_submit_orphan_resolver_scopes_to_latest_command_after_prior_terminal(tmp_path, monkeypatch):
+    seeded = _seed_pre_submit_orphan(tmp_path / "world.db", include_regret=False)
+    conn = _connect(seeded["db_path"])
+    try:
+        ledger = LiveOrderAggregateLedger(conn)
+        cap_ledger = LiveCapLedger(conn)
+        receipt_hash = "receipt-prior-command"
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": seeded["execution_command_id"],
+                "execution_receipt_hash": receipt_hash,
+                "idempotency_key": "prior-idempotency-key",
+            },
+            occurred_at=NOW,
+            source_authority="executor",
+        )
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="SubmitRejected",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": seeded["execution_command_id"],
+                "execution_receipt_hash": receipt_hash,
+                "reason_code": "entries_paused:old-local-rejection",
+                "venue_call_started": True,
+                "pre_submit_rejection": False,
+            },
+            occurred_at=NOW,
+            source_authority="executor",
+        )
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="CapTransitioned",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": seeded["execution_command_id"],
+                "execution_receipt_hash": receipt_hash,
+                "to_status": "RELEASED",
+                "projection_status": "RELEASED",
+                "transition_reason": "entries_paused:old-local-rejection",
+            },
+            occurred_at=NOW,
+            source_authority="executor",
+        )
+        cap_ledger.release(seeded["usage_id"], "prior command released")
+
+        next_command_id = "cmd-pre-submit-orphan-2"
+        pre_submit = ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                event_id=seeded["event_id"],
+                final_intent_id=seeded["final_intent_id"],
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        reservation = cap_ledger.reserve(
+            event_id=seeded["event_id"],
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=12.0,
+            final_intent_id=seeded["final_intent_id"],
+            execution_command_id=next_command_id,
+        )
+        live_cap = ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="LiveCapReserved",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "usage_id": reservation.usage_id,
+            },
+            occurred_at=NOW,
+            source_authority="live_cap_ledger",
+        )
+        ledger.append_event(
+            aggregate_id=seeded["aggregate_id"],
+            event_type="ExecutionCommandCreated",
+            payload={
+                "event_id": seeded["event_id"],
+                "final_intent_id": seeded["final_intent_id"],
+                "execution_command_id": next_command_id,
+                "pre_submit_event_hash": pre_submit.event_hash,
+                "live_cap_reserved_event_hash": live_cap.event_hash,
+            },
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(resolver_mod, "get_world_connection_read_only", lambda: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "get_world_connection", lambda **kw: _connect(seeded["db_path"]))
+    monkeypatch.setattr(resolver_mod, "world_write_lock", _no_world_lock)
+
+    rc = resolver_mod.resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=lambda msg: None)
+
+    assert rc == 0
+    check = _connect(seeded["db_path"])
+    try:
+        assert check.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = ?",
+            (seeded["usage_id"],),
+        ).fetchone()["reservation_status"] == "RELEASED"
+        events_after_latest_command = check.execute(
+            """
+            SELECT GROUP_CONCAT(event_type)
+            FROM edli_live_order_events
+            WHERE aggregate_id = ?
+              AND event_sequence > (
+                  SELECT MAX(event_sequence)
+                  FROM edli_live_order_events
+                  WHERE aggregate_id = ? AND event_type = 'ExecutionCommandCreated'
+              )
+            """,
+            (seeded["aggregate_id"], seeded["aggregate_id"]),
+        ).fetchone()[0]
+        assert events_after_latest_command == "SubmitRejected,CapTransitioned"
+    finally:
+        check.close()
+
+
 def test_pre_submit_orphan_resolver_refuses_when_venue_command_exists(tmp_path, monkeypatch):
     seeded = _seed_pre_submit_orphan(tmp_path / "world.db", include_regret=False)
     conn = _connect(seeded["db_path"])
