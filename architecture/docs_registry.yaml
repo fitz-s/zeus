@@ -281,26 +281,6 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: packet_audit
-- path: docs/reports/authority_history/zeus_live_backtest_shadow_boundary.md
-  doc_class: report
-  default_read: false
-  direct_reference_allowed: true
-  current_role: demoted live/backtest/shadow boundary evidence
-  canonical_replaced_by:
-  - docs/authority/zeus_current_architecture.md
-  - docs/authority/zeus_current_delivery.md
-  next_action: retain_as_evidence
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: report_evidence
-  freshness_class: historical
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: packet_audit
 - path: docs/reports/authority_history/zeus_openclaw_venus_delivery_boundary.md
   doc_class: report
   default_read: false
@@ -676,7 +656,7 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/tigge_daemon_integration.md
+- path: docs/archive/2026-Q2/operations_historical/tigge_daemon_integration.md
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
@@ -713,7 +693,7 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: true
   refresh_source: packet_audit
-- path: docs/operations/zeus_agent_runtime_compounding_plan_2026-05-16.md
+- path: docs/archive/2026-Q2/operations_historical/zeus_agent_runtime_compounding_plan_2026-05-16.md
   doc_class: report
   default_read: false
   direct_reference_allowed: true
@@ -731,7 +711,7 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: false
   refresh_source: n/a
-- path: docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md
+- path: docs/archive/2026-Q2/operations_historical/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md
   doc_class: report
   default_read: false
   direct_reference_allowed: true
@@ -744,10 +724,10 @@ entries:
   truth_profile: report_evidence
   freshness_class: packet_bound
   supersedes:
-  - docs/operations/PREARM_SAFETY_AUDIT_2026-06-02.md
-  - docs/operations/EDLI_LIVE_VS_DESIGN_MASTER_SPEC_2026-06-01.md
-  - docs/operations/BEST_ORDER_SELECTION_ROOT_2026-06-01.md
-  - docs/operations/DROPPED_CONTEXT_SEAM_LEDGER_2026-06-01.md
+  - docs/archive/2026-Q2/operations_historical/PREARM_SAFETY_AUDIT_2026-06-02.md
+  - docs/archive/2026-Q2/operations_historical/EDLI_LIVE_VS_DESIGN_MASTER_SPEC_2026-06-01.md
+  - docs/archive/2026-Q2/operations_historical/BEST_ORDER_SELECTION_ROOT_2026-06-01.md
+  - docs/archive/2026-Q2/operations_historical/DROPPED_CONTEXT_SEAM_LEDGER_2026-06-01.md
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: true
@@ -1487,8 +1467,6 @@ entries:
   current_role: Data Density Discount and oracle penalty design reference
   canonical_replaced_by:
   - src/strategy/oracle_penalty.py
-  - scripts/bridge_oracle_to_calibration.py
-  - tests/test_bridge_oracle_to_calibration.py
   next_action: keep
   lifecycle_state: durable
   coverage_scope: exact

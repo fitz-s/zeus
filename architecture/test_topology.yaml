@@ -40,12 +40,15 @@ test_trust_policy:
     tests/strategy/live_inference/test_selection_curse_entry_seam.py: {created: "2026-06-23", last_used: "2026-06-23", note: "Money-path antibody: selection_calibrated_admission_q_lcb composes the price-conditioned selection-curse deflation at ENTRY (the primary curse site) — mid-price buy_no admission q_lcb deflates below cost (edge_lcb<=0, not admitted); favorites + buy_yes untouched; absent->identity. Reverting re-admits the mid-price buy_no entry."}
     tests/test_harvester_truth_writer_m1_settled_at.py: {created: "2026-06-24", last_used: "2026-06-24", note: "M1 money-path antibody for the reconstruction settlement writer: settled_at = obs fetched_at (availability time), NOT datetime.now(); recorded_at is the separate write time; missing fetch time forces QUARANTINED. Reverting to now() re-introduces the backfill-constant settled_at corruption that leaked every settlement walk-forward (PR #419)."}
     tests/strategy/live_inference/test_q_exec_lcb_taker_gate.py: {created: "2026-06-23", last_used: "2026-06-23", note: "Taker-gate antibody: select_rest_then_cross_mode honors the execution-conditioned bound q_exec_lcb — a lower bound refuses a taker that clears raw q_lcb (MAKER/POLICY_MAKER_TAKER_FORBIDDEN); None is identity; a high bound never loosens beyond q_lcb; it travels on the receipt. Reverting re-admits the blocked cross."}
+    tests/strategy/live_inference/test_source_clock_vnext.py: {created: "2026-06-25", last_used: "2026-06-25", note: "Source-clock vNext antibodies: forecast run unavailable until availability+10m; unknown/absorbed market reaction fails closed or removes q_exec_lcb edge; underreacted positive log-utility admits; q_lcb>q_point rejects; NO-side lower bound is 1-q_ucb_yes; stale/provider-family duplicate sources get zero/one representative weights."}
+    tests/strategy/live_inference/test_source_clock_city_weights.py: {created: "2026-06-25", last_used: "2026-06-25", note: "Source-clock live replacement city-weight artifact loader: one final scheme per city, normalized fixed weights, missing-source renormalization, and affected-city routing from updated source ids."}
+    tests/data/test_openmeteo_model_updates.py: {created: "2026-06-25", last_used: "2026-06-25", note: "Open-Meteo model update metadata parser/probe: supports list and mapping payloads, enforces availability+10m public clock, and does not advance the update cursor before a changed run is publicly usable."}
     tests/engine/test_q_exec_lcb_event_seam.py: {created: "2026-06-23", last_used: "2026-06-23", note: "Money-path antibody: _build_event_bound_taker_quality_proof gates its after-cost edge on the price-conditioned selection-curse bound. A mid-price buy_no taker that passes on raw q_lcb is REFUSED once the bound is armed (realized NO rate ~0.66 at price 0.70); favorites + buy_yes untouched; absent/unarmed->identity. Reverting re-admits the refused buy_no cross."}
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
     tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired trade_authority_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
     tests/test_repair_dust_exit_projection.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Dust pending-exit projection repair antibody: only existing canonical EXIT_CHAIN_DUST_STILL_HELD backoff evidence may mark position_current.order_status=backoff_exhausted; no venue action or share mutation."}
-    tests/test_replacement_forecast_live_schema.py: {created: "2026-06-06", last_used: "2026-06-18", note: "Replacement forecast live-support schema compatibility: forecast_posteriors migrates legacy trade_authority_status to runtime_layer='live' and drops the old column; live support tables stay forecast-class only. Renamed from test_replacement_forecast_shadow_schema.py on 2026-06-18."}
-    tests/execution/test_inv37_harvester_atomicity.py: {created: "2026-06-14", last_used: "2026-06-14", note: "INV-37 harvester atomicity RED-on-revert (ChatGPT PR#408 B1). T1: pre-fix two-independent-commit pattern leaves partial state (forecasts commits, trades does not) on injected crash — proves the violation was real. T2: post-fix ATTACH+SAVEPOINT rolls back BOTH sides atomically on injected exception after forecasts write — RED if reverted to two-conn pattern. T3: happy-path commit persists both sides. T4: SAVEPOINT spans both MAIN and ATTACHed schemas. Authority: docs/operations/inv37_harvester_fix_2026-06-14.md"}
+    tests/test_replacement_forecast_live_schema.py: {created: "2026-06-06", last_used: "2026-06-18", note: "Replacement forecast live-support schema compatibility: forecast_posteriors migrates legacy trade_authority_status to runtime_layer='live' and drops the old column; live support tables stay forecast-class only."}
+    tests/execution/test_inv37_harvester_atomicity.py: {created: "2026-06-14", last_used: "2026-06-14", note: "INV-37 harvester atomicity RED-on-revert (ChatGPT PR#408 B1). T1: pre-fix two-independent-commit pattern leaves partial state (forecasts commits, trades does not) on injected crash — proves the violation was real. T2: post-fix ATTACH+SAVEPOINT rolls back BOTH sides atomically on injected exception after forecasts write — RED if reverted to two-conn pattern. T3: happy-path commit persists both sides. T4: SAVEPOINT spans both MAIN and ATTACHed schemas. Authority: docs/archive/2026-Q2/operations_historical/inv37_harvester_fix_2026-06-14.md"}
     tests/engine/test_post_refresh_reelect_fresh_at_none.py: {created: "2026-06-14", last_used: "2026-06-14", note: "RED-on-revert RT: post-refresh re-elect in _build_event_bound_no_submit_receipt_core MUST pass fresh_at=None (NOT decision_time). The bug excluded refresher rows (captured_at > decision_time) via the captured_at ceiling -> stale re-election -> _snapshot_price_stale_reason fires again -> permanent STALE requeue -> 0 EDLI receipts 2026-06-12 to 2026-06-14. T1: DB contract (fresh_at=None returns post-decision row; fresh_at=decision_time excludes it). T2: source-level call-site guard (reverted arg -> RED immediately). Authority: docs/evidence/deadloop_2026-06-14/diagnosis.md"}
     tests/riskguard/test_no_network_io_under_conn.py: {created: "2026-06-13", last_used: "2026-06-13", note: "T0-1 conn-across-IO RED-on-revert RT: in riskguard._tick_once the bankroll NETWORK fetch (bankroll_provider.current) MUST precede opening either write-class DB conn (_get_runtime_trade_connection/get_connection); sentinel fires on conn-open, asserts fetch recorded first. Authority: t0_live_problem_report_2026-06-13 T0-1 + dimension-#4"}
     tests/test_fit_bias_scale.py: {created: "2026-06-12", last_used: "2026-06-12", note: "Task 1.1 identifiability + bias-absorption regression: joint (b_loc,k) interval-censored categorical MLE recovers known (b=+1.2,k=1.1); k-only fit on same data inflates k>1.1 (proves k_wrong^2=k_true^2+(delta/sigma)^2); Monte-Carlo pins the theorem; EB shrinkage pulls low-n city toward pool"}
@@ -57,15 +60,14 @@ test_trust_policy:
     tests/engine/test_maker_quote_p_fill_not_taker_zero.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root: maker-quote lane must not return taker-shaped p_fill_lcb=0.0 (zeroes trade_score=p_fill*edge for every maker buy_no); uses MAKER_FILL_PROBABILITY_PRIOR; strong-edge maker candidate gets positive trade_score. The taker-shaped-checks-strangle-makers class."}
     tests/strategy/test_selection_shrinkage.py: {created: "2026-06-13", last_used: "2026-06-13", note: "C2 task #60 relationship test: EB selection shrinkage pulls the argmax of a winner's-curse universe (N=100 null edges) toward the cross-sectional mean (~0) while the raw max is inflated to ~s*sqrt(2 ln N); lfsr correctness on synthetic posteriors; Tweedie license boundary (N>=200); posterior-utility license. Authority statistical_calibration_addendum_2026-06-13 A2/D3."}
     tests/strategy/test_horse_race_kelly.py: {created: "2026-06-13", last_used: "2026-06-13", note: "Q2/P1 task #63 relationship test: R1 not-overround -> f_k=q_k,s=0; R2 overround budget closes + active-set property (f_k>0 iff q_k/p_k>s*, endogenous threshold); R3 no-bet -> all cash; R4 GROWTH-DOMINANCE (the TRUE overbetting-correction invariant — horse-race exp-log-growth >= any per-candidate sizing, 400k random families; the task-brief 'sum horse f <= sum naive f' is FALSE, per-bin Kelly UNDER-bets exclusive bins); R5 YES(a)+NO(b) dominance LP (P5); R6 cross-family QP signs (P2); degenerate/normalize/error pins. Authority exit_portfolio_execution_authority_2026-06-13 P1-P2,P5."}
-    tests/engine/test_selection_shrinkage_wiring.py: {created: "2026-06-13", last_used: "2026-06-13", note: "C2 task #60 reactor-wiring relationship test: flag OFF -> selection_authority=BH_FDR with shadow quantities still computed (golden); flag ON -> EB_SHRINKAGE license replaces BH; no-executable-universe falls back to BH (never a silent admit); default-False flag contract."}
+    tests/engine/test_selection_shrinkage_wiring.py: {created: "2026-06-13", last_used: "2026-06-13", note: "C2 task #60 reactor-wiring relationship test: flag OFF -> selection_authority=BH_FDR with audit quantities still computed (golden); flag ON -> EB_SHRINKAGE license replaces BH; no-executable-universe falls back to BH (never a silent admit); default-False flag contract."}
     tests/strategy/test_exit_policy.py: {created: "2026-06-13", last_used: "2026-06-13", note: "Exit capability (consult-3 Q1, task #52) relationship tests: E1 cost-basis independence (no c in the signature, same state -> same fraction); E4 stop-loss-not-distinct (exit fires iff sell-dominance holds with updated q, no % stop); E6 partial-exit FOC matches the closed-form x0 on constant depth AND is a fraction not all-or-nothing; E6 depth-aware proceeds never assume hidden liquidity (caps at fillable depth, concave VWAP); E3 take-profit = sell-dominance boundary (bar below q); E5a q_exit blend defers/follows market and degrades to agent when unlicensed; E5b e-process h* is cost-derived (not 20), unit-martingale under null, fires on the Denver class, increment sign accumulates against the agent. Authority: exit_portfolio_execution_authority_2026-06-13 E1-E6."}
-    tests/strategy/test_exit_policy_shadow.py: {created: "2026-06-13", last_used: "2026-06-13", note: "Exit capability shadow-orchestration relationship test: flags OFF -> q_exit/fraction/E_n still COMPUTED as telemetry; q_exit degrades to raw agent q without artifact (flag-off golden belief identity); sizing skipped gracefully on incomplete inputs; E5b suspension makes the rule belief follow the market (Denver-class fix surfaced in shadow); calibrated agent never trips the alarm; licensed blend pulls q_exit toward market. Authority: exit_portfolio_execution_authority_2026-06-13 E1-E6 + shadow-rollout law."}
     tests/test_boot_guard_pin_shape.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_boot_guard_settings_object.py: {created: "2026-06-03", last_used: "2026-06-03", note: "W0-T2+T3: Settings-object antibody + --validate-boot"}
     tests/test_edli_market_channel_refresh_authority.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P1-1: scan_authority=VERIFIED contract; trigger reason separate (relationship test)"}
     tests/test_market_events_persistence_observability.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P2-2: market_events persistence failure surfaces to scheduler health (relationship test)"}
     tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
-    tests/test_calibration_coverage_guard.py: {created: "2026-06-03", last_used: "2026-06-03", note: "#90: loud bias+Platt calibration-coverage antibody — warn(shadow)/fail-closed(armed); relationship test over real read_bias_model + boot-wrapper severity"}
+    tests/test_calibration_coverage_guard.py: {created: "2026-06-03", last_used: "2026-06-03", note: "#90: loud bias+Platt calibration-coverage antibody — warn(unarmed)/fail-closed(armed); relationship test over real read_bias_model + boot-wrapper severity"}
     tests/test_calibration_bin_source_fix1.py: {created: "2026-06-03", last_used: "2026-06-03", note: "FIX-1 antibody: canonical_v2 bin_source wiring + flag-OFF byte-identity + count/fit population agreement"}
     tests/test_migration_converge_settlement_store.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
@@ -76,7 +78,7 @@ test_trust_policy:
     tests/engine/test_executable_snapshot_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/engine/test_cost_basis_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/test_mainstream_agreement_gate.py: {created: "2026-06-03", last_used: "2026-06-03"}
-    tests/test_bias_family_unify_d2.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D2 bias-family entry/exit unify shadow flag — RT: flag-OFF byte-identity (no DB read), flag-ON edli_per_city_v1 resolves (legacy ft 0-row miss proven), entry/exit same-family+same-shift cross-module invariant"}
+    tests/test_bias_family_unify_d2.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D2 bias-family entry/exit unify feature flag — RT: flag-OFF byte-identity (no DB read), flag-ON edli_per_city_v1 resolves (legacy ft 0-row miss proven), entry/exit same-family+same-shift cross-module invariant"}
     # PR #380 honest-q + settlement-unit deployment antibodies (2026-06-03)
     tests/test_settlement_unit_trigger_deployment_2026_06_03.py: {created: "2026-06-03", last_used: "2026-06-03", note: "deployment RT: settlement_unit VERIFIED triggers on EXISTING DB via migration"}
     tests/test_d7_rolling_edli_bias.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: D-7 rolling bias producer — causality, unit, thin-n, idempotency"}
@@ -91,8 +93,8 @@ test_trust_policy:
     tests/test_qlcb_provenance_type.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: QlcbProvenance typed carrier antibody + clamp-not-raise on finite out-of-range tail"}
     tests/test_k3_qlcb_clamp_legacy_family_formation.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 fix RT: deep-OTM negative q_lcb clamps to [0,1] (clamped=True) instead of raising -> family still forms; decision-equivalent to legacy raw negative"}
     tests/test_settlement_backward_coverage.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-backward coverage check + isotonic realized rate + ARM-gate coverage predicate"}
-    tests/test_qlcb_coverage_flag_and_armgate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-coverage shadow flag OFF==byte-identical + ARM gate reads coverage verdict unconditionally"}
-    tests/engine/test_qlcb_coverage_adapter_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: carrier helpers round-trip float; flag-OFF apply is byte-identical; default shadow flag OFF"}
+    tests/test_qlcb_coverage_flag_and_armgate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-coverage shrink-only behavior + ARM gate reads coverage verdict unconditionally"}
+    tests/engine/test_qlcb_coverage_adapter_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: carrier helpers round-trip float and live coverage shrink stays carrier-local"}
     tests/engine/test_qlcb_coverage_live_application.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: live coverage application via grade_receipt loader; flag-OFF byte-identical; deep-OTM write does not collapse family"}
     tests/engine/test_k3_selection_byte_identity_integration.py: {created: "2026-06-03", last_used: "2026-06-03", note: "HARDEN-2 integration antibody: real _generate_candidate_proofs->_selected_candidate_proof path; two negative-raw-q_lcb bins select legacy-correct bin (tok-B-yes); RED-on-revert proven via clamped-reader patch"}
     tests/test_no_certain_no_ceiling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: no certain-NO (q_no_lcb<1) structural antibody on corrected domain"}
@@ -158,7 +160,6 @@ test_trust_policy:
     tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/events/test_live_profit_audit.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/events/test_arm_gate_artifact_boot_binding.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (A) D2 ARM-artifact boot binding: armed boot (canary/live) fails-closed without HEAD-bound positive-EV coverage-licensed ARM evidence artifact"}
-    tests/scripts/test_check_edli_live_canary_gate.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/decision_kernel/test_certificate_time_filtration.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_submit_theorems.py: {created: "2026-05-25", last_used: "2026-05-25"}
@@ -175,8 +176,8 @@ test_trust_policy:
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-06-03", note: "Arm direction-gate footgun antibody (2026-06-03): _assert_edli_arm_requires_direction_gate makes arming with only real_order_submit_enabled (direction gate skipped) a boot failure; tests test_arm_with_*/test_shadow_no_submit_does_not_reach_direction_gate_guard"}
-    tests/money_path/test_edli_live_canary.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-06-03", note: "Arm direction-gate footgun antibody (2026-06-03): _assert_edli_arm_requires_direction_gate makes arming with only real_order_submit_enabled (direction gate skipped) a boot failure; tests arm/no-submit guard coverage."}
+    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -229,15 +230,12 @@ test_trust_policy:
     tests/test_oracle_posterior.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_entry_forecast_evaluator_cutover.py: {created: "2026-05-03", last_used: "2026-05-14"}
     tests/test_entry_forecast_promotion_evidence_io.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_entry_readiness_writer.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_entry_forecast_chain_relationship.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_rollout.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # End-to-end sign / window / transport invariant audit for the FT-ship
     # hierarchical bias-correction layer. Authority: operator critique 2026-05-27
-    # + docs/operations/INVARIANT_SIGN_PROOF_2026-05-27.md.
+    # + docs/archive/2026-Q2/operations_historical/INVARIANT_SIGN_PROOF_2026-05-27.md.
     tests/test_invariant_sign_convention.py: {created: "2026-05-27", last_used: "2026-05-27"}
     tests/test_evaluator_explicit_n_mc.py: {created: "2026-04-30", last_used: "2026-05-08"}
     tests/test_evaluator_strategy_key_failclosed.py: {created: "2026-05-02", last_used: "2026-05-21"}
@@ -323,7 +321,7 @@ test_trust_policy:
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
     tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-06-10"}
-    tests/test_day0_shadow_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-18", note: "live-only EDLI adapter boundary: forecast_plus_day0 is the only production scope; former day0_shadow/forecast_only scopes reject before proof build or executor submit"}
+    tests/test_edli_live_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-18", note: "live-only EDLI adapter boundary: forecast_plus_day0 is the only production scope; unsupported scopes reject before proof build or executor submit"}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}
@@ -376,7 +374,7 @@ test_trust_policy:
     tests/test_phase5_gate_d_low_purity.py: {created: "2026-04-17", last_used: "2026-04-17"}
     tests/test_phase5c_replay_metric_identity.py: {created: "2026-04-17", last_used: "2026-04-17"}
     tests/test_phase6_day0_split.py: {created: "2026-04-18", last_used: "2026-04-29"}
-    tests/test_phase8_shadow_code.py: {created: "2026-04-18", last_used: "2026-04-25"}
+    tests/test_phase8_low_prerequisites.py: {created: "2026-04-18", last_used: "2026-04-25"}
     tests/test_phase9c_gate_f_prep.py: {created: "2026-04-19", last_used: "2026-04-29"}
     tests/test_phase10b_dt_seam_cleanup.py: {created: "2026-04-19", last_used: "2026-04-29"}
     tests/test_price_evidence_report.py: {created: "2026-05-09", last_used: "2026-05-09"}
@@ -433,8 +431,6 @@ test_trust_policy:
     tests/test_ws_poll_reaction_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_calibration_observation.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_calibration_observation_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
-    tests/test_low_high_alignment_report.py: {created: "2026-05-07", last_used: "2026-05-07"}
-    tests/test_opendata_tigge_equivalence_report.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_learning_loop_observation.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_learning_loop_observation_weekly.py: {created: "2026-04-29", last_used: "2026-04-29"}
     tests/test_supervisor_contracts.py: {created: "2026-04-28", last_used: "2026-04-28"}
@@ -517,13 +513,10 @@ test_trust_policy:
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-18"}
-    tests/test_activation_flag_combinations.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_admission_severity_schema.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_attach_narrow_except.py: {created: "2026-05-05", last_used: "2026-05-05"}
-    tests/test_auto_pause_hardening.py: {created: "2026-05-01", last_used: "2026-05-04"}
     tests/test_backfill_harvester_settlements_isolation.py: {created: "2026-05-11", last_used: "2026-05-11"}
     tests/test_backtest_runs_schema_lane_allowlist.py: {created: "2026-05-07", last_used: "2026-05-07"}
-    tests/test_bridge_oracle_to_calibration.py: {created: "2026-05-02", last_used: "2026-05-21"}
     # 2026-05-21 P0 live-money antibody: mutually-exclusive weather family bins must not emit independent live orders.
     tests/test_inv_family_exclusive_sizing.py: {created: "2026-05-20", last_used: "2026-05-21"}
     # Task #107 portfolio/multi Kelly — INV-K1..K8 relationship antibodies (2026-06-03)
@@ -556,10 +549,7 @@ test_trust_policy:
     tests/test_ecmwf_open_data_source_failover.py: {created: "2026-05-11", last_used: "2026-05-11"}
     tests/test_ensemble_snapshots_ingest_backend.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_entries_block_registry.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_entry_forecast_shadow_evidence_migration.py: {created: "2026-05-05", last_used: "2026-05-05"}
-    tests/test_entry_forecast_shadow_promotion_passthrough.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_evaluate_calibration_transfer_oos.py: {created: "2026-05-05", last_used: "2026-05-08"}
-    tests/test_evaluator_phase_beta_wiring.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_execution_harvester_paginator.py: {created: "2026-05-11", last_used: "2026-05-11"}
     tests/test_extractor_east_asia_c12_boundary.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_extractor_period_step_contract.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -591,10 +581,8 @@ test_trust_policy:
     tests/test_phase2_review_round1_fixes_part2.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_phase2_review_round1_fixes.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_phase3_routing_ecmwf_open_data.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_post_merge_cleanup_hook.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_pr_monitor.py: {created: "2026-05-01", last_used: "2026-05-17"}
     tests/test_pre_checkout_overlap.py: {created: "2026-05-06", last_used: "2026-05-06"}
-    tests/test_pre_commit_hook.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_pre_merge_comment_check.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_produce_activation_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_promote_calibration_attach_path.py: {created: "2026-05-13", last_used: "2026-05-13"}
@@ -705,21 +693,19 @@ test_trust_policy:
     tests/test_live_release_registry_runtime_assertions.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # 2026-05-21 live release proof P3-2: central IDs and review deadlines for pre-existing failures.
     tests/test_pre_existing_failure_registry.py: {created: "2026-05-21", last_used: "2026-05-21"}
-    # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger + cluster cap + shadow-readiness report.
+    # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger + cluster cap.
     tests/test_shoulder_cluster_cap.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_shoulder_exposure_ledger.py: {created: "2026-05-21", last_used: "2026-05-21"}
-    tests/test_shoulder_shadow_readiness_report.py: {created: "2026-05-21", last_used: "2026-05-21"}
     # Phase 5 T1+T2+T3 (2026-05-21): Ledoit-Wolf shrinkage + regime correlation store + variance-based cluster cap.
     tests/test_correlation_shrinkage.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_regime_correlation_store.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_cluster_exposure_shrunk.py: {created: "2026-05-21", last_used: "2026-05-21"}
-    # Phase 4 T4 (2026-05-21): cross_market_correlation_hedge + neg_risk_basket shadow candidate relationship tests.
+    # Phase 4 T4 (2026-05-21): cross_market_correlation_hedge + neg_risk_basket candidate relationship tests.
     tests/test_phase4_t4_candidates.py: {created: "2026-05-21", last_used: "2026-05-21"}
-    # Phase 6 T1+T2+T3+T4 (2026-05-21): EvidenceTier + ShadowExperimentRegistry + RegretDecomposer + LiveReadinessTribunal.
+    # Phase 6 T1+T2+T3+T4 (2026-05-21): EvidenceTier + RegretDecomposer + LiveReadinessTribunal.
     tests/test_strategy_profile_evidence_tier.py: {created: "2026-05-21", last_used: "2026-05-21"}
-    # Wave stochastic-datagated (2026-05-22): shadow capture pipeline + new candidates.
+    # Wave stochastic-datagated (2026-05-22): audit capture pipeline + new candidates.
     tests/test_shoulder_buy_evt.py: {created: "2026-05-22", last_used: "2026-05-22"}
-    tests/test_l1_shadow_capture_hook.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_promotion_proof_router_wave.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_cross_market_portfolio_relationships.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # C-EPIC combination candidates wave (2026-05-23)
@@ -773,7 +759,7 @@ test_trust_policy:
     tests/sizing/test_portfolio_reservation_rollback.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: portfolio reservation rollback under multi-bet correlated sizing"}
     # day0 live activation: absorbing-mask direction antibody + single live scope (2026-06-05, modernized 2026-06-18)
     tests/engine/test_day0_live_mask_direction.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P0 RT: pins LIVE day0 absorbing-mask direction (observed-so-far → mask → posterior) so inversion is UNCONSTRUCTABLE; reproduces #98 Paris low=14°C wrong-side"}
-    tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-18", note: "live-only EDLI scope law: forecast_plus_day0 is the only production scope; day0_shadow/forecast_only/unknown scopes fail closed before entering execution semantics"}
+    tests/money_path/test_edli_live_scope.py: {created: "2026-06-05", last_used: "2026-06-18", note: "live-only EDLI scope law: forecast_plus_day0 is the only production scope; unsupported scopes fail closed before entering execution semantics"}
     tests/engine/test_day0_mask_consolidation.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P2 RT: collapse to ONE absorbing mask — hardened inline _edli_day0_mask_for_analysis truth table (zero behavioral delta), dark module deleted"}
     tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
     tests/engine/test_no_loss_class_nonexecutable_yes_gate.py: {created: "2026-06-13", last_used: "2026-06-13", note: "RED-on-revert antibody for the buy-NO loss-class gate in _canonical_probability_and_fdr_proof: a NON-executable-YES far bin emits q_lcb_no=0.0/p=1.0/prefilter=False (profitable-era gate), while an EXECUTABLE-YES bin's buy_no stays reconciled via the native NO edge (GOOD-fill path). RED-on-revert proven by temporarily restoring the 745aa10c6f forecast-NO else-branch (q_lcb_no jumps to 0.775). Authority: settled-data loss-class replay 2026-06-13, n=485, 98.1% admit; git regression 745aa10c6f"}
@@ -905,8 +891,6 @@ categories:
     - tests/test_pre_existing_failure_registry.py
     - tests/test_entry_forecast_config.py
     - tests/test_entry_forecast_promotion_evidence_io.py
-    - tests/test_entry_readiness_writer.py
-    - tests/test_entry_forecast_chain_relationship.py
     - tests/test_ingest_boot_time_semantics.py
     - tests/test_opendata_release_calendar_selection.py
     - tests/test_opendata_writes_v2_table.py
@@ -1021,7 +1005,6 @@ categories:
     - tests/test_calibration_store_metric_required.py
     - tests/test_calibration_transfer_policy.py
     - tests/test_calibration_v2_fallback_alerting.py
-    - tests/test_entry_forecast_shadow.py
     - tests/test_ensemble_snapshots_bias_corrected_schema.py
     - tests/test_evaluator_metric_normalizer_failclosed.py
     - tests/test_execution_intent_typed_slippage.py
@@ -1174,7 +1157,7 @@ categories:
     - tests/test_phase5_gate_d_low_purity.py
     - tests/test_phase5b_low_historical_lane.py
     - tests/test_phase6_day0_split.py
-    - tests/test_phase8_shadow_code.py
+    - tests/test_phase8_low_prerequisites.py
     - tests/test_phase9c_gate_f_prep.py
     - tests/test_proxy_health.py
     - tests/test_rebuild_pipeline.py
@@ -1182,7 +1165,7 @@ categories:
     - tests/test_riskguard.py
     - tests/test_solar_etl.py
     - tests/test_tracker_integrity.py
-    - tests/test_shadow_boundary.py
+    - tests/test_advisory_boundary.py
     - tests/test_wu_scheduler.py
     - tests/test_dt1_commit_ordering.py
     - tests/test_dt1_savepoint_integration.py
@@ -1193,15 +1176,12 @@ categories:
     - tests/test_realized_fill.py
     - tests/test_tick_size.py
     - tests/test_vig_treatment_provenance.py
-    - tests/test_activation_flag_combinations.py
     - tests/test_admission_severity_schema.py
     - tests/test_attach_narrow_except.py
     - tests/test_attribution_cohort_boundary.py
     - tests/test_authority_rebuild_invariants.py
-    - tests/test_auto_pause_hardening.py
     - tests/test_backfill_harvester_settlements_isolation.py
     - tests/test_backtest_runs_schema_lane_allowlist.py
-    - tests/test_bridge_oracle_to_calibration.py
     - tests/test_calibration_pin_eligibility.py
     - tests/test_calibration_read_path_asymmetry_fixes_2026_05_06.py
     - tests/test_calibration_serving_status.py
@@ -1236,10 +1216,7 @@ categories:
     - tests/test_entries_block_registry.py
     - tests/test_entry_forecast_evaluator_cutover.py
     - tests/test_entry_forecast_rollout.py
-    - tests/test_entry_forecast_shadow_evidence_migration.py
-    - tests/test_entry_forecast_shadow_promotion_passthrough.py
     - tests/test_evaluate_calibration_transfer_oos.py
-    - tests/test_evaluator_phase_beta_wiring.py
     - tests/test_executable_forecast_reader.py
     - tests/test_execution_harvester_paginator.py
     - tests/test_extractor_east_asia_c12_boundary.py
@@ -1287,10 +1264,8 @@ categories:
     - tests/test_phase3_routing_ecmwf_open_data.py
     - tests/test_phase_aware_kelly_live.py
     - tests/test_position_projection_d6_counters.py
-    - tests/test_post_merge_cleanup_hook.py
     - tests/test_pr_monitor.py
     - tests/test_pre_checkout_overlap.py
-    - tests/test_pre_commit_hook.py
     - tests/test_pre_merge_comment_check.py
     - tests/test_produce_activation_evidence.py
     - tests/test_producer_readiness_builder.py
@@ -1337,7 +1312,7 @@ categories:
     - tests/test_startup_wallet_warm_overlap.py
     # day0 live activation antibodies (2026-06-05, modernized 2026-06-18)
     - tests/engine/test_day0_live_mask_direction.py
-    - tests/money_path/test_day0_shadow_scope.py
+    - tests/money_path/test_edli_live_scope.py
     - tests/engine/test_day0_mask_consolidation.py
     - tests/engine/test_day0_mask_runtime_gate.py
 
@@ -1356,8 +1331,6 @@ categories:
     - tests/test_center_buy_repair.py
     - tests/test_divergence_exit_counterfactual.py
     - tests/test_lead_sigma_evaluation.py
-    - tests/test_low_high_alignment_report.py
-    - tests/test_opendata_tigge_equivalence_report.py
     - tests/test_sigma_floor_evaluation.py
     - tests/test_temporal_closure_evaluation.py
 
@@ -1456,7 +1429,7 @@ law_gate:
       - src/state/venue_command_repo.py
       - src/execution/executor.py
       - src/engine/cycle_runner.py
-  LIVE_BACKTEST_SHADOW:
+  LIVE_BACKTEST_AUDIT_BOUNDARY:
     tests:
       - tests/test_backtest_outcome_comparison.py
       - tests/test_backtest_settlement_value_outcome.py
@@ -1506,10 +1479,7 @@ law_gate:
       - tests/test_calibration_transfer_policy.py
       - tests/test_entry_forecast_evaluator_cutover.py
       - tests/test_entry_forecast_promotion_evidence_io.py
-      - tests/test_entry_readiness_writer.py
-      - tests/test_entry_forecast_chain_relationship.py
       - tests/test_entry_forecast_rollout.py
-      - tests/test_entry_forecast_shadow.py
       - tests/test_executable_forecast_reader.py
       - tests/test_forecast_fetch_plan.py
       - tests/test_ingest_boot_time_semantics.py
@@ -1540,7 +1510,6 @@ law_gate:
       - src/control/entry_forecast_rollout.py
       - src/engine/evaluator.py
       - src/data/calibration_transfer_policy.py
-      - src/data/entry_forecast_shadow.py
       - src/data/executable_forecast_reader.py
       - src/data/live_entry_status.py
       - scripts/ingest_grib_to_snapshots.py
@@ -1681,23 +1650,6 @@ high_sensitivity_skips:
     reason_patterns:
       - "src/main.py not present in this worktree"
     sunset: Remove once scheduler dispatch fixture no longer depends on optional entrypoint presence.
-  tests/test_architecture_contracts.py:
-    owner: topology-program
-    packet: Packet 5
-    reason: Legacy P9/Phase2 position_events vocabulary and backfill tests are skipped while canonical event/projection law is represented elsewhere.
-    skip_count: 22
-    reason_patterns:
-      - "P9: legacy position_events vocabulary eliminated"
-      - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
-    sunset: Replace, reactivate, or archive in test cleanup packet after canonical coverage is mapped.
-  tests/test_db.py:
-    owner: topology-program
-    packet: Packet 5
-    reason: Legacy position_events write-path tests skipped after write path elimination; DB truth coverage remains high sensitivity.
-    skip_count: 19
-    reason_patterns:
-      - "P9: legacy position_events write path eliminated"
-    sunset: Reconcile with canonical ledger/projection tests in test cleanup packet.
   tests/test_live_safety_invariants.py:
     owner: topology-program
     packet: Packet 5
@@ -1707,14 +1659,6 @@ high_sensitivity_skips:
       - "non-live execution was removed in Phase2"
       - "_load_portfolio_from_json_data contamination-guard path are deleted"
     sunset: Must have replacement live-safety antibodies before deletion.
-  tests/test_truth_surface_health.py:
-    owner: topology-program
-    packet: Packet 5
-    reason: Legacy truth-surface skips indicate topology drift, not safe deletion.
-    skip_count: 5
-    reason_patterns:
-      - "P9/Phase2: legacy position_events_legacy or backfill eliminated"
-    sunset: Resolve with truth-surface cleanup packet.
   tests/test_dual_track_law_stubs.py:
     owner: dual-track-program
     packet: Phase 0b
@@ -1759,14 +1703,6 @@ high_sensitivity_skips:
     reason_patterns:
       - "K1: save_tracker is no-op"
     sunset: Archive only after durable truth-layer replacement coverage exists.
-  tests/test_strategy_tracker_regime.py:
-    owner: topology-program
-    packet: Packet 5
-    reason: Strategy tracker migrated to no-op; keep explicit until tracker authority is deleted or replaced.
-    skip_count: 6
-    reason_patterns:
-      - "K1: strategy_tracker migrated to no-op"
-    sunset: Archive in tracker cleanup packet after replacement evidence.
   tests/test_phase5c_replay_metric_identity.py:
     owner: dual-track-program
     packet: Phase 5C
@@ -2235,8 +2171,6 @@ test_metadata:
     source_under_test:
       - tests/conftest.py
       - src/state/db.py
-    law_dependencies:
-      - docs/historical_evidence/topology_v_next_shadow/
     notes: >
       Antibody tests for TI-1 DB isolation fixture. Covers: direct sqlite3.connect
       blocked for world/forecasts/trades live paths; tmp_path connects allowed;
@@ -2251,13 +2185,11 @@ test_metadata:
     profile: precedence1_operator_freeze
     blocks_commit: true
     asserted_invariants:
-      - PRECEDENCE-1-AUTO-PAUSE-CANNOT-SHADOW-OPERATOR-INDEFINITE-FREEZE
+      - PRECEDENCE-1-AUTO-PAUSE-CANNOT-OVERRIDE-OPERATOR-INDEFINITE-FREEZE
       - PRECEDENCE-SKIP-EMITS-LOG-WARNING
     source_under_test:
       - src/control/control_plane.py
       - src/state/db.py
-    law_dependencies:
-      - docs/historical_evidence/topology_v_next_shadow/
     notes: >
       Antibody tests for PRECEDENCE-1: system_auto_pause cannot overwrite an
       operator indefinite freeze. Tests cover: skip fires when operator freeze
@@ -2839,7 +2771,7 @@ test_metadata:
     last_reused_or_audited: "2026-05-19"
     law_dependencies:
       - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - scaffolds/pr27_scaffold.md
+      - docs/archive/2026-Q2/scaffolds_historical/pr27_scaffold.md
     notes: >
       R-EE.1–R-EE.4, R-EE.7–R-EE.8: INV-kelly-effective enforcement, bucket
       policy property tests, fee_erased zero-size, cycle_runtime threading audit.
@@ -2868,7 +2800,7 @@ test_metadata:
     last_reused_or_audited: "2026-05-19"
     law_dependencies:
       - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - scaffolds/pr27_scaffold.md
+      - docs/archive/2026-Q2/scaffolds_historical/pr27_scaffold.md
     notes: >
       R-EE.5–R-EE.6: PR 2 wide_spread_display_substitution + depth_at_best_ask
       roundtrip, one-sided-book zero-depth, schema idempotency, WIDE_SPREAD_THRESHOLD.
@@ -2881,7 +2813,7 @@ test_metadata:
     pr: PR3
     blocks_commit: true
     law_dependencies:
-      - scaffolds/pr36_scaffold.md
+      - docs/archive/2026-Q2/scaffolds_historical/pr36_scaffold.md
     notes: >
       PR 3 relationship tests: observation timing chain ordering (obs_after_provider,
       provider_after_available, available_after_decision). Path F conditional validators
@@ -2894,7 +2826,7 @@ test_metadata:
     pr: PR6
     blocks_commit: true
     law_dependencies:
-      - scaffolds/pr36_scaffold.md
+      - docs/archive/2026-Q2/scaffolds_historical/pr36_scaffold.md
     notes: >
       PR 6 relationship tests: chain-finality split (inclusion_after_finality),
       submit/ack ordering (submit_after_ack), clock drift thresholds (100ms warning,
@@ -2907,7 +2839,7 @@ test_metadata:
     pr: PR6
     blocks_commit: true
     law_dependencies:
-      - scaffolds/pr36_scaffold.md
+      - docs/archive/2026-Q2/scaffolds_historical/pr36_scaffold.md
     notes: >
       INV-alpha-provenance antibody: raw_orderbook_hash_transition_delta_ms cache
       logic correctness. Verifies process-local hash transition delta is computed
@@ -3222,7 +3154,7 @@ test_metadata:
     source_under_test:
       - src/signal/probability_sanity.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Unit tests for validate_high_distribution covering: categorical pass, p_raw sum >1,
       point-bucket high probability without member support, extreme market disagreement,
@@ -3242,7 +3174,7 @@ test_metadata:
       - src/data/executable_forecast_reader.py
       - src/data/forecast_extrema_authority.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Regression antibody for PR-A snapshot ORDER BY fix. Exercises production SQL
       from _snapshot_query_sql against an in-memory fixture. Contributing 00Z must
@@ -3264,7 +3196,7 @@ test_metadata:
       - src/data/forecast_extrema_authority.py
       - src/data/executable_forecast_reader.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Unit + integration tests for ForecastExtremaAuthority classifier and reader
       ORDER BY preference. Covers FULL_CONTRIBUTOR, PARTIAL_CONTRIBUTOR, NON_CONTRIBUTOR,
@@ -3289,7 +3221,7 @@ test_metadata:
       - src/data/forecast_extrema_authority.py
       - src/signal/probability_sanity.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       P0 follow-up relationship tests: full-bundle-layer selection prefers a
       contributing 00Z bundle over a later non-contributing 12Z bundle (DISTINCT
@@ -3311,7 +3243,7 @@ test_metadata:
     source_under_test:
       - src/signal/probability_sanity.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Integration test for probability_sanity_gate wiring in evaluator. Tests
       validate_high_distribution directly against evaluator-realistic inputs —
@@ -3333,7 +3265,7 @@ test_metadata:
       - src/state/decision_integrity_quarantine.py
       - src/state/schema/decision_integrity_quarantine_schema.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Unit tests for quarantine_decisions_for_noncontributing_forecast: only
       contributes=0 and UNKNOWN attribution rows quarantined; contributes=1 rows
@@ -3358,7 +3290,7 @@ test_metadata:
       - src/analysis/evidence_report.py
       - scripts/refit_platt.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       PR-E extended quarantine: tag-coverage tests for calibration_pairs_v2,
       probability_trace_fact, selection_family_fact, selection_hypothesis_fact,
@@ -3381,7 +3313,7 @@ test_metadata:
       - src/state/decision_integrity_quarantine.py
       - src/analysis/evidence_report.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       PR-E MINOR finding: cross-DB integration tests with separate world/trade/forecasts
       tempfile SQLite DBs ATTACHed as production does. test_writer_crossdb_attach proves
@@ -3402,7 +3334,7 @@ test_metadata:
     source_under_test:
       - src/data/day0_observation_reader.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Root C antibody: observation_instants.running_max is non-monotonic (per-hour
       bucket max). high_so_far must be MAX(running_max) over all qualifying rows, not
@@ -3422,7 +3354,7 @@ test_metadata:
     source_under_test:
       - src/data/day0_observation_reader.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Repo-static AST/regex guard: scans all src/**/*.py files and asserts none use
       the (ORDER BY ... DESC, LIMIT 1, running_max/running_min) anti-pattern.
@@ -3445,7 +3377,7 @@ test_metadata:
       - src/signal/day0_high_distribution.py
       - src/signal/day0_high_nowcast_signal.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       Physical law invariants for Day0 HIGH: each sample = settle(max(observed_high,
       future_member_max)); current_temp must never lower the future max. Covers
@@ -3466,7 +3398,7 @@ test_metadata:
       - src/engine/evaluator.py
       - src/signal/day0_window.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
       P0-3 antibody: day0 remaining-window guard rejects whole-day period_extrema
       (mx2t3/mn2t3). Guard fires before any access to ens_result['members_hourly'].
@@ -3475,24 +3407,23 @@ test_metadata:
     created: 2026-05-23
     last_reused_or_audited: 2026-05-23
 
-  tests/test_probability_sanity_shadow.py:
+  tests/test_probability_sanity_removed_log_only.py:
     modules: [signal, evaluator]
     category: integration_antibody
     kind: antibody
-    profile: p0_d_probability_sanity_shadow
+    profile: p0_d_probability_sanity_removed_log_only
     blocks_commit: true
     asserted_invariants:
-      - NON_DAY0_SANITY_SHADOW_LOGS_NOT_BLOCKS
+      - NON_DAY0_SANITY_REMOVED_LOG_ONLY_NOT_BLOCKING
       - DAY0_HIGH_HARD_GATE_CONTRACT_PRESERVED
     source_under_test:
       - src/signal/probability_sanity.py
       - src/engine/evaluator.py
     law_dependencies:
-      - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >
-      P0-D antibody: validate_high_distribution runs as shadow telemetry for non-day0
-      strategies - logged only, not blocking. Day0 HIGH hard gate contract preserved.
-      Shadow log line uses [PROBABILITY_SANITY_SHADOW] prefix for grep-ability.
+      P0-D antibody: validate_high_distribution no longer runs as log-only telemetry for
+      non-day0 strategies. Day0 HIGH hard gate contract preserved.
     created: 2026-05-23
     last_reused_or_audited: 2026-05-23
 
@@ -3500,7 +3431,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/operations/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md
+      - docs/archive/2026-Q2/operations_historical/EXEC_FRESHNESS_ROOTCAUSE_2026-05-24.md
     notes: >
       Relationship test pinning fresh-at-submit re-capture invariant
       across discovery→execution boundary. Guards that stale snapshots
@@ -3514,7 +3445,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+      - docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
     notes: >
       Relationship tests for identity_full_transport_v1 calibration route (Zeus #64).
       Three invariants: (a) identity calibrator bucket reaches evaluator gate pass with
@@ -3527,7 +3458,7 @@ test_metadata:
     cohort: ship_gate_antibody
     trust: trusted
     authority_docs:
-      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+      - docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
     notes: >
       Unit tests for check_full_transport_ship_readiness. Verifies gate returns FAIL
       today (nothing shipped yet) and check function names match the 9 spec items exactly.
@@ -3538,7 +3469,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+      - docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
     notes: >
       Relationship + antibody tests for Fix B: MIN_PAIRED_N gate on transport delta
       (Zeus #64). Verifies fit_city_predictive_error does not apply spurious correction
@@ -3550,7 +3481,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
+      - docs/archive/2026-Q2/operations_historical/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md
     notes: >
       Relationship tests for full_transport_live wiring in monitor_refresh (Zeus #64).
       Three invariants: (a) flag OFF = p_raw byte-identical to plain path; (b) flag ON +
@@ -3563,9 +3494,9 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/operations/EXEC_EXIT_AUDIT_2026-06-02.md
+      - docs/archive/2026-Q2/operations_historical/EXEC_EXIT_AUDIT_2026-06-02.md
     notes: >
-      Relationship tests for the D2 bias-family entry/exit unify shadow flag
+      Relationship tests for the D2 bias-family entry/exit unify feature flag
       (feature_flags.exit_bias_family_unify_enabled, default OFF). Cross-module invariants:
       (a) flag OFF = both resolvers return None and do NO bias-model read (byte-identical to
       pre-fix); (b) flag ON = both resolvers resolve the populated edli_per_city_v1 family
@@ -3586,7 +3517,7 @@ test_metadata:
       BLOCKER 1 RT: preflight_restart_check.py must read flag values from the correct
       scope in config/settings.json (edli_v1 for capture/fusion/arm/caps/qlcb;
       feature_flags for soft_anchor flags) — not from the top-level cfg dict. Covers
-      the full stage ladder (SHADOW -> ACCRUING -> SHADOW-FUSION -> ARMED) and verifies
+      the full stage ladder (BLOCKED -> ACCRUING -> FUSION_ACCRUING -> ARMED) and verifies
       each rung reads from the correct scope. Operator-named TDD test.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08

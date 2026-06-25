@@ -906,9 +906,9 @@ def _strategy_settlement_summary(rows: list[dict]) -> dict[str, dict]:
 
     K1 invariant (bug #1/#2): this aggregation MUST be deduped by
     trade_id. Settlement rows can come from multiple upstream sources
-    (canonical position_events, legacy position_events_legacy, legacy
-    decision_log artifacts) and the same underlying trade may appear in
-    more than one source or in multiple batches of the same source. Prior
+    (canonical position_events and historical decision_log artifacts), and
+    the same underlying trade may appear in more than one source or in
+    multiple batches of the same source. Prior
     to dedup, opening_inertia would show 19 settlements on
     2026-04-11 while the canonical truth was 6 unique positions, because
     two decision_log settlement batches (19:43 and 20:43) each recorded

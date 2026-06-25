@@ -1,8 +1,8 @@
 """Heartbeat supervision for live resting Polymarket orders.
 
 R3 Z3: GTC/GTD placement is allowed only while the venue heartbeat is
-healthy. Heartbeat loss reuses the existing fail-closed auto-pause tombstone;
-it does not introduce a second control truth surface.
+healthy. Heartbeat loss is represented by the supervisor status; it does not
+write or read the retired auto-pause tombstone.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from src.contracts.freshness_registry import FreshnessLevel, registry as _freshn
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_CANCEL_SUSPECTED_REASON = "heartbeat_cancel_suspected"
 DEFAULT_HEARTBEAT_CADENCE_SECONDS = 2
 DEFAULT_HEARTBEAT_HTTP_TIMEOUT_SECONDS = 1.0
 DEFAULT_HEARTBEAT_STATUS_MAX_AGE_SECONDS = 8
@@ -461,7 +460,6 @@ class HeartbeatSupervisor:
         self._lease_continuous_since: Optional[datetime] = None
         self._lease_gap_suspected_until: Optional[datetime] = None
         self._running = False
-        self._tombstone_written = False
         self._run_once_lock = threading.Lock()
 
     async def start(self) -> None:
@@ -567,12 +565,10 @@ class HeartbeatSupervisor:
         if _is_invalid_heartbeat_id_error(exc):
             self._last_invalid_id_at = now
             self._health = HeartbeatHealth.LOST
-            self._write_failclosed_tombstone()
         elif self._consecutive_failures == 1:
             self._health = HeartbeatHealth.DEGRADED
         else:
             self._health = HeartbeatHealth.LOST
-            self._write_failclosed_tombstone()
         logger.warning(
             "Venue heartbeat failure (%s): health=%s error=%s",
             self._consecutive_failures,
@@ -598,13 +594,7 @@ class HeartbeatSupervisor:
     def gate_for_order_type(self, order_type: str | OrderType | None) -> bool:
         if not heartbeat_required_for(order_type):
             return True
-        if self._tombstone_written or _failclosed_tombstone_exists():
-            return False
         return self.status().resting_order_safe()
-
-    def _write_failclosed_tombstone(self) -> None:
-        # Tombstone retired 2026-05-04 — runtime safety covered by gate 6/9/10.
-        pass
 
 
 _GLOBAL_SUPERVISOR: Optional[Any] = None
@@ -631,15 +621,6 @@ def current_status() -> HeartbeatStatus:
             last_error="heartbeat supervisor not configured",
         )
     return supervisor.status()
-
-
-def _failclosed_tombstone_exists() -> bool:
-    try:
-        from src.config import state_path
-
-        return state_path("auto_pause_failclosed.tombstone").exists()
-    except Exception:
-        return True
 
 
 def assert_heartbeat_allows_order_type(order_type: str | OrderType | None = OrderType.GTC) -> None:

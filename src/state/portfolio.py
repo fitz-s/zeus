@@ -2,7 +2,7 @@
 
 Atomic JSON + SQL mirror. Positions are projection-cache adapters; canonical
 truth is `position_events` + `position_current` (see PR #352, F1 in
-docs/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
+docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md). The `Position` dataclass is a runtime view that
 combines submitted-intent economics, verified fill economics, and chain-
 observed economics into a single object — but each economics object has its
 own authority field on `position_current` and event payloads. The legacy
@@ -414,7 +414,7 @@ def _finite_float_or_zero(value: object) -> float:
     return result if math.isfinite(result) else 0.0
 
 
-# F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): effective-exposure typed
+# F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): effective-exposure typed
 # view consumed by exit_triggers / monitor_refresh / risk gates. Routes by
 # fill_authority so balance-only (venue_position_observed) positions expose
 # chain economics, and trade-verified positions expose fill economics — both
@@ -525,7 +525,7 @@ class Position:
     corrected_executable_economics_eligible: bool = False
     bankroll_at_entry: Optional[float] = None
     entered_at: str = ""
-    # F2 (docs/findings_2026_05_28.md §F2, 2026-05-28): provenance tag for
+    # F2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2, 2026-05-28): provenance tag for
     # entered_at. "verified_entry_fill" when the timestamp came from a real
     # venue fill fact; "reconstructed_from_chain" when it was fabricated from
     # the reconcile-time clock (no fill fact available); "" for legacy rows
@@ -570,7 +570,7 @@ class Position:
     # Chain reconciliation (Blueprint v2 §5)
     chain_state: str = VenueVisibilityStatus.UNKNOWN.value
     chain_shares: float = 0.0
-    # F1 (docs/findings_2026_05_28.md, 2026-05-28): chain-observed economics
+    # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md, 2026-05-28): chain-observed economics
     # carry their own typed slots so balance-only rescue does not overwrite
     # decision/fill economics on `entry_price` / `cost_basis_usd` / `size_usd`.
     # Set by chain_reconciliation balance-only rescue branch; consumed by
@@ -583,7 +583,7 @@ class Position:
     # not see this position — that case uses `last_chain_absence_observed_at`.
     # Finding 1 (PR C0, 2026-05-27): conflating positive and absence
     # observations into one timestamp inverted CHAIN_EMPTY vs CHAIN_UNKNOWN
-    # semantics downstream. See docs/plans/2026-05-27-chain-local-position-model-refactor.md.
+    # semantics downstream. See docs/archive/2026-Q2/plans_historical/2026-05-27-chain-local-position-model-refactor.md.
     chain_verified_at: str = ""
     last_chain_absence_observed_at: str = ""
 
@@ -2385,7 +2385,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
             row.get("last_chain_absence_observed_at") or row.get("chain_absence_at") or ""
         ),
         chain_shares=float(row.get("chain_shares") or 0.0),
-        # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
+        # F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1, 2026-05-28): chain-observed
         # economics round-trip via position_current so a balance-only
         # rescued position survives daemon restart with the correct
         # exposure on `effective_exposure()`.
@@ -3099,7 +3099,7 @@ def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill
 def _track_exit(state: PortfolioState, pos: Position) -> None:
     """Track exit for reentry/cooldown checks AND replay auditability.
 
-    CRITICAL: All fields required by profit_validation_replay.py must be
+    CRITICAL: All fields required by equity/report replay consumers must be
     persisted here. If a field is on Position but not in this dict, the
     replay engine will classify the exit as 'fully_skipped'.
 

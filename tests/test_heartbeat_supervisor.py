@@ -23,7 +23,6 @@ import pytest
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
 from src.control.heartbeat_supervisor import (
-    HEARTBEAT_CANCEL_SUSPECTED_REASON,
     ExternalHeartbeatSupervisor,
     HeartbeatHealth,
     HeartbeatNotHealthy,
@@ -392,21 +391,6 @@ def test_lost_generic_request_failure_attempts_empty_chain_recovery_but_keeps_gt
     assert adapter.heartbeat_ids == ["", "id-1", "id-1", ""]
 
 
-@pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — _write_failclosed_tombstone is now a no-op")
-def test_lost_state_writes_tombstone_with_heartbeat_cancel_suspected_reason(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
-    adapter = FakeHeartbeatAdapter([RuntimeError("miss-1"), RuntimeError("miss-2")])
-    supervisor = HeartbeatSupervisor(adapter, cadence_seconds=5)
-
-    _run(supervisor.run_once())
-    status = _run(supervisor.run_once())
-
-    assert status.health is HeartbeatHealth.LOST
-    tombstone = tmp_path / "auto_pause_failclosed.tombstone"
-    assert tombstone.read_text() == HEARTBEAT_CANCEL_SUSPECTED_REASON
-    assert sorted(p.name for p in tmp_path.glob("*tombstone*")) == ["auto_pause_failclosed.tombstone"]
-
-
 def test_lost_state_blocks_GTC_and_GTD_placement():
     supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
     supervisor.record_failure("miss-1")
@@ -427,18 +411,6 @@ def test_lost_state_allows_FOK_FAK_immediate_only():
     assert heartbeat_required_for(OrderType.FAK) is False
     assert supervisor.gate_for_order_type("FOK") is True
     assert supervisor.gate_for_order_type("FAK") is True
-
-
-@pytest.mark.skip(reason="auto-pause tombstone retired 2026-05-04 — recovered heartbeat no longer persists tombstone block")
-def test_recovered_heartbeat_still_blocks_resting_orders_until_tombstone_cleared():
-    supervisor = HeartbeatSupervisor(FakeHeartbeatAdapter([]), cadence_seconds=5)
-    supervisor.record_failure("miss-1")
-    supervisor.record_failure("miss-2")
-    supervisor.record_success()
-
-    assert supervisor.status().health is HeartbeatHealth.HEALTHY
-    assert supervisor.gate_for_order_type("GTC") is False
-    assert supervisor.gate_for_order_type("FOK") is True
 
 
 def test_executor_blocks_gtc_before_command_persistence_when_heartbeat_lost(monkeypatch):

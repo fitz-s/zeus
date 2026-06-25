@@ -5,33 +5,9 @@
 #   Position.evaluate_exit (the one live path).
 import pytest
 import numpy as np
-from src.contracts.semantic_types import Direction, EntryMethod
-from src.contracts.execution_intent import ExecutionIntent
+from src.contracts.semantic_types import EntryMethod
 from src.contracts.edge_context import EdgeContext
-from src.contracts.slippage_bps import SlippageBps
 from src.state.portfolio import Position, ExitContext
-from src.execution.executor import execute_intent
-
-@pytest.mark.skip(reason="Phase2: is_sandbox path removed; no monkeypatch available")
-def test_execution_intent_schema():
-    # P3-fix1 (post-review BLOCKER, 2026-04-26): max_slippage now requires
-    # SlippageBps per ExecutionIntent.__post_init__ runtime guard.
-    intent = ExecutionIntent(
-        direction=Direction("buy_no"),
-        target_size_usd=100.0,
-        limit_price=0.45,
-        toxicity_budget=0.05,
-        max_slippage=SlippageBps(value_bps=200.0, direction="adverse"),
-        is_sandbox=True,
-        market_id="m123",
-        token_id="t123",
-        timeout_seconds=3600,
-    )
-    assert intent.limit_price == 0.45
-    
-    result = execute_intent(intent, edge_vwmp=0.44, label="test")
-    assert result.status == "filled"
-    assert result.shares > 0
 
 def test_monitoring_chain_trigger():
     """Divergence panic fires via the ONE live exit path (Position.evaluate_exit)."""

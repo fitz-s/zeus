@@ -26,10 +26,6 @@ RUNTIME_ROOT = Path(os.environ.get("ZEUS_PRIMARY_ROOT") or PROJECT_ROOT).expandu
 STATE_DIR = RUNTIME_ROOT / "state"
 
 
-def legacy_state_path(filename: str) -> Path:
-    return STATE_DIR / filename
-
-
 def runtime_state_path(filename: str) -> Path:
     """State path for the live runtime.
 
@@ -169,7 +165,6 @@ class Settings:
 
 class EntryForecastRolloutMode(StrEnum):
     BLOCKED = "blocked"
-    SHADOW = "shadow"
     CANARY = "canary"
     LIVE = "live"
 
@@ -733,7 +728,7 @@ def exit_correlation_crowding_rate() -> float:
 def hold_value_exit_costs_enabled() -> bool:
     """T6.4 feature flag: when False (default), _buy_yes_exit /
     _buy_no_exit call HoldValue.compute with fee=0/time=0 (pre-T6.4
-    behavior preserved during shadow validation). When True, exit
+    behavior preserved until activation). When True, exit
     decisions include fee + time opportunity cost via
     HoldValue.compute_with_exit_costs. See config/settings.json
     feature_flags.HOLD_VALUE_EXIT_COSTS for flip protocol."""

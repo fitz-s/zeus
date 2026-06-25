@@ -3,7 +3,6 @@
 Goes beyond healthcheck.py's surface-level checks (daemon alive? status fresh?)
 to audit *semantic correctness* of the trading system's internal state:
 
-- Event table parity (canonical vs legacy exit events)
 - Position lifecycle phase staleness
 - Runtime-state contamination in canonical rows
 - Portfolio loader data-source integrity
@@ -80,76 +79,7 @@ def _hours_ago(iso_ts: str | None) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Check 1: Event Table Parity
-# ---------------------------------------------------------------------------
-
-def check_event_table_parity(conn: sqlite3.Connection) -> dict:
-    """Compare canonical position_events exit events vs position_events_legacy exits.
-
-    If legacy has EXIT events for positions that have NO canonical exit event,
-    it means exits are being written to the wrong table.
-    """
-    result = {"check": "event_table_parity", "ok": True, "details": {}}
-
-    has_canonical = _table_exists(conn, "position_events")
-    has_legacy = _table_exists(conn, "position_events_legacy")
-
-    result["details"]["canonical_table_exists"] = has_canonical
-    result["details"]["legacy_table_exists"] = has_legacy
-
-    if not has_legacy:
-        result["details"]["note"] = "No legacy table — fully migrated"
-        return result
-
-    if not has_canonical:
-        result["details"]["note"] = "No canonical table — pre-migration state"
-        return result
-
-    # Count canonical exit events
-    canonical_exit_count = conn.execute(
-        "SELECT COUNT(DISTINCT position_id) FROM position_events "
-        "WHERE event_type IN ('ECONOMIC_CLOSE', 'SETTLEMENT_CONFIRMED')"
-    ).fetchone()[0]
-
-    # Count legacy exit events (position_state contains EXIT or CLOSED)
-    legacy_exit_count = conn.execute(
-        "SELECT COUNT(DISTINCT runtime_trade_id) FROM position_events_legacy "
-        "WHERE position_state IN ('POSITION_EXIT_RECORDED', 'ECONOMICALLY_CLOSED', 'SETTLED')"
-    ).fetchone()[0]
-
-    result["details"]["canonical_exit_positions"] = canonical_exit_count
-    result["details"]["legacy_exit_positions"] = legacy_exit_count
-
-    # Find legacy exits with no canonical counterpart
-    orphaned = conn.execute(
-        """
-        SELECT DISTINCT l.runtime_trade_id
-        FROM position_events_legacy l
-        WHERE l.position_state IN ('POSITION_EXIT_RECORDED', 'ECONOMICALLY_CLOSED', 'SETTLED')
-          AND l.runtime_trade_id NOT IN (
-            SELECT DISTINCT position_id FROM position_events
-            WHERE event_type IN ('ECONOMIC_CLOSE', 'SETTLEMENT_CONFIRMED')
-          )
-        """
-    ).fetchall()
-
-    orphaned_ids = [row[0] for row in orphaned]
-    result["details"]["orphaned_legacy_exits"] = len(orphaned_ids)
-
-    if orphaned_ids:
-        result["ok"] = False
-        result["severity"] = "critical"
-        result["details"]["orphaned_trade_ids"] = orphaned_ids[:20]  # cap output
-        result["message"] = (
-            f"{len(orphaned_ids)} exit event(s) written to legacy table only — "
-            "canonical position_current won't be updated"
-        )
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Check 2: Position Phase Staleness
+# Check 1: Position Phase Staleness
 # ---------------------------------------------------------------------------
 
 def check_phase_staleness(conn: sqlite3.Connection) -> dict:
@@ -229,20 +159,6 @@ def check_env_contamination(conn: sqlite3.Connection) -> dict:
                 )
         else:
             result["details"]["position_current_env_column"] = False
-
-    # Check position_events_legacy
-    if _table_exists(conn, "position_events_legacy"):
-        wrong_legacy = conn.execute(
-            "SELECT COUNT(*) FROM position_events_legacy WHERE env != ?",
-            (mode,),
-        ).fetchone()[0]
-        result["details"]["legacy_events_wrong_env"] = wrong_legacy
-        if wrong_legacy > 0 and result["ok"]:
-            result["ok"] = False
-            result["severity"] = "warning"
-            result["message"] = (
-                f"{wrong_legacy} legacy event(s) in {mode} DB have wrong env"
-            )
 
     return result
 
@@ -522,7 +438,6 @@ def run_diagnostics() -> dict:
 
     try:
         checks = [
-            check_event_table_parity(conn),
             check_phase_staleness(conn),
             check_env_contamination(conn),
             check_portfolio_loader(conn),

@@ -27,13 +27,11 @@ from src.backtest.purpose import (
 )
 from src.backtest.skill import run_skill, _economics_fields_in_limitations
 from scripts import equity_curve as equity_curve_module
-from scripts.equity_curve import _single_exit_economics_cohort
-from scripts.profit_validation_replay import (
+from scripts.equity_curve import (
     CORRECTED_ECONOMICS_COHORT,
-    LEGACY_EXIT_TRIGGER_REPLAY_COHORT,
     LEGACY_DIAGNOSTIC_COHORT,
+    _single_exit_economics_cohort,
     require_single_exit_economics_cohort,
-    require_legacy_exit_trigger_replay_cohort,
 )
 
 
@@ -133,18 +131,6 @@ def test_equity_curve_uses_status_pnl_not_bankroll_delta(monkeypatch):
     assert report["total_pnl"] == pytest.approx(7.0)
     assert report["performance_equity"] == pytest.approx(218.37)
     assert report["return_pct"] == pytest.approx(3.31)
-
-
-def test_profit_replay_allows_legacy_trigger_only_for_legacy_diagnostic_cohort():
-    assert (
-        require_legacy_exit_trigger_replay_cohort(LEGACY_DIAGNOSTIC_COHORT)
-        == LEGACY_EXIT_TRIGGER_REPLAY_COHORT
-    )
-
-
-def test_profit_replay_rejects_corrected_cohort_for_legacy_exit_trigger_replay():
-    with pytest.raises(ValueError, match="corrected executable exit cohort"):
-        require_legacy_exit_trigger_replay_cohort(CORRECTED_ECONOMICS_COHORT)
 
 
 def test_economics_tombstone_raises():
@@ -403,7 +389,7 @@ def test_economics_field_leak_detector_clean():
     clean = {
         "pnl_available": False,
         "pnl_unavailable_reason": "no_market_price_linkage",
-        "authority_scope": "diagnostic_non_promotion",
+        "authority_scope": "offline_no_promotion",
         "uses_stored_winning_bin_as_truth": False,
     }
     assert _economics_fields_in_limitations(clean) == set()

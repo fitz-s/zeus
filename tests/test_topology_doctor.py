@@ -1583,7 +1583,7 @@ def test_replay_fidelity_digest_names_non_promotion_and_point_in_time_truth():
     joined = "\n".join(str(item) for values in digest.values() if isinstance(values, list) for item in values)
 
     assert digest["profile"] == "edit replay fidelity"
-    assert "diagnostic_non_promotion" in joined
+    assert "offline_no_promotion" in joined
     assert "point-in-time" in joined
     assert any("state/zeus_backtest.db" in item for item in digest["downstream"])
     assert any("Do not promote" in item for item in digest["stop_conditions"])
@@ -3020,103 +3020,6 @@ def test_scripts_mode_applies_diagnostic_rules_to_report_writers(monkeypatch):
     assert any(issue.code == "script_diagnostic_forbidden_write_target" for issue in result.issues)
 
 
-def test_backfill_outcome_fact_manifest_declares_legacy_apply_guard():
-    manifest = topology_doctor.load_script_manifest()
-    entry = manifest["scripts"]["backfill_outcome_fact.py"]
-
-    assert entry["class"] == "repair"
-    assert entry["dangerous_if_run"] is True
-    assert entry["dry_run_default"] is True
-    assert entry["apply_flag"] == "--apply"
-    assert entry["target_db"] == "state/zeus.db"
-    assert entry["write_targets"] == ["state/zeus.db"]
-    assert "legacy_lifecycle_projection_not_settlement_authority" in entry["promotion_barrier"]
-    assert "--confirm-legacy-outcome-fact-backfill" in entry["canonical_command"]
-
-
-def test_backfill_outcome_fact_defaults_to_dry_run(tmp_path):
-    from scripts import backfill_outcome_fact
-
-    db_path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE outcome_fact (
-            position_id TEXT PRIMARY KEY,
-            strategy_key TEXT,
-            entered_at TEXT,
-            settled_at TEXT,
-            exit_reason TEXT,
-            decision_snapshot_id TEXT,
-            pnl REAL,
-            outcome INTEGER
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE chronicle (
-            trade_id TEXT,
-            timestamp TEXT,
-            event_type TEXT,
-            details_json TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE position_events_legacy (
-            runtime_trade_id TEXT,
-            timestamp TEXT,
-            strategy TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO chronicle (
-            trade_id, timestamp, event_type, details_json
-        ) VALUES (
-            'legacy-pos', '2026-04-01T23:00:00Z', 'SETTLEMENT',
-            '{"pnl": 4.25, "outcome": 1, "decision_snapshot_id": "snap-legacy", "strategy": "center_buy"}'
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_events_legacy (
-            runtime_trade_id, timestamp, strategy
-        ) VALUES ('legacy-pos', '2026-04-01T12:00:00Z', 'center_buy')
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    with redirect_stdout(StringIO()):
-        summary = backfill_outcome_fact.backfill(db_path=db_path)
-
-    conn = sqlite3.connect(db_path)
-    count = conn.execute("SELECT COUNT(*) FROM outcome_fact").fetchone()[0]
-    conn.close()
-
-    assert summary["status"] == "dry_run"
-    assert summary["dry_run"] is True
-    assert summary["inserted"] == 1
-    assert summary["authority_scope"] == "legacy_lifecycle_projection_not_settlement_authority"
-    assert count == 0
-
-
-def test_backfill_outcome_fact_missing_db_does_not_create_file(tmp_path):
-    from scripts import backfill_outcome_fact
-
-    db_path = tmp_path / "missing.db"
-
-    summary = backfill_outcome_fact.backfill(db_path=db_path)
-
-    assert summary["status"] == "error_missing_db"
-    assert not db_path.exists()
-
-
 def test_scripts_mode_rejects_long_lived_one_off_script_name(monkeypatch):
     manifest = topology_doctor.load_script_manifest()
     manifest["scripts"]["scratch_probe.py"] = {"class": "utility"}
@@ -3259,7 +3162,7 @@ def test_data_rebuild_mode_rejects_empty_row_contract(monkeypatch):
 
 def test_data_rebuild_mode_rejects_missing_non_db_promotion_targets(monkeypatch):
     topology = topology_doctor.load_data_rebuild_topology()
-    topology["diagnostic_non_promotion"]["forbidden_promotions"] = [
+    topology["offline_no_promotion"]["forbidden_promotions"] = [
         "state/zeus_trades.db",
         "state/zeus-world.db",
     ]
@@ -3279,7 +3182,7 @@ def test_data_backfill_digest_includes_row_contract_and_replay_coverage():
     assert "calibration_pairs" in data_topology["row_contract_tables"]
     assert "decision_group_id" in data_topology["row_contract_tables"]["calibration_pairs"]["required_fields"]
     assert "market_price_linkage" in data_topology["replay_coverage_rule"]["required_for_strategy_replay_coverage"]
-    assert "calibration model activation" in data_topology["diagnostic_non_promotion"]["forbidden_promotions"]
+    assert "calibration model activation" in data_topology["offline_no_promotion"]["forbidden_promotions"]
 
 
 @pytest.mark.live_topology
@@ -4258,7 +4161,7 @@ def test_operation_vector_does_not_admit_unrelated_freshness_gate_work_as_canary
 def test_operation_vector_does_not_misread_pre_merge_hook_as_git_merge():
     digest = topology_doctor.build_digest(
         "harden pre-merge hook fail-closed behavior",
-        [".claude/hooks/pre-merge-contamination-check.sh"],
+        [".claude/hooks/pre-merge-commit"],
         write_intent="edit",
     )
     card = digest["route_card"]
@@ -4310,12 +4213,11 @@ def test_settings_wires_pre_edit_architecture_for_multiedit():
 def test_operation_vector_admits_runtime_governance_profile_boundary():
     files = [
         ".claude/CLAUDE.md",
+        ".claude/hooks/dispatch.py",
         ".claude/hooks/hook_common.py",
         ".claude/hooks/pre-commit",
-        ".claude/hooks/pre-commit-invariant-test.sh",
-        ".claude/hooks/pre-commit-secrets.sh",
-        ".claude/hooks/pre-edit-architecture.sh",
-        ".claude/hooks/pre-merge-contamination-check.sh",
+        ".claude/hooks/pre-merge-commit",
+        ".claude/hooks/registry.yaml",
         ".claude/settings.json",
         ".gitignore",
         "architecture/kernel_manifest.yaml",
@@ -4342,9 +4244,10 @@ def test_operation_vector_guides_broad_fix_package_to_planning_packet():
         "narrow semgrep zeus-no-json-authority-write, remove temperature_metric DEFAULT high, "
         "and repair docs rules bidirectional references",
         [
-            ".claude/hooks/pre-commit-invariant-test.sh",
-            ".claude/hooks/pre-merge-contamination-check.sh",
-            ".claude/hooks/pre-edit-architecture.sh",
+            ".claude/hooks/dispatch.py",
+            ".claude/hooks/pre-commit",
+            ".claude/hooks/pre-merge-commit",
+            ".claude/hooks/registry.yaml",
             ".claude/settings.json",
             "architecture/ast_rules/semgrep_zeus.yml",
             "architecture/negative_constraints.yaml",
@@ -4961,433 +4864,3 @@ def test_city_truth_contract_rejects_unbacked_current_assertion(monkeypatch):
 
     assert not result.ok
     assert any(issue.code == "city_truth_contract_current_claim_unbacked" for issue in result.issues)
-
-
-
-
-# === ultrareview-25 P1 hook fail-closed antibodies ===
-# Subprocess-driven regression tests for the bash hooks at
-# .claude/hooks/{pre-commit-invariant-test.sh,pre-merge-contamination-check.sh}.
-# Antibodies for F3 (multi-space + git -C bypass), F4 (protected branch glob
-# over-match), F13 (critic verdict comment-injection), and F17 (OVERRIDE doc
-# claim honesty). These tests pin the regression behaviour: a future refactor
-# from regex back to literal `case` would silently re-open the bypass — these
-# tests catch that.
-
-import json as _json
-import shutil as _shutil
-import subprocess as _subprocess
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PRE_MERGE_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-merge-contamination-check.sh")
-_PRE_EDIT_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-edit-architecture.sh")
-_PRE_COMMIT_INVARIANT_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-commit-invariant-test.sh")
-_PRE_COMMIT_SECRETS_HOOK = os.path.join(_REPO_ROOT, ".claude/hooks/pre-commit-secrets.sh")
-_PRE_COMMIT_ORCHESTRATOR = os.path.join(_REPO_ROOT, ".claude/hooks/pre-commit")
-
-
-@pytest.fixture(scope="module")
-def _protected_branch_worktree(tmp_path_factory):
-    """Session-scoped fixture creating a temp worktree on a unique protected
-    branch so the hook's
-    branch-protection check fires the merge-class detection paths under test.
-    The hook short-circuits on non-protected branches; without this fixture,
-    the test runner's current branch (e.g. a feature branch) would silently
-    bypass coverage of F3/F4/F13/F17 antibodies."""
-    repo_root = _REPO_ROOT
-    worktree_dir = tmp_path_factory.mktemp("hook-test-worktree")
-    branch_name = f"plan-pre999/hook-test-{os.getpid()}-{worktree_dir.name}"
-    rc = _subprocess.run(
-        ["git", "-C", repo_root, "worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"],
-        capture_output=True, text=True,
-    )
-    if rc.returncode != 0:
-        pytest.skip(f"could not create protected branch worktree for hook tests: {rc.stderr[:200]}")
-    yield str(worktree_dir)
-    _subprocess.run(
-        ["git", "-C", repo_root, "worktree", "remove", "--force", str(worktree_dir)],
-        capture_output=True, text=True,
-    )
-    _subprocess.run(
-        ["git", "-C", repo_root, "branch", "-D", branch_name],
-        capture_output=True, text=True,
-    )
-
-
-@pytest.fixture
-def _secrets_hook_worktree(tmp_path):
-    repo_root = _REPO_ROOT
-    worktree_dir = tmp_path / "secrets-hook-worktree"
-    branch_name = f"hook-secrets-test-{os.getpid()}-{tmp_path.name}"
-    rc = _subprocess.run(
-        ["git", "-C", repo_root, "worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if rc.returncode != 0:
-        pytest.skip(f"could not create secrets hook worktree: {rc.stderr[:200]}")
-    yield str(worktree_dir)
-    _subprocess.run(
-        ["git", "-C", repo_root, "worktree", "remove", "--force", str(worktree_dir)],
-        capture_output=True,
-        text=True,
-    )
-    _subprocess.run(
-        ["git", "-C", repo_root, "branch", "-D", branch_name],
-        capture_output=True,
-        text=True,
-    )
-
-
-def _run_pre_merge_hook(command, env=None, evidence_path=None, cwd=None):
-    """Invoke pre-merge hook with a fake Bash tool payload; return (rc, stderr).
-
-    `cwd` selects the working directory the hook runs in. Pass the
-    `_protected_branch_worktree` fixture value to exercise protected-branch
-    code paths regardless of the test runner's current branch.
-    """
-    payload = _json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    proc_env = dict(os.environ)
-    if env:
-        proc_env.update(env)
-    if evidence_path is not None:
-        proc_env["MERGE_AUDIT_EVIDENCE"] = evidence_path
-    elif "MERGE_AUDIT_EVIDENCE" in proc_env:
-        del proc_env["MERGE_AUDIT_EVIDENCE"]
-    proc = _subprocess.run(
-        ["bash", _PRE_MERGE_HOOK],
-        input=payload,
-        capture_output=True,
-        text=True,
-        env=proc_env,
-        cwd=cwd,
-    )
-    return proc.returncode, proc.stderr
-
-
-def _git_index_env(cwd, env_overrides=None):
-    result = _subprocess.run(
-        ["git", "-C", cwd, "rev-parse", "--git-path", "index"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    env = dict(os.environ)
-    env["GIT_INDEX_FILE"] = result.stdout.strip()
-    if env_overrides:
-        env.update(env_overrides)
-    return env
-
-
-def _run_pre_commit_secrets_git(cwd, env=None):
-    proc = _subprocess.run(
-        ["bash", _PRE_COMMIT_SECRETS_HOOK],
-        input="",
-        capture_output=True,
-        text=True,
-        env=_git_index_env(cwd, env),
-        cwd=cwd,
-        check=False,
-    )
-    return proc.returncode, proc.stderr
-
-
-def _path_without_gitleaks(tmp_path):
-    fake_bin = tmp_path / "no-gitleaks-bin"
-    fake_bin.mkdir()
-    for tool in ("git", "python3"):
-        target = _shutil.which(tool)
-        assert target, f"{tool} must be available for hook regression tests"
-        os.symlink(target, fake_bin / tool)
-    return fake_bin, f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
-
-
-def test_pre_commit_secrets_blocks_unregistered_review_safe_tag(_secrets_hook_worktree):
-    tag = "NEW" + "_TAG"
-    probe = pathlib.Path(_secrets_hook_worktree) / "tmp_review_safe_probe.txt"
-    probe.write_text(f'public_test_value = "not-secret"  # [REVIEW-SAFE: {tag}]\n')
-    _subprocess.run(["git", "add", str(probe)], cwd=_secrets_hook_worktree, check=True)
-
-    rc, stderr = _run_pre_commit_secrets_git(_secrets_hook_worktree)
-
-    assert rc == 2
-    assert tag in stderr
-    assert "not registered" in stderr
-
-
-def test_pre_commit_secrets_blocks_unregistered_review_safe_without_gitleaks(tmp_path, _secrets_hook_worktree):
-    tag = "MISSING_GITLEAKS" + "_TAG"
-    probe = pathlib.Path(_secrets_hook_worktree) / "tmp_review_safe_no_gitleaks_probe.txt"
-    probe.write_text(f'public_test_value = "not-secret"  # [REVIEW-SAFE: {tag}]\n')
-    _subprocess.run(["git", "add", str(probe)], cwd=_secrets_hook_worktree, check=True)
-    _, path_without_gitleaks = _path_without_gitleaks(tmp_path)
-
-    rc, stderr = _run_pre_commit_secrets_git(
-        _secrets_hook_worktree,
-        env={"PATH": path_without_gitleaks},
-    )
-
-    assert rc == 2
-    assert tag in stderr
-    assert "not registered" in stderr
-
-
-def test_pre_commit_secrets_accepts_review_safe_tag_registered_in_same_commit(_secrets_hook_worktree):
-    tag = "TEST_REGISTERED" + "_TAG"
-    worktree = pathlib.Path(_secrets_hook_worktree)
-    registry = worktree / "SECURITY-FALSE-POSITIVES.md"
-    registry.write_text(
-        registry.read_text()
-        + f"\n## [REVIEW-SAFE: {tag}] — test-local cleared token\n\n"
-        + "**Operator ruling 2026-05-02**: test-only registry validation fixture.\n"
-    )
-    probe = worktree / "tmp_registered_review_safe_probe.txt"
-    probe.write_text(f'public_test_value = "not-secret"  # [REVIEW-SAFE: {tag}]\n')
-    _subprocess.run(["git", "add", "SECURITY-FALSE-POSITIVES.md", str(probe)], cwd=_secrets_hook_worktree, check=True)
-
-    rc, stderr = _run_pre_commit_secrets_git(_secrets_hook_worktree)
-
-    assert rc == 0, stderr
-
-
-def test_pre_commit_secrets_audits_staged_requirements_blob_not_worktree(tmp_path, _secrets_hook_worktree):
-    worktree = pathlib.Path(_secrets_hook_worktree)
-    requirements = worktree / "requirements-local.txt"
-    requirements.write_text("staged-package==1.0.0\n")
-    _subprocess.run(["git", "add", str(requirements)], cwd=_secrets_hook_worktree, check=True)
-    requirements.write_text("unstaged-package==9.9.9\n")
-
-    fake_bin, path_without_gitleaks = _path_without_gitleaks(tmp_path)
-    (fake_bin / "pip-audit").write_text(
-        "#!/usr/bin/env bash\n"
-        "while [ \"$#\" -gt 0 ]; do\n"
-        "  if [ \"$1\" = \"-r\" ]; then cat \"$2\" > \"$CAPTURE_FILE\"; exit 0; fi\n"
-        "  shift\n"
-        "done\n"
-        "exit 1\n"
-    )
-    os.chmod(fake_bin / "pip-audit", 0o755)
-    capture = tmp_path / "audited_requirements.txt"
-
-    rc, stderr = _run_pre_commit_secrets_git(
-        _secrets_hook_worktree,
-        env={
-            "PATH": path_without_gitleaks,
-            "CAPTURE_FILE": str(capture),
-        },
-    )
-
-    assert rc == 0, stderr
-    assert "gitleaks not on PATH" in stderr
-    assert capture.read_text() == "staged-package==1.0.0\n"
-
-
-def test_gitleaks_config_has_no_review_safe_catch_all():
-    config = (pathlib.Path(_REPO_ROOT) / ".gitleaks.toml").read_text()
-    assert "'''\\[REVIEW-SAFE:" not in config
-
-
-@pytest.mark.parametrize(
-    "command,must_detect",
-    [
-        ("git merge feature", True),
-        ("git  merge feature", True),  # F3: multi-space
-        ("git\tmerge feature", True),  # F3: tab-separated
-        ("/usr/bin/git merge feature", True),  # F3: absolute path
-        ("git -C /tmp merge feature", True),  # F3: -C path form
-        ("git -C /tmp -c user.x=y merge feature", True),  # F3: chained options
-        ("git --no-pager merge feature", True),  # long value-less option
-        ("git --git-dir .git --work-tree . merge feature", True),  # long options with values
-        ("git -c core.editor='vim -e' merge feature", True),  # quoted option value
-        ("git status && git --no-pager merge feature", True),  # chained git command
-        ("git status&&git merge feature", True),  # no-space operator
-        ("echo ok;git merge feature", True),  # no-space semicolon
-        ("git status\ngit merge feature", True),  # multiline command
-        ("GIT_DIR=. git merge feature", True),  # F3: env-prefixed
-        ("git pull origin main", True),
-        ("git cherry-pick abc", True),
-        ("git rebase main", True),
-        ("git am patch.mbox", True),
-        # Must NOT trigger:
-        ("git mergetool", False),  # different subcmd
-        ("git-merge x", False),  # not a real git invocation
-        ("git commit -m 'merge feature'", False),  # commit, not merge
-        ("ungit merge x", False),  # word-boundary
-        # NOTE: text-mentions inside shell string args (e.g. `echo "git merge"`)
-        # ARE detected by the first-line scan — this is the documented trade-off
-        # (lines 31-35 of the hook); the hook errs fail-closed in that case.
-    ],
-)
-def test_hook_pre_merge_F3_detector_catches_evil_inputs(command, must_detect, _protected_branch_worktree):
-    """F3 antibody: regex must catch every form of merge-class command on
-    a protected branch, including multi-space, absolute path, -C form."""
-    rc, stderr = _run_pre_merge_hook(command, cwd=_protected_branch_worktree)
-    detected = "ADVISORY" in stderr or "BLOCKED" in stderr or "PASS" in stderr or "OVERRIDE" in stderr
-    if must_detect:
-        assert detected, f"F3 regression: failed to detect merge-class in {command!r}"
-    else:
-        assert not detected, f"F3 false positive on {command!r}: {stderr[:200]}"
-
-
-def test_hook_pre_merge_F4_protected_branch_regex():
-    """F4 antibody: the protected-branch list is enumerated, not glob-wide."""
-    # Re-implement the same regex Python-side; if hook regex drifts, this drifts too.
-    import re
-
-    def is_protected(branch):
-        return bool(re.match(r"^(main|plan-pre[0-9]+(/.*)?|release-[A-Za-z0-9._/-]+)$", branch))
-
-    # Must protect:
-    assert is_protected("main")
-    assert is_protected("plan-pre5")
-    assert is_protected("plan-pre10")
-    assert is_protected("plan-pre5/sub-branch")  # sub-branch namespacing preserved
-    assert is_protected("release-1.0")
-    assert is_protected("release-2.0/rc1")
-    # Must NOT protect:
-    assert not is_protected("plan-pretty")  # F4 over-broad glob fix
-    assert not is_protected("plan-prototype")
-    assert not is_protected("plan-pre")  # no number
-    assert not is_protected("release-")  # empty suffix
-    assert not is_protected("Release-1.0")  # case-sensitive
-    assert not is_protected("feature-x")
-    assert not is_protected("topology-runtime-hooks-governance")
-
-
-def test_hook_pre_merge_F13_blocks_commented_critic_verdict(tmp_path, _protected_branch_worktree):
-    """F13 antibody: a fully-commented evidence file must NOT satisfy the
-    critic_verdict existence check (comment-injection spoof)."""
-    spoof = tmp_path / "evidence_spoof.txt"
-    spoof.write_text(
-        "# critic_verdict: APPROVE\n"
-        "# diff_scope: 1 file\n"
-        "# drift_keyword_scan: clean\n"
-    )
-    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(spoof), cwd=_protected_branch_worktree)
-    assert "BLOCKED" in stderr, f"F13 regression: spoofed evidence accepted: {stderr[:300]}"
-
-
-def test_hook_pre_merge_F13_accepts_real_verdict_with_comment_companion(tmp_path, _protected_branch_worktree):
-    """F13 dual: a legit evidence file with both a comment mentioning the field
-    AND a real un-commented field must PASS."""
-    legit = tmp_path / "evidence_legit.txt"
-    legit.write_text(
-        "# This comment mentions critic_verdict: APPROVE for context\n"
-        "critic_verdict: APPROVE\n"
-        "diff_scope: 5 files +200/-50\n"
-        "drift_keyword_scan: bidirectional clean\n"
-    )
-    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(legit), cwd=_protected_branch_worktree)
-    assert "PASS" in stderr, f"F13 false positive on legit evidence: {stderr[:300]}"
-
-
-def test_hook_pre_merge_accepts_verdict_with_trailing_comment(tmp_path, _protected_branch_worktree):
-    """Review-crash antibody: critic_verdict may carry a YAML-style trailing
-    comment, but the parsed value must still be exactly APPROVE/REVISE."""
-    evidence = tmp_path / "evidence_trailing_comment.txt"
-    evidence.write_text(
-        "critic_verdict: APPROVE # reviewer note\n"
-        "diff_scope: 1 file\n"
-        "drift_keyword_scan: clean\n"
-    )
-    rc, stderr = _run_pre_merge_hook("git --no-pager merge x", evidence_path=str(evidence), cwd=_protected_branch_worktree)
-    assert rc == 0
-    assert "PASS" in stderr, f"trailing comment verdict was not accepted: {stderr[:300]}"
-
-
-def test_hook_pre_merge_blocks_revise_verdict(tmp_path, _protected_branch_worktree):
-    evidence = tmp_path / "evidence_revise.txt"
-    evidence.write_text(
-        "critic_verdict: REVISE\n"
-        "diff_scope: 1 file\n"
-        "drift_keyword_scan: clean\n"
-    )
-    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(evidence), cwd=_protected_branch_worktree)
-    assert rc == 2
-    assert "critic_verdict=REVISE" in stderr
-
-
-def test_hook_pre_merge_F17_OVERRIDE_docstring_matches_implementation():
-    """F17 antibody: the OVERRIDE docstring must match the actual log target
-    (.claude/logs/merge-overrides.log), and must NOT claim writes to the
-    docs/operations/current_state.md drift table (which the code does not do)."""
-    with open(_PRE_MERGE_HOOK, "r") as f:
-        text = f.read()
-    assert "logged to docs/operations/current_state.md drift table" not in text, (
-        "F17 regression: false log-target claim is back in the OVERRIDE docstring"
-    )
-    assert ".claude/logs/merge-overrides.log" in text, (
-        "F17 regression: docstring no longer references the durable log file"
-    )
-    # Implementation pin: the OVERRIDE block must contain the actual write
-    assert "OVERRIDE_LOG_PATH" in text, (
-        "F17 regression: OVERRIDE log-write implementation missing"
-    )
-
-
-def test_hook_pre_merge_F17_OVERRIDE_writes_durable_log_on_protected_branch(_protected_branch_worktree):
-    """F17 behavior antibody: when OVERRIDE fires on a protected branch, the
-    hook must append a forensic record to .claude/logs/merge-overrides.log."""
-    import pathlib
-    worktree_dir = pathlib.Path(_protected_branch_worktree)
-    log_path = worktree_dir / ".claude" / "logs" / "merge-overrides.log"
-    if log_path.exists():
-        log_path.unlink()
-    rc, stderr = _run_pre_merge_hook(
-        "git merge feature-x",
-        evidence_path="OVERRIDE_pytest_F17_durable_log",
-        cwd=str(worktree_dir),
-    )
-    assert rc == 0, f"OVERRIDE should exit 0, got {rc}: {stderr[:300]}"
-    assert "OVERRIDE" in stderr, f"Expected OVERRIDE in stderr: {stderr[:300]}"
-    assert log_path.exists(), (
-        f"F17 regression: OVERRIDE did not create durable log at {log_path}. "
-        f"stderr: {stderr[:300]}"
-    )
-    log_text = log_path.read_text()
-    assert "reason=pytest_F17_durable_log" in log_text, f"log missing reason field: {log_text}"
-    assert "channel=agent" in log_text, f"log missing channel field: {log_text}"
-    assert "command=git merge feature-x" in log_text, f"log missing command field: {log_text}"
-
-
-def test_hook_pre_merge_git_channel_override_logs_non_empty_command_context(_protected_branch_worktree):
-    """Review-crash antibody: git pre-merge-commit channel has no Claude
-    command payload, but the forensic log must still carry non-empty context."""
-    import pathlib
-    worktree_dir = pathlib.Path(_protected_branch_worktree)
-    log_path = worktree_dir / ".claude" / "logs" / "merge-overrides.log"
-    if log_path.exists():
-        log_path.unlink()
-    env = {
-        **os.environ,
-        "GIT_INDEX_FILE": "fake",
-        "MERGE_AUDIT_EVIDENCE": "OVERRIDE_pytest_git_channel",
-    }
-    proc = _subprocess.run(
-        ["bash", _PRE_MERGE_HOOK],
-        input="",
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(worktree_dir),
-    )
-    assert proc.returncode == 0, proc.stderr[:300]
-    log_text = log_path.read_text()
-    assert "channel=git" in log_text, f"log missing git channel: {log_text}"
-    assert "command=git-hook:" in log_text, f"git-channel command context empty: {log_text}"
-
-
-def test_hook_pre_merge_F13_blocks_yaml_nested_critic_verdict_spoof(tmp_path, _protected_branch_worktree):
-    """F13 antibody (tightened): a YAML-nested critic_verdict (under another
-    top-level key) must NOT satisfy admission. Schema is strictly flat."""
-    nested = tmp_path / "evidence_nested.txt"
-    nested.write_text(
-        "some_parent:\n"
-        "  critic_verdict: APPROVE\n"
-        "  diff_scope: 1 file\n"
-        "  drift_keyword_scan: clean\n"
-    )
-    rc, stderr = _run_pre_merge_hook("git merge x", evidence_path=str(nested), cwd=_protected_branch_worktree)
-    assert "BLOCKED" in stderr, (
-        f"F13 regression: YAML-nested verdict spoof accepted: {stderr[:300]}"
-    )

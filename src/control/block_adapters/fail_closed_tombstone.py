@@ -36,8 +36,8 @@ class FailClosedTombstoneAdapter:
             blocking_reason=None,
             state_source="file:state/auto_pause_failclosed.tombstone",
             source_file_line=self.source_file_line,
-            owner_module="src.control.heartbeat_supervisor",
-            owner_function="_write_failclosed_tombstone",
+            owner_module="src.control.control_plane",
+            owner_function="_tombstone_path",
             raw_probe={"retired": True, "note": "Gate retired 2026-05-04 Stage 2 gate-purge. Runtime safety covered by gate 6/9/10."},
             notes="Gate retired 2026-05-04. Always CLEAR.",
         )

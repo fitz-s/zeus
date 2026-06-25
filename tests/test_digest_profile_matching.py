@@ -138,27 +138,6 @@ def test_source_contract_watch_script_routes_to_script_profile():
     assert "scripts/watch_source_contract.py" in digest["admission"]["admitted_files"]
 
 
-def test_b0_oracle_evidence_bridge_routes_to_dedicated_profile():
-    digest = build_digest(
-        "B0 Oracle evidence wiring bridge canonical settlements observations "
-        "daily_observation_revisions high low no penalty sufficient evidence "
-        "source_type normalize",
-        [
-            "scripts/bridge_oracle_to_calibration.py",
-            "src/strategy/oracle_penalty.py",
-            "tests/test_bridge_oracle_to_calibration.py",
-        ],
-        intent="modify_existing",
-        write_intent="edit",
-    )
-
-    assert digest["profile"] == "oracle evidence bridge implementation"
-    assert digest["admission"]["status"] == "admitted"
-    assert "scripts/bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
-    assert "src/strategy/oracle_penalty.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_bridge_oracle_to_calibration.py" in digest["admission"]["admitted_files"]
-
-
 def test_b2_weather_family_exposure_gate_routes_to_dedicated_profile():
     digest = build_digest(
         "B2 Weather family exposure gate WeatherFamilyKey mutually exclusive "
@@ -767,7 +746,6 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
         "pricing semantics authority cutover F-10 report replay cohort hard gate "
         "after F-09 durable fill fields",
         [
-            "scripts/profit_validation_replay.py",
             "scripts/equity_curve.py",
             "src/execution/harvester.py",
             "src/state/db.py",
@@ -780,7 +758,6 @@ def test_pricing_semantics_authority_cutover_admits_f10_report_replay_cohort_pac
     assert digest["profile"] == "pricing semantics authority cutover"
     assert digest["admission"]["status"] == "admitted"
     admitted = set(digest["admission"]["admitted_files"])
-    assert "scripts/profit_validation_replay.py" in admitted
     assert "scripts/equity_curve.py" in admitted
     assert "src/state/db.py" in admitted
     assert "tests/test_run_replay_cli.py" in admitted
@@ -1498,7 +1475,6 @@ def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
         [
             "src/strategy/benchmark_suite.py",
             "src/strategy/data_lake.py",
-            "src/strategy/candidates/__init__.py",
             "tests/test_strategy_benchmark.py",
             "docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/A1.yaml",
         ],
@@ -1508,7 +1484,6 @@ def test_r3_a1_strategy_benchmark_routes_to_a1_profile_not_heartbeat():
     assert digest["admission"]["status"] == "admitted"
     assert "src/strategy/benchmark_suite.py" in digest["admission"]["admitted_files"]
     assert "src/strategy/data_lake.py" in digest["admission"]["admitted_files"]
-    assert "src/strategy/candidates/__init__.py" in digest["admission"]["admitted_files"]
     assert "tests/test_strategy_benchmark.py" in digest["admission"]["admitted_files"]
 
 

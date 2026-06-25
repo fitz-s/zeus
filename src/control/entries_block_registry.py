@@ -80,10 +80,10 @@ class Block:
     """'src/control/control_plane.py:385' — citation that adapter probes."""
 
     owner_module: str
-    """'src.control.heartbeat_supervisor'."""
+    """Owning module for the probed state surface."""
 
     owner_function: str
-    """'_write_failclosed_tombstone'."""
+    """Owning function for the probed state surface."""
 
     raw_probe: Mapping[str, Any]
     """Debug payload — adapter-specific."""
