@@ -360,6 +360,121 @@ class TestPreDay0LowCarryover:
             lead_hours_to_target_start=4.00,
         ) is not None
 
+    def test_edli_qkernel_spine_uses_pre_day0_low_carryover_members(self):
+        from src.data.day0_fast_obs import PreDay0LowWindow
+        from src.engine import event_reactor_adapter as era
+        from src.signal.day0_low_distribution import PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION
+
+        city = self._london_city()
+        family = SimpleNamespace(city="London", metric="low", target_date="2026-06-18")
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "source_table": "test_observation_instants",
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
+            "by_city": {
+                "London": {
+                    "lead_buckets": {
+                        "1": {
+                            "n": 240,
+                            "residual_quantiles": [-0.2, 0.0, 0.4, 0.8],
+                        }
+                    }
+                }
+            },
+            "by_unit": {},
+        }
+        window = PreDay0LowWindow(
+            city="London",
+            station_id="EGLL",
+            target_date="2026-06-18",
+            unit="C",
+            window_start_time=datetime(2026, 6, 17, 21, 45, tzinfo=timezone.utc),
+            target_start_time=datetime(2026, 6, 17, 23, 0, tzinfo=timezone.utc),
+            window_low=12.0,
+            current_temp=12.3,
+            low_obs_time=datetime(2026, 6, 17, 22, 30, tzinfo=timezone.utc),
+            first_obs_time=datetime(2026, 6, 17, 21, 50, tzinfo=timezone.utc),
+            last_obs_time=datetime(2026, 6, 17, 22, 40, tzinfo=timezone.utc),
+            last_receipt_time=datetime(2026, 6, 17, 22, 41, tzinfo=timezone.utc),
+            sample_count=3,
+            skipped_unit_law=0,
+            quarantined_implausible=0,
+        )
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(era, "runtime_cities_by_name", lambda: {"London": city})
+        try:
+            members, meta, reason = era._apply_pre_day0_low_carryover_to_spine_members(
+                family=family,
+                decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+                members_native=[15.0, 15.0, 15.0],
+                empirical_model=model,
+                low_window=window,
+            )
+        finally:
+            monkey.undo()
+
+        assert reason is None
+        assert meta is not None
+        assert meta["live_probability_applied"] is True
+        assert meta["original_member_count"] == 3
+        assert meta["conditioned_member_count"] == 12
+        assert len(members) == 12
+        assert min(members) == pytest.approx(11.8)
+        assert max(members) == pytest.approx(12.8)
+
+    def test_edli_qkernel_spine_blocks_when_pre_day0_low_evidence_missing(self):
+        from src.engine import event_reactor_adapter as era
+        from src.signal.day0_low_distribution import PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION
+
+        city = self._london_city()
+        family = SimpleNamespace(city="London", metric="low", target_date="2026-06-18")
+        model = {
+            "model_version": PRE_DAY0_LOW_EMPIRICAL_MODEL_VERSION,
+            "live_policy": {
+                "max_lead_hours": 4.0,
+                "trailing_lookback_hours": 1.0,
+                "basis": "test",
+            },
+            "by_city": {},
+            "by_unit": {},
+        }
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(era, "runtime_cities_by_name", lambda: {"London": city})
+        try:
+            members, meta, reason = era._apply_pre_day0_low_carryover_to_spine_members(
+                family=family,
+                decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+                members_native=[15.0, 15.0, 15.0],
+                empirical_model=model,
+                low_window=None,
+            )
+        finally:
+            monkey.undo()
+
+        assert members == [15.0, 15.0, 15.0]
+        assert meta is None
+        assert reason == "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:fast_obs_window_missing:lead_hours=0.250"
+
+    def test_edli_qkernel_spine_carryover_is_inactive_outside_low_window(self):
+        from src.engine import event_reactor_adapter as era
+
+        family = SimpleNamespace(city="London", metric="high", target_date="2026-06-18")
+        members, meta, reason = era._apply_pre_day0_low_carryover_to_spine_members(
+            family=family,
+            decision_time=datetime(2026, 6, 17, 22, 45, tzinfo=timezone.utc),
+            members_native=[15.0, 15.0, 15.0],
+            empirical_model=None,
+            low_window=None,
+        )
+
+        assert members == [15.0, 15.0, 15.0]
+        assert meta is None
+        assert reason is None
+
 
 # ===========================================================================
 # R2 — stale-obs boundary guard (latency-aware dead/alive decisions)

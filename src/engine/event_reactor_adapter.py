@@ -3260,7 +3260,11 @@ def _build_event_bound_no_submit_receipt_core(
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
             honor_admission_rejections=False,
         )
-        if not _spine_entry_proofs:
+        _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
+        if _pre_day0_low_block_reason is not None:
+            proof = None
+            _spine_no_trade_reason = str(_pre_day0_low_block_reason)
+        elif not _spine_entry_proofs:
             proof = None
             _spine_no_trade_reason = None
         else:
@@ -10070,6 +10074,26 @@ def _generate_candidate_proofs(
             )
             if _spine_multimodel is not None:
                 _spine_raw, _spine_source_cycle, _spine_precision = _spine_multimodel
+                (
+                    _spine_conditioned,
+                    _pre_day0_low_carryover,
+                    _pre_day0_low_block_reason,
+                ) = _apply_pre_day0_low_carryover_to_spine_members(
+                    family=family,
+                    decision_time=decision_time,
+                    members_native=_spine_raw,
+                )
+                if _pre_day0_low_block_reason is not None:
+                    payload["_edli_spine_pre_day0_low_block_reason"] = _pre_day0_low_block_reason
+                    _spine_raw = []
+                    _spine_precision = []
+                elif _pre_day0_low_carryover is not None:
+                    _spine_raw = _spine_conditioned
+                    payload["_edli_spine_pre_day0_low_carryover"] = _pre_day0_low_carryover
+                    # The empirical residual conditioning expands each model member into a
+                    # member x residual-quantile sample space. The original per-model
+                    # precision arrays are no longer index-aligned and must not be reused.
+                    _spine_precision = []
                 _spine_arr = np.asarray(_spine_raw, dtype=float).ravel()
                 if _spine_arr.size:
                     _spine_lst = [float(_x) for _x in _spine_arr.tolist()]
@@ -10099,8 +10123,29 @@ def _generate_candidate_proofs(
                         payload["_edli_spine_sigma_native"] = float(_spine_var ** 0.5)
                     if _spine_source_cycle:
                         payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
-        except Exception:  # noqa: BLE001 — spine-input population is observability-only; never break the decision
-            pass
+            else:
+                _pre_day0_low_context, _pre_day0_low_block_reason = _pre_day0_low_carryover_context(
+                    family,
+                    decision_time,
+                )
+                if _pre_day0_low_context is not None and _pre_day0_low_block_reason is None:
+                    payload["_edli_spine_pre_day0_low_block_reason"] = (
+                        "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:spine_members_unavailable"
+                    )
+                elif _pre_day0_low_block_reason is not None:
+                    payload["_edli_spine_pre_day0_low_block_reason"] = _pre_day0_low_block_reason
+        except Exception as exc:  # noqa: BLE001 — ordinary spine gaps stay typed downstream
+            _pre_day0_low_context, _pre_day0_low_block_reason = _pre_day0_low_carryover_context(
+                family,
+                decision_time,
+            )
+            if _pre_day0_low_block_reason is not None:
+                payload["_edli_spine_pre_day0_low_block_reason"] = _pre_day0_low_block_reason
+            elif _pre_day0_low_context is not None:
+                payload["_edli_spine_pre_day0_low_block_reason"] = (
+                    "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:"
+                    f"spine_input_population_error:{type(exc).__name__}"
+                )
     # === Q-KERNEL REBUILD STAGE 0 — lift the receipt-spine inputs (2026-06-14) ===========
     # READ-ONLY: the q-build (_market_analysis_from_event_snapshot) already stashed the
     # forecast/q spine onto the THREADED payload under payload["_edli_spine_*"]. Lift those
@@ -10119,6 +10164,8 @@ def _generate_candidate_proofs(
                     "_edli_spine_debiased_members_native",
                     "_edli_spine_q_vector",
                     "_edli_spine_source_cycle_time_utc",
+                    "_edli_spine_pre_day0_low_carryover",
+                    "_edli_spine_pre_day0_low_block_reason",
                     "_edli_q_source",
                 )
                 if k in payload
@@ -13881,7 +13928,7 @@ def _spine_multimodel_members_for_event(
     event: OpportunityEvent,
     family,
     decision_time: datetime,
-) -> tuple[list[float], str, list[tuple[str, float | None, int]]] | None:
+) -> tuple[list[float], str, list[tuple[str, float | None, int, float]]] | None:
     """The Q-KERNEL SPINE member envelope sourced from the MULTI-MODEL DETERMINISTIC
     fusion table ``raw_model_forecasts`` — the SAME source the strategy-of-record,
     the de-bias provider, and the ARM-replay validation all use.
@@ -14079,6 +14126,212 @@ def _spine_multimodel_members_for_event(
         else:
             precision_by_index.append((str(_model), None, 0, _repr_native))
     return members_native, str(_causal_sct), precision_by_index
+
+
+_PRE_DAY0_LOW_MODEL_UNSET = object()
+_PRE_DAY0_LOW_WINDOW_UNSET = object()
+
+
+def _pre_day0_low_carryover_context(
+    family,
+    decision_time: datetime,
+    *,
+    empirical_model: Any = _PRE_DAY0_LOW_MODEL_UNSET,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return active pre-Day0 LOW context, or a typed block reason.
+
+    Forecast-only qkernel selection is unsafe for LOW markets in the final
+    pre-midnight window unless the late T-1 observed-low carryover signal is
+    applied. Outside that window this returns ``(None, None)``.
+    """
+    if str(getattr(family, "metric", "") or "").lower() != "low":
+        return None, None
+    try:
+        from zoneinfo import ZoneInfo
+
+        from src.data.day0_fast_obs import (
+            PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS,
+            PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS,
+        )
+        from src.signal.day0_low_distribution import (
+            load_pre_day0_low_empirical_model,
+            pre_day0_low_empirical_live_policy,
+        )
+
+        city = runtime_cities_by_name().get(str(family.city))
+        if city is None:
+            return None, f"PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:city_config_missing:{family.city}"
+        tz_name = str(getattr(city, "timezone", "") or "")
+        if not tz_name:
+            return None, f"PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:city_timezone_missing:{family.city}"
+        target = date.fromisoformat(str(family.target_date)[:10])
+        target_start = datetime.combine(target, time.min, tzinfo=ZoneInfo(tz_name)).astimezone(UTC)
+        decision_utc = decision_time.astimezone(UTC)
+        lead_hours = (target_start - decision_utc).total_seconds() / 3600.0
+        model = (
+            load_pre_day0_low_empirical_model()
+            if empirical_model is _PRE_DAY0_LOW_MODEL_UNSET
+            else empirical_model
+        )
+        policy = pre_day0_low_empirical_live_policy(model)
+        if policy is None:
+            default_max_lead = float(PRE_DAY0_LOW_CARRYOVER_MAX_LEAD_HOURS)
+            if 0.0 < lead_hours <= default_max_lead:
+                return None, (
+                    "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:"
+                    f"empirical_model_policy_missing:lead_hours={lead_hours:.3f}"
+                )
+            return None, None
+        max_lead_hours, trailing_lookback_hours, model_policy_basis = policy
+        if lead_hours <= 0.0 or lead_hours > float(max_lead_hours):
+            return None, None
+        return {
+            "city": city,
+            "target": target,
+            "decision_utc": decision_utc,
+            "lead_hours": float(lead_hours),
+            "max_lead_hours": float(max_lead_hours),
+            "trailing_lookback_hours": float(trailing_lookback_hours),
+            "model_policy_basis": model_policy_basis,
+            "model": model,
+            "default_lookback_hours": float(PRE_DAY0_LOW_CARRYOVER_LOOKBACK_HOURS),
+        }, None
+    except Exception as exc:  # noqa: BLE001 - fail closed only when the window cannot be classified
+        return None, f"PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:context_error:{type(exc).__name__}"
+
+
+def _apply_pre_day0_low_carryover_to_spine_members(
+    *,
+    family,
+    decision_time: datetime,
+    members_native: list[float],
+    empirical_model: Any = _PRE_DAY0_LOW_MODEL_UNSET,
+    low_window: Any = _PRE_DAY0_LOW_WINDOW_UNSET,
+    fast_obs_emitter: Any = None,
+) -> tuple[list[float], dict[str, Any] | None, str | None]:
+    """Condition qkernel LOW spine members on live pre-Day0 observed-low evidence.
+
+    For a LOW target whose local day starts soon, the final late-evening
+    observed low on T-1 materially changes the settlement preimage around
+    midnight. Returning the unconditioned forecast envelope in that window is
+    a live-money error; if the carryover evidence cannot be built, return a
+    typed block reason.
+    """
+    context, block_reason = _pre_day0_low_carryover_context(
+        family,
+        decision_time,
+        empirical_model=empirical_model,
+    )
+    if block_reason is not None:
+        return list(members_native), None, block_reason
+    if context is None:
+        return list(members_native), None, None
+    arr = np.asarray(members_native, dtype=float).ravel()
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return list(members_native), None, "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:spine_members_invalid"
+    try:
+        from src.data.day0_fast_obs import get_fast_obs_emitter
+        from src.signal.day0_low_distribution import build_pre_day0_low_empirical_conditioning
+
+        city = context["city"]
+        target = context["target"]
+        decision_utc = context["decision_utc"]
+        if low_window is _PRE_DAY0_LOW_WINDOW_UNSET:
+            emitter = fast_obs_emitter if fast_obs_emitter is not None else get_fast_obs_emitter()
+            low_window = emitter.latest_pre_day0_low_window(
+                city,
+                target.isoformat(),
+                as_of=decision_utc,
+                lookback_hours=context["trailing_lookback_hours"],
+                max_lead_hours=context["max_lead_hours"],
+            )
+        if low_window is None:
+            return list(members_native), None, (
+                "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:"
+                f"fast_obs_window_missing:lead_hours={context['lead_hours']:.3f}"
+            )
+        conditioning = build_pre_day0_low_empirical_conditioning(
+            member_mins=arr,
+            window_low=float(low_window.window_low),
+            lead_hours_to_target_start=float(context["lead_hours"]),
+            unit=str(getattr(city, "settlement_unit", "") or getattr(low_window, "unit", "")),
+            city_name=str(getattr(city, "name", "") or family.city),
+            model=context["model"],
+        )
+        if conditioning is None:
+            return list(members_native), None, (
+                "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:"
+                f"conditioning_unavailable:lead_hours={context['lead_hours']:.3f}"
+            )
+        conditioned = np.asarray(conditioning.conditioned_member_mins, dtype=float).ravel()
+        if conditioned.size == 0 or not np.all(np.isfinite(conditioned)):
+            return list(members_native), None, "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:conditioned_members_invalid"
+        obs_age_minutes = max(
+            0.0,
+            (
+                decision_utc
+                - low_window.last_obs_time.astimezone(UTC)
+            ).total_seconds()
+            / 60.0,
+        )
+        low_age_minutes = max(
+            0.0,
+            (
+                decision_utc
+                - low_window.low_obs_time.astimezone(UTC)
+            ).total_seconds()
+            / 60.0,
+        )
+        metadata = {
+            "belief_source": "pre_day0_low_empirical_carryover",
+            "belief_kind": "empirical_residual_conditioning",
+            "calibration_status": "EMPIRICAL_RESIDUAL_MODEL_VERIFIED",
+            "live_probability_applied": True,
+            "hard_fact": False,
+            "absorbing": False,
+            "metric": "low",
+            "target_date": target.isoformat(),
+            "model_version": conditioning.model_version,
+            "residual_scope": conditioning.residual_scope,
+            "residual_source": conditioning.residual_source,
+            "residual_sample_count": int(conditioning.residual_sample_count),
+            "holdout_nll": (
+                float(conditioning.holdout_nll)
+                if conditioning.holdout_nll is not None
+                else None
+            ),
+            "residual_quantile_count": int(conditioning.residual_quantiles.size),
+            "lead_bucket_hours": int(conditioning.lead_bucket_hours),
+            "max_lead_hours": float(context["max_lead_hours"]),
+            "trailing_lookback_hours": float(conditioning.trailing_lookback_hours),
+            "model_policy_basis": context["model_policy_basis"],
+            "source": "aviationweather_metar",
+            "station_id": low_window.station_id,
+            "unit": low_window.unit,
+            "window_start_time": low_window.window_start_time.isoformat(),
+            "target_start_time": low_window.target_start_time.isoformat(),
+            "window_low": float(low_window.window_low),
+            "current_temp": float(low_window.current_temp),
+            "low_obs_time": low_window.low_obs_time.isoformat(),
+            "last_obs_time": low_window.last_obs_time.isoformat(),
+            "last_receipt_time": (
+                low_window.last_receipt_time.isoformat()
+                if low_window.last_receipt_time is not None
+                else None
+            ),
+            "sample_count": int(low_window.sample_count),
+            "lead_hours_to_target_start": float(conditioning.lead_hours_to_target_start),
+            "observation_age_minutes": float(obs_age_minutes),
+            "low_age_minutes": float(low_age_minutes),
+            "original_member_count": int(arr.size),
+            "conditioned_member_count": int(conditioned.size),
+        }
+        return [float(v) for v in conditioned.tolist()], metadata, None
+    except Exception as exc:  # noqa: BLE001
+        return list(members_native), None, (
+            "PRE_DAY0_LOW_CARRYOVER_UNAVAILABLE:"
+            f"conditioning_error:{type(exc).__name__}"
+        )
 
 
 def _day0_seed_members_multimodel(
