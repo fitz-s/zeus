@@ -1,0 +1,75 @@
+schema_version: 1
+metadata:
+  created: '2026-06-23'
+  owner: docs authority isolation rebuild
+  authority_status: machine_authority
+  purpose: >
+    Three-plane docs model for future maintenance. Every tracked or generated
+    cognition artifact must map to authority, operations, or persistent_special.
+
+planes:
+  authority:
+    definition: durable law and machine-checkable law
+    may_authorize_runtime: true
+    default_read: task_required
+    allowed_roots:
+      - docs/authority/
+      - architecture/
+    examples:
+      - docs/authority/zeus_current_architecture.md
+      - docs/authority/zeus_database_runtime_authority.md
+      - architecture/forecast_fusion_manifest.yaml
+      - architecture/db_runtime_manifest.yaml
+  operations:
+    definition: current facts, runtime artifacts, active work, active evidence, receipts, and generated run outputs
+    may_authorize_runtime: false
+    default_read: pointer_only
+    allowed_roots:
+      - docs/operations/
+      - state/
+      - logs/
+      - raw/
+    required_for_runtime_artifacts: true
+    rule: >
+      Any artifact produced by live runtime, daemon inspection, smoke tests,
+      launchd checks, DB probes, current source checks, current positions, fills,
+      balances, or temporary rejection analysis belongs to operations or runtime
+      state, not authority or reference.
+  persistent_special:
+    definition: durable explanation, procedures, historical evidence, retained reports, archive indexes, and module books
+    may_authorize_runtime: false
+    default_read: false_unless_routed
+    allowed_roots:
+      - docs/reference/
+      - docs/runbooks/
+      - docs/reports/
+      - docs/evidence/
+      - docs/archive/
+      - docs/rebuild/
+      - docs/archive_registry.md
+    rule: >
+      Persistent special files may be preserved and searched, but they do not
+      create law. Reference explains; runbook procedures guide; reports and
+      evidence preserve history.
+
+runtime_artifact_rules:
+  live_runtime_outputs:
+    plane: operations
+    preferred_docs_root: docs/operations/current/
+    forbidden_roots: [docs/authority/, docs/reference/]
+  current_fact_summaries:
+    plane: operations
+    allowed_files:
+      - docs/operations/current_state.md
+      - docs/operations/current_data_state.md
+      - docs/operations/current_source_validity.md
+  durable_lessons_extracted_from_runtime:
+    plane: authority_or_persistent_special_after_promotion
+    rule: must be rewritten, code/manifold backed, and registry-routed before leaving operations
+
+migration_rule:
+  from_old_classes: >
+    Old labels such as report, evidence, archive, runbook, module_reference, and
+    reference remain for detailed indexing but must roll up to one of the three
+    planes above for boot routing.
+  default_route_rule: only authority plus routed references plus current fact pointers may appear in default boot.
