@@ -2352,11 +2352,6 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
-        if _cycle_lock.locked() or _edli_reactor_active():
-            return
-        adapter = _ensure_venue_read_side_adapter()
-        _start_collateral_background_refresh_async(adapter)
-        _start_venue_background_maintenance_async(adapter)
         return
     if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
         return

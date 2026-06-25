@@ -834,7 +834,7 @@ def test_heartbeat_keeper_ignores_stale_restart_seed(tmp_path):
     assert adapter.heartbeat_ids == [""]
 
 
-def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
+def test_main_external_venue_heartbeat_mode_consumes_status_without_boot_adapter(
     tmp_path,
     monkeypatch,
 ):
@@ -848,11 +848,9 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
         cadence_seconds=5,
     )
     write_heartbeat_keeper_status(status)
-    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "should-not-post"})])
-
     class Client:
         def _ensure_v2_adapter(self):
-            return adapter
+            raise AssertionError("external heartbeat startup must not construct CLOB adapter")
 
     launched_background = []
     launched_collateral = []
@@ -878,9 +876,8 @@ def test_main_external_venue_heartbeat_mode_consumes_status_without_posting(
 
     assert main._venue_heartbeat_thread is None
     assert main._venue_heartbeat_supervisor is None
-    assert launched_collateral == [adapter]
-    assert launched_background == [adapter]
-    assert adapter.heartbeat_ids == []
+    assert launched_collateral == []
+    assert launched_background == []
 
 
 def test_main_internal_venue_heartbeat_reuses_fresh_chain_id_on_restart(
