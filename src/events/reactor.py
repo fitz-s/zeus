@@ -47,7 +47,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from src.decision_kernel import claims
 from src.events.day0_authority import normalize_day0_live_authority_status
@@ -2104,9 +2104,12 @@ class OpportunityEventReactor:
         envelope_json = self._build_regret_envelope_json(
             event, stage, reason, receipt=receipt, decision_time=decision_time, payload=payload
         )
-        family_level_all_rejected = str(reason or "").startswith(
+        reason_text = str(reason or "")
+        family_level_all_rejected = reason_text.startswith(
             "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
         )
+        family_level_qkernel_no_trade = reason_text.startswith("QKERNEL_SPINE_NO_TRADE:")
+        family_level_no_trade = family_level_all_rejected or family_level_qkernel_no_trade
         condition_id = _receipt_or_payload(receipt, payload, "condition_id")
         token_id = _receipt_or_payload(receipt, payload, "token_id")
         outcome_label = _receipt_or_payload(receipt, payload, "outcome_label")
@@ -2135,7 +2138,7 @@ class OpportunityEventReactor:
                 c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
                 c_cost_95pct = qkernel_economics["c_cost_95pct"]
                 trade_score = qkernel_economics["trade_score"]
-        if family_level_all_rejected:
+        if family_level_no_trade:
             condition_id = None
             token_id = None
             outcome_label = None
@@ -2185,8 +2188,8 @@ class OpportunityEventReactor:
                 executable_snapshot_id=executable_snapshot_id,
             )
         )
-        if family_level_all_rejected:
-            for candidate_row in _all_candidates_rejected_candidate_rows(receipt):
+        if family_level_no_trade:
+            for candidate_row in _all_candidates_rejected_candidate_rows(receipt, family_reason=reason_text):
                 candidate_reason = str(candidate_row["rejection_reason"])
                 self._regret_ledger.insert_idempotent(
                     NoTradeRegretEvent(
@@ -2403,6 +2406,8 @@ def _optional_bool(value: Any) -> bool | None:
 
 def _all_candidates_rejected_candidate_rows(
     receipt: EventSubmissionReceipt | None,
+    *,
+    family_reason: str | None = None,
 ) -> list[dict[str, Any]]:
     if receipt is None or not isinstance(receipt.opportunity_book, dict):
         return []
@@ -2417,18 +2422,35 @@ def _all_candidates_rejected_candidate_rows(
         trade_score = _optional_float(raw.get("trade_score"))
         missing_reason = str(raw.get("missing_reason") or "").strip()
         candidate_id = str(raw.get("candidate_id") or "").strip()
+        qkernel_economics = _candidate_qkernel_regret_economics(raw)
+        qkernel_family_reason = str(family_reason or "").startswith("QKERNEL_SPINE_NO_TRADE:")
         if (
             execution_price is None
             or execution_price <= 0.0
-            or trade_score is None
-            or trade_score <= 0.0
-            or not missing_reason
             or not candidate_id
         ):
             continue
+        if qkernel_family_reason and qkernel_economics is not None:
+            candidate_missing_reason = str(family_reason or "").strip()
+            q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
+            c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
+            c_cost_95pct = qkernel_economics["c_cost_95pct"]
+            candidate_trade_score = qkernel_economics["trade_score"]
+        else:
+            if (
+                trade_score is None
+                or trade_score <= 0.0
+                or not missing_reason
+            ):
+                continue
+            candidate_missing_reason = missing_reason
+            q_lcb_5pct = _optional_float(raw.get("q_lcb_5pct"))
+            c_fee_adjusted = execution_price
+            c_cost_95pct = _optional_float(raw.get("c_cost_95pct")) or execution_price
+            candidate_trade_score = trade_score
         reason = (
             "EVENT_BOUND_CANDIDATE_REJECTED:"
-            f"{missing_reason}:candidate_id={candidate_id}"
+            f"{candidate_missing_reason}:candidate_id={candidate_id}"
         )
         out.append(
             {
@@ -2440,16 +2462,36 @@ def _all_candidates_rejected_candidate_rows(
                 "bin_label": raw.get("bin_label"),
                 "direction": raw.get("direction"),
                 "q_live": _optional_float(raw.get("q_posterior")),
-                "q_lcb_5pct": _optional_float(raw.get("q_lcb_5pct")),
-                "c_fee_adjusted": execution_price,
-                "c_cost_95pct": _optional_float(raw.get("c_cost_95pct")) or execution_price,
+                "q_lcb_5pct": q_lcb_5pct,
+                "c_fee_adjusted": c_fee_adjusted,
+                "c_cost_95pct": c_cost_95pct,
                 "p_fill_lcb": _optional_float(raw.get("p_fill_lcb")),
-                "trade_score": trade_score,
+                "trade_score": candidate_trade_score,
                 "native_quote_available": _optional_bool(raw.get("native_quote_available")),
                 "executable_snapshot_id": receipt.executable_snapshot_id,
             }
         )
     return out
+
+
+def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, float] | None:
+    cert = raw.get("qkernel_execution_economics")
+    if not isinstance(cert, Mapping):
+        return None
+    try:
+        payoff_q_lcb = float(cert["payoff_q_lcb"])
+        cost = float(cert["cost"])
+        edge_lcb = float(cert["edge_lcb"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+        return None
+    return {
+        "q_lcb_5pct": payoff_q_lcb,
+        "c_fee_adjusted": cost,
+        "c_cost_95pct": cost,
+        "trade_score": edge_lcb,
+    }
 
 
 def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, float] | None:

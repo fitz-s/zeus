@@ -55,6 +55,7 @@ def _insert_held(
     *,
     position_id="p-old",
     token_id="tok-A",
+    no_token_id="",
     phase="active",
     bin_label="60-61F",
     direction="buy_yes",
@@ -70,10 +71,10 @@ def _insert_held(
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric, p_posterior,
             entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, size_usd, updated_at
-        ) VALUES (?, ?, ?, '', ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, 10.0, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, 10.0, ?,
                   '2026-06-22T06:00:00')
         """,
-        (position_id, phase, token_id, bin_label, direction, city, target_date,
+        (position_id, phase, token_id, no_token_id, bin_label, direction, city, target_date,
          metric, cost_basis_usd, chain_cost_basis_usd, cost_basis_usd),
     )
 
@@ -102,6 +103,27 @@ def test_sibling_different_bin_is_returned():
     assert held.position_id == "p-old"
     assert held.token_id == "tok-A"
     assert held.bin_label == "60-61F"
+    assert held.current_live_usd == pytest.approx(4.0)
+
+
+def test_buy_no_sibling_returns_no_token_as_sellable_old_leg():
+    """SHIFT_BIN must sell the held-side NO token, not the row's YES/condition token."""
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-tok-A",
+        no_token_id="no-tok-A",
+        bin_label="60-61F",
+        direction="buy_no",
+        cost_basis_usd=4.0,
+    )
+    held = sbw.read_held_sibling_exposure(
+        conn, city="Tokyo", target_date="2026-06-23", temperature_metric="high",
+        selected_token_id="no-tok-B", selected_bin_label="62-63F",
+    )
+    assert held is not None
+    assert held.token_id == "no-tok-A"
+    assert held.direction == "buy_no"
     assert held.current_live_usd == pytest.approx(4.0)
 
 
@@ -139,6 +161,19 @@ def test_old_leg_residual_prefers_chain_cost_basis():
     conn = _conn()
     _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0, chain_cost_basis_usd=7.0)
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
+
+
+def test_old_leg_residual_reads_buy_no_no_token():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-tok-A",
+        no_token_id="no-tok-A",
+        direction="buy_no",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+    )
+    assert sbw.read_old_leg_residual_usd(conn, token_id="no-tok-A") == pytest.approx(7.0)
 
 
 def test_old_leg_residual_zero_when_not_held():
@@ -205,6 +240,31 @@ def test_plan_live_old_leg_exits_first_lease_in_exit_submitted():
     assert row["status"] == "EXIT_SUBMITTED"
     assert row["held_position_id"] == "p-old"
     assert row["held_token_id"] == "tok-A"
+
+
+def test_plan_buy_no_live_old_leg_records_sellable_no_token():
+    conn = _conn()
+    _insert_held(
+        conn,
+        position_id="p-old",
+        token_id="yes-tok-A",
+        no_token_id="no-tok-A",
+        bin_label="60-61F",
+        direction="buy_no",
+        cost_basis_usd=4.0,
+    )
+    held = sbw.read_held_sibling_exposure(
+        conn, city="Tokyo", target_date="2026-06-23", temperature_metric="high",
+        selected_token_id="no-tok-B", selected_bin_label="62-63F",
+    )
+    plan = _plan(conn, held=held, selected_token_id="no-tok-B", old_leg_residual_usd=4.0)
+    assert plan.kind == "EXIT_OLD_LEG"
+    assert plan.old_token_id == "no-tok-A"
+    row = conn.execute(
+        "SELECT held_token_id FROM family_rebalance_intents WHERE intent_id=?",
+        (plan.lease_intent_id,),
+    ).fetchone()
+    assert row["held_token_id"] == "no-tok-A"
 
 
 def test_plan_blocking_exposure_aborts_no_exit_no_entry():

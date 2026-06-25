@@ -631,16 +631,16 @@ def test_fetch_pending_query_uses_processing_status_index():
 
     conn.executed_sql.clear()
     store.fetch_pending(decision_time=decision_time, limit=90)
-    # Locate fetch_pending's main claim query by its stable signature: it joins
-    # the processing table via split active-status indexes and computes the
-    # per-city round-robin rank (_city_round). Format-robust — does not depend
-    # on the SELECT-list being on one line.
+    # Locate fetch_pending's main claim query by its stable signature. The hot
+    # path now keeps SQL to indexed eligibility + bounded overfetch; per-city
+    # round-robin rank is computed in Python so SQLite does not materialize a
+    # ROW_NUMBER/json_extract temp sort over the live working set.
     fetch_sql, fetch_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
         if "INDEXED BY idx_opportunity_event_processing_status" in sql
         and "p.claimed_at <= ?" in sql
-        and "_city_round" in sql
+        and "c._p_attempt_count" in sql
     )
 
     plan_text = _plan_text(conn, fetch_sql, fetch_params)
@@ -654,3 +654,5 @@ def test_fetch_pending_query_uses_processing_status_index():
     assert "SCAN P" not in plan_text, (
         f"fetch_pending must not full-scan opportunity_event_processing, got: {plan_text!r}"
     )
+    assert "ROW_NUMBER" not in fetch_sql.upper()
+    assert "JSON_EXTRACT(C.PAYLOAD_JSON" not in fetch_sql.upper()

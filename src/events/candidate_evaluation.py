@@ -59,6 +59,7 @@ class CandidateEvaluation:
     taker_forbidden_reason: str | None = None
     maker_fill_probability: float | None = None
     maker_fill_probability_source: str | None = None
+    qkernel_execution_economics: dict[str, Any] | None = None
     support_index: int | None = None
     bin_id: str | None = None
     # Live-path wiring of the selection calibrator. ``lead_days`` / ``bin_class`` shape the
@@ -304,6 +305,7 @@ class CandidateEvaluation:
             "taker_forbidden_reason": self.taker_forbidden_reason,
             "maker_fill_probability": self.maker_fill_probability,
             "maker_fill_probability_source": self.maker_fill_probability_source,
+            "qkernel_execution_economics": self.qkernel_execution_economics,
             "robust_ev_per_dollar": self.robust_ev_per_dollar,
             "robust_kelly_fraction_lcb": self.robust_kelly_fraction_lcb,
             "robust_kelly_growth_score": self.robust_kelly_growth_score,

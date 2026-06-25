@@ -16,7 +16,7 @@ Relationship pins:
   (b) provider absent from BOTH endpoints                                      => dropped, exactly
       as today;
   (c) gem_global behavior byte-identical to the edc598b440 exception (same value, same row id;
-      single_runs priority; natural-key cycle isolation);
+      single_runs priority; future-cycle isolation);
   (d) the substituted instrument keeps its OWN lead bucket (lead_days reported verbatim from the
       served row; the walk-forward history at that lead prices the older run — no manual
       down-weighting field exists anywhere);
@@ -131,14 +131,33 @@ def test_single_runs_row_wins_over_previous_runs_for_every_model() -> None:
     assert out["jma_seamless"].served_via == "single_runs"
 
 
-def test_substitution_respects_natural_key_cycle() -> None:
-    # A previous_runs row from a DIFFERENT cycle must never leak into this capture
-    # (preserved from the original gem antibody — the natural key is the freshness anchor).
+def test_substitution_uses_prior_cycle_when_selected_cycle_has_no_row() -> None:
+    # Live 00Z can be selected by the anchor lane before single-runs has complete local-day
+    # coverage for a city. The serving boundary must not go blind: use the newest persisted row
+    # no later than the selected cycle, branded by its actual served_cycle.
     conn = _conn()
     _insert(conn, 1, "gfs_global", 33.0, "single_runs")
     _insert(conn, 2, "jma_seamless", 33.5, "previous_runs", cycle=OTHER_CYCLE)
     out = _read(conn)
+    assert out["jma_seamless"].value_c == 33.5
+    assert out["jma_seamless"].served_cycle == OTHER_CYCLE
+
+
+def test_substitution_rejects_future_cycle_rows() -> None:
+    conn = _conn()
+    future_cycle = "2026-06-11T12:00:00+00:00"
+    _insert(conn, 2, "jma_seamless", 33.5, "previous_runs", cycle=future_cycle)
+    out = _read(conn)
     assert "jma_seamless" not in out
+
+
+def test_selected_cycle_row_wins_over_prior_cycle_row() -> None:
+    conn = _conn()
+    _insert(conn, 1, "jma_seamless", 33.2, "previous_runs", cycle=OTHER_CYCLE)
+    _insert(conn, 2, "jma_seamless", 33.5, "previous_runs", cycle=CYCLE)
+    out = _read(conn)
+    assert out["jma_seamless"].value_c == 33.5
+    assert out["jma_seamless"].served_cycle == CYCLE
 
 
 # -------------------------------------------------------------------------------------
@@ -193,14 +212,14 @@ def test_trigger_capturable_set_is_the_serving_authority_key_set() -> None:
     conn = _conn()
     _insert(conn, 1, "gfs_global", 33.0, "single_runs")
     _insert(conn, 2, "jma_seamless", 33.5, "previous_runs")
-    _insert(conn, 3, "icon_global", 32.5, "previous_runs", cycle=OTHER_CYCLE)  # wrong cycle
+    _insert(conn, 3, "icon_global", 32.5, "previous_runs", cycle=OTHER_CYCLE)  # prior possessed cycle
     capturable = _capturable_models_for_scope(
         conn, city="Beijing", target_date="2026-06-12", metric="high", source_cycle_iso=CYCLE
     )
-    assert capturable == set(_read(conn).keys()) == {"gfs_global", "jma_seamless"}, (
+    assert capturable == set(_read(conn).keys()) == {"gfs_global", "jma_seamless", "icon_global"}, (
         "the trigger's capturable set must be EXACTLY the serving authority's key set — a "
-        "substitutable provider (JMA via previous_runs) counts as capturable, so the PARTIAL "
-        "posterior that dropped it is detected as upgradeable"
+        "substitutable provider (same-cycle JMA or prior-cycle icon_global via previous_runs) "
+        "counts as capturable, so the PARTIAL posterior that dropped it is detected as upgradeable"
     )
 
 

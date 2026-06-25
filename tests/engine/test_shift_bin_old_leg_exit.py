@@ -51,7 +51,15 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _insert_old_leg(conn, *, token_id="tok-A", position_id="p-old", shares=10.0):
+def _insert_old_leg(
+    conn,
+    *,
+    token_id="tok-A",
+    no_token_id="",
+    direction="buy_yes",
+    position_id="p-old",
+    shares=10.0,
+):
     conn.execute(
         """
         INSERT INTO position_current (
@@ -59,11 +67,11 @@ def _insert_old_leg(conn, *, token_id="tok-A", position_id="p-old", shares=10.0)
             condition_id, city, target_date, temperature_metric, p_posterior,
             entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
             size_usd, updated_at
-        ) VALUES (?, 'active', ?, '', '60-61F', 'buy_yes', 'cond-1', 'Tokyo',
+        ) VALUES (?, 'active', ?, ?, '60-61F', ?, 'cond-1', 'Tokyo',
                   '2026-06-23', 'high', 0.50, 0.20, 4.0, NULL, ?, ?, 4.0,
                   '2026-06-22T06:00:00')
         """,
-        (position_id, token_id, shares, shares),
+        (position_id, token_id, no_token_id, direction, shares, shares),
     )
 
 
@@ -117,6 +125,41 @@ def test_placed_sell_advances_lease_exit_submitted(monkeypatch):
     ).fetchone()
     assert row["status"] == "EXIT_SUBMITTED"  # family stays BLOCKING; no counter-entry
     assert row["old_exit_command_id"] == "exit-cmd-1"
+
+
+def test_buy_no_shift_exit_sells_no_token(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(
+        conn,
+        token_id="yes-tok-A",
+        no_token_id="no-tok-A",
+        direction="buy_no",
+        shares=14.0,
+    )
+    intent = fr.acquire_rebalance_lease(
+        conn, family_key="live|Tokyo|2026-06-23|high", operation="SHIFT_BIN",
+        now_iso="t0", held_position_id="p-old", held_token_id="no-tok-A",
+        held_bin_id="60-61F",
+    )
+    fr.advance_rebalance_lease(conn, intent, status="EXIT_SUBMITTED", now_iso="t0")
+
+    def _inputs(conn, *, old_token_id):
+        assert old_token_id == "no-tok-A"
+        return (14.0, 0.42, 0.42, {"executable_snapshot_id": "snap-1"})
+
+    monkeypatch.setattr(era, "_read_old_leg_exit_inputs", _inputs)
+    captured = {}
+    import src.execution.exit_lifecycle as xl
+    def _placed(**kw):
+        captured["kw"] = kw
+        return _FakeOrderResult(status="pending", order_id="exit-cmd-1")
+
+    monkeypatch.setattr(xl, "place_sell_order", _placed)
+    payload = _payload(intent)
+    payload["old_token_id"] = "no-tok-A"
+    era._submit_shift_bin_old_leg_exit(conn, payload=payload, decision_time=_now())
+    assert captured["kw"]["token_id"] == "no-tok-A"
+    assert captured["kw"]["shares"] == pytest.approx(14.0)
 
 
 def test_unknown_side_effect_blocks_family(monkeypatch):

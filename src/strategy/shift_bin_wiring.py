@@ -70,7 +70,13 @@ from src.strategy.fill_up_wiring import (
 
 @dataclass(frozen=True)
 class HeldSiblingExposure:
-    """The OLD held leg (same family, DIFFERENT bin/token than the fresh selection)."""
+    """The OLD held leg (same family, DIFFERENT bin/token than the fresh selection).
+
+    ``token_id`` is the HELD-SIDE / sellable token. For buy_yes positions this is
+    ``position_current.token_id``; for buy_no positions it is ``no_token_id``. The
+    shift-bin exit path sells this token, so using the condition/YES token for buy_no
+    rows creates a false collateral miss even when chain/local shares are synced.
+    """
 
     position_id: str
     token_id: str
@@ -154,7 +160,7 @@ def read_held_sibling_exposure(
     positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
 
     select_cols = []
-    for name in ("position_id", "token_id", "bin_label", "direction",
+    for name in ("position_id", "token_id", "no_token_id", "bin_label", "direction",
                  "chain_cost_basis_usd", "cost_basis_usd", "size_usd", metric_col):
         select_cols.append(name if name in cols else f"NULL AS {name}")
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
@@ -181,7 +187,10 @@ def read_held_sibling_exposure(
 
         if _norm_metric(_g(metric_col)) != metric_norm:
             continue
-        tok = str(_g("token_id") or "")
+        direction = str(_g("direction") or "")
+        yes_token = str(_g("token_id") or "")
+        no_token = str(_g("no_token_id") or "")
+        tok = no_token if direction == "buy_no" and no_token else yes_token
         bin_label = str(_g("bin_label") or "")
         # Same token == fill-up territory, not a sibling shift.
         if tok and tok == sel_token:
@@ -202,7 +211,7 @@ def read_held_sibling_exposure(
             position_id=str(_g("position_id") or ""),
             token_id=tok,
             bin_label=bin_label,
-            direction=str(_g("direction") or ""),
+            direction=direction,
             current_live_usd=current_live,
         )
     return None

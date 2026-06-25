@@ -2069,6 +2069,35 @@ def _compose_day0_observed_extreme(
     return (extreme, best[1], best[2], best[3])
 
 
+def _apply_absorbing_floor_to_observed_extreme(
+    raw_live: float | None,
+    canonical_native: float | None,
+    *,
+    metric_is_low: bool,
+) -> float | None:
+    """Monotonic absorbing floor for the BELIEF's observed extreme (REQ-20260623-184115).
+
+    The day0 belief samples ``settle(max(observed_high_so_far, future_member_max))`` (high) /
+    ``min(...)`` (low), so the observed extreme is a hard floor/ceiling on the day's settle value.
+    A later, LOWER live high (an evening METAR/station revision) must NEVER undercut the canonical
+    running max — once the running max has exceeded a bin upper bound the bin is WON, and a lower
+    reading cannot re-open it. The hard-fact/reseed path already composes live+canonical by this
+    absorbing law (`_compose_day0_observed_extreme`); the belief was the last consumer still reading
+    the raw revisable live value (Chicago 2026-06-25: high revised down -> won 76-77 bin re-opened ->
+    belief 1.0->0.65 -> false SETTLEMENT_IMMINENT sale). Returns the absorbing extreme:
+    ``max(live, canonical)`` for high, ``min(live, canonical)`` for low; non-finite values are
+    dropped; ``raw_live`` is returned unchanged when no canonical floor is available.
+    """
+
+    candidates = [
+        v for v in (raw_live, canonical_native)
+        if v is not None and np.isfinite(float(v))
+    ]
+    if not candidates:
+        return raw_live
+    return min(candidates) if metric_is_low else max(candidates)
+
+
 def _day0_observed_extreme_reseed_payload(
     *, city: str, target_date: str, metric: str
 ) -> dict[str, object]:
@@ -2524,6 +2553,28 @@ def _refresh_day0_observation(
     observed_high_so_far = _finite_day0_observation_float(obs, "high_so_far")
     observed_low_so_far = _finite_day0_observation_float(obs, "low_so_far")
     current_temp = _finite_day0_observation_float(obs, "current_temp")
+    # ABSORBING FLOOR (2026-06-25 "wrong exit"): the BELIEF's observed extreme must be MONOTONIC.
+    # day0_high_distribution samples max(observed_high_so_far, future_max), so a later LOWER live
+    # high (evening METAR/station revision) would drop the floor back into an already-WON max-bin and
+    # spuriously collapse the belief (Chicago 1.0->0.65 -> false SETTLEMENT_IMMINENT sale). The
+    # hard-fact/reseed path already composes live+canonical by the absorbing law (REQ-20260623-184115);
+    # the belief was the last consumer still on the raw revisable live value. Wire the SAME canonical
+    # running-extreme floor here (only the position's own metric — avoids a second world read).
+    _belief_metric_is_low = temperature_metric.is_low()
+    _belief_canonical_extreme = _day0_observed_extreme_from_canonical_surface(
+        city_name=str(getattr(city, "name", "") or ""),
+        target_date=str(target_d),
+        metric_is_low=_belief_metric_is_low,
+    )
+    if _belief_canonical_extreme is not None:
+        if _belief_metric_is_low:
+            observed_low_so_far = _apply_absorbing_floor_to_observed_extreme(
+                observed_low_so_far, _belief_canonical_extreme[0], metric_is_low=True
+            )
+        else:
+            observed_high_so_far = _apply_absorbing_floor_to_observed_extreme(
+                observed_high_so_far, _belief_canonical_extreme[0], metric_is_low=False
+            )
     observation_source_for_value = str(_day0_observation_field(obs, "source", "") or "")
     if current_temp is None and observation_source_for_value.startswith("ogimet_metar_"):
         current_temp = float("nan")

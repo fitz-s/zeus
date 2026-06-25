@@ -15,6 +15,7 @@ import sqlite3
 
 import pytest
 
+from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.state.db import init_schema
@@ -53,11 +54,18 @@ def _payload(target_date: str, snapshot_id: str) -> ForecastSnapshotReadyPayload
     )
 
 
-def _event(target_date: str, snapshot_id: str, *, available_at: str, received_at: str):
+def _event(
+    target_date: str,
+    snapshot_id: str,
+    *,
+    available_at: str,
+    received_at: str,
+    source: str = "forecast",
+):
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
         entity_key=f"Chicago|{target_date}|high|{snapshot_id}",
-        source="forecast",
+        source=source,
         observed_at="2026-06-03T04:10:00+00:00",
         available_at=available_at,
         received_at=received_at,
@@ -163,3 +171,33 @@ def test_retry_debt_precedes_zero_attempt_redecision_with_same_target():
     returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=2)
     ids = [e.event_id for e in returned]
     assert ids == [retry_debt.event_id, brand_new.event_id]
+
+
+def test_tier0_escalation_not_hidden_behind_bounded_lower_tier_prefix():
+    """Regression for the Python-ranking rewrite: SQL LIMIT must not truncate before tiering.
+
+    A Tier-0 escalation inserted after >2,000 ordinary rows must still be returned for
+    ``limit=1``. Otherwise redecision/Day0 money-path work can sit behind stale discovery backlog.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    for idx in range(2_501):
+        store.insert_or_ignore(
+            _event(
+                "2026-06-06",
+                f"snap-bulk-{idx}",
+                available_at="2026-06-05T00:00:00+00:00",
+                received_at=f"2026-06-05T00:{idx % 60:02d}:00+00:00",
+            )
+        )
+    escalation = _event(
+        "2026-06-06",
+        "snap-escalation",
+        available_at="2026-06-05T00:00:00+00:00",
+        received_at="2026-06-05T01:00:00+00:00",
+        source=f"{ESCALATION_CROSS_SOURCE_PREFIX}test",
+    )
+    store.insert_or_ignore(escalation)
+
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+    assert [e.event_id for e in returned] == [escalation.event_id]

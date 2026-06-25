@@ -3220,6 +3220,7 @@ def _build_event_bound_no_submit_receipt_core(
     _spine_no_trade_reason: str | None = None
     from src.engine.qkernel_spine_bridge import (
         decide_family_via_spine,
+        qkernel_candidate_economics_by_bin_side,
         qkernel_spine_enabled,
     )
 
@@ -3237,6 +3238,7 @@ def _build_event_bound_no_submit_receipt_core(
     _spine_flag_on = qkernel_spine_enabled()
     _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
     _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES
+    _spine_candidate_economics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     # Fix #4 generalized: pass REAL current per-bin family exposure into the
     # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
     # pick a leg the account is already heavy in; re-sizing after selection
@@ -3273,6 +3275,9 @@ def _build_event_bound_no_submit_receipt_core(
             )
             proof = _spine_result.selected_proof
             _spine_no_trade_reason = _spine_result.no_trade_reason
+            _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
+                _spine_result.decision
+            )
     else:
         proof = _selected_candidate_proof(
             payload,
@@ -3290,6 +3295,7 @@ def _build_event_bound_no_submit_receipt_core(
         locked_opportunity_conn=locked_opportunity_conn,
         held_position_conn=trade_conn,
         allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+        qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -3505,6 +3511,7 @@ def _build_event_bound_no_submit_receipt_core(
                     locked_opportunity_conn=locked_opportunity_conn,
                     held_position_conn=trade_conn,
                     allow_same_family_monitor_owned=allow_same_family_monitor_owned,
+                    qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -4521,6 +4528,7 @@ _CANDIDATE_BOOK_FIELDS: tuple[str, ...] = (
     "trade_score",
     "missing_reason",
     "execution_mode_intent",
+    "qkernel_execution_economics",
     "admitted",
 )
 _CANDIDATE_BOOK_STR_CAP = 200
@@ -9429,6 +9437,7 @@ def _candidate_evaluation_from_proof(
         taker_forbidden_reason=proof.taker_forbidden_reason,
         maker_fill_probability=proof.maker_fill_probability,
         maker_fill_probability_source=proof.maker_fill_probability_source,
+        qkernel_execution_economics=proof.qkernel_execution_economics,
     )
 
 
@@ -9596,6 +9605,49 @@ def _opportunity_book_proofs_with_selection_rejections(
     return tuple(annotated)
 
 
+def _qkernel_side_for_direction(direction: str | None) -> str | None:
+    if str(direction or "") == "buy_yes":
+        return "YES"
+    if str(direction or "") == "buy_no":
+        return "NO"
+    return None
+
+
+def _proofs_with_qkernel_candidate_economics(
+    *,
+    proofs: tuple[_CandidateProof, ...],
+    qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]] | None,
+) -> tuple[_CandidateProof, ...]:
+    """Attach qkernel candidate economics to receipt proofs without granting authority.
+
+    Non-selected qkernel candidates need their vector edge / delta-U / stake evidence
+    in the live opportunity book and regret rows, but they must not get the
+    ``selection_authority_applied`` stamp that authorizes qkernel submit sizing.
+    """
+    if not qkernel_economics_by_bin_side:
+        return proofs
+    annotated: list[_CandidateProof] = []
+    changed = False
+    for proof in proofs:
+        side = _qkernel_side_for_direction(proof.direction)
+        cert = (
+            qkernel_economics_by_bin_side.get((_candidate_bin_id(proof), side))
+            if side is not None
+            else None
+        )
+        if cert is None:
+            annotated.append(proof)
+            continue
+        annotated.append(
+            dataclass_replace(
+                proof,
+                qkernel_execution_economics=dict(cert),
+            )
+        )
+        changed = True
+    return tuple(annotated) if changed else proofs
+
+
 # REJECTION-LABEL TRUTH (operator law 2026-06-11: 每一个被拒绝的具体原因都要写出来).
 # When the family selector returns no live primary, the receipt must say WHY in the
 # aggregate — not a single bin's label and not a lie about missing books. These two
@@ -9725,6 +9777,7 @@ def _opportunity_book_from_proofs(
     locked_opportunity_conn: sqlite3.Connection | None = None,
     held_position_conn: sqlite3.Connection | None = None,
     allow_same_family_monitor_owned: bool = False,
+    qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> OpportunityBook:
     # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
     # selection scalar-Kelly pass that used to populate it is retired; the live
@@ -9735,6 +9788,10 @@ def _opportunity_book_from_proofs(
         bin_id = _candidate_bin_id(proof)
         if bin_id not in support_index_by_bin_id:
             support_index_by_bin_id[bin_id] = len(support_index_by_bin_id)
+    book_proofs = _proofs_with_qkernel_candidate_economics(
+        proofs=proofs,
+        qkernel_economics_by_bin_side=qkernel_economics_by_bin_side,
+    )
     evaluations = tuple(
         _candidate_evaluation_from_proof(
             family_id=family_id,
@@ -9743,7 +9800,7 @@ def _opportunity_book_from_proofs(
             bin_id=_candidate_bin_id(proof),
         )
         for proof in _opportunity_book_proofs_with_selection_rejections(
-            proofs=proofs,
+            proofs=book_proofs,
             locked_opportunity_conn=locked_opportunity_conn,
             held_position_conn=held_position_conn,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
@@ -12294,6 +12351,10 @@ def _replacement_live_authority_proof_for_direction(
 def _replacement_primary_authority_already_applied(proof: _CandidateProof) -> bool:
     if str(getattr(proof, "q_source", "") or "") == "replacement_0_1":
         return True
+    if str(getattr(proof, "probability_authority", "") or "").startswith("day0_absorbing"):
+        return True
+    if str(getattr(proof, "q_source", "") or "") == "day0_remaining_day":
+        return True
     return str(getattr(proof, "selection_authority_applied", "") or "") == "qkernel_spine"
 
 
@@ -12457,6 +12518,7 @@ def _live_yes_probabilities(
         )
         return masked_q, masked_lcb, p_values, prefilter, {
             **evidence,
+            "probability_authority": "day0_absorbing_hard_fact",
             "p_live_vector_hash": _probability_vector_hash(
                 masked_q[str(candidate.condition_id or "")]
                 for candidate in family.candidates

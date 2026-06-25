@@ -15,6 +15,7 @@ import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 
+from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.opportunity_event import OpportunityEvent
 
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
@@ -195,7 +196,6 @@ class EventStore:
         """
 
         self._require_world_event_tables()
-        from src.events.event_priority import claim_tier_expr_sql
 
         parsed_decision_time = _parse_utc(decision_time)
         stale_processing_before = (
@@ -205,11 +205,6 @@ class EventStore:
         # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
         # clause so shadow-only day0 events fall to Tier 2 — strictly below the
         # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
-        # The bare tier CASE expression (no ASC) — used as a SELECT column so the
-        # per-city round-robin window can PARTITION by tier, and reused as the
-        # outer ORDER BY tier key. One authority (claim_tier_expr_sql); the legacy
-        # ORDER-BY-only form (claim_tier_case_sql) appends ASC to this same string.
-        _claim_tier_expr = claim_tier_expr_sql(day0_is_tradeable=day0_is_tradeable)
         # PER-CITY ROUND-ROBIN FAIRNESS (2026-06-11 live throughput incident).
         #
         # THE CATEGORY THIS MAKES UNCONSTRUCTABLE
@@ -237,13 +232,12 @@ class EventStore:
         # admissibility, same WITHIN-city freshness order — only the CROSS-city
         # interleaving changes from "drain one city fully" to "one per city, fair".
         #
-        # The city key is the leading entity_key segment ("Chicago|2026-06-12|..."),
-        # so no per-row json_extract is needed for the partition. Events without a
-        # '|' (or with an empty/NULL entity_key) fall back to the whole entity_key
-        # then the event_type, so non-city lanes form their own buckets and never
-        # fragment the city round-robin.
-        rows = self.conn.execute(
-            f"""
+        # The original SQL implemented the round-robin with ROW_NUMBER() and sorted
+        # by json_extract(payload_json, '$.target_date'). On the live world DB that
+        # forced SQLite to build temp B-trees and spend reactor time in jsonExtractFunc.
+        # Keep SQL to indexed eligibility + bounded overfetch, then do the cheap
+        # target/city/tier ranking in Python over the bounded candidate pool.
+        base_sql = """
             WITH eligible_processing AS (
               SELECT p.event_id, p.attempt_count
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
@@ -260,19 +254,7 @@ class EventStore:
             candidates AS (
               SELECT
                 e.*,
-                p.attempt_count AS _p_attempt_count,
-                ({_claim_tier_expr}) AS _claim_tier,
-                COALESCE(
-                  NULLIF(
-                    CASE
-                      WHEN instr(e.entity_key, '|') > 0
-                      THEN substr(e.entity_key, 1, instr(e.entity_key, '|') - 1)
-                      ELSE e.entity_key
-                    END,
-                    ''
-                  ),
-                  e.event_type
-                ) AS _city_key
+                p.attempt_count AS _p_attempt_count
               FROM eligible_processing p
               JOIN opportunity_events e
                 ON e.event_id = p.event_id
@@ -288,79 +270,92 @@ class EventStore:
             SELECT
               -- Project EXACTLY the opportunity_events columns (in table order) so
               -- _event_from_row receives only its expected keys — the helper
-              -- columns (_claim_tier/_city_key/_p_attempt_count/_city_round) drive
-              -- ordering but must NOT reach OpportunityEvent(**row).
+              -- column (_p_attempt_count) drives Python ordering but must NOT reach
+              -- OpportunityEvent(**row).
               c.event_id, c.event_type, c.entity_key, c.source,
               c.observed_at, c.available_at, c.received_at,
               c.causal_snapshot_id, c.payload_hash, c.idempotency_key,
               c.priority, c.expires_at, c.payload_json, c.schema_version,
               c.created_at,
-              c._claim_tier,
-              -- Per-(tier, city) occurrence rank. The window ORDER is the EXACT
-              -- intra-city freshness order the legacy query used as its tail sort,
-              -- so each city's rank-1 event is still its freshest. Ranking inside
-              -- the tier partition keeps cross-tier dominance intact (a Tier-2
-              -- rank-1 can never jump a Tier-1 rank-2).
-              ROW_NUMBER() OVER (
-                PARTITION BY c._claim_tier, c._city_key
-                ORDER BY
-                  json_extract(c.payload_json, '$.target_date') DESC,
-                  c.available_at DESC,
-                  CASE WHEN c._p_attempt_count > 0 THEN 0 ELSE 1 END ASC,
-                  c.received_at DESC,
-                  c.event_id ASC
-              ) AS _city_round
+              c._p_attempt_count
             FROM candidates c
-            ORDER BY
-              -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
-              --         actionable alpha source while day0 is a tradeable lane. Test/replay callers
-              --         can pass day0_is_tradeable=False to omit the Tier-0 clause.
-              -- Tier 1: window-complete FORECAST_SNAPSHOT_READY — direct receipt candidates.
-              --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
-              --         target window, so source_run completeness is not the queue authority.
-              -- Tier 2: Other decision-trigger events — still actionable
-              --         or cheaply dead-letterable. Market-channel cache-hydration
-              --         events are intentionally excluded from fetch_pending and
-              --         initialized as ignored at the write boundary; they are quote
-              --         cache / feasibility inputs, not submit-reactor work.
-              c._claim_tier ASC,
-              -- FAIRNESS (primary cross-city key): one event per city before any
-              -- city's second event. A budget of K reaches K distinct cities/cycle;
-              -- every city is reached within ceil(N/K) cycles (anti-starvation).
-              -- _city_round is the outer SELECT's window alias (no table prefix).
-              _city_round ASC,
-              c.priority DESC,
-              -- FRESHEST-TARGET-FIRST tiebreak (now SECONDARY to fairness): within
-              -- the same round across cities, the fresher target/available wins.
-              -- NULL target_date (non-forecast events) sorts last within its tier
-              -- (json_extract → NULL → last under DESC in SQLite). Newer available_at
-              -- wins before retry debt because it is fresher evidence; for SAME
-              -- target_date + available_at, retry debt wins before zero-attempt
-              -- redecision rows so transiently blocked events cannot be starved
-              -- forever by same-evidence rows.
-              json_extract(c.payload_json, '$.target_date') DESC,
-              c.available_at DESC,
-              CASE WHEN c._p_attempt_count > 0 THEN 0 ELSE 1 END ASC,
-              c.received_at DESC,
-              c.event_id ASC
+            WHERE {tier_predicate}
             LIMIT ?
-            """,
+            """
+        tier_queries: tuple[tuple[str, tuple[object, ...]], ...] = (
             (
-                self.consumer_name,
-                self.consumer_name,
-                stale_processing_before,
-                parsed_decision_time.isoformat(),
-                parsed_decision_time.isoformat(),
-                parsed_decision_time.isoformat(),
-                # Fetch extra rows so the post-filter can drop stale events
-                # without under-filling the caller's requested limit.
-                max(limit * 4, limit + 50),
+                "("
+                "c.event_type = 'EDLI_REDECISION_PENDING'"
+                " OR (c.event_type = 'FORECAST_SNAPSHOT_READY' AND c.source LIKE ?)"
+                + (" OR c.event_type = 'DAY0_EXTREME_UPDATED'" if day0_is_tradeable else "")
+                + ")",
+                (f"{ESCALATION_CROSS_SOURCE_PREFIX}%",),
             ),
-        ).fetchall()
-
-        events = [_event_from_row(row) for row in rows]
-        admissible = [e for e in events if self._is_timely(e, parsed_decision_time)]
-        return admissible[:limit]
+            (
+                "("
+                "c.event_type = 'FORECAST_SNAPSHOT_READY'"
+                " AND c.source NOT LIKE ?"
+                " AND json_extract(c.payload_json, '$.coverage_completeness_status') = 'COMPLETE'"
+                " AND json_extract(c.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'"
+                ")",
+                (f"{ESCALATION_CROSS_SOURCE_PREFIX}%",),
+            ),
+            (
+                "("
+                "c.event_type NOT IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING'"
+                + (", 'DAY0_EXTREME_UPDATED'" if day0_is_tradeable else "")
+                + ")"
+                " OR ("
+                "c.event_type = 'FORECAST_SNAPSHOT_READY'"
+                " AND c.source NOT LIKE ?"
+                " AND ("
+                "json_extract(c.payload_json, '$.coverage_completeness_status') != 'COMPLETE'"
+                " OR json_extract(c.payload_json, '$.coverage_readiness_status') != 'LIVE_ELIGIBLE'"
+                " OR json_extract(c.payload_json, '$.coverage_completeness_status') IS NULL"
+                " OR json_extract(c.payload_json, '$.coverage_readiness_status') IS NULL"
+                ")"
+                ")"
+                ")",
+                (f"{ESCALATION_CROSS_SOURCE_PREFIX}%",),
+            ),
+        )
+        out: list[OpportunityEvent] = []
+        pool_limits = (
+            max(limit * 64, limit + 2_000),
+            max(limit * 256, limit + 10_000),
+        )
+        common_params = (
+            self.consumer_name,
+            self.consumer_name,
+            stale_processing_before,
+            parsed_decision_time.isoformat(),
+            parsed_decision_time.isoformat(),
+            parsed_decision_time.isoformat(),
+        )
+        for tier_predicate, tier_params in tier_queries:
+            tier_admissible: list[OpportunityEvent] = []
+            for pool_limit in pool_limits:
+                rows = self.conn.execute(
+                    base_sql.format(tier_predicate=tier_predicate),
+                    common_params + tier_params + (pool_limit,),
+                ).fetchall()
+                ranked = _rank_pending_rows_python(
+                    rows,
+                    day0_is_tradeable=day0_is_tradeable,
+                )
+                events = [event for event, _attempt_count in ranked]
+                tier_admissible = [e for e in events if self._is_timely(e, parsed_decision_time)]
+                if len(tier_admissible) >= limit - len(out) or len(rows) < pool_limit:
+                    break
+            out.extend(tier_admissible[: max(0, limit - len(out))])
+            if len(out) >= limit:
+                return out[:limit]
+            # If the tier remained at the hard overfetch ceiling, do not claim lower-tier rows
+            # ahead of a not-yet-exhausted higher tier. This preserves fail-closed money priority
+            # under pathological backlogs instead of letting lower tiers jump the queue.
+            if rows and len(rows) >= pool_limits[-1]:
+                return out[:limit]
+        return out[:limit]
 
     def archive_expired_candidates(
         self, *, decision_time: str, batch_limit: int = 50_000
@@ -1676,6 +1671,140 @@ _EVENT_ROW_KEYS: tuple[str, ...] = (
     "schema_version",
     "created_at",
 )
+
+
+def _event_payload_dict(event: OpportunityEvent) -> dict:
+    try:
+        payload = json.loads(event.payload_json)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _event_city_key(event: OpportunityEvent) -> str:
+    entity_key = str(event.entity_key or "")
+    if "|" in entity_key:
+        city = entity_key.split("|", 1)[0].strip()
+        if city:
+            return city
+    return entity_key.strip() or str(event.event_type or "")
+
+
+def _claim_tier_for_event(
+    event: OpportunityEvent,
+    payload: dict,
+    *,
+    day0_is_tradeable: bool,
+) -> int:
+    if (
+        event.event_type == "FORECAST_SNAPSHOT_READY"
+        and str(event.source or "").startswith(ESCALATION_CROSS_SOURCE_PREFIX)
+    ):
+        return 0
+    if event.event_type == "EDLI_REDECISION_PENDING":
+        return 0
+    if event.event_type == "DAY0_EXTREME_UPDATED" and day0_is_tradeable:
+        return 0
+    if (
+        event.event_type == "FORECAST_SNAPSHOT_READY"
+        and payload.get("coverage_completeness_status") == "COMPLETE"
+        and payload.get("coverage_readiness_status") == "LIVE_ELIGIBLE"
+    ):
+        return 1
+    if event.event_type in {
+        "BEST_BID_ASK_CHANGED",
+        "BOOK_SNAPSHOT",
+        "NEW_MARKET_DISCOVERED",
+    }:
+        return 3
+    return 2
+
+
+def _date_desc_key(value: object) -> tuple[int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return (1, 0)
+    try:
+        return (0, -date.fromisoformat(text).toordinal())
+    except ValueError:
+        return (1, 0)
+
+
+def _datetime_desc_key(value: object) -> tuple[int, float]:
+    text = str(value or "").strip()
+    if not text:
+        return (1, 0.0)
+    try:
+        parsed = _parse_utc(text)
+    except Exception:
+        return (1, 0.0)
+    return (0, -parsed.timestamp())
+
+
+def _rank_pending_rows_python(
+    rows: list[sqlite3.Row] | tuple[sqlite3.Row, ...],
+    *,
+    day0_is_tradeable: bool,
+) -> list[tuple[OpportunityEvent, int]]:
+    records: list[dict] = []
+    for row in rows:
+        event = _event_from_row(row)
+        full = dict(row)
+        try:
+            attempt_count = int(full.get("_p_attempt_count") or 0)
+        except (TypeError, ValueError):
+            attempt_count = 0
+        payload = _event_payload_dict(event)
+        records.append(
+            {
+                "event": event,
+                "attempt_count": attempt_count,
+                "payload": payload,
+                "tier": _claim_tier_for_event(
+                    event,
+                    payload,
+                    day0_is_tradeable=day0_is_tradeable,
+                ),
+                "city_key": _event_city_key(event),
+                "target_key": _date_desc_key(payload.get("target_date")),
+                "available_key": _datetime_desc_key(event.available_at),
+                "retry_key": 0 if attempt_count > 0 else 1,
+                "received_key": _datetime_desc_key(event.received_at),
+            }
+        )
+
+    intra_city = sorted(
+        records,
+        key=lambda item: (
+            item["tier"],
+            item["city_key"],
+            item["target_key"],
+            item["available_key"],
+            item["retry_key"],
+            item["received_key"],
+            item["event"].event_id,
+        ),
+    )
+    rounds_by_key: dict[tuple[int, str], int] = {}
+    for item in intra_city:
+        key = (int(item["tier"]), str(item["city_key"]))
+        rounds_by_key[key] = rounds_by_key.get(key, 0) + 1
+        item["city_round"] = rounds_by_key[key]
+
+    ranked = sorted(
+        records,
+        key=lambda item: (
+            item["tier"],
+            item.get("city_round", 1),
+            -int(getattr(item["event"], "priority", 0) or 0),
+            item["target_key"],
+            item["available_key"],
+            item["retry_key"],
+            item["received_key"],
+            item["event"].event_id,
+        ),
+    )
+    return [(item["event"], int(item["attempt_count"])) for item in ranked]
 
 
 def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:

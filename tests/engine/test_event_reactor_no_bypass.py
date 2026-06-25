@@ -2971,6 +2971,87 @@ def test_replacement_live_authority_same_direction_replaces_receipt_probability(
     assert receipt.replacement_forecast["runtime_layer"] == "live"
 
 
+def test_day0_probability_evidence_is_absorbing_authority(monkeypatch):
+    """A live-authorized Day0 observation is already the probability authority.
+
+    The replacement forecast hook/readiness licenses forecast-entry posterior rows; it
+    must not become a second authority over a DAY0_EXTREME_UPDATED hard fact.
+    """
+
+    from src.engine import event_reactor_adapter as adapter
+
+    candidate = SimpleNamespace(
+        condition_id="condition-1",
+        bin=Bin(low=72.0, high=73.0, unit="F", label="72-73F"),
+    )
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        event_type="DAY0_EXTREME_UPDATED",
+        candidates=[candidate],
+    )
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+
+    def _canonical(**_kwargs):
+        return (
+            {"condition-1": 0.96},
+            {("condition-1", "buy_yes"): 0.95, ("condition-1", "buy_no"): 0.0},
+            {("condition-1", "buy_yes"): 0.01, ("condition-1", "buy_no"): 0.99},
+            {("condition-1", "buy_yes"): True, ("condition-1", "buy_no"): False},
+            {
+                "p_cal_vector_hash": "day0",
+                "p_live_vector_hash": "pre-mask",
+            },
+        )
+
+    monkeypatch.setattr(adapter, "_canonical_probability_and_fdr_proof", _canonical)
+    q, lcb, _p_values, _prefilter, evidence = adapter._live_yes_probabilities(
+        event=event,
+        payload={
+            "city": "Chicago",
+            "metric": "high",
+            "rounded_value": 72.0,
+            "observation_time": "2026-05-24T14:00:00+00:00",
+        },
+        family=family,
+        conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        native_costs={},
+        decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+    )
+
+    assert q["condition-1"] == pytest.approx(1.0)
+    assert evidence["probability_authority"] == "day0_absorbing_hard_fact"
+    assert "day0_lcb_transform_hash" in evidence
+
+
+def test_day0_absorbing_proof_is_primary_authority_for_replacement_hook():
+    from src.engine import event_reactor_adapter as adapter
+
+    proof = adapter._CandidateProof(
+        candidate=SimpleNamespace(condition_id="condition-2", family_id="family-1"),
+        token_id="yes-2",
+        direction="buy_yes",
+        row={},
+        executable_snapshot_id="snapshot-1",
+        execution_price=None,
+        q_posterior=0.96,
+        q_lcb_5pct=0.95,
+        c_cost_95pct=0.40,
+        p_fill_lcb=1.0,
+        trade_score=0.05,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="day0",
+        p_live_vector_hash="day0",
+        probability_authority="day0_absorbing_hard_fact",
+    )
+
+    assert adapter._replacement_primary_authority_already_applied(proof) is True
+
+
 def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof

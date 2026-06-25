@@ -1377,7 +1377,10 @@ def test_all_candidates_rejected_writes_structured_candidate_rows_from_receipt_b
         (event.event_id,),
     ).fetchall()
     assert len(rows) == 2
-    family_summary, candidate = rows
+    family_summary = next(
+        row for row in rows if row[0].startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
+    )
+    candidate = next(row for row in rows if row[0].startswith("EVENT_BOUND_CANDIDATE_REJECTED:"))
     assert family_summary[0].startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:")
     assert family_summary[2:11] == (None, None, None, None, None, None, None, None, None)
     assert candidate[0].startswith(
@@ -1391,6 +1394,109 @@ def test_all_candidates_rejected_writes_structured_candidate_rows_from_receipt_b
     assert candidate[6:11] == (0.972, 0.9616, 0.6712, 1.0, 0.4327)
     assert candidate[11] == 1
     assert candidate[12] == "exec-1"
+
+
+def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():
+    conn, store = _store()
+    event = _day0_event()
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+    payload.update(
+        {
+            "family_id": "family-beijing",
+            "city": "Beijing",
+            "target_date": "2026-06-26",
+            "metric": "high",
+        }
+    )
+    event = replace(
+        event,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        city="Beijing",
+        target_date="2026-06-26",
+        metric="high",
+        family_id="family-beijing",
+        executable_snapshot_id="exec-qkernel",
+        opportunity_book={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-buy-no-33c",
+                    "family_id": "family-beijing",
+                    "condition_id": "condition-33",
+                    "token_id": "no-token-33",
+                    "direction": "buy_no",
+                    "bin_label": "Will the highest temperature in Beijing be 33°C on June 26?",
+                    "execution_price": 0.74962,
+                    "q_posterior": 0.8054,
+                    "q_lcb_5pct": 0.773718,
+                    "c_cost_95pct": 0.74962,
+                    "p_fill_lcb": 1.0,
+                    "trade_score": 0.0084,
+                    "native_quote_available": True,
+                    "missing_reason": None,
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                        "route_id": "DIRECT_NO:bin-33@proof",
+                        "payoff_q_lcb": 0.748,
+                        "edge_lcb": -0.00162,
+                        "point_ev": 0.031,
+                        "delta_u_at_min": -0.0004,
+                        "optimal_stake_usd": "0",
+                        "optimal_delta_u": 0.0,
+                        "q_dot_payoff": 0.779,
+                        "cost": 0.74962,
+                    },
+                }
+            ]
+        },
+    )
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _decision_time: None,
+        reject=lambda _event, _stage, _reason: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor._write_regret(
+        event,
+        "TRADE_SCORE",
+        "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+        receipt=receipt,
+        decision_time=datetime(2026, 6, 25, 5, 24, tzinfo=timezone.utc),
+    )
+
+    rows = conn.execute(
+        """
+        SELECT rejection_reason, bin_label, direction, condition_id, token_id,
+               q_live, q_lcb_5pct, c_fee_adjusted, c_cost_95pct, trade_score
+          FROM no_trade_regret_events
+         WHERE event_id = ?
+         ORDER BY rejection_reason
+        """,
+        (event.event_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    family_summary = next(row for row in rows if row[0].startswith("QKERNEL_SPINE_NO_TRADE:"))
+    candidate = next(row for row in rows if row[0].startswith("EVENT_BOUND_CANDIDATE_REJECTED:"))
+    assert family_summary[0] == "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE"
+    assert family_summary[1:] == (None, None, None, None, None, None, None, None, None)
+    assert candidate[0].startswith(
+        "EVENT_BOUND_CANDIDATE_REJECTED:QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE:"
+    )
+    assert candidate[1] == "Will the highest temperature in Beijing be 33°C on June 26?"
+    assert candidate[2] == "buy_no"
+    assert candidate[3] == "condition-33"
+    assert candidate[4] == "no-token-33"
+    assert candidate[5:10] == (0.8054, 0.748, 0.74962, 0.74962, -0.00162)
 
 
 def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
