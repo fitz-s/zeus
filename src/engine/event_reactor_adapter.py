@@ -1811,46 +1811,20 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     post-facto release recovery.
     """
 
-    if conn is None:
-        return None
-    now = datetime.now(timezone.utc).isoformat()
-    saw_authority = False
     try:
-        schemas = _adapter_attached_schema_names(conn)
-    except sqlite3.Error as exc:
-        return f"entries_pause_control_unreadable:{type(exc).__name__}"
-    for schema in schemas:
-        if schema == "temp":
-            continue
+        from src.state.db import get_world_connection, query_control_override_state
+
+        world_conn = get_world_connection()
         try:
-            if not _adapter_table_or_view_exists(conn, schema, "control_overrides"):
-                continue
-            saw_authority = True
-            schema_sql = _adapter_sql_identifier(schema)
-            row = conn.execute(
-                f"""
-                SELECT value, issued_by, reason, issued_at, effective_until
-                FROM {schema_sql}.control_overrides
-                WHERE target_type = 'global'
-                  AND target_key = 'entries'
-                  AND action_type = 'gate'
-                  AND issued_at <= ?
-                  AND (effective_until IS NULL OR effective_until > ?)
-                ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
-        except sqlite3.Error as exc:
-            return f"entries_pause_control_unreadable:{type(exc).__name__}"
-        if row is None:
-            continue
-        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "").strip().lower()
-        if value in {"true", "1", "yes", "on"}:
-            reason = row["reason"] if isinstance(row, sqlite3.Row) else row[2]
-            return str(reason or "entries_paused")
-    if saw_authority:
-        return None
+            state = query_control_override_state(world_conn)
+        finally:
+            world_conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return f"entries_pause_control_unreadable:{type(exc).__name__}"
+    if state.get("status") != "ok":
+        return f"entries_pause_control_unreadable:{state.get('status', 'unknown')}"
+    if bool(state.get("entries_paused", False)):
+        return str(state.get("entries_pause_reason") or "entries_paused")
     return None
 
 

@@ -14,6 +14,7 @@ touched; writes go to per-test tmp mirrors.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -235,6 +236,57 @@ def test_entries_pause_read_clears_stale_memory_when_db_unpaused():
     assert cp.is_entries_paused() is False
     assert cp.get_entries_pause_source() is None
     assert cp.get_entries_pause_reason() is None
+
+
+def test_live_submit_pause_gates_ignore_trade_legacy_archived_control_override():
+    """Executor/EDLI gates must not consume the legacy trade DB control ghost.
+
+    ``control_overrides`` in zeus_trades.db is registered as legacy_archived.
+    A stale row there must not override the world control plane after resume.
+    """
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+    trade_conn.execute(
+        """
+        CREATE TABLE control_overrides (
+            override_id TEXT,
+            target_type TEXT,
+            target_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_by TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            reason TEXT,
+            precedence INTEGER
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO control_overrides (
+            override_id, target_type, target_key, action_type, value,
+            issued_by, issued_at, effective_until, reason, precedence
+        ) VALUES (
+            'control_plane:global:entries_paused', 'global', 'entries',
+            'gate', 'true', 'codex',
+            '2026-06-25T15:44:10.786360+00:00', NULL,
+            'operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix', 100
+        )
+        """
+    )
+    trade_conn.commit()
+
+    from src.engine.event_reactor_adapter import _entry_pause_blocks_live_submit
+    from src.execution.executor import _entry_control_pause_component
+
+    try:
+        component = _entry_control_pause_component(trade_conn)
+        assert component["allowed"] is True
+        assert component["authority_schema"] == "world"
+        assert _entry_pause_blocks_live_submit(trade_conn) is None
+    finally:
+        trade_conn.close()
 
 
 # ---------------------------------------------------------------------------

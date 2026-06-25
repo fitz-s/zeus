@@ -707,46 +707,39 @@ class TestLiveOrderCommandSplit:
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
-    def test_entry_control_pause_reads_attached_world_override(
+    def test_entry_control_pause_reads_world_control_authority(
         self,
         mem_conn,
         monkeypatch,
     ):
-        """Trade connections must not stop at an empty main control view."""
+        """Trade connections read pause authority from world control state."""
         import src.execution.executor as executor_module
         from src.execution.executor import _live_order
 
-        mem_conn.execute("ATTACH DATABASE ':memory:' AS world")
-        mem_conn.execute(
-            """
-            CREATE TABLE world.control_overrides (
-                override_id TEXT,
-                target_type TEXT,
-                target_key TEXT,
-                action_type TEXT,
-                value TEXT,
-                issued_by TEXT,
-                issued_at TEXT,
-                effective_until TEXT,
-                reason TEXT,
-                precedence INTEGER
-            )
-            """
+        from src.state.db import (
+            DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+            apply_architecture_kernel_schema,
+            upsert_control_override,
         )
-        mem_conn.execute(
-            """
-            INSERT INTO world.control_overrides (
-                override_id, target_type, target_key, action_type, value,
-                issued_by, issued_at, effective_until, reason, precedence
-            ) VALUES (
-                'control_plane:global:entries_paused', 'global', 'entries',
-                'gate', 'true', 'control_plane',
-                '2026-06-17T16:27:51+00:00', NULL,
-                'manual_pause:attached_world', 100
-            )
-            """
+
+        world_conn = sqlite3.connect(":memory:")
+        world_conn.row_factory = sqlite3.Row
+        apply_architecture_kernel_schema(world_conn)
+        upsert_control_override(
+            world_conn,
+            override_id="control_plane:global:entries_paused",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_by="control_plane",
+            issued_at="2026-06-17T16:27:51+00:00",
+            reason="manual_pause:world_control",
+            effective_until=None,
+            precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
         )
-        mem_conn.commit()
+        world_conn.commit()
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda: world_conn)
 
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
@@ -770,7 +763,7 @@ class TestLiveOrderCommandSplit:
             )
 
         assert result.status == "rejected"
-        assert result.reason == "entries_paused:manual_pause:attached_world"
+        assert result.reason == "entries_paused:manual_pause:world_control"
         insert_command.assert_not_called()
         MockClient.assert_not_called()
 

@@ -381,66 +381,49 @@ def _table_exists_in_schema(conn: sqlite3.Connection, schema: str, table: str) -
 
 
 def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
-    """Read the durable entries-paused override at the submit boundary."""
+    """Read the single durable entries-paused authority at the submit boundary.
 
-    now = datetime.now(timezone.utc).isoformat()
-    checked_schemas: list[str] = []
-    authority_schemas: list[str] = []
-    for schema in _attached_schema_names(conn):
-        if schema == "temp":
-            continue
-        checked_schemas.append(schema)
+    ``control_overrides`` tables in trade DB are legacy archived ghosts; they
+    must not be consumed as live submit authority.  The control plane writes and
+    resumes through world DB, so the executor opens that authority directly.
+    """
+
+    try:
+        from src.state.db import get_world_connection, query_control_override_state
+
+        world_conn = get_world_connection()
         try:
-            if not _table_exists_in_schema(conn, schema, "control_overrides"):
-                continue
-            authority_schemas.append(schema)
-            schema_sql = _quote_sql_identifier(schema)
-            row = conn.execute(
-                f"""
-                SELECT value, issued_by, reason, issued_at, effective_until
-                FROM {schema_sql}.control_overrides
-                WHERE target_type = 'global'
-                  AND target_key = 'entries'
-                  AND action_type = 'gate'
-                  AND issued_at <= ?
-                  AND (effective_until IS NULL OR effective_until > ?)
-                ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
-        except sqlite3.Error:
-            continue
-        if row is None:
-            continue
-        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "").strip().lower()
-        if value in {"true", "1", "yes", "on"}:
-            issued_by = row["issued_by"] if isinstance(row, sqlite3.Row) else row[1]
-            reason = row["reason"] if isinstance(row, sqlite3.Row) else row[2]
-            issued_at = row["issued_at"] if isinstance(row, sqlite3.Row) else row[3]
-            effective_until = row["effective_until"] if isinstance(row, sqlite3.Row) else row[4]
-            return {
-                "component": "entries_pause_control_override",
-                "allowed": False,
-                "reason": str(reason or "entries_paused"),
-                "issued_by": str(issued_by or ""),
-                "issued_at": str(issued_at or ""),
-                "effective_until": "" if effective_until is None else str(effective_until),
-                "authority_schema": schema,
-            }
-
-    if authority_schemas:
+            state = query_control_override_state(world_conn)
+        finally:
+            world_conn.close()
+    except Exception as exc:  # noqa: BLE001
         return {
             "component": "entries_pause_control_override",
-            "allowed": True,
-            "reason": "allowed",
-            "authority_schema": ",".join(authority_schemas),
+            "allowed": False,
+            "reason": f"entries_pause_control_unreadable:{type(exc).__name__}",
+            "authority_schema": "world",
+        }
+
+    if state.get("status") != "ok":
+        return {
+            "component": "entries_pause_control_override",
+            "allowed": False,
+            "reason": f"entries_pause_control_unreadable:{state.get('status', 'unknown')}",
+            "authority_schema": "world",
+        }
+    if bool(state.get("entries_paused", False)):
+        return {
+            "component": "entries_pause_control_override",
+            "allowed": False,
+            "reason": str(state.get("entries_pause_reason") or "entries_paused"),
+            "issued_by": str(state.get("entries_pause_source") or ""),
+            "authority_schema": "world",
         }
     return {
         "component": "entries_pause_control_override",
         "allowed": True,
-        "reason": "missing_control_override_table",
-        "checked_schemas": checked_schemas,
+        "reason": "allowed",
+        "authority_schema": "world",
     }
 
 
