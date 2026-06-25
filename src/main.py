@@ -8464,7 +8464,18 @@ def _edli_reactor_family_market_absence_provider():
     def _is_absent(*, city, target_date, metric, **_ignored):
         key = _substrate_refresh_family_key(city, target_date, metric)
         until = _GAMMA_EMPTY_BACKOFF_UNTIL.get(key, 0.0)
-        return until > time.monotonic()
+        if until > time.monotonic():
+            return True
+        try:
+            from src.data.market_absence_evidence import has_recent_gamma_empty_evidence
+
+            return has_recent_gamma_empty_evidence(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+        except Exception:
+            return False
 
     return _is_absent
 

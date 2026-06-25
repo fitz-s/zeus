@@ -913,6 +913,20 @@ def _refresh_pending_family_snapshots(
                 _eb_deadline = time.monotonic() + _gamma_empty_backoff_s
                 for _eb_key in gamma_empty_family_keys:
                     _GAMMA_EMPTY_BACKOFF_UNTIL[_eb_key] = _eb_deadline
+                try:
+                    from src.data.market_absence_evidence import record_gamma_empty_families
+
+                    record_gamma_empty_families(
+                        gamma_empty_family_keys,
+                        ttl_seconds=_gamma_empty_backoff_s,
+                        observed_at=now_utc,
+                    )
+                except Exception:
+                    logger.debug(
+                        "refresh_pending_family_snapshots: failed to persist Gamma-empty "
+                        "absence evidence",
+                        exc_info=True,
+                    )
 
             # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
             # families. The old fallback called the global weather discovery scanner,

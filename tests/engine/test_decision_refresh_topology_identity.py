@@ -319,3 +319,31 @@ def test_reactor_market_absence_provider_reads_gamma_empty_backoff(monkeypatch) 
 
     monkeypatch.setattr(main.time, "monotonic", lambda: 131.0)
     assert provider(city="Auckland", target_date="2026-06-20", metric="low") is False
+
+
+def test_reactor_market_absence_provider_reads_sidecar_file_evidence(monkeypatch) -> None:
+    """Gamma-empty evidence is produced by the substrate-observer process.
+
+    The order daemon's provider must read the shared evidence surface, not only its
+    own process-local backoff map.
+    """
+
+    import src.main as main
+    from src.data import market_absence_evidence
+
+    monkeypatch.setattr(main.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(main, "_GAMMA_EMPTY_BACKOFF_UNTIL", {})
+
+    def _has_recent_gamma_empty_evidence(*, city, target_date, metric, now=None, path=None):
+        return (city, target_date, metric) == ("Auckland", "2026-06-20", "low")
+
+    monkeypatch.setattr(
+        market_absence_evidence,
+        "has_recent_gamma_empty_evidence",
+        _has_recent_gamma_empty_evidence,
+    )
+
+    provider = main._edli_reactor_family_market_absence_provider()
+
+    assert provider(city="Auckland", target_date="2026-06-20", metric="low") is True
+    assert provider(city="Auckland", target_date="2026-06-20", metric="high") is False
