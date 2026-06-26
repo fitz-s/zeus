@@ -200,6 +200,35 @@ def test_clean_rejection_releases_lease(monkeypatch):
     assert "exit_mutex_held" in (row["abort_reason"] or "")
 
 
+def test_auth_signature_rejection_keeps_shift_exit_retry_active(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch)
+    import src.execution.exit_lifecycle as xl
+    monkeypatch.setattr(
+        xl,
+        "place_sell_order",
+        lambda **kw: _FakeOrderResult(
+            status="rejected",
+            order_id="exit-cmd-auth",
+            reason=(
+                "venue_rejected_400: PolyApiException[status_code=400, "
+                "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
+            ),
+        ),
+    )
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, old_exit_command_id, abort_reason "
+        "FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_UNKNOWN"
+    assert row["old_exit_command_id"] == "exit-cmd-auth"
+    assert str(row["abort_reason"]).startswith("SHIFT_BIN_EXIT_RETRYABLE_REJECTED:")
+
+
 def test_exit_raises_without_durable_command_releases_for_retry(monkeypatch):
     conn = _conn()
     _insert_old_leg(conn)

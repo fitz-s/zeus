@@ -30,6 +30,7 @@ from src.config import runtime_cities_by_name
 from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.event_store import EventStore
 from src.events.opportunity_event import (
+    Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
     make_opportunity_event,
 )
@@ -142,6 +143,31 @@ def _continuous_redecision(city: str, snapshot_id: str, *, available_at: str, re
     )
 
 
+def _day0_event(city: str, snapshot_id: str, *, available_at: str, received_at: str):
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"{city}|{_TARGET_DATE}|high|82",
+        source="day0",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=received_at,
+        causal_snapshot_id=snapshot_id,
+        payload=Day0ExtremeUpdatedPayload(
+            city=city,
+            target_date=_TARGET_DATE,
+            metric="high",
+            settlement_source="wu_icao_history",
+            station_id="TEST",
+            observation_time=available_at,
+            observation_available_at=available_at,
+            raw_value=82.0,
+            rounded_value=82,
+            high_so_far=82.0,
+        ),
+        priority=20,
+    )
+
+
 def test_escalation_redecision_jumps_full_city_backlog():
     """RED-ON-REVERT antibody. A 49-city tradeable-FSR backlog (one per city, the
     full live round-robin depth) PLUS ONE escalation-origin re-decision for a city
@@ -229,4 +255,46 @@ def test_continuous_redecision_jumps_ordinary_fsr_backlog():
     assert claimed[0].event_id == cont.event_id, (
         "a screen-admitted EDLI_REDECISION_PENDING row must not be stuck behind "
         "ordinary FSR discovery when the cycle budget reaches only one event"
+    )
+
+
+def test_requeued_continuous_redecision_jumps_tier0_backlog():
+    """A transient live redecision retry is active money-path work, not ordinary
+    discovery. After a cancel/price-move/shift-old-leg transient block, the next
+    cycle must re-claim it before unrelated fresh Tier-0 work can consume the
+    budget; otherwise the order/position redecision line vanishes until a later
+    city rotation.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    cities = _REAL_CITIES[:8]
+    for rank, city in enumerate(cities):
+        store.insert_or_ignore(
+            _day0_event(
+                city,
+                f"snap-day0-{city}",
+                available_at=f"2026-06-16T06:{rank:02d}:00+00:00",
+                received_at=f"2026-06-16T06:{rank:02d}:30+00:00",
+            )
+        )
+
+    cont = _continuous_redecision(
+        cities[-1],
+        "snap-retry-continuous",
+        available_at="2026-06-16T05:00:00+00:00",
+        received_at="2026-06-16T05:00:30+00:00",
+    )
+    store.insert_or_ignore(cont)
+    assert store.claim(cont.event_id, claimed_at="2026-06-16T06:10:00+00:00") is True
+    store.requeue_pending(
+        cont.event_id,
+        last_error="SHIFT_BIN_EXIT_OLD_LEG_PENDING",
+    )
+
+    claimed = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+    assert len(claimed) == 1
+    assert claimed[0].event_id == cont.event_id, (
+        "a requeued EDLI_REDECISION_PENDING money-path retry must reclaim the "
+        "next decision slot instead of disappearing behind unrelated Tier-0 work"
     )

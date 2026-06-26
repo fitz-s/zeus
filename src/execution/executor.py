@@ -898,6 +898,15 @@ def _is_polymarket_invalid_amount_400_message(message: str) -> bool:
     return precision_rejection or marketable_buy_min_rejection
 
 
+def _is_polymarket_invalid_signature_400(exc: Exception) -> bool:
+    if type(exc).__name__ != "PolyApiException":
+        return False
+    message = str(exc)
+    if "status_code=400" not in message:
+        return False
+    return "invalid POLY_GNOSIS_SAFE signature" in message
+
+
 def _geoblock_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
     return {
         "reason": "venue_rejected_geoblock_403",
@@ -916,6 +925,17 @@ def _invalid_amount_rejection_payload(exc: Exception, *, idempotency_key: str) -
         "exception_message": str(exc),
         "idempotency_key": idempotency_key,
         "proof_class": "deterministic_venue_invalid_amount_400",
+        "venue_order_created": False,
+    }
+
+
+def _invalid_signature_rejection_payload(exc: Exception, *, idempotency_key: str) -> dict:
+    return {
+        "reason": "venue_auth_invalid_signature_400",
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "idempotency_key": idempotency_key,
+        "proof_class": "deterministic_venue_auth_signature_400",
         "venue_order_created": False,
     }
 
@@ -957,6 +977,8 @@ def _deterministic_submit_rejection_payload(
         return _geoblock_rejection_payload(exc, idempotency_key=idempotency_key)
     if _is_polymarket_invalid_amount_400(exc):
         return _invalid_amount_rejection_payload(exc, idempotency_key=idempotency_key)
+    if _is_polymarket_invalid_signature_400(exc):
+        return _invalid_signature_rejection_payload(exc, idempotency_key=idempotency_key)
     # GENERAL 400 fallback (kept LAST so the specific invalid_amount reason_code wins
     # for its downstream no-verbatim-retry handling): every other 400 is still a
     # deterministic venue rejection, never an unknown side effect / governor latch.

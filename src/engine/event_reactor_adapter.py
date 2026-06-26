@@ -1324,6 +1324,18 @@ def _shift_exit_has_durable_command(
         return False
 
 
+def _shift_exit_rejection_requires_retry(reason: str) -> bool:
+    """Whether a rejected old-leg exit is infrastructure/auth, not strategy finality."""
+
+    normalized = " ".join(str(reason or "").lower().split())
+    if not normalized:
+        return False
+    return (
+        "invalid poly_gnosis_safe signature" in normalized
+        or "venue_auth_invalid_signature_400" in normalized
+    )
+
+
 def _submit_shift_bin_old_leg_exit(
     conn: sqlite3.Connection,
     *,
@@ -1340,8 +1352,10 @@ def _submit_shift_bin_old_leg_exit(
                                 blocking until the residual is proven zero/dust).
       - "unknown_side_effect" → EXIT_UNKNOWN (block the family; reconciliation owns it;
                                 NO counter-entry, NO replacement).
-      - "rejected"            → ABORTED (clean pre-venue rejection: no side effect; the
-                                lease releases so a legitimate retry can re-acquire).
+      - "rejected"            → ABORTED for clean pre-venue rejection; auth/signature
+                                infrastructure rejects with a durable command stay
+                                EXIT_UNKNOWN so the old-leg retry is not terminalized
+                                as a strategy failure.
     Any read miss (old leg already closed, no seed price) leaves the lease unchanged
     (EXIT_SUBMITTED) so the next cycle re-attempts — close-before-open is preserved.
     """
@@ -1463,11 +1477,25 @@ def _submit_shift_bin_old_leg_exit(
                 reason=f"SHIFT_BIN_EXIT_UNKNOWN_NO_DURABLE_COMMAND:{reason}",
             )
     else:
+        reason = str(getattr(result, "reason", "") or status)
+        has_command = bool(command_id) or _shift_exit_has_durable_command(
+            conn, decision_id=decision_id
+        )
+        if has_command and _shift_exit_rejection_requires_retry(reason):
+            _shift_bin_wiring.record_exit_submitted(
+                conn,
+                intent_id,
+                now_iso=now_iso,
+                old_exit_command_id=command_id or None,
+                status="EXIT_UNKNOWN",
+                reason=f"SHIFT_BIN_EXIT_RETRYABLE_REJECTED:{reason}",
+            )
+            return
         # Clean pre-venue rejection (mutex held, collateral, snapshot gate, malformed
         # price, shares→0): no side effect. Release the lease for a legitimate retry.
         _shift_bin_wiring.abort_shift_bin_lease(
             conn, intent_id, now_iso=now_iso,
-            reason=f"SHIFT_BIN_EXIT_REJECTED:{getattr(result, 'reason', '') or status}",
+            reason=f"SHIFT_BIN_EXIT_REJECTED:{reason}",
         )
 
 

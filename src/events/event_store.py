@@ -1827,6 +1827,21 @@ def _pending_row_attempt_count(row: sqlite3.Row | tuple) -> int:
         return 0
 
 
+def _live_redecision_retry_lane(event: OpportunityEvent, attempt_count: int) -> int:
+    """Claim lane for live redecision rows already carrying retry debt.
+
+    A requeued ``EDLI_REDECISION_PENDING`` row is not ordinary discovery work:
+    it represents a family with live money-path work already in progress
+    (rest-management, held-position re-evaluation, or a shift/fill-up lease).
+    Keep it ahead of fresh tier-0 forecast/day0 work so a cancel/price-move
+    retry cannot disappear behind the normal city round-robin budget.
+    """
+
+    if event.event_type == "EDLI_REDECISION_PENDING" and attempt_count > 0:
+        return 0
+    return 1
+
+
 def _rank_pending_rows_python(
     rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
     *,
@@ -1851,6 +1866,9 @@ def _rank_pending_rows_python(
                 "target_key": _date_desc_key(payload.get("target_date")),
                 "available_key": _datetime_desc_key(event.available_at),
                 "retry_key": 0 if attempt_count > 0 else 1,
+                "live_redecision_retry_lane": _live_redecision_retry_lane(
+                    event, attempt_count
+                ),
                 "received_key": _datetime_desc_key(event.received_at),
             }
         )
@@ -1877,6 +1895,7 @@ def _rank_pending_rows_python(
         records,
         key=lambda item: (
             item["tier"],
+            item["live_redecision_retry_lane"],
             item.get("city_round", 1),
             -int(getattr(item["event"], "priority", 0) or 0),
             item["target_key"],
