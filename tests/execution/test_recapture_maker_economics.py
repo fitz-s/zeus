@@ -29,6 +29,7 @@ class _LegacyIntent:
     executable_snapshot_min_tick_size: float = 0.01
     executable_snapshot_min_order_size: float = 5.0
     executable_snapshot_neg_risk: bool = False
+    limit_price: float = 0.14
 
 
 def _final_intent(*, post_only: bool, limit: float = 0.14):
@@ -69,6 +70,12 @@ def _fresh_snapshot_with_min_order_size(*, top_ask, min_order_size):
 def _fresh_snapshot_with_neg_risk(*, top_ask, neg_risk):
     snap = _fresh_snapshot(top_ask=top_ask)
     snap.neg_risk = neg_risk
+    return snap
+
+
+def _fresh_snapshot_with_tick(*, top_ask, min_tick_size):
+    snap = _fresh_snapshot(top_ask=top_ask)
+    snap.min_tick_size = min_tick_size
     return snap
 
 
@@ -204,6 +211,30 @@ def test_same_selected_token_neg_risk_drift_updates_envelope(_patched_recapture)
 
     assert out.executable_snapshot_id == "snap-fresh"
     assert out.executable_snapshot_neg_risk is True
+
+
+def test_same_selected_token_tick_drift_updates_envelope(_patched_recapture):
+    """Venue tick metadata can drift between elected snapshot and submit.
+    For the same selected token, recapture should carry the fresh tick forward
+    and keep the order if its fresh-tick limit remains non-crossing."""
+
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_tick(
+        top_ask=Decimal("0.20"),
+        min_tick_size=Decimal("0.01"),
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(executable_snapshot_min_tick_size=Decimal("0.001")),
+        _final_intent(post_only=True, limit=0.141),
+        conn=object(),
+        submitted_shares=5.0,
+    )
+
+    assert out.executable_snapshot_id == "snap-fresh"
+    assert out.executable_snapshot_min_tick_size == Decimal("0.01")
+    assert out.limit_price == 0.14
 
 
 def test_recapture_rejects_when_submitted_shares_below_fresh_min_order_size(_patched_recapture):

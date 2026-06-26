@@ -1571,6 +1571,273 @@ def _edli_market_channel_seed_first_token_ids(
     return held | open_rest | candidates
 
 
+def _edli_schema_prefix(schema: str = "") -> str:
+    clean = str(schema or "").strip()
+    return f"{clean}." if clean else ""
+
+
+def _edli_table_exists(conn, table: str, *, schema: str = "") -> bool:
+    clean_table = str(table or "").strip()
+    if not clean_table:
+        return False
+    master = f"{_edli_schema_prefix(schema)}sqlite_master"
+    try:
+        return (
+            conn.execute(
+                f"SELECT 1 FROM {master} WHERE type='table' AND name=?",
+                (clean_table,),
+            ).fetchone()
+            is not None
+        )
+    except Exception:
+        return False
+
+
+def _edli_quote_event_token_ids(events) -> set[str]:
+    tokens: set[str] = set()
+    for event in events or ():
+        if getattr(event, "event_type", "") not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            continue
+        try:
+            payload = json.loads(str(getattr(event, "payload_json", "") or "{}"))
+        except Exception:
+            continue
+        token = str(payload.get("token_id") or "").strip()
+        if token and token != "None":
+            tokens.add(token)
+    return tokens
+
+
+def _edli_money_path_family_keys_for_tokens(
+    trade_conn,
+    forecasts_conn,
+    token_ids,
+    *,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    """Resolve quote token ids to live money-path families.
+
+    Price-channel events are token-keyed cache facts; EDLI decisions are
+    family-keyed forecast events. This bridge intentionally admits only tokens
+    that already belong to held exposure, resting entry commands, or the active
+    weather topology. It never turns arbitrary market noise into reactor work.
+    """
+
+    tokens = {
+        str(token or "").strip()
+        for token in (token_ids or set())
+        if str(token or "").strip() and str(token or "").strip() != "None"
+    }
+    if not tokens:
+        return set()
+
+    families: set[tuple[str, str, str]] = set()
+    trade_prefix = _edli_schema_prefix(trade_schema)
+    placeholders = ",".join("?" for _ in tokens)
+
+    if _edli_table_exists(trade_conn, "position_current", schema=trade_schema):
+        try:
+            rows = trade_conn.execute(
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM {trade_prefix}position_current
+                 WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
+                   AND (
+                        token_id IN ({placeholders})
+                     OR no_token_id IN ({placeholders})
+                   )
+                   AND city IS NOT NULL AND TRIM(city) != ''
+                   AND target_date IS NOT NULL AND TRIM(target_date) != ''
+                   AND temperature_metric IN ('high', 'low')
+                """,
+                (*tuple(tokens), *tuple(tokens)),
+            ).fetchall()
+            for row in rows:
+                families.add((str(row[0]), str(row[1]), str(row[2])))
+        except Exception:
+            pass
+
+    condition_ids: set[str] = set()
+    if _edli_table_exists(trade_conn, "executable_market_snapshots", schema=trade_schema):
+        try:
+            rows = trade_conn.execute(
+                f"""
+                SELECT DISTINCT condition_id
+                  FROM {trade_prefix}executable_market_snapshots
+                 WHERE selected_outcome_token_id IN ({placeholders})
+                    OR yes_token_id IN ({placeholders})
+                    OR no_token_id IN ({placeholders})
+                """,
+                (*tuple(tokens), *tuple(tokens), *tuple(tokens)),
+            ).fetchall()
+            condition_ids.update(str(row[0] or "").strip() for row in rows)
+        except Exception:
+            pass
+    condition_ids.discard("")
+    condition_ids.discard("None")
+
+    if condition_ids and _edli_table_exists(forecasts_conn, "market_events"):
+        cond_placeholders = ",".join("?" for _ in condition_ids)
+        try:
+            rows = forecasts_conn.execute(
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE condition_id IN ({cond_placeholders})
+                   AND city IS NOT NULL AND TRIM(city) != ''
+                   AND target_date IS NOT NULL AND TRIM(target_date) != ''
+                   AND temperature_metric IN ('high', 'low')
+                """,
+                tuple(condition_ids),
+            ).fetchall()
+            for row in rows:
+                families.add((str(row[0]), str(row[1]), str(row[2])))
+        except Exception:
+            pass
+
+    return {
+        (city.strip(), target_date.strip(), metric.strip())
+        for city, target_date, metric in families
+        if city.strip() and target_date.strip() and metric.strip() in {"high", "low"}
+    }
+
+
+def _edli_pending_redecision_entity_keys(world_conn) -> set[str]:
+    if not (
+        _edli_table_exists(world_conn, "opportunity_events")
+        and _edli_table_exists(world_conn, "opportunity_event_processing")
+    ):
+        return set()
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT e.entity_key
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE e.event_type = 'EDLI_REDECISION_PENDING'
+               AND p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status IN ('pending','processing')
+            """
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+
+
+def _edli_redecision_event_with_origin(event, origin: str):
+    from src.events.opportunity_event import make_opportunity_event
+
+    try:
+        payload = json.loads(str(event.payload_json or "{}"))
+        if not isinstance(payload, dict):
+            return event
+        payload["redecision_origin"] = str(origin)
+        return make_opportunity_event(
+            event_type=event.event_type,
+            entity_key=event.entity_key,
+            source=event.source,
+            observed_at=event.observed_at,
+            available_at=event.available_at,
+            received_at=event.received_at,
+            causal_snapshot_id=event.causal_snapshot_id,
+            payload=payload,
+            priority=event.priority,
+            expires_at=event.expires_at,
+            created_at=event.created_at,
+        )
+    except Exception:
+        return event
+
+
+def _edli_emit_price_channel_redecisions_for_events(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    events,
+    *,
+    received_at: str,
+    trade_schema: str = "",
+) -> int:
+    """Emit EDLI_REDECISION_PENDING for money-path quote changes.
+
+    The raw market-channel events stay cache-only/ignored. This function derives
+    the family-level decision trigger from successfully persisted quote evidence,
+    so live orders and positions re-enter the normal forecast decision path on
+    price movement without letting the entire market-data stream flood reactor
+    priority lanes.
+    """
+
+    tokens = _edli_quote_event_token_ids(events)
+    families = _edli_money_path_family_keys_for_tokens(
+        trade_conn,
+        forecasts_conn,
+        tokens,
+        trade_schema=trade_schema,
+    )
+    if not families:
+        return 0
+    try:
+        decision_time = datetime.fromisoformat(str(received_at).replace("Z", "+00:00"))
+        if decision_time.tzinfo is None:
+            decision_time = decision_time.replace(tzinfo=timezone.utc)
+        decision_time = decision_time.astimezone(timezone.utc)
+    except Exception:
+        decision_time = datetime.now(timezone.utc)
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+
+    writer = EventWriter(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        writer,
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+    events_to_emit = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=decision_time,
+        received_at=decision_time.isoformat(),
+        limit=None,
+        source=f"market_channel_price:{decision_time.isoformat()}",
+        already_pending_keys=_edli_pending_redecision_entity_keys(world_conn),
+        event_type="EDLI_REDECISION_PENDING",
+        restrict_to_families=families,
+    )
+    emitted = writer.write_many(
+        [_edli_redecision_event_with_origin(event, "market_price") for event in events_to_emit]
+    )
+    return sum(1 for result in emitted if result.inserted)
+
+
+def _edli_price_channel_redecision_sink(world_with_trades_conn, *, trade_schema: str = "trades"):
+    """Build a market-event sink bound to the atomic world+trades connection."""
+
+    def _sink(events) -> None:
+        from src.state.db import get_forecasts_connection_read_only
+
+        forecasts_conn = get_forecasts_connection_read_only()
+        try:
+            emitted = _edli_emit_price_channel_redecisions_for_events(
+                world_with_trades_conn,
+                world_with_trades_conn,
+                forecasts_conn,
+                events,
+                received_at=datetime.now(timezone.utc).isoformat(),
+                trade_schema=trade_schema,
+            )
+        finally:
+            forecasts_conn.close()
+        if emitted:
+            logger.info(
+                "EDLI market-channel price trigger emitted redecision events=%d quote_events=%d",
+                emitted,
+                len(events),
+            )
+
+    return _sink
+
+
 def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
     """Build refresh_executable_market_substrate_snapshots kwargs for a market-channel action.
 
@@ -1692,6 +1959,7 @@ def _edli_refresh_held_position_quote_evidence(
                     feasibility_conn=conn,
                     feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
+                    market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
             )
@@ -1810,6 +2078,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     feasibility_conn=conn,
                     feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
+                    market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
             )
@@ -2090,6 +2359,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         feasibility_conn=feasibility_conn,
                         feasibility_schema="trades",
                         coalescer=EventCoalescer(max_market_keys=1000),
+                        market_event_sink=_edli_price_channel_redecision_sink(conn),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
                     invalidate_snapshot=_invalidate_snapshot_action,

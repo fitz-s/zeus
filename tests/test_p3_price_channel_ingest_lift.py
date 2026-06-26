@@ -331,6 +331,67 @@ def test_market_channel_seed_first_falls_back_to_candidates_without_open_positio
     ) == {"candidate-yes", "candidate-no"}
 
 
+def test_price_channel_money_path_tokens_resolve_to_redecision_families():
+    from src.ingest.price_channel_ingest import _edli_money_path_family_keys_for_tokens
+
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?)",
+        ("pos-1", "active", "Paris", "2026-06-20", "low", "held-yes", "held-no"),
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("0xrest", "rest-no", "rest-yes", "rest-no"),
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?)",
+        ("0xrest", "Tokyo", "2026-06-20", "high"),
+    )
+
+    assert _edli_money_path_family_keys_for_tokens(
+        trade,
+        forecasts,
+        {"held-no", "rest-no", "unknown-token"},
+    ) == {
+        ("Paris", "2026-06-20", "low"),
+        ("Tokyo", "2026-06-20", "high"),
+    }
+
+
 def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table

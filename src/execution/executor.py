@@ -2944,8 +2944,10 @@ def _recapture_fresh_entry_snapshot_if_needed(
         return legacy_intent
     if fresh.selected_outcome_token_id != final_intent.selected_token_id:
         raise ValueError("recaptured executable snapshot selected token mismatch")
-    if fresh.min_tick_size != final_intent.tick_size:
-        raise ValueError("recaptured executable snapshot tick_size mismatch")
+    fresh_limit_price = _align_buy_limit_price_to_tick(
+        final_intent.final_limit_price,
+        fresh.min_tick_size,
+    )
     if Decimal(str(submitted_shares)) < Decimal(str(fresh.min_order_size)):
         raise ValueError(
             "recaptured executable snapshot submitted_shares below fresh min_order_size: "
@@ -2971,10 +2973,10 @@ def _recapture_fresh_entry_snapshot_if_needed(
     _is_maker_rest = bool(getattr(final_intent, "post_only", False))
     if _is_maker_rest:
         fresh_ask = fresh.orderbook_top_ask
-        if fresh_ask is not None and Decimal(str(final_intent.final_limit_price)) >= Decimal(str(fresh_ask)):
+        if fresh_ask is not None and Decimal(str(fresh_limit_price)) >= Decimal(str(fresh_ask)):
             raise ValueError(
                 "recaptured executable snapshot changed final-intent economics: "
-                f"post_only limit {final_intent.final_limit_price} would cross fresh ask {fresh_ask}"
+                f"post_only limit {fresh_limit_price} would cross fresh ask {fresh_ask}"
             )
     else:
         sweep = simulate_clob_sweep(
@@ -2982,15 +2984,21 @@ def _recapture_fresh_entry_snapshot_if_needed(
             direction=final_intent.direction,
             requested_size_kind="shares",
             requested_size_value=Decimal(str(submitted_shares)),
-            limit_price=final_intent.final_limit_price,
+            limit_price=fresh_limit_price,
         )
-        if sweep.depth_status != "PASS" or sweep.average_price != final_intent.expected_fill_price_before_fee:
+        expected_price = Decimal(str(final_intent.expected_fill_price_before_fee))
+        if (
+            sweep.depth_status != "PASS"
+            or sweep.average_price is None
+            or Decimal(str(sweep.average_price)) > expected_price
+        ):
             raise ValueError(
                 "recaptured executable snapshot changed final-intent economics: "
                 f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
             )
     return replace(
         legacy_intent,
+        limit_price=fresh_limit_price,
         executable_snapshot_id=fresh.snapshot_id,
         executable_snapshot_hash=fresh.executable_snapshot_hash,
         executable_snapshot_min_tick_size=fresh.min_tick_size,

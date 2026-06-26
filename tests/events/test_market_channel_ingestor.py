@@ -516,6 +516,35 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
     assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
 
 
+def test_market_channel_quote_notifies_inserted_event_sink_once():
+    conn, writer = _conn_writer()
+    seen: list[list[str]] = []
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=lambda events: seen.append([event.event_id for event in events]),
+    )
+    message = {
+        "event_type": "book",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "outcome_label": "YES",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "hash-1",
+        "timestamp": "1766789469958",
+    }
+
+    first = ingestor.handle_message(message, received_at="2026-05-24T10:00:00+00:00")
+    second = ingestor.handle_message(message, received_at="2026-05-24T10:00:00+00:00")
+
+    assert first.inserted is True
+    assert second.inserted is False
+    assert len(seen) == 1
+    assert len(seen[0]) == 1
+
+
 def test_market_channel_can_write_feasibility_to_trade_connection():
     world_conn = sqlite3.connect(":memory:")
     init_schema(world_conn)

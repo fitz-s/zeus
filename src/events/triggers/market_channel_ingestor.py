@@ -100,6 +100,7 @@ class MarketChannelIngestor:
         feasibility_schema: str = "",
         quote_cache: QuoteCache | None = None,
         coalescer: EventCoalescer | None = None,
+        market_event_sink: Callable[[list[OpportunityEvent]], None] | None = None,
     ) -> None:
         self._writer = writer
         self._feasibility_conn = feasibility_conn or writer.conn
@@ -114,6 +115,7 @@ class MarketChannelIngestor:
         self._token_metadata = token_metadata or {}
         self.quote_cache = quote_cache or QuoteCache()
         self._coalescer = coalescer
+        self._market_event_sink = market_event_sink
 
     def handle_message(self, message: dict[str, Any], *, received_at: str) -> EventWriteResult | MarketChannelAction | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -142,11 +144,14 @@ class MarketChannelIngestor:
             return []
         events = self._coalescer.drain(market_budget=market_budget)
         results = []
+        inserted_events: list[OpportunityEvent] = []
         for event in events:
             result = self._writer.write(event)
             if result.inserted:
                 self._write_feasibility_evidence(event)
+                inserted_events.append(event)
             results.append(result)
+        self._notify_market_event_sink(inserted_events)
         return results
 
     def event_from_message(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
@@ -228,7 +233,9 @@ class MarketChannelIngestor:
                 continue
             self._cache_event_payload(event)
             result = self._writer.write(event)
-            self._write_feasibility_evidence(event)
+            if result.inserted:
+                self._write_feasibility_evidence(event)
+                self._notify_market_event_sink([event])
             results.append(result)
         return results
 
@@ -383,8 +390,15 @@ class MarketChannelIngestor:
             self._coalescer.enqueue(event)
             return None
         result = self._writer.write(event)
-        self._write_feasibility_evidence(event)
+        if result.inserted:
+            self._write_feasibility_evidence(event)
+            self._notify_market_event_sink([event])
         return result
+
+    def _notify_market_event_sink(self, events: list[OpportunityEvent]) -> None:
+        if self._market_event_sink is None or not events:
+            return
+        self._market_event_sink(events)
 
 
 def active_weather_token_ids_from_snapshots(
@@ -873,7 +887,9 @@ class MarketChannelOnlineService:
             )
             if event is not None:
                 result = self.ingestor._writer.write(event)
-                self.ingestor._write_feasibility_evidence(event)
+                if result.inserted:
+                    self.ingestor._write_feasibility_evidence(event)
+                    self.ingestor._notify_market_event_sink([event])
                 results.append(result)
         self.gap_start = None
         return results
