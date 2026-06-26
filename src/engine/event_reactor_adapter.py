@@ -13245,6 +13245,8 @@ def _replacement_live_authority_proof_for_direction(
 def _replacement_primary_authority_already_applied(proof: _CandidateProof) -> bool:
     if str(getattr(proof, "q_source", "") or "") == "replacement_0_1":
         return True
+    if str(getattr(proof, "probability_authority", "") or "") == "replacement_0_1":
+        return True
     if str(getattr(proof, "probability_authority", "") or "").startswith("day0_absorbing"):
         return True
     if str(getattr(proof, "q_source", "") or "") == "day0_remaining_day":

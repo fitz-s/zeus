@@ -254,6 +254,10 @@ def test_replacement_reactor_hook_success_status_is_plain_live(
 
 def test_replacement_0_1_primary_authority_skips_legacy_replacement_hook() -> None:
     replacement_proof = SimpleNamespace(q_source="replacement_0_1")
+    replacement_probability_authority_proof = SimpleNamespace(
+        q_source=None,
+        probability_authority="replacement_0_1",
+    )
     baseline_proof = SimpleNamespace(q_source="emos")
     qkernel_selected_proof = SimpleNamespace(
         q_source="emos",
@@ -261,5 +265,11 @@ def test_replacement_0_1_primary_authority_skips_legacy_replacement_hook() -> No
     )
 
     assert adapter._replacement_primary_authority_already_applied(replacement_proof) is True
+    assert (
+        adapter._replacement_primary_authority_already_applied(
+            replacement_probability_authority_proof
+        )
+        is True
+    )
     assert adapter._replacement_primary_authority_already_applied(baseline_proof) is False
     assert adapter._replacement_primary_authority_already_applied(qkernel_selected_proof) is True
