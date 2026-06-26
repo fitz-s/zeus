@@ -144,7 +144,7 @@ def _substrate_refresh_city_alias_to_name() -> dict[str, str]:
 
 
 def _substrate_refresh_canonical_city_name(city: object) -> str:
-    raw = str(city or "").strip()
+    raw = str(getattr(city, "name", None) or city or "").strip()
     return _substrate_refresh_city_alias_to_name().get(
         _substrate_refresh_family_text_key(raw),
         raw,

@@ -485,7 +485,7 @@ def _refresh_pending_family_snapshots(
                 _refresh_city_alias_to_name[_key] = _city.name
 
     def _canonical_refresh_city_name(city: object) -> str:
-        raw = str(city or "").strip()
+        raw = str(getattr(city, "name", None) or city or "").strip()
         return _refresh_city_alias_to_name.get(_refresh_family_text_key(raw), raw)
 
     def _canonical_refresh_metric(metric: object) -> str:
