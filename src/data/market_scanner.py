@@ -3848,8 +3848,16 @@ def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> fl
     return _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS", 130.0)
 
 
-def _snapshot_capture_reserve_seconds_from_env(total_budget_seconds: float) -> float:
-    reserve = _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 12.0)
+def _snapshot_capture_reserve_seconds_from_env(
+    total_budget_seconds: float,
+    *,
+    reserve_seconds: float | None = None,
+) -> float:
+    reserve = (
+        float(reserve_seconds)
+        if reserve_seconds is not None
+        else _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 12.0)
+    )
     return min(reserve, max(0.05, float(total_budget_seconds) - 0.05))
 
 
@@ -4437,6 +4445,7 @@ def refresh_executable_market_substrate_snapshots(
     refresh_reason: str | None = None,
     max_outcomes: int | None = None,
     budget_seconds: float | None = None,
+    capture_reserve_seconds: float | None = None,
     priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
@@ -4685,7 +4694,10 @@ def refresh_executable_market_substrate_snapshots(
     # latency is charged against the same envelope (advisor 2026-05-27: a
     # 50-token POST /books can take >1s; charging it keeps the deadline honest).
     snapshot_budget_seconds = _snapshot_budget_seconds_from_env(budget_seconds)
-    capture_reserve_seconds = _snapshot_capture_reserve_seconds_from_env(snapshot_budget_seconds)
+    capture_reserve_seconds = _snapshot_capture_reserve_seconds_from_env(
+        snapshot_budget_seconds,
+        reserve_seconds=capture_reserve_seconds,
+    )
     deadline = time.monotonic() + snapshot_budget_seconds
     prefetch_deadline = deadline - capture_reserve_seconds
     budget_exhausted = False

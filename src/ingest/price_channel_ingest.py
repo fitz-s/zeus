@@ -2428,15 +2428,17 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
         try:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
-                from src.state.db import get_trade_connection
+                from src.state.db import _zeus_trade_db_path, get_trade_connection
+                from src.state.db_writer_lock import WriteClass, db_writer_lock
 
                 trade_conn = get_trade_connection(write_class="live")
                 try:
-                    invalidated = invalidate_executable_snapshots_for_market_channel_action(
-                        trade_conn,
-                        action,
-                        invalidated_at=datetime.now(timezone.utc),
-                    )
+                    with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
+                        invalidated = invalidate_executable_snapshots_for_market_channel_action(
+                            trade_conn,
+                            action,
+                            invalidated_at=datetime.now(timezone.utc),
+                        )
                     if invalidated:
                         trade_conn.commit()
                 finally:
@@ -2448,7 +2450,9 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
-                from src.state.db import get_trade_connection
+                from src.data.dual_run_lock import acquire_lock
+                from src.state.db import _zeus_trade_db_path, get_trade_connection
+                from src.state.db_writer_lock import WriteClass, db_writer_lock
 
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
                 if not substrate_acquired:
@@ -2456,8 +2460,18 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         "EDLI market-channel refresh skipped: executable substrate refresh already running"
                     )
                     return
+                process_lock_ctx = acquire_lock("market_substrate_refresh")
+                process_entered = False
+                process_acquired = False
                 trade_conn = None
                 try:
+                    process_acquired = process_lock_ctx.__enter__()
+                    process_entered = True
+                    if not process_acquired:
+                        logger.info(
+                            "EDLI market-channel refresh skipped: cross-process executable substrate refresh already running"
+                        )
+                        return
                     trade_conn = get_trade_connection(write_class="live")
                     try:
                         markets = find_weather_markets_or_raise(
@@ -2479,19 +2493,24 @@ def _edli_market_channel_ingestor_cycle() -> None:
                                 action.condition_id,
                             )
                             return
-                    summary = refresh_executable_market_substrate_snapshots(
-                        trade_conn,
-                        **_edli_market_channel_refresh_kwargs(
-                            action, markets, clob, datetime.now(timezone.utc)
-                        ),
-                    )
+                    with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
+                        summary = refresh_executable_market_substrate_snapshots(
+                            trade_conn,
+                            **_edli_market_channel_refresh_kwargs(
+                                action, markets, clob, datetime.now(timezone.utc)
+                            ),
+                        )
                     trade_conn.commit()
                 finally:
                     try:
                         if trade_conn is not None:
                             trade_conn.close()
                     finally:
-                        _market_substrate_refresh_lock.release()
+                        try:
+                            if process_entered:
+                                process_lock_ctx.__exit__(None, None, None)
+                        finally:
+                            _market_substrate_refresh_lock.release()
                 logger.info(
                     "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,

@@ -1227,6 +1227,7 @@ def _refresh_pending_family_snapshots(
                         scan_authority="VERIFIED",
                         max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
                         budget_seconds=snapshot_budget_s,
+                        capture_reserve_seconds=snapshot_reserve_s,
                         priority_condition_ids=priority_conditions,
                     )
                 write_conn.commit()

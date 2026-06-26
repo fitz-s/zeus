@@ -348,6 +348,13 @@ def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
         assert "with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):" in src
         assert "refresh_executable_market_substrate_snapshots(" in src
 
+    assert "capture_reserve_seconds=snapshot_reserve_s" in inspect.getsource(
+        main_module._refresh_pending_family_snapshots
+    )
+    assert "capture_reserve_seconds=snapshot_reserve_s" in inspect.getsource(
+        substrate_observer._refresh_pending_family_snapshots
+    )
+
 
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     """Background warming must not occupy the shared substrate lock for the full cadence."""

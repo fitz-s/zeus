@@ -2627,6 +2627,17 @@ def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(m
     assert ms._snapshot_capture_reserve_seconds_from_env(summary_budget) == pytest.approx(12.0)
 
 
+def test_call_site_snapshot_capture_reserve_overrides_global_default(monkeypatch):
+    """Tight sidecar budgets must not silently inherit the 12s global capture reserve."""
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", "12.0")
+
+    assert ms._snapshot_capture_reserve_seconds_from_env(
+        8.0,
+        reserve_seconds=6.0,
+    ) == pytest.approx(6.0)
+
+
 def test_illiquid_identity_capture_skips_fee_rate_http():
     """No-ask identity rows are non-executable and must not spend fee-rate HTTP."""
 

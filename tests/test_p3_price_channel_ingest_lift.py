@@ -1192,3 +1192,12 @@ def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module
     assert "get_orderbook_snapshot" in lane_src
     # And it is GONE from the order daemon (the lift, not a copy).
     assert "run_market_channel_service_forever" not in main_src
+
+
+def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_writer_locks():
+    """The lifted price-channel lane must not race main/substrate snapshot writers."""
+
+    lane_src = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
+    assert 'acquire_lock("market_substrate_refresh")' in lane_src
+    assert "with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):" in lane_src
+    assert "refresh_executable_market_substrate_snapshots(" in lane_src

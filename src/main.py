@@ -3725,6 +3725,7 @@ def _refresh_pending_family_snapshots(
                         scan_authority="VERIFIED",
                         max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
                         budget_seconds=snapshot_budget_s,
+                        capture_reserve_seconds=snapshot_reserve_s,
                         priority_condition_ids=priority_conditions,
                     )
                 write_conn.commit()
@@ -9395,6 +9396,10 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                             # only the selected bin would leave stale sibling prices in q/FDR).
                             max_outcomes=0,
                             budget_seconds=call_budget_s,
+                            capture_reserve_seconds=min(
+                                max(1.0, call_budget_s * 0.5),
+                                max(0.05, call_budget_s - 0.05),
+                            ),
                             priority_condition_ids=priority_condition_ids,
                         )
                     write_conn.commit()
