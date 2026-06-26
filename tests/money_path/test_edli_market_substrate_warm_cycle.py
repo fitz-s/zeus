@@ -368,6 +368,8 @@ def test_decision_refresh_lock_busy_does_not_consume_quota():
     """A shared-lock miss is not a refresh attempt and must not spend the one-family quota."""
 
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    assert "refresh_window_started: float | None = None" in refresh_src
+    assert "if refresh_window_started is None:" in refresh_src
     quota_pos = refresh_src.index("refresh_attempts += 1")
     process_lock_pos = refresh_src.index("if not substrate_process_acquired:")
     write_conn_pos = refresh_src.index("write_conn = get_trade_connection")

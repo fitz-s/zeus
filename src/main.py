@@ -9231,7 +9231,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             value = default
         return max(minimum, min(value, maximum))
 
-    cycle_started = time.monotonic()
+    refresh_window_started: float | None = None
     cycle_budget_s = _float_setting(
         "reactor_decision_refresh_cycle_budget_seconds",
         6.0,
@@ -9253,7 +9253,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
     refresh_attempts = 0
 
     def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
-        nonlocal refresh_attempts
+        nonlocal refresh_attempts, refresh_window_started
         from src.data.market_scanner import (
             reconstruct_weather_market_from_static_topology,
             refresh_executable_market_substrate_snapshots,
@@ -9269,7 +9269,10 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 city, target_date, metric,
             )
             return False
-        elapsed = time.monotonic() - cycle_started
+        now_mono = time.monotonic()
+        if refresh_window_started is None:
+            refresh_window_started = now_mono
+        elapsed = now_mono - refresh_window_started
         if refresh_attempts >= max_refreshes_per_cycle or (
             cycle_budget_s > 0 and elapsed >= cycle_budget_s
         ):
