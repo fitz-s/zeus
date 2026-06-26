@@ -5034,28 +5034,18 @@ def _edli_event_reactor_cycle() -> None:
             edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
         )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
-        # FUNNEL-STARVATION FIX (2026-06-09): raise the per-cycle evaluation ceiling
-        # so the reactor can sweep the FULL live FORECAST_SNAPSHOT_READY set
-        # (~200 events across ~50 cities × 3 target dates) within one or two cycles
-        # once the substrate warmer (now round-robin, see _SUBSTRATE_REFRESH_CURSOR)
-        # keeps books fresh. The prior maximum=50 capped a cycle at 50 evaluations
-        # regardless of config, so even with fresh books the live family set could
-        # not be fully swept per cadence — a throttle on EVALUATION COVERAGE, the
-        # exact thing the operator directive forbids (every live family must be
-        # evaluated, honest no-edge only after a FULL evaluation). The reactor's own
-        # 30s wall-clock budget (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, in reactor.py)
-        # remains the real safety bound on cycle length; this ceiling just stops
-        # truncating the admissible queue below the live family count. Economic
-        # gates (q_lcb, cost floor, Kelly, depth) are untouched.
-        # Wave-1 2026-06-12: the no_submit_proof_limit production cap is DELETED. It
-        # truncated how many pending families the reactor processed per cycle — and thus
-        # how many no-submit proofs/receipts were persisted — which silently dropped the
-        # tail of the admissible queue (an artificial throttle the operator law forbids).
-        # proof_limit is now UNBOUNDED (None): every pending family is processed and every
-        # proof persists. The reactor's own 30s wall-clock budget
-        # (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, reactor.py) remains the real, honest safety
-        # bound on cycle length; any family not reached this cycle requeues for the next.
-        proof_limit = None
+        # Live cadence invariant: full coverage is achieved by fair rotation across
+        # continuous cycles, not by processing an unbounded queue in one cycle. The
+        # unbounded 2026-06-12 setting let stale substrate / slow JIT book events hold
+        # one reactor run past the 60s scheduler cadence, so the next run skipped and
+        # entry/day0/redecision stalled. Bound per-cycle work; events not reached stay
+        # pending and are reached by EventStore's city/lane fairness.
+        proof_limit = _edli_bounded_positive_int(
+            edli_cfg,
+            "reactor_process_limit",
+            default=12,
+            maximum=50,
+        )
         store = EventStore(conn)
         #
         # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
@@ -8881,15 +8871,15 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
 def _edli_pre_submit_clob_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
     if raw in (None, ""):
-        return 6.0
+        return 3.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
-        return 6.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
+        return 3.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
-        return 6.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
+        return 3.0
     return value
 
 
@@ -8923,12 +8913,12 @@ def _edli_pre_submit_inner_io_timeout_seconds() -> float:
     return max(0.01, min(2.0, outer * 0.35))
 
 
-def _edli_run_pre_submit_clob_call(label: str, fn):
+def _edli_run_pre_submit_clob_call(label: str, fn, *, seconds: float | None = None):
     from src.runtime.timeout_guard import run_with_timeout
 
     return run_with_timeout(
         fn,
-        seconds=_edli_pre_submit_clob_timeout_seconds(),
+        seconds=seconds if seconds is not None else _edli_pre_submit_clob_timeout_seconds(),
         label=f"pre_submit_{label}",
     )
 
@@ -8951,11 +8941,28 @@ def _edli_pre_submit_jit_book_timeout():
     import httpx
 
     outer = _edli_pre_submit_clob_timeout_seconds()
-    read, write, pool = 0.85, 0.25, 0.10
-    # 0.3s headroom for Python overhead under the outer guard, halved for the
-    # TCP+TLS double-application of the connect budget.
-    connect = max(0.5, min(2.25, (outer - read - write - pool - 0.3) / 2.0))
+    read, write, pool = 0.55, 0.20, 0.08
+    # Submit-time JIT is a freshness witness, not a producer catch-up lane. It
+    # must fail closed quickly and let the event requeue instead of spending a
+    # reactor cadence on one stale candidate.
+    connect = max(0.25, min(0.85, (outer - read - write - pool - 0.25) / 2.0))
     return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
+def _edli_pre_submit_jit_outer_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_PRE_SUBMIT_JIT_OUTER_TIMEOUT_SECONDS")
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid ZEUS_PRE_SUBMIT_JIT_OUTER_TIMEOUT_SECONDS=%r; using strict default",
+                raw,
+            )
+        else:
+            if value > 0:
+                return min(value, _edli_pre_submit_clob_timeout_seconds())
+    return min(1.6, _edli_pre_submit_clob_timeout_seconds())
 
 
 def _edli_pre_submit_jit_warmup_timeout():
@@ -9063,6 +9070,7 @@ def _edli_pre_submit_jit_book_quote_provider():
         return _edli_run_pre_submit_clob_call(
             "jit_book",
             lambda: clob.get_orderbook_snapshot(token_id),
+            seconds=_edli_pre_submit_jit_outer_timeout_seconds(),
         )
 
     return _fetch

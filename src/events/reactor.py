@@ -60,7 +60,7 @@ from src.strategy.live_inference.live_admission import (
 
 UTC = timezone.utc
 
-DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
+DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 22.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
@@ -809,7 +809,7 @@ class OpportunityEventReactor:
         # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
         # cycle so the scheduler never hits "max running instances reached" and
         # fresh candidates (freshest-target-first, STEP 3) are reached promptly.
-        # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
+        # Default 22s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
         budget = _cycle_budget_seconds()
         cycle_start = time.monotonic()
         batch_limit = _fetch_batch_limit() if limit is None else max(1, int(limit))
