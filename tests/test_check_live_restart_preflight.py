@@ -888,6 +888,73 @@ def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatc
     assert tolerated["repair_evidence"]["command_state"] == "REJECTED"
 
 
+def test_preflight_tolerates_pre_submit_exit_retry_without_exit_command(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            venue_status TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'retry-no-command-pos', 'pending_exit', 'Singapore', '2026-06-26', 'high',
+            'Will the highest temperature in Singapore be 30°C on June 26?',
+            'buy_yes', 1.031967, 1.0319, 'filled', 'DAY0_HARD_FACT_BIN_DEAD',
+            9, '2026-06-26T10:58:15+00:00', 0.0, 1, 0.031, 1,
+            '2026-06-26T10:06:50+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'retry-no-command-pos:phase_transition:505',
+            'retry-no-command-pos',
+            505,
+            'EXIT_ORDER_REJECTED',
+            '2026-06-26T09:58:15+00:00',
+            'retry_pending',
+            '{"error":"executable_snapshot_gate: venue command requires executable market snapshot_id"}'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_pre_submit_retry_resume"
+    assert tolerated["repair_evidence"]["command_state"] == "NO_EXIT_COMMAND_RETRY_PENDING"
+    assert tolerated["repair_evidence"]["event_type"] == "EXIT_ORDER_REJECTED"
+
+
 def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tmp_path):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)

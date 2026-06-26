@@ -1039,10 +1039,13 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
             }
             tolerated.append(item)
         elif str(row["position_id"] or "") in retry_resumable:
+            _retry_evidence = retry_resumable[str(row["position_id"] or "")]
             item = {
                 **item,
-                "restart_resolution": "exit_lifecycle_retry_resume",
-                "repair_evidence": retry_resumable[str(row["position_id"] or "")],
+                "restart_resolution": _retry_evidence.get(
+                    "restart_resolution", "exit_lifecycle_retry_resume"
+                ),
+                "repair_evidence": _retry_evidence,
             }
             tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
@@ -1166,6 +1169,69 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
             "exit_retry_count": row["exit_retry_count"],
             "next_exit_retry_at": row["next_exit_retry_at"],
             "command_updated_at": row["command_updated_at"],
+        }
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return resumable
+        rows = conn.execute(
+            """
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE cmd.intent_kind = 'EXIT'
+            ),
+            latest_event AS (
+                SELECT pe.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pe.position_id
+                           ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+                       ) AS rn
+                  FROM position_events pe
+                 WHERE pe.event_type IN ('EXIT_ORDER_REJECTED', 'EXIT_INTENT', 'EXIT_ORDER_POSTED')
+            )
+            SELECT pc.position_id,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   latest_event.event_id,
+                   latest_event.event_type,
+                   latest_event.venue_status,
+                   latest_event.occurred_at
+              FROM position_current pc
+              LEFT JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+              JOIN latest_event
+                ON latest_event.position_id = pc.position_id
+               AND latest_event.rn = 1
+             WHERE pc.phase = 'pending_exit'
+               AND latest_exit.command_id IS NULL
+               AND latest_event.event_type = 'EXIT_ORDER_REJECTED'
+               AND LOWER(COALESCE(latest_event.venue_status, '')) = 'retry_pending'
+               AND COALESCE(pc.exit_retry_count, 0) > 0
+               AND COALESCE(pc.next_exit_retry_at, '') != ''
+            """
+        ).fetchall()
+    for row in rows:
+        resumable[str(row["position_id"])] = {
+            "command_id": None,
+            "command_state": "NO_EXIT_COMMAND_RETRY_PENDING",
+            "venue_order_id": "",
+            "exit_retry_count": row["exit_retry_count"],
+            "next_exit_retry_at": row["next_exit_retry_at"],
+            "command_updated_at": None,
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "venue_status": row["venue_status"],
+            "event_occurred_at": row["occurred_at"],
+            "restart_resolution": "exit_lifecycle_pre_submit_retry_resume",
         }
     return resumable
 
