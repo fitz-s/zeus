@@ -63,6 +63,51 @@ from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 import src.data.substrate_observer as substrate_observer
 
 
+def test_confirmation_refresh_prune_restricts_to_priority_conditions():
+    """Scoped redecision confirmation must not refresh every sibling bin."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            condition_id TEXT,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            snapshot_id TEXT
+        )
+        """
+    )
+    market = {
+        "outcomes": [
+            {"condition_id": "priority-cond", "token_id": "yes-priority", "no_token_id": "no-priority"},
+            {"condition_id": "sibling-cond", "token_id": "yes-sibling", "no_token_id": "no-sibling"},
+        ],
+        "condition_ids": ["priority-cond", "sibling-cond"],
+    }
+
+    scoped, _fresh, stale = main_module._prune_fresh_market_outcomes_for_snapshot_refresh(
+        conn,
+        [market],
+        fresh_at_iso="2026-06-26T00:00:00+00:00",
+        restrict_to_condition_ids={"priority-cond"},
+    )
+    ordinary, _fresh2, ordinary_stale = main_module._prune_fresh_market_outcomes_for_snapshot_refresh(
+        conn,
+        [market],
+        fresh_at_iso="2026-06-26T00:00:00+00:00",
+    )
+
+    assert stale == 1
+    assert [o["condition_id"] for o in scoped[0]["outcomes"]] == ["priority-cond"]
+    assert scoped[0]["condition_ids"] == ["priority-cond"]
+    assert ordinary_stale == 2
+    assert [o["condition_id"] for o in ordinary[0]["outcomes"]] == ["priority-cond", "sibling-cond"]
+
+
 def _venue_open_now(target_date: str) -> datetime:
     """A frozen decision-clock instant at which a family's venue market is still
     OPEN (NOT POST_TRADING) — 06:00 UTC of ``target_date``, six hours before the

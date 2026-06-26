@@ -2685,7 +2685,13 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     markets: list[dict],
     *,
     fresh_at_iso: str,
+    restrict_to_condition_ids: Iterable[str] | None = None,
 ) -> tuple[list[dict], int, int]:
+    scoped_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (restrict_to_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
     pruned: list[dict] = []
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
@@ -2695,6 +2701,8 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
             if not isinstance(outcome, dict):
                 continue
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            if scoped_conditions and cid not in scoped_conditions:
+                continue
             if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
                 fresh_conditions_skipped += 1
                 continue
@@ -3596,6 +3604,11 @@ def _refresh_pending_family_snapshots(
                 write_conn,
                 markets,
                 fresh_at_iso=now_iso,
+                restrict_to_condition_ids=(
+                    priority_conditions
+                    if priority_conditions and not include_pending_families
+                    else None
+                ),
             )
         )
         if not markets_for_refresh:
