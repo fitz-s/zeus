@@ -3707,6 +3707,94 @@ def test_gate84_jit_book_uses_fetch_time_when_reactor_decision_time_is_old(monke
     assert payload["quote_age_ms"] <= witness.max_quote_age_ms
 
 
+def test_pre_submit_payload_carries_receipt_economics_from_final_intent():
+    from src.engine.event_reactor_adapter import (
+        PreSubmitAuthorityWitness,
+        _pre_submit_revalidation_payload_from_final_intent,
+    )
+
+    decision_time = datetime(2026, 6, 26, 21, 0, tzinfo=timezone.utc)
+    qkernel_economics = {
+        "source": "qkernel_spine",
+        "route_id": "DIRECT_YES:bin-1@proof",
+        "side": "YES",
+        "payoff_q_point": 0.62,
+        "payoff_q_lcb": 0.58,
+        "edge_lcb": 0.08,
+        "cost": 0.50,
+    }
+    final_intent = SimpleNamespace(
+        certificate_hash="final-cert",
+        payload={
+            "event_id": "event-1",
+            "event_type": "ForecastSnapshotReady",
+            "final_intent_id": "intent-1",
+            "strategy_key": "strategy-1",
+            "condition_id": "cond-1",
+            "token_id": "yes-1",
+            "side": "BUY",
+            "direction": "buy_yes",
+            "city": "City",
+            "target_date": "2026-06-28",
+            "metric": "high",
+            "actionable_certificate_hash": "actionable-cert",
+            "cost_basis_hash": "cost-cert",
+            "limit_price": 0.50,
+            "order_type": "LIMIT",
+            "time_in_force": "GTC",
+            "post_only": True,
+            "size": 10.0,
+            "q_live": 0.62,
+            "q_lcb_5pct": 0.58,
+            "trade_score": 0.08,
+            "action_score": 0.07,
+            "c_fee_adjusted": 0.50,
+            "c_cost_95pct": 0.50,
+            "selection_authority_applied": "qkernel_spine",
+            "qkernel_execution_economics": qkernel_economics,
+        },
+    )
+    witness = PreSubmitAuthorityWitness(
+        checked_at=decision_time.isoformat(),
+        quote_seen_at=(decision_time - timedelta(milliseconds=50)).isoformat(),
+        max_quote_age_ms=1000,
+        book_hash="book-hash",
+        current_best_bid=0.49,
+        current_best_ask=0.60,
+        tick_size=0.01,
+        min_order_size=5.0,
+        neg_risk=False,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="execution_feasibility_evidence",
+        book_captured_at=decision_time.isoformat(),
+        heartbeat_authority_id="heartbeat_supervisor",
+        heartbeat_checked_at=decision_time.isoformat(),
+        user_ws_authority_id="ws_gap_guard",
+        user_ws_checked_at=decision_time.isoformat(),
+        venue_connectivity_authority_id="polymarket_public_orderbook",
+        venue_connectivity_checked_at=decision_time.isoformat(),
+        balance_allowance_authority_id="polymarket_wallet_readonly",
+        balance_allowance_checked_at=decision_time.isoformat(),
+    )
+
+    payload = _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent,
+        executable_snapshot=object(),
+        decision_time=decision_time,
+        authority_witness=witness,
+    )
+
+    assert payload["q_live"] == pytest.approx(0.62)
+    assert payload["q_lcb_5pct"] == pytest.approx(0.58)
+    assert payload["expected_edge"] == pytest.approx(0.08)
+    assert payload["expected_edge_source_certificate_hash"] == "actionable-cert"
+    assert payload["cost_basis_source_certificate_hash"] == "cost-cert"
+    assert payload["qkernel_execution_economics"] == qkernel_economics
+
+
 def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
     """RED: when the JIT fetch is unavailable/fails AND the only DB row is genuinely
     stale (> max_quote_age_ms), the provider must FAIL CLOSED — never emit a witness

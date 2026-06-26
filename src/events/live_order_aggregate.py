@@ -28,6 +28,11 @@ PRE_SUBMIT_REQUIRED_FIELDS = (
     "current_best_bid",
     "current_best_ask",
     "limit_price",
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "expected_edge_source_certificate_hash",
+    "cost_basis_source_certificate_hash",
     "would_cross_book",
     "tick_size",
     "tick_aligned",
@@ -745,7 +750,22 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     _positive_number(payload.get("min_order_size"), "min_order_size")
     _non_negative_number(payload.get("current_best_bid"), "current_best_bid")
     _non_negative_number(payload.get("current_best_ask"), "current_best_ask")
-    _non_negative_number(payload.get("limit_price"), "limit_price")
+    limit_price = _positive_number(payload.get("limit_price"), "limit_price")
+    q_live = _probability_number(payload.get("q_live"), "q_live")
+    q_lcb = _probability_number(payload.get("q_lcb_5pct"), "q_lcb_5pct")
+    if q_lcb > q_live:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires q_lcb_5pct <= q_live")
+    expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
+    if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
+    if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires cost_basis_source_certificate_hash")
+    submit_edge = q_lcb - limit_price
+    if submit_edge <= 0.0:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires positive submit q_lcb-minus-limit")
+    if expected_edge > submit_edge + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds submit q_lcb-minus-limit")
+    _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
     # GATE#85 fix (2026-06-01): taker orders (post_only is False, FOK/FAK) are exempt
     # from the post_only=True and GTC/GTD invariants — those are maker-only constraints.
     # Explicit post_only=False signals taker intent; missing/None → fail-closed as maker.
@@ -764,6 +784,45 @@ def _positive_number(value: Any, name: str) -> float:
     if number <= 0:
         raise LiveOrderAggregateError(f"PreSubmitRevalidated requires positive {name}")
     return number
+
+
+def _probability_number(value: Any, name: str) -> float:
+    number = _non_negative_number(value, name)
+    if number > 1:
+        raise LiveOrderAggregateError(f"PreSubmitRevalidated requires probability {name}")
+    return number
+
+
+def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: float, q_lcb: float) -> None:
+    economics = payload.get("qkernel_execution_economics")
+    if economics in (None, ""):
+        return
+    if not isinstance(economics, dict):
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires object qkernel_execution_economics")
+    route_id = str(economics.get("route_id") or "").upper()
+    route_type = str(economics.get("route_type") or "").lower()
+    if route_type != "direct" and not route_id.startswith("DIRECT_"):
+        return
+    route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
+    native_side = _native_curve_side_for_direction(str(payload.get("direction") or ""))
+    qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
+    if qkernel_side and native_side is not None and qkernel_side != native_side:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel side must match submit direction")
+    payoff_q_point = _probability_number(economics.get("payoff_q_point"), "qkernel_execution_economics.payoff_q_point")
+    payoff_q_lcb = _probability_number(economics.get("payoff_q_lcb"), "qkernel_execution_economics.payoff_q_lcb")
+    if payoff_q_point > q_live + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_point exceeds submit q_live")
+    if payoff_q_lcb > q_lcb + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb exceeds submit q_lcb_5pct")
+
+
+def _native_curve_side_for_direction(direction: str) -> str | None:
+    normalized = str(direction or "").strip().lower()
+    if normalized.endswith("_yes"):
+        return "YES"
+    if normalized.endswith("_no"):
+        return "NO"
+    return None
 
 
 def _non_negative_number(value: Any, name: str) -> float:

@@ -5172,8 +5172,8 @@ def test_buy_no_exit_ev_gate_uses_fill_authority_shares_for_hold_value(monkeypat
     assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
 
 
-def test_exit_micro_position_hold_uses_fill_authority_cost_basis():
-    """Micro-position hold is about actual held cost basis, not stale submitted size."""
+def test_micro_position_uses_fill_authority_but_does_not_block_negative_edge_exit():
+    """Micro-position handling marks actual filled cost but still runs exit economics."""
     pos = _make_position(
         direction="buy_yes",
         size_usd=100.0,
@@ -5202,7 +5202,8 @@ def test_exit_micro_position_hold_uses_fill_authority_cost_basis():
         )
     )
 
-    assert decision.should_exit is False
+    assert decision.should_exit is True
+    assert decision.trigger == "EDGE_REVERSAL"
     assert "micro_position_hold" in decision.applied_validations
 
 

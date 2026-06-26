@@ -1173,15 +1173,12 @@ class Position:
                 trigger="FLASH_CRASH_PANIC",
             )
 
-        # Micro-position hold (Layer 8: < $1 never sold)
+        # Micro-position marker: small fills still need the same live redecision
+        # math as every other held position. Returning here hid incident-created
+        # negative-edge dust from CI/hold-value exits; keep the breadcrumb but let
+        # the downstream economic gates decide hold vs exit.
         if self.effective_cost_basis_usd < 1.0:
             applied.append("micro_position_hold")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                False,
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-            )
 
         # Vig extreme
         if (

@@ -429,6 +429,11 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"balance_allowance_status": "INSUFFICIENT"}, "balance_allowance_status=OK"),
         ({"book_authority_id": ""}, "book_authority_id"),
         ({"time_in_force": "FOK"}, "GTC/GTD"),
+        ({"q_lcb_5pct": 0.72, "q_live": 0.70}, "q_lcb_5pct <= q_live"),
+        ({"q_lcb_5pct": 0.39, "limit_price": 0.40}, "positive submit q_lcb-minus-limit"),
+        ({"expected_edge": 0.25}, "expected_edge exceeds"),
+        ({"expected_edge_source_certificate_hash": ""}, "expected_edge_source_certificate_hash"),
+        ({"cost_basis_source_certificate_hash": ""}, "cost_basis_source_certificate_hash"),
     ],
 )
 def test_pre_submit_revalidation_failures_block_command(override, message):
@@ -446,6 +451,65 @@ def test_pre_submit_revalidation_failures_block_command(override, message):
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
             payload=_pre_submit_payload(**override),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_lucknow_negative_edge_submit_split():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="positive submit q_lcb-minus-limit"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                q_live=0.005426579861923466,
+                q_lcb_5pct=0.003,
+                limit_price=0.006,
+                expected_edge=0.04049776073684555,
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_jeddah_qkernel_payoff_above_submit_lcb():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="payoff_q_lcb exceeds submit q_lcb_5pct"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                side="BUY",
+                direction="buy_no",
+                token_id="token-no",
+                q_live=0.986261171798223,
+                q_lcb_5pct=0.986261171798223,
+                limit_price=0.98,
+                expected_edge=0.005,
+                qkernel_execution_economics={
+                    "route_id": "DIRECT_NO:b24@proof",
+                    "side": "NO",
+                    "payoff_q_point": 0.986261171798223,
+                    "payoff_q_lcb": 0.998678563135879,
+                },
+            ),
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
@@ -564,6 +628,9 @@ def _pre_submit_payload(**overrides):
         "current_best_bid": 0.41,
         "current_best_ask": 0.43,
         "limit_price": 0.40,
+        "q_live": 0.70,
+        "q_lcb_5pct": 0.60,
+        "expected_edge": 0.10,
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,
