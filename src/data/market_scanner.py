@@ -174,9 +174,9 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
     if per_city_limit != 0:
         return None
     try:
-        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "500"))
+        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "32"))
     except ValueError:
-        configured = 500
+        configured = 32
     return configured if configured > 0 else None
 
 

@@ -136,14 +136,21 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
         FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
         GROUP BY city, target_date, metric
-        -- Refresh the newest target date first. Old target-date rows can remain
-        -- pending after a market has disappeared from Gamma; if they consume the
-        -- per-cycle cap, fresh executable snapshots starve and no receipt is
-        -- emitted even though the reactor itself is healthy.
+        -- Refresh live-money urgency first. Day0 hard facts and price-driven
+        -- redecisions are the rows whose stale executable substrate directly
+        -- blocks hold/exit/shift/new-entry decisions. Target date remains a
+        -- freshness tiebreak, not the primary ordering law; otherwise future
+        -- families can bury same-day Day0 rows.
         ORDER BY
-            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
+            MAX(CASE e.event_type
+                  WHEN 'DAY0_EXTREME_UPDATED' THEN 4
+                  WHEN 'EDLI_REDECISION_PENDING' THEN 3
+                  WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
+                  ELSE 1
+                END) DESC,
             MAX(e.priority) DESC,
             MAX(e.available_at) DESC,
+            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
         (consumer_name, event_window_limit),
@@ -401,6 +408,7 @@ def _refresh_pending_family_snapshots(
     now_utc: datetime | None = None,
     extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
     include_pending_families: bool = True,
+    priority_condition_ids: Iterable[str] | None = None,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -433,6 +441,11 @@ def _refresh_pending_family_snapshots(
 
     now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
+    priority_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     if include_pending_families:
@@ -1098,6 +1111,7 @@ def _refresh_pending_family_snapshots(
                         scan_authority="VERIFIED",
                         max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
                         budget_seconds=snapshot_budget_s,
+                        priority_condition_ids=priority_conditions,
                     )
                 write_conn.commit()
             finally:

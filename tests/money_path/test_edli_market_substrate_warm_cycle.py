@@ -60,6 +60,7 @@ import pytest
 
 import src.main as main_module
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+import src.data.market_scanner as market_scanner
 import src.data.substrate_observer as substrate_observer
 
 
@@ -227,6 +228,28 @@ def test_pending_family_refresh_has_no_fixed_family_cap():
     assert "ordinary_families[:start_offset]" in src, (
         "expected the rotating-cursor wrap-around ordinary_families[:start_offset]; the "
         "round-robin sweep is what prevents tail-family starvation"
+    )
+
+
+def test_pending_family_refresh_orders_money_path_urgency_before_target_date():
+    """Day0/redecision freshness must not be buried behind newer future dates."""
+
+    main_src = inspect.getsource(main_module._pending_family_rows_for_refresh)
+    observer_src = inspect.getsource(substrate_observer._pending_family_rows_for_refresh)
+
+    for src in (main_src, observer_src):
+        day0_pos = src.index("WHEN 'DAY0_EXTREME_UPDATED' THEN 4")
+        redecision_pos = src.index("WHEN 'EDLI_REDECISION_PENDING' THEN 3")
+        target_pos = src.index("MAX(json_extract(e.payload_json, '$.target_date')) DESC")
+        assert day0_pos < target_pos
+        assert redecision_pos < target_pos
+
+
+def test_full_family_capture_default_batch_is_small_enough_for_direct_clob():
+    """The warm producer must make real snapshot progress, not select 500 misses."""
+
+    assert market_scanner._snapshot_capture_max_candidates_per_tick(per_city_limit=0) <= (
+        market_scanner._full_family_direct_clob_prefetch_candidate_threshold()
     )
 
 

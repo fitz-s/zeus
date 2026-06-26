@@ -2425,14 +2425,21 @@ def _pending_family_rows_for_refresh(
         FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
         GROUP BY city, target_date, metric
-        -- Refresh the newest target date first. Old target-date rows can remain
-        -- pending after a market has disappeared from Gamma; if they consume the
-        -- per-cycle cap, fresh executable snapshots starve and no receipt is
-        -- emitted even though the reactor itself is healthy.
+        -- Refresh live-money urgency first. Day0 hard facts and price-driven
+        -- redecisions are the rows whose stale executable substrate directly
+        -- blocks hold/exit/shift/new-entry decisions. Target date remains a
+        -- freshness tiebreak, not the primary ordering law; otherwise future
+        -- families can bury same-day Day0 rows.
         ORDER BY
-            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
+            MAX(CASE e.event_type
+                  WHEN 'DAY0_EXTREME_UPDATED' THEN 4
+                  WHEN 'EDLI_REDECISION_PENDING' THEN 3
+                  WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
+                  ELSE 1
+                END) DESC,
             MAX(e.priority) DESC,
             MAX(e.available_at) DESC,
+            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
         (consumer_name, event_window_limit),
