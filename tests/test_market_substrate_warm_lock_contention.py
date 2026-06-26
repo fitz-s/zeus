@@ -382,7 +382,8 @@ def test_substrate_clob_timeout_is_short_and_independent_of_discovery(monkeypatc
     The warm lane retries continuously and must stay inside its 20s cadence.
     ``ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS`` is allowed to be longer for broad
     discovery, but it must not make pending-family /books or targeted decision
-    refresh block most of a live cycle.
+    refresh block most of a live cycle. The default must still exceed the
+    measured cold TLS handshake envelope for the CLOB host.
     """
 
     import src.data.substrate_observer as substrate_observer
@@ -391,8 +392,8 @@ def test_substrate_clob_timeout_is_short_and_independent_of_discovery(monkeypatc
     monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "9.0")
     monkeypatch.delenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", raising=False)
 
-    assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(1.5)
-    assert main_module._substrate_clob_timeout_seconds() == pytest.approx(1.5)
+    assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(4.0)
+    assert main_module._substrate_clob_timeout_seconds() == pytest.approx(4.0)
 
     monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "2.25")
 

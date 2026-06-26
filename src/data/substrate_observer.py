@@ -81,12 +81,15 @@ def _substrate_clob_timeout_seconds() -> float:
 
     This lane is a continuously retried producer. It must finish inside the
     warm cadence; a missing orderbook is cheaper to retry next tick than to let
-    one slow public CLOB read starve every pending family.
+    one slow public CLOB read starve every pending family. The default still
+    has to clear the measured cold TLS handshake envelope for clob.polymarket.com;
+    the public client documents ~2.2-2.7s cold handshakes, so 1.5s made the live
+    priority refresh fail before it could establish a connection.
     """
 
     return max(
         1.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "1.5")),
+        float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "4.0")),
     )
 
 

@@ -118,7 +118,7 @@ def _substrate_clob_timeout_seconds() -> float:
 
     return max(
         1.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "1.5")),
+        float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "4.0")),
     )
 
 
