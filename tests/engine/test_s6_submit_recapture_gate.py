@@ -618,6 +618,7 @@ def test_qkernel_selected_proof_is_not_overruled_by_legacy_family_ranker():
             "candidate_id": "DIRECT_YES:cond-A@proof",
             "route_id": "DIRECT_YES:cond-A@proof",
             "side": "YES",
+            "payoff_q_point": 0.62,
             "payoff_q_lcb": 0.58,
             "edge_lcb": 0.08,
             "delta_u_at_min": 0.01,

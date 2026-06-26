@@ -395,6 +395,7 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
             "route_id": f"DIRECT_YES:{era._candidate_bin_id(unguarded)}@proof",
             "side": "YES",
             "bin_id": era._candidate_bin_id(unguarded),
+            "payoff_q_point": 0.90,
             "payoff_q_lcb": 0.30,
             "edge_lcb": 0.10,
             "point_ev": 0.70,
@@ -463,6 +464,7 @@ def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
             "route_id": f"DIRECT_YES:{era._candidate_bin_id(base)}@proof",
             "side": "YES",
             "bin_id": era._candidate_bin_id(base),
+            "payoff_q_point": 0.90,
             "payoff_q_lcb": 0.30,
             "edge_lcb": 0.10,
             "point_ev": 0.70,
@@ -492,6 +494,56 @@ def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
     assert guarded_price.value == pytest.approx(0.20)
 
 
+def test_qkernel_native_candidate_uses_certificate_point_with_certificate_lcb():
+    """Submit materialization must not mix qkernel LCB with legacy proof point q."""
+
+    from src.types.market import Bin
+
+    bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
+    row = _snapshot_row(yes_asks=(("0.20", "1000000"),))
+    base = _proof_from_row(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-1",
+        q_posterior=0.80,
+        q_lcb_5pct=0.70,
+        bin_obj=bin_x,
+    )
+    guarded = replace(
+        base,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": f"YES:{era._candidate_bin_id(base)}:DIRECT_YES",
+            "route_id": f"DIRECT_YES:{era._candidate_bin_id(base)}@proof",
+            "side": "YES",
+            "bin_id": era._candidate_bin_id(base),
+            "payoff_q_point": 0.99,
+            "payoff_q_lcb": 0.95,
+            "edge_lcb": 0.75,
+            "point_ev": 0.79,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "6.25",
+            "optimal_delta_u": 0.02,
+            "q_dot_payoff": 0.99,
+            "cost": 0.20,
+            "false_edge_rate": 0.02,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+    )
+
+    candidate = era._native_side_candidate_from_proof(
+        family_key="fam",
+        proof=guarded,
+    )
+
+    assert candidate.is_tradeable is True
+    assert candidate.q_point == pytest.approx(0.99)
+    assert candidate.q_lcb == pytest.approx(0.95)
+
+
 @pytest.mark.parametrize(
     "certificate",
     [
@@ -502,6 +554,7 @@ def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
             "source": "qkernel_spine",
             "candidate_id": "YES:bin-1:DIRECT_YES",
             "route_id": "DIRECT_NO:bin-1@proof",
+            "payoff_q_point": 0.90,
             "payoff_q_lcb": 0.30,
             "edge_lcb": 0.10,
             "delta_u_at_min": 0.01,

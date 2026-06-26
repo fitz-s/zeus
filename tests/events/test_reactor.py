@@ -1444,6 +1444,7 @@ def test_qkernel_no_trade_writes_structured_candidate_rows_from_receipt_book():
                         "source": "qkernel_spine",
                         "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
                         "route_id": "DIRECT_NO:bin-33@proof",
+                        "payoff_q_point": 0.779,
                         "payoff_q_lcb": 0.748,
                         "edge_lcb": -0.00162,
                         "point_ev": 0.031,

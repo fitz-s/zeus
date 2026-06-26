@@ -911,6 +911,9 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(
         0.052
     )
+    assert new_proof.qkernel_execution_economics["payoff_q_point"] == pytest.approx(
+        0.202
+    )
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
     assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
@@ -943,6 +946,7 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
         "route_id": "DIRECT_YES:b24@proof",
         "side": "YES",
         "bin_id": "b24",
+        "payoff_q_point": 0.20,
         "payoff_q_lcb": 0.137,
         "edge_lcb": 0.132,
         "delta_u_at_min": 0.001,

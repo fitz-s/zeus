@@ -249,7 +249,7 @@ def _entry_authority_from_certificates(
     q_lcb = _float_or_none(actionable_payload.get("q_lcb_5pct"))
     qkernel_payload = actionable_payload.get("qkernel_execution_economics")
     if isinstance(qkernel_payload, dict):
-        qkernel_point = _float_or_none(qkernel_payload.get("q_dot_payoff"))
+        qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
         qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
         if (
             qkernel_point is not None
@@ -318,7 +318,7 @@ def _entry_authority_from_decision_audit(
     entry_method: str | None = None
     qkernel_payload = audit.get("qkernel_execution_economics")
     if isinstance(qkernel_payload, dict):
-        qkernel_point = _float_or_none(qkernel_payload.get("q_dot_payoff"))
+        qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
         qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
         if (
             qkernel_point is not None

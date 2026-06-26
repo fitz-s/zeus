@@ -1360,8 +1360,8 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     ``execution_price`` etc. off the proof. The spine is the selection authority, but
     its payoff-space fair value is not a replacement for the receipt-facing
     selected-side probability fields. Preserve ``q_source``, ``q_posterior``, and
-    ``q_lcb_5pct``; record qkernel selection authority separately and overlay only
-    the spine's selected edge/score provenance. The executable identity
+    ``q_lcb_5pct`` as provenance; record qkernel execution probability as a complete
+    ``payoff_q_point`` / ``payoff_q_lcb`` pair in the guarded certificate. The executable identity
     (row / token / execution_price / native_quote_available) is LEFT UNCHANGED — the
     spine selected this exact executable leg, and the submit pipeline re-authorizes it
     at submit time. Returns a NEW proof (frozen dataclass replace) so the original
@@ -1454,6 +1454,7 @@ def _candidate_qkernel_execution_economics_payload(
             "receipt_hash": getattr(decision, "receipt_hash", None),
             "candidate_id": selected.candidate_id,
             "route_id": selected.route_id,
+            "payoff_q_point": q_dot_payoff,
             "payoff_q_lcb": edge_lcb + cost_value,
             "edge_lcb": edge_lcb,
             "point_ev": point_ev,

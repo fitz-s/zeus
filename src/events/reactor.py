@@ -2529,14 +2529,18 @@ def _candidate_qkernel_regret_economics(raw: Mapping[str, Any]) -> dict[str, flo
     if not isinstance(cert, Mapping):
         return None
     try:
+        payoff_q_point = float(cert["payoff_q_point"])
         payoff_q_lcb = float(cert["payoff_q_lcb"])
         cost = float(cert["cost"])
         edge_lcb = float(cert["edge_lcb"])
     except (KeyError, TypeError, ValueError):
         return None
-    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+    if not all(math.isfinite(value) for value in (payoff_q_point, payoff_q_lcb, cost, edge_lcb)):
+        return None
+    if not (0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0):
         return None
     return {
+        "q_live": payoff_q_point,
         "q_lcb_5pct": payoff_q_lcb,
         "c_fee_adjusted": cost,
         "c_cost_95pct": cost,
@@ -2549,24 +2553,28 @@ def _qkernel_regret_economics(receipt: EventSubmissionReceipt) -> dict[str, floa
 
     ``q_live`` / ``q_lcb_5pct`` on the receipt are selected-side probability
     provenance. A qkernel-selected route is economically licensed by its guarded
-    payoff-space certificate: ``payoff_q_lcb``, ``cost`` and ``edge_lcb``. Project
-    those values into the regret table's scalar economic columns so operators and
-    continuous-redecision screens do not compare a preserved selected-side q_lcb
-    against a qkernel route score.
+    payoff-space certificate: ``payoff_q_point``, ``payoff_q_lcb``, ``cost`` and
+    ``edge_lcb``. Project those values into the regret table's scalar economic columns
+    so operators and continuous-redecision screens do not compare preserved proof
+    probabilities against a qkernel route score.
     """
 
     cert = receipt.qkernel_execution_economics
     if not isinstance(cert, dict):
         return None
     try:
+        payoff_q_point = float(cert["payoff_q_point"])
         payoff_q_lcb = float(cert["payoff_q_lcb"])
         cost = float(cert["cost"])
         edge_lcb = float(cert["edge_lcb"])
     except (KeyError, TypeError, ValueError):
         return None
-    if not all(math.isfinite(value) for value in (payoff_q_lcb, cost, edge_lcb)):
+    if not all(math.isfinite(value) for value in (payoff_q_point, payoff_q_lcb, cost, edge_lcb)):
+        return None
+    if not (0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0):
         return None
     return {
+        "q_live": payoff_q_point,
         "q_lcb_5pct": payoff_q_lcb,
         "c_fee_adjusted": cost,
         "c_cost_95pct": cost,

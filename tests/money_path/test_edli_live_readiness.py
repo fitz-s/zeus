@@ -3108,6 +3108,7 @@ def _qkernel_execution_cert(**overrides):
         "source": "qkernel_spine",
         "candidate_id": "DIRECT_YES:bin-1",
         "route_id": "DIRECT_YES:bin-1@proof",
+        "payoff_q_point": 0.72,
         "payoff_q_lcb": 0.72,
         "edge_lcb": 0.17,
         "delta_u_at_min": 0.01,
@@ -3126,6 +3127,11 @@ def _qkernel_execution_cert(**overrides):
         and "edge_lcb" not in overrides
     ):
         cert["edge_lcb"] = float(cert["payoff_q_lcb"]) - float(cert["cost"])
+    if "payoff_q_lcb" in overrides and "payoff_q_point" not in overrides:
+        cert["payoff_q_point"] = max(
+            float(cert["payoff_q_point"]),
+            float(cert["payoff_q_lcb"]),
+        )
     return cert
 
 

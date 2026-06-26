@@ -367,7 +367,7 @@ def test_bridge_projects_qkernel_authority_into_position_current(conn):
             "q_lcb_5pct": 0.0,
             "qkernel_execution_economics": {
                 "side": "YES",
-                "q_dot_payoff": 0.1507234,
+                "payoff_q_point": 0.1507234,
                 "payoff_q_lcb": 0.1374248,
                 "edge_lcb": 0.1311266,
                 "optimal_delta_u": 0.0209995,
@@ -445,7 +445,7 @@ def test_bridge_projects_qkernel_authority_from_decision_audit_when_cert_unreada
                 "q_lcb_5pct": 0.01935548685529438,
                 "qkernel_execution_economics": {
                     "side": "YES",
-                    "q_dot_payoff": 0.1507234,
+                    "payoff_q_point": 0.1507234,
                     "payoff_q_lcb": 0.1374248,
                 },
             },
@@ -511,7 +511,7 @@ def test_durable_fill_bridge_repairs_incomplete_existing_projection(conn):
             "decision_audit": {
                 "qkernel_execution_economics": {
                     "side": "YES",
-                    "q_dot_payoff": 0.1507234,
+                    "payoff_q_point": 0.1507234,
                     "payoff_q_lcb": 0.1374248,
                 },
             },
@@ -654,7 +654,7 @@ def test_durable_fill_bridge_prioritizes_incomplete_open_projection_over_healthy
             "decision_audit": {
                 "qkernel_execution_economics": {
                     "side": "YES",
-                    "q_dot_payoff": 0.1507234,
+                    "payoff_q_point": 0.1507234,
                     "payoff_q_lcb": 0.1374248,
                 },
             },
@@ -802,7 +802,7 @@ def test_durable_fill_bridge_repairs_command_linked_short_position_projection(co
             "decision_audit": {
                 "qkernel_execution_economics": {
                     "side": "YES",
-                    "q_dot_payoff": 0.1507234,
+                    "payoff_q_point": 0.1507234,
                     "payoff_q_lcb": 0.1374248,
                 },
             },

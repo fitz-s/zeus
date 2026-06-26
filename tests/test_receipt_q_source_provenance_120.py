@@ -77,6 +77,7 @@ def test_non_qkernel_receipt_omits_qkernel_execution_economics():
 def test_qkernel_selection_authority_records_economics_without_rewriting_q_source():
     cert = {
         "edge_lcb": 0.077,
+        "payoff_q_point": 0.74,
         "payoff_q_lcb": 0.73,
         "candidate_id": "DIRECT_YES:bin-1:route",
     }

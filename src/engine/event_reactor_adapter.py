@@ -1667,6 +1667,7 @@ def _valid_qkernel_execution_economics_payload(
     if not (route_id.startswith("DIRECT_YES:") or route_id.startswith("DIRECT_NO:")):
         return None
     for key in (
+        "payoff_q_point",
         "payoff_q_lcb",
         "edge_lcb",
         "delta_u_at_min",
@@ -1692,14 +1693,33 @@ def _valid_qkernel_execution_economics_payload(
     if not (math.isfinite(false_edge_rate) and 0.0 < false_edge_rate <= 1.0):
         return None
     try:
+        payoff_q_point = float(cert.get("payoff_q_point"))
         payoff_q_lcb = float(cert.get("payoff_q_lcb"))
         cost = float(cert.get("cost"))
         edge_lcb = float(cert.get("edge_lcb"))
         optimal_delta_u = float(cert.get("optimal_delta_u"))
     except (TypeError, ValueError):
         return None
+    if not (0.0 <= payoff_q_point <= 1.0):
+        return None
     if not (0.0 <= payoff_q_lcb <= 1.0):
         return None
+    if payoff_q_lcb > payoff_q_point:
+        return None
+    if "q_dot_payoff" in cert:
+        try:
+            q_dot_payoff = float(cert.get("q_dot_payoff"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(q_dot_payoff):
+            return None
+        if not math.isclose(
+            q_dot_payoff,
+            payoff_q_point,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            return None
     if not (0.0 < cost < 1.0):
         return None
     if edge_lcb <= 0.0 or optimal_delta_u <= 0.0 or optimal_stake <= 0.0:
@@ -5728,11 +5748,12 @@ def _build_event_bound_taker_quality_proof(
                 "maker_expected_profit_usd": "0",
                 "incremental_expected_profit_usd": "0",
             }
+        q_live = _optional_float(qkernel_cert.get("payoff_q_point"))
         q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
         q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
     else:
+        q_live = _optional_float(actionable_payload.get("q_live"))
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
-    q_live = _optional_float(actionable_payload.get("q_live"))
     notional = _optional_float(
         actionable_payload.get("live_cap_reserved_notional_usd")
         or actionable_payload.get("kelly_size_usd")
@@ -9518,6 +9539,7 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
         "source",
         "candidate_id",
         "route_id",
+        "payoff_q_point",
         "payoff_q_lcb",
         "edge_lcb",
         "delta_u_at_min",
@@ -9615,6 +9637,16 @@ def _qkernel_execution_q_lcb(proof: "_CandidateProof") -> float | None:
     return q_lcb
 
 
+def _qkernel_execution_q_point(proof: "_CandidateProof") -> float | None:
+    """The guarded payoff-space point probability paired with qkernel qLCB."""
+    q_point = _qkernel_execution_float(proof, "payoff_q_point")
+    if q_point is None:
+        return None
+    if not (0.0 <= q_point <= 1.0):
+        return None
+    return q_point
+
+
 def _native_side_cost_curve_from_execution_price(
     *,
     proof: _CandidateProof,
@@ -9705,10 +9737,12 @@ def _native_side_candidate_from_proof(
     and is NEVER inverted here. A direction that is neither buy_yes nor buy_no has
     no native BUY side to price -> NATIVE_QUOTE_MISSING no-trade.
 
-    ROBUST LOWER BOUND (spec §5.6 / Hidden #2): the candidate's ``q_lcb`` is the
-    proof's ``q_lcb_5pct`` (the S2 robust probability lower bound) — never
-    ``q_posterior`` and never ``edge_ci_lower``. ``q_point`` is ``q_posterior``.
-    The constructor enforces ``q_lcb <= q_point``.
+    ROBUST LOWER BOUND (spec §5.6 / Hidden #2): legacy proofs use
+    ``q_posterior`` / ``q_lcb_5pct`` as the point/lower-bound pair. A proof stamped
+    with qkernel execution authority uses the guarded certificate's
+    ``payoff_q_point`` / ``payoff_q_lcb`` pair instead. The constructor enforces
+    ``q_lcb <= q_point``; mixing a qkernel LCB with a legacy point q is a
+    money-path probability-authority bug.
 
     NATIVE EXECUTABLE SEPARATION (spec §4 / Hidden #1): the executable cost curve
     is rebuilt from the proof's OWN snapshot-row native ask ladder, side-tagged
@@ -9806,8 +9840,22 @@ def _native_side_candidate_from_proof(
 
     q_point = float(proof.q_posterior)
     q_lcb = float(proof.q_lcb_5pct)
+    qkernel_q_point = _qkernel_execution_q_point(proof)
     qkernel_q_lcb = _qkernel_execution_q_lcb(proof)
     if qkernel_q_lcb is not None:
+        if qkernel_q_point is None:
+            return NativeSideCandidate.no_trade(
+                family_key=family_key,
+                bin_id=bin_id,
+                side=side,
+                token_id=token_id,
+                condition_id=condition_id,
+                forecast_snapshot_id=forecast_snapshot_id,
+                market_snapshot_id=market_snapshot_id,
+                reason=CandidateNoTradeReason.Q_LCB_INVALID,
+                hypothesis_id=hypothesis_id,
+            )
+        q_point = qkernel_q_point
         q_lcb = qkernel_q_lcb
 
     # §13 / Hidden #2 live no-trade gate: q_lcb is INVALID when it is out of
@@ -12131,6 +12179,7 @@ def _robust_marginal_utility_stake_and_price(
         if stake_floor_out is not None:
             stake_floor_out["qkernel_execution_economics"] = {
                 "payoff_q_lcb": float(qkernel_q_lcb),
+                "payoff_q_point": float(_qkernel_execution_q_point(selected_proof) or 0.0),
                 "submit_edge": float(qkernel_submit_edge),
                 "edge_lcb": float(qkernel_edge),
                 "optimal_stake_usd": float(qkernel_optimal_stake),
@@ -12494,6 +12543,15 @@ def _evaluate_submit_recapture_for_selected(
                 family_rank_reversed=False,
             ),
         )
+        reason = getattr(candidate, "no_trade_reason", None)
+        if reason is not None:
+            decision = dataclass_replace(
+                decision,
+                detail=(
+                    "recapture selected candidate not tradeable: "
+                    f"{getattr(reason, 'value', str(reason))}; no executable cost curve"
+                ),
+            )
         return decision, 0.0, None
     fresh_curve = candidate.executable_cost_curve
 

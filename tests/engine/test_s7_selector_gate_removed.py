@@ -397,6 +397,7 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
         "source": "qkernel_spine",
         "candidate_id": "DIRECT_YES:bin-B",
         "route_id": "DIRECT_YES:bin-B@proof",
+        "payoff_q_point": 0.65,
         "payoff_q_lcb": 0.30,
         "edge_lcb": 0.10,
         "delta_u_at_min": 0.01,
