@@ -1540,9 +1540,14 @@ def test_day0_emit_is_reactor_budgeted():
     assert "reactor_day0_emit_budget_seconds" in inspect.getsource(
         main._edli_day0_emit_budget_seconds
     )
+    assert "reactor_day0_emit_busy_timeout_ms" in inspect.getsource(
+        main._edli_day0_emit_busy_timeout_ms
+    )
     assert "budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg)" in cycle_src
     assert "_edli_install_sqlite_deadline(world_conn" in emit_src
     assert "_edli_install_sqlite_deadline(trade_conn" in emit_src
+    assert "_edli_set_sqlite_busy_timeout_ms(world_conn, day0_busy_timeout_ms)" in emit_src
+    assert "_edli_set_sqlite_busy_timeout_ms(trade_conn, day0_busy_timeout_ms)" in emit_src
     assert "EDLI day0 emit budget exhausted" in emit_src
 
 

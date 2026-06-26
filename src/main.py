@@ -7975,6 +7975,15 @@ def _edli_day0_emit_budget_seconds(config: dict) -> float:
     return max(0.0, min(value, 20.0))
 
 
+def _edli_day0_emit_busy_timeout_ms(config: dict) -> int:
+    raw = config.get("reactor_day0_emit_busy_timeout_ms", 750)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 750
+    return max(1, min(value, 5_000))
+
+
 def _edli_install_sqlite_deadline(conn, *, deadline_monotonic: float | None) -> None:
     """Interrupt long SQLite reads/writes once the caller's wall-clock budget is spent."""
 
@@ -7990,6 +7999,28 @@ def _edli_install_sqlite_deadline(conn, *, deadline_monotonic: float | None) -> 
 def _edli_clear_sqlite_progress_handler(conn) -> None:
     try:
         conn.set_progress_handler(None, 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _edli_sqlite_busy_timeout_ms(conn) -> int | None:
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _edli_set_sqlite_busy_timeout_ms(conn, value: int | None) -> None:
+    if value is None:
+        return
+    try:
+        conn.execute("PRAGMA busy_timeout = %d" % max(1, int(value)))
     except Exception:  # noqa: BLE001
         pass
 
@@ -8597,6 +8628,12 @@ def _edli_emit_day0_extreme_events(
         if budget_seconds is not None and float(budget_seconds) > 0
         else None
     )
+    edli_cfg = _settings_section("edli", {})
+    day0_busy_timeout_ms = _edli_day0_emit_busy_timeout_ms(edli_cfg)
+    saved_world_busy_timeout_ms = _edli_sqlite_busy_timeout_ms(world_conn)
+    saved_trade_busy_timeout_ms = _edli_sqlite_busy_timeout_ms(trade_conn)
+    _edli_set_sqlite_busy_timeout_ms(world_conn, day0_busy_timeout_ms)
+    _edli_set_sqlite_busy_timeout_ms(trade_conn, day0_busy_timeout_ms)
     _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
     _edli_install_sqlite_deadline(trade_conn, deadline_monotonic=deadline_monotonic)
     fast_emitted = 0
@@ -8649,6 +8686,8 @@ def _edli_emit_day0_extreme_events(
     finally:
         _edli_clear_sqlite_progress_handler(trade_conn)
         _edli_clear_sqlite_progress_handler(world_conn)
+        _edli_set_sqlite_busy_timeout_ms(trade_conn, saved_trade_busy_timeout_ms)
+        _edli_set_sqlite_busy_timeout_ms(world_conn, saved_world_busy_timeout_ms)
 
 
 def _edli_scan_day0_with_lock_retry(
