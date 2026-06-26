@@ -41,7 +41,7 @@ Zeus must not classify strategies by names such as `center_buy` or `stale_quote_
 
    for NO buys.
 
-The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, candidate strategy files, `decision_events`, `no_trade_events`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values instead of producing theorem-backed decision records.
+The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, `decision_events`, `no_trade_events`, and `regret_decompositions`. The current gap is that blocked strategy registry entries require theorem-backed decision records before promotion.
 
 The strongest actionable strategy family is **deterministic/vector payoff arbitrage**, especially `neg_risk_basket` and YES/NO parity baskets. The strongest existing live family is **settlement/observation deterministic capture**, especially `settlement_capture` and the proposed production form of `resolution_window_maker`. The strongest forecast family remains **calibrated finite-bin center trading**. The weakest original thesis is **ex-ante `shoulder_sell` as retail-lottery short-tail**; it is refuted in sign by the supplied shoulder proof and must be replaced by a physical impossible-tail capture theorem.
 
@@ -94,7 +94,6 @@ This packet uses the following code/document surfaces as implementation ground t
 - `src/analysis/market_analysis_vnext.py`: `MicrostructureMetrics` and current missing field state.
 - `src/contracts/executable_market_snapshot.py`: executable snapshot fields.
 - `src/contracts/execution_intent.py`: execution order types and depth status vocabulary.
-- `src/strategy/candidates/*.py`: candidate strategy current behavior.
 - `docs/reference/zeus_math_spec.md`: rounding, bins, calibration, FDR, Kelly, decision groups.
 - `docs/operations/task_2026-05-21_mainline_completion_authority/**`: mainline completion and promotion pipeline package.
 
@@ -1482,7 +1481,7 @@ with the actual code on `feat-strategy-spec-20260522` (verified by grep + read,
 2026-05-22). They are distinct from the reframe-proposals throughout §5–§17, which
 are intended *changes* the directive requests (and therefore not contradictions).
 Only two genuine factual mismatches were found; the directive's current-state
-descriptions are otherwise historical (retired placeholder edge values, registry
+descriptions are otherwise historical (retired edge constants, registry
 statuses, and candidate gate logic all match).
 
 **C-1 — `settlement_capture` is two strategies in code, not one.** Directive §1

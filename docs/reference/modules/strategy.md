@@ -62,7 +62,6 @@ Derived but economically central. Strategy code must stay downstream of contract
 | `correlation.py` | Cross-market dependence control. |
 | `risk_limits.py / oracle_penalty.py / selection_family.py` | Strategy-side constraints and grouping. |
 | `benchmark_suite.py / data_lake.py` | R3 A1 evidence-only benchmark metrics, replay-corpus accessor, and diagnostic/simulated/read-only-live evidence gate. Promotion requires explicit promotion-grade economics evidence. |
-| `candidates/` | R3 A1 non-executable strategy candidate stubs for future benchmark registration. |
 
 ## 10. Relevant tests
 - tests/test_alpha_target_coherence.py
@@ -79,7 +78,7 @@ Derived but economically central. Strategy code must stay downstream of contract
 
 ## 12. Negative constraints
 - Read-only live evaluation is supporting evidence; it must not place orders, activate credentials, mutate production DB/state artifacts, or authorize CLOB cutover.
-- Strategy candidate stubs are not executable alpha.
+- Blocked strategy registry entries are not executable alpha.
 - Do not let strategy modules reach into execution/state to patch economic truth directly.
 - Do not treat narrow historical strategy wins/losses as universal law.
 
