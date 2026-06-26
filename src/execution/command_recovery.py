@@ -140,6 +140,15 @@ _SHIFT_BIN_EXIT_ACTIVE_STATUSES = frozenset({
     "EXIT_UNKNOWN",
     "EXIT_PARTIAL",
 })
+_SHIFT_BIN_ENTRY_TERMINAL_NO_POSITION_STATES = frozenset({
+    "CANCELED",
+    "CANCELLED",
+    "EXPIRED",
+    "FAILED",
+    "REJECTED",
+    "SUBMIT_REJECTED",
+    "VOIDED",
+})
 _REBALANCE_LIVE_EXPOSURE_PHASES = frozenset({
     "",
     "open",
@@ -1069,6 +1078,203 @@ def release_closed_shift_bin_exit_leases(
             summary["advanced"] += 1
         else:
             summary["stayed"] += 1
+    return summary
+
+
+def release_stale_rebalance_entry_leases(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: str | datetime | None = None,
+    min_age_seconds: int = 20 * 60,
+) -> dict:
+    """Release stale rebalance entry leases that no longer protect venue state.
+
+    These leases sit after the old-leg close decision and before/around the
+    counter-entry submit. If the counter-entry order later cancels or expires with
+    no selected-token exposure, keeping the lease active suppresses the next fresh
+    redecision forever. A FILLED command without a position projection is not
+    released here; that is ambiguous live exposure and must be repaired by fill
+    projection/reconciliation first.
+    """
+
+    summary = {
+        "advanced": 0,
+        "stayed": 0,
+        "planned_fill_up_released": 0,
+        "shift_entry_scanned": 0,
+        "shift_entry_advanced": 0,
+        "shift_entry_stayed": 0,
+        "errors": 0,
+    }
+    table_ref = _family_rebalance_intents_table_ref(conn)
+    if table_ref is None:
+        return summary
+    required = {
+        "intent_id",
+        "event_id",
+        "operation",
+        "status",
+        "selected_token_id",
+        "new_entry_command_id",
+        "updated_at",
+    }
+    if not _table_has_columns(conn, table_ref, required):
+        return summary
+    now_iso = (
+        observed_at.isoformat()
+        if isinstance(observed_at, datetime)
+        else str(observed_at or _now_iso())
+    )
+
+    try:
+        cur = conn.execute(
+            f"""
+            UPDATE {table_ref}
+               SET status = 'ABORTED',
+                   updated_at = ?,
+                   abort_reason = COALESCE(
+                       abort_reason,
+                       'FILL_UP_PLANNED_STALE_NO_DURABLE_COMMAND_RECOVERED'
+                   )
+             WHERE operation = 'FILL_UP'
+               AND status = 'PLANNED'
+               AND COALESCE(new_entry_command_id, '') = ''
+               AND datetime(updated_at) <= datetime(?, ?)
+            """,
+            (now_iso, now_iso, f"-{int(min_age_seconds)} seconds"),
+        )
+        summary["planned_fill_up_released"] = int(cur.rowcount or 0)
+    except sqlite3.Error:
+        summary["errors"] += 1
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT intent_id, event_id, selected_token_id, updated_at
+              FROM {table_ref}
+             WHERE operation = 'SHIFT_BIN'
+               AND status = 'ENTRY_SUBMITTED'
+             ORDER BY updated_at ASC
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        summary["errors"] += 1
+        return summary
+
+    terminal_placeholders = ",".join("?" for _ in _SHIFT_BIN_ENTRY_TERMINAL_NO_POSITION_STATES)
+    for row in rows:
+        summary["shift_entry_scanned"] += 1
+        data = _dict_row(row)
+        intent_id = str(data.get("intent_id") or "").strip()
+        event_id = str(data.get("event_id") or "").strip()
+        selected_token_id = str(data.get("selected_token_id") or "").strip()
+        updated_at = str(data.get("updated_at") or "").strip()
+        if not intent_id or not selected_token_id:
+            summary["shift_entry_stayed"] += 1
+            continue
+
+        exposure = _live_position_exposure_for_token_usd(conn, token_id=selected_token_id)
+        if exposure is None:
+            summary["shift_entry_stayed"] += 1
+            continue
+        if exposure > 0:
+            try:
+                cur = conn.execute(
+                    f"""
+                    UPDATE {table_ref}
+                       SET status = 'COMPLETE',
+                           updated_at = ?,
+                           abort_reason = COALESCE(
+                               abort_reason,
+                               'SHIFT_BIN_COUNTER_ENTRY_POSITION_PRESENT_BY_COMMAND_RECOVERY'
+                           )
+                     WHERE intent_id = ?
+                       AND operation = 'SHIFT_BIN'
+                       AND status = 'ENTRY_SUBMITTED'
+                    """,
+                    (now_iso, intent_id),
+                )
+            except sqlite3.Error:
+                summary["errors"] += 1
+                continue
+            if int(cur.rowcount or 0) > 0:
+                summary["shift_entry_advanced"] += 1
+            else:
+                summary["shift_entry_stayed"] += 1
+            continue
+
+        command_row = None
+        if _table_exists(conn, "venue_commands"):
+            try:
+                params: list[object] = [selected_token_id]
+                event_filter = ""
+                if event_id:
+                    event_filter = " AND decision_id LIKE ?"
+                    params.append(f"edli_exec_cmd:{event_id}:%")
+                command_row = conn.execute(
+                    f"""
+                    SELECT command_id, state
+                      FROM venue_commands
+                     WHERE intent_kind = 'ENTRY'
+                       AND token_id = ?
+                       {event_filter}
+                     ORDER BY updated_at DESC, created_at DESC
+                     LIMIT 1
+                    """,
+                    tuple(params),
+                ).fetchone()
+            except sqlite3.Error:
+                summary["errors"] += 1
+                summary["shift_entry_stayed"] += 1
+                continue
+
+        release_reason: str | None = None
+        if command_row is not None:
+            command = _dict_row(command_row)
+            state = str(command.get("state") or "").strip().upper()
+            if state in _SHIFT_BIN_ENTRY_TERMINAL_NO_POSITION_STATES:
+                release_reason = (
+                    "SHIFT_BIN_ENTRY_TERMINAL_NO_POSITION_BY_COMMAND_RECOVERY:"
+                    f"state={state}"
+                )
+        elif updated_at:
+            try:
+                age_row = conn.execute(
+                    "SELECT datetime(?) <= datetime(?, ?)",
+                    (updated_at, now_iso, f"-{int(min_age_seconds)} seconds"),
+                ).fetchone()
+                is_stale = bool(age_row[0]) if age_row is not None else False
+            except sqlite3.Error:
+                is_stale = False
+            if is_stale:
+                release_reason = "SHIFT_BIN_ENTRY_STALE_NO_DURABLE_COMMAND_RECOVERED"
+
+        if release_reason is None:
+            summary["shift_entry_stayed"] += 1
+            continue
+
+        try:
+            cur = conn.execute(
+                f"""
+                UPDATE {table_ref}
+                   SET status = 'ABORTED',
+                       updated_at = ?,
+                       abort_reason = COALESCE(abort_reason, ?)
+                 WHERE intent_id = ?
+                   AND operation = 'SHIFT_BIN'
+                   AND status = 'ENTRY_SUBMITTED'
+                """,
+                (now_iso, release_reason, intent_id),
+            )
+        except sqlite3.Error:
+            summary["errors"] += 1
+            continue
+        if int(cur.rowcount or 0) > 0:
+            summary["shift_entry_advanced"] += 1
+        else:
+            summary["shift_entry_stayed"] += 1
+    summary["advanced"] = int(summary["planned_fill_up_released"]) + int(summary["shift_entry_advanced"])
+    summary["stayed"] = int(summary["shift_entry_stayed"])
     return summary
 
 
@@ -10758,6 +10964,15 @@ def _reconcile_passes_inline(
         summary["stayed"] += closed_shift_summary["stayed"]
         summary["errors"] += closed_shift_summary["errors"]
 
+        stale_rebalance_entry_summary = release_stale_rebalance_entry_leases(
+            conn,
+            observed_at=started_at,
+        )
+        summary["stale_rebalance_entry_leases"] = stale_rebalance_entry_summary
+        summary["advanced"] += stale_rebalance_entry_summary["advanced"]
+        summary["stayed"] += stale_rebalance_entry_summary["stayed"]
+        summary["errors"] += stale_rebalance_entry_summary["errors"]
+
 
 def _accumulate(
     summary: dict,
@@ -11035,6 +11250,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "closed_shift_bin_exit_leases",
             observed_at=started_at,
         )
+        _db_pass(
+            "stale_rebalance_entry_leases",
+            release_stale_rebalance_entry_leases,
+            "stale_rebalance_entry_leases",
+            observed_at=started_at,
+        )
         _db_pass("cancel_ack_terminal_no_fill_facts",
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")
@@ -11103,4 +11324,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              advanced_key="corrected", fold_stayed=False, observed_at=started_at)
     _db_pass("closed_shift_bin_exit_leases",
              release_closed_shift_bin_exit_leases, "closed_shift_bin_exit_leases",
+             observed_at=started_at)
+    _db_pass("stale_rebalance_entry_leases",
+             release_stale_rebalance_entry_leases, "stale_rebalance_entry_leases",
              observed_at=started_at)

@@ -403,6 +403,118 @@ def test_closed_shift_bin_release_reads_attached_world_table(tmp_path):
     trade_conn.close()
 
 
+def test_stale_rebalance_entry_release_reads_attached_world_table(tmp_path):
+    """Canceled counter-entry orders must not keep rebalance leases active."""
+    from src.execution.command_recovery import release_stale_rebalance_entry_leases
+    from src.state.schema.family_rebalance_intents_schema import ensure_table
+
+    trade_path = tmp_path / "trade.db"
+    world_path = tmp_path / "world.db"
+    old_time = "2026-06-26T04:00:00+00:00"
+    now_time = "2026-06-26T05:00:00+00:00"
+
+    world_conn = sqlite3.connect(str(world_path))
+    world_conn.row_factory = sqlite3.Row
+    ensure_table(world_conn)
+    world_conn.execute(
+        """
+        INSERT INTO family_rebalance_intents (
+            intent_id, event_id, family_key, operation, held_position_id,
+            held_token_id, held_bin_id, selected_token_id, selected_bin_id,
+            status, generation, created_at, updated_at, schema_version
+        ) VALUES (
+            'intent-shift-entry-cancelled', 'evt-shift-entry',
+            'live|Tokyo|2026-06-27|low', 'SHIFT_BIN',
+            'pos-old', 'tok-old', '22C', 'tok-new', '23C',
+            'ENTRY_SUBMITTED', 1, ?, ?, 1
+        )
+        """,
+        (old_time, old_time),
+    )
+    world_conn.execute(
+        """
+        INSERT INTO family_rebalance_intents (
+            intent_id, event_id, family_key, operation, held_position_id,
+            held_token_id, held_bin_id, selected_token_id, selected_bin_id,
+            status, generation, created_at, updated_at, schema_version
+        ) VALUES (
+            'intent-fill-up-planned', 'evt-fill-up',
+            'live|Osaka|2026-06-27|low', 'FILL_UP',
+            'pos-old', 'tok-old', '22C', 'tok-old', '22C',
+            'PLANNED', 1, ?, ?, 1
+        )
+        """,
+        (old_time, old_time),
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    trade_conn = sqlite3.connect(str(trade_path))
+    trade_conn.row_factory = sqlite3.Row
+    trade_conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT, phase TEXT, token_id TEXT, no_token_id TEXT,
+            chain_cost_basis_usd REAL, cost_basis_usd REAL, size_usd REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY, decision_id TEXT, intent_kind TEXT,
+            token_id TEXT, state TEXT, created_at TEXT, updated_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, intent_kind, token_id, state, created_at, updated_at
+        ) VALUES (
+            'cmd-shift-entry-cancelled', 'edli_exec_cmd:evt-shift-entry:intent:tok-new:buy_yes',
+            'ENTRY', 'tok-new', 'CANCELLED', ?, ?
+        )
+        """,
+        (old_time, old_time),
+    )
+    trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    summary = release_stale_rebalance_entry_leases(trade_conn, observed_at=now_time)
+
+    assert summary == {
+        "advanced": 2,
+        "stayed": 0,
+        "planned_fill_up_released": 1,
+        "shift_entry_scanned": 1,
+        "shift_entry_advanced": 1,
+        "shift_entry_stayed": 0,
+        "errors": 0,
+    }
+    rows = {
+        row["intent_id"]: dict(row)
+        for row in trade_conn.execute(
+            """
+            SELECT intent_id, status, abort_reason
+              FROM world.family_rebalance_intents
+             ORDER BY intent_id
+            """
+        ).fetchall()
+    }
+    assert rows["intent-fill-up-planned"] == {
+        "intent_id": "intent-fill-up-planned",
+        "status": "ABORTED",
+        "abort_reason": "FILL_UP_PLANNED_STALE_NO_DURABLE_COMMAND_RECOVERED",
+    }
+    assert rows["intent-shift-entry-cancelled"] == {
+        "intent_id": "intent-shift-entry-cancelled",
+        "status": "ABORTED",
+        "abort_reason": "SHIFT_BIN_ENTRY_TERMINAL_NO_POSITION_BY_COMMAND_RECOVERY:state=CANCELLED",
+    }
+    trade_conn.close()
+
+
 def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monkeypatch, tmp_path):
     """Live cadence may defer heavy client sweeps, but must not leave confirmed
     cancel/no-fill pending-entry ghosts in the money path."""
