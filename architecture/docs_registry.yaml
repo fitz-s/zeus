@@ -1122,7 +1122,7 @@ entries:
   doc_class: module_reference
   default_read: false
   direct_reference_allowed: true
-  current_role: dense calibration module reference for Platt fitting, maturity gates, and shadow metrics
+  current_role: dense calibration module reference for Platt fitting, maturity gates, and diagnostic baseline metrics
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: durable

@@ -20,8 +20,8 @@ This module is the single locus for:
 
 - Storage-root resolution via ``ZEUS_STORAGE_ROOT`` env override
   (default = repo root via ``__file__`` traversal).
-- Path builders for all storage artifacts (oracle error rates, oracle
-  shadow snapshots, heartbeat).
+- Path builders for all storage artifacts (oracle error rates, oracle-time
+  snapshots, heartbeat).
 - ``write_json_atomic`` — public atomic JSON writer with checksum +
   writer-identity metadata.
 - ``write_heartbeat`` — paired heartbeat record for stale-artifact detection.
@@ -100,12 +100,12 @@ def oracle_artifact_heartbeat_path() -> Path:
 
 
 def oracle_snapshot_dir() -> Path:
-    """Directory hosting per-(city, date) oracle shadow snapshots.
+    """Directory hosting per-(city, date) oracle-time snapshots.
 
     Single writer: ``scripts/oracle_snapshot_listener.py``.
     Single reader: ``scripts/bridge_oracle_to_calibration.py``.
     """
-    return storage_root() / "raw" / "oracle_shadow_snapshots"
+    return storage_root() / "raw" / "oracle_time_snapshots"
 
 
 # ── atomic JSON writer ─────────────────────────────────────────────── #

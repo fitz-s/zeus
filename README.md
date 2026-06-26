@@ -57,7 +57,7 @@ Three bin types exist:
 
 ### Calibration (baseline path)
 
-Extended Platt below is the **legacy baseline / LCB-cap** calibration; the live q is built by `emos.bin_probability_settlement` (see Strategy of record above). Raw ensemble probabilities are biased — overconfident at long lead times, underconfident near settlement. Zeus uses Extended Platt scaling with lead-time as an input feature:
+Extended Platt below is diagnostic/comparison baseline calibration; the live q is built by `emos.bin_probability_settlement` (see Strategy of record above). Raw ensemble probabilities are biased — overconfident at long lead times, underconfident near settlement. Zeus uses Extended Platt scaling with lead-time as an input feature:
 
 ```text
 P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)

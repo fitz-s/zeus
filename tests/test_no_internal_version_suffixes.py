@@ -296,7 +296,7 @@ GRANDFATHER: frozenset[str] = frozenset(
         "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
         "openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
         "operator_retrain_candidate_v1",
-        "oracle_shadow_v1",
+        "oracle_time_snapshot_v1",
         "outcomes_v2",
         "overlap_keys_v2_wins",
         "p2_consolidated_v2",

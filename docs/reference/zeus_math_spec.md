@@ -6,7 +6,7 @@
 
 **Version 2** (2026-04-13): corrections incorporated per user review of v1 — logit clipping explicit, open-boundary bins allowed, Monte Carlo pseudocode deduplicated across bins, stream-of-consciousness removed, `decision_group` concept added as independent sample unit.
 
-> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the **LEGACY BASELINE** path — an independent baseline / LCB cap joined to the live q as a floor (`effective_q_lcb = min(replacement, baseline)`), NOT the primary q. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
+> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the diagnostic/comparison baseline path, NOT the primary q. The former baseline-to-live `min(...)` cap/floor join was deleted; baseline outputs may appear as provenance/comparison only and must not cap, floor, or veto live replacement q without new authority. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
 
 ---
 
@@ -83,16 +83,15 @@ distinct-endpoint [A, B]:     [A − 0.5, B + 0.5)
 
 This fixes the degenerate point-bin problem (interior bins always get non-zero mass). q is persisted by `replacement_forecast_materializer._insert_posterior` (owns q_mode).
 
-### 0.1e q_lcb floor and the baseline junction
+### 0.1e q_lcb floor and the removed baseline junction
 
 ```
 q_lcb = Wilson lower bound (z = 1.645)         — event_reactor_adapter._wilson_lower_bound
         capped per-(city, season, metric) by settlement-residual σ
                                                — _resolve_replacement_settlement_floor_lcb
-effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)
 ```
 
-Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The min-cap is where the §6/§7 baseline q_lcb enters — as a floor, never as the primary q. Edge = q_lcb − cost → BH FDR (§9) → Fractional Kelly (§10), unchanged.
+Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The former §6/§7 baseline q_lcb min-cap join is deleted. Baseline q may be emitted as comparison/provenance only; it is not a live authority, cap, floor, or fallback. Edge = replacement q_lcb − cost → BH FDR (§9) → Fractional Kelly (§10), unchanged.
 
 ---
 
@@ -332,7 +331,7 @@ This guarantees every possible `settlement_value` falls in exactly one bin. Beca
 
 ## 6. Extended Platt calibration (LEGACY BASELINE)
 
-> Baseline calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math feeds the baseline / LCB-cap path (`src/calibration/platt.py` `ExtendedPlattCalibrator.predict`).
+> Diagnostic baseline calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math may produce comparison/provenance output only; it must not cap, floor, or veto live replacement q without new authority.
 
 ### 6.1 Model (with logit numerical safety)
 

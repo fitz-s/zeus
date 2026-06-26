@@ -140,7 +140,7 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_oracle_snapshot", "ingest_main", "diagnostic", "fast", False,
                   callable_ref="_oracle_snapshot_tick", file_only=True, family="diagnostic",
                   misfire_grace_time=600,
-                  notes="daily oracle shadow snapshot listener; file-only raw/oracle_shadow_snapshots output"),
+                  notes="daily oracle-time snapshot listener; file-only raw/oracle_time_snapshots output"),
     SourceJobSpec("ingest_oracle_bridge", "ingest_main", "diagnostic", "fast", False,
                   callable_ref="_bridge_oracle_tick", file_only=True, family="diagnostic",
                   misfire_grace_time=600,

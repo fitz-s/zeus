@@ -1624,7 +1624,7 @@ def _run_bridge_oracle_script() -> str:
 
 @_scheduler_job("ingest_oracle_snapshot")
 def _oracle_snapshot_tick():
-    """Capture WU/HKO oracle shadow snapshots daily at 10:00 UTC.
+    """Capture WU/HKO oracle-time snapshots daily at 10:00 UTC.
 
     Promotes oracle_snapshot_listener.py into the ingest_main scheduler
     (same F35 pattern used by _bridge_oracle_tick) so the snapshot job is
@@ -1637,7 +1637,7 @@ def _oracle_snapshot_tick():
     the file atomically.
 
     Zero coupling to any DB — reads only config/cities.json and writes to
-    raw/oracle_shadow_snapshots/.  subprocess.run (not DB executor).
+    raw/oracle_time_snapshots/.  subprocess.run (not DB executor).
     """
     _run_oracle_snapshot_script()
 
@@ -1675,7 +1675,7 @@ def _run_oracle_snapshot_script() -> str:
 
 
 def _latest_oracle_snapshot_mtime() -> float | None:
-    """Return latest oracle shadow snapshot mtime, or None when no snapshots exist."""
+    """Return latest oracle-time snapshot mtime, or None when no snapshots exist."""
     try:
         from src.state.paths import oracle_snapshot_dir
         snapshot_dir = oracle_snapshot_dir()

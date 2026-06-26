@@ -1,10 +1,10 @@
 # Zeus Strategy Mathematics & Execution Authority Specification
 
-> **Superseded for probability law (2026-06-09):** the live q chain is `docs/authority/replacement_final_form_2026_06_09.md` (`bayes_precision_fusion.fuse_bayes_precision_posterior` → `emos.bin_probability_settlement`). This spec describes the **legacy baseline**; its proof-form taxonomy still governs, but treat its probability/calibration math as baseline / LCB-cap, not the strategy of record.
+> **Superseded for probability law (2026-06-09):** the live q chain is `docs/authority/replacement_final_form_2026_06_09.md` (`bayes_precision_fusion.fuse_bayes_precision_posterior` → `emos.bin_probability_settlement`). This spec describes the diagnostic baseline and strategy proof taxonomy; treat its probability/calibration math as comparison/provenance only, not the strategy of record.
 
 **Created:** 2026-05-22  
 **Suggested repo destination:** `docs/reference/zeus_strategy_authority_spec.md`  
-**Purpose:** Provide a permanent strategy-level authority guide for Zeus: every live, shadow, and blocked strategy is expressed as executable mathematics tied to code surfaces, market microstructure, physical weather constraints, and promotion evidence.  
+**Purpose:** Provide a permanent strategy-level authority guide for Zeus: every live, blocked, or deprecated strategy is expressed as executable mathematics tied to code surfaces, market microstructure, physical weather constraints, and promotion evidence.
 **Status:** Draft authority packet for operator review. It is written to be committed into the repo after review. It does not override executable code until committed and tested.
 
 ---
@@ -85,7 +85,7 @@ where \(C\) is shares, \(p\) is share price, and \(r\) is category taker fee rat
 
 This packet uses the following code/document surfaces as implementation ground truth:
 
-- `architecture/strategy_profile_registry.yaml`: current live/shadow/blocked strategy registry.
+- `architecture/strategy_profile_registry.yaml`: current live/blocked/deprecated strategy registry.
 - `src/strategy/strategy_profile.py`: `StrategyProfile`, `is_runtime_live`, and `live_allowed_keys`.
 - `src/contracts/evidence_tier.py`: `EvidenceTier` IntEnum.
 - `src/analysis/evidence_report.py`: Beta(2,2) CI, decision/regret/no-trade aggregation.
@@ -401,9 +401,9 @@ This matters because future agents must not treat `live_status: live` alone as s
 Current strategic state from registry and code:
 
 - Runtime live old strategies: `settlement_capture`, `center_buy`, `opening_inertia`, `imminent_open_capture`.
-- Shadow/block status new strategies: `shoulder_sell`, `shoulder_buy`, `center_sell`, and six Phase-4 candidates.
+- Blocked status new strategies: `shoulder_sell`, `shoulder_buy`, `center_sell`, and six Phase-4 candidates.
 - The retired shoulder vNext scaffold classifier has been removed. Blocked shoulder strategies do not classify into runtime strategy keys until a real physical-bound or tail model is implemented.
-- Current candidate strategies mostly write placeholder shadow edges and do not yet compute theorem-grade EV.
+- Blocked candidate strategies are not runtime-routed until they compute theorem-grade EV and pass the registry promotion gates.
 
 This document therefore distinguishes **current code behavior** from **target mathematical implementation** for every strategy.
 
@@ -491,7 +491,7 @@ deterministic_profit=1-a-fee
 
 ### 6.1 Current code state
 
-`resolution_window_maker.py` is a shadow candidate. It checks `umaResolutionStatus`-like strings and writes a shadow decision with placeholder `_SHADOW_EDGE=0.03`. It does not compute target price, target size, deterministic profit, or typed settlement outcome.
+`resolution_window_maker` is blocked. The retired placeholder candidate path has no runtime authority; promotion requires typed settlement outcome, target price, target size, deterministic profit, and registry evidence.
 
 ### 6.2 Correct mathematical identity
 
@@ -790,7 +790,7 @@ Application-grade as a bridge between calibrated forecast and physical settlemen
 
 ### 11.1 Current code state
 
-Registry marks `shoulder_sell` shadow with blockers. No runtime classifier remains for the retired retail-bias shoulder path.
+Registry marks `shoulder_sell` blocked with blockers. No runtime classifier remains for the retired retail-bias shoulder path.
 
 ### 11.2 Original thesis failure
 
@@ -939,7 +939,7 @@ Not currently live-ready. Can become application-grade after nonstationary tail 
 
 ### 13.1 Current code state
 
-Current code treats `spread_observed_window_ms` as an info-event proxy and `raw_orderbook_hash_transition_delta_ms` as book transition evidence. It writes placeholder `_SHADOW_EDGE=0.02`. Current `MarketAnalysisVNext` sets `spread_observed_window_ms=None`, so production signal is not fed.
+Current support code treats `spread_observed_window_ms` as an info-event proxy and `raw_orderbook_hash_transition_delta_ms` as book transition evidence, but the strategy remains blocked and production signal is not fed.
 
 ### 13.2 Correct mathematical model
 
@@ -994,7 +994,7 @@ Application-grade after info-event feed and FOK execution binding are wired.
 
 ### 14.1 Current code state
 
-Current code checks `alert_source` and `active_weather_alert` and writes placeholder `_SHADOW_EDGE=0.04`. It does not quantify alert impact on market bins.
+Current support code checks `alert_source` and `active_weather_alert`, but the strategy remains blocked because it does not quantify alert impact on market bins.
 
 ### 14.2 Correct mathematical model
 
@@ -1048,7 +1048,7 @@ edge_lower_bound
 
 ### 14.6 Application level
 
-Can become application-grade stochastic strategy after alert likelihood model is fit. Current placeholder should remain shadow.
+Can become application-grade stochastic strategy only after an alert likelihood model is fit and the registry promotion gate is satisfied.
 
 ---
 
@@ -1122,7 +1122,7 @@ Research-to-application after adverse selection model. Current fill-probability 
 
 ### 16.1 Current code state
 
-Current code resolves city, regime, correlation cache, then enters if maximum off-diagonal correlation magnitude exceeds 0.10. It writes placeholder `_SHADOW_EDGE=0.02`. Correlation cache is expected but not historically populated in current promotion design.
+Current support code resolves city, regime, and correlation cache, but the strategy remains blocked. Correlation cache is expected but not historically populated in current promotion design.
 
 ### 16.2 Correct mathematical model
 
@@ -1181,7 +1181,7 @@ Application-grade only after cache and edge vector are fed. Current correlation-
 
 ### 17.1 Current code state
 
-Current code already states the right thesis: family completeness of the negRisk YES token book vs theoretical total. It currently uses `_BASKET_ARB_THRESHOLD = Decimal("0.97")`, checks `neg_risk_family_complete`, `neg_risk_token_count`, and `neg_risk_yes_ask_sum`, then writes a shadow decision.
+The retained theorem states the right thesis: family completeness of the negRisk YES token book vs theoretical total. The retired placeholder candidate path has no runtime authority; promotion requires executable family orderbook sweep and vector execution proof.
 
 ### 17.2 Correct theorem
 
@@ -1327,7 +1327,7 @@ VectorEdgeDecision:
 
 ### 19.4 Why this matters
 
-Without these types, deterministic arbitrage strategies are forced to fake `p_posterior` or `_SHADOW_EDGE`. That makes evidence reports meaningless. Strategy proof type should be first-class data.
+Without these types, deterministic arbitrage strategies are forced to fake stochastic posterior fields. That makes evidence reports meaningless. Strategy proof type should be first-class data.
 
 ---
 
@@ -1465,15 +1465,15 @@ This upgrades:
 | `center_buy` | live | calibrated stochastic | application-grade | use lower-bound EV vs native ask |
 | `opening_inertia` | live | calibrated stochastic + microstructure relaxation | application-grade | estimate relaxation half-life and lower-bound edge |
 | `imminent_open_capture` | live | short-horizon posterior collapse / physical interval | application-grade | add time-to-resolution posterior variance and interval collapse |
-| `shoulder_sell` | shadow | original thesis refuted; physical impossible-tail capture only | original not usable; reformed usable | block retail-bias path; implement physical tail exclusion |
+| `shoulder_sell` | blocked | original thesis refuted; physical impossible-tail capture only | original not usable; reformed usable | block retail-bias path; implement physical tail exclusion |
 | `shoulder_buy` | blocked | nonstationary tail stochastic | research-to-application | EVT/conformal tail lower bound and native YES ask |
 | `center_sell` | blocked | calibrated stochastic + pair parity deterministic | application-grade after routing | route buy_no finite bins; add native NO and parity proof |
-| `stale_quote_detector` | shadow | FOK information-delay microstructure | application-grade after info feed | canonical InfoEvent and post-event posterior |
-| `weather_event_arbitrage` | shadow | alert Bayes factor stochastic | research-to-application | NWS alert likelihood ratios |
-| `resolution_window_maker` | shadow | source-known deterministic | application-grade after typed settlement | typed SettlementOutcome and payoff computation |
-| `liquidity_provision_with_heartbeat` | shadow | maker adverse-selection model | research-to-application | external adverse selection estimator |
-| `cross_market_correlation_hedge` | shadow | joint-distribution portfolio | research-to-application | edge vector + shrunk covariance optimizer |
-| `neg_risk_basket` | shadow | complete family deterministic basket | highest-priority application-grade | family orderbook sweep and vector execution |
+| `stale_quote_detector` | blocked | FOK information-delay microstructure | application-grade after info feed | canonical InfoEvent and post-event posterior |
+| `weather_event_arbitrage` | blocked | alert Bayes factor stochastic | research-to-application | NWS alert likelihood ratios |
+| `resolution_window_maker` | blocked | source-known deterministic | application-grade after typed settlement | typed SettlementOutcome and payoff computation |
+| `liquidity_provision_with_heartbeat` | blocked | maker adverse-selection model | research-to-application | external adverse selection estimator |
+| `cross_market_correlation_hedge` | blocked | joint-distribution portfolio | research-to-application | edge vector + shrunk covariance optimizer |
+| `neg_risk_basket` | blocked | complete family deterministic basket | highest-priority application-grade | family orderbook sweep and vector execution |
 
 ### 22.1 Directive-vs-code contradictions (audit findings)
 
@@ -1482,7 +1482,7 @@ with the actual code on `feat-strategy-spec-20260522` (verified by grep + read,
 2026-05-22). They are distinct from the reframe-proposals throughout §5–§17, which
 are intended *changes* the directive requests (and therefore not contradictions).
 Only two genuine factual mismatches were found; the directive's current-state
-descriptions are otherwise accurate (`_SHADOW_EDGE` placeholder values, registry
+descriptions are otherwise historical (retired placeholder edge values, registry
 statuses, and candidate gate logic all match).
 
 **C-1 — `settlement_capture` is two strategies in code, not one.** Directive §1
@@ -1563,7 +1563,7 @@ evidence/promotion analysis keyed on `strategy_key` will under-count
 ## 24. Guidance for future agents
 
 1. Do not introduce a strategy-specific cap as proof of edge. Caps limit loss; they do not create positive EV.
-2. Do not treat placeholder `_SHADOW_EDGE` as evidence.
+2. Do not treat retired placeholder edge constants as evidence.
 3. Do not treat correlation as alpha. Correlation only defines covariance; alpha requires edge vector.
 4. Do not use synthetic complement prices as executable truth unless explicitly marked and reconciled.
 5. Do not let deterministic strategies be evaluated only by stochastic win-rate CI.
