@@ -279,13 +279,47 @@ def test_open_position_tokens_are_market_channel_seed_priority():
     }
 
 
-def test_market_channel_seed_first_prefers_held_positions_over_candidate_universe():
+def test_open_rest_tokens_are_market_channel_seed_priority():
+    from src.ingest.price_channel_ingest import _edli_open_rest_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            intent_kind TEXT,
+            state TEXT,
+            token_id TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO venue_commands VALUES (?,?,?,?)",
+        [
+            ("posting", "ENTRY", "POSTING", "tok-posting"),
+            ("acked", "ENTRY", "ACKED", "tok-acked"),
+            ("partial", "ENTRY", "PARTIAL", "tok-partial"),
+            ("exit", "EXIT", "ACKED", "tok-exit"),
+            ("filled", "ENTRY", "FILLED", "tok-filled"),
+            ("blank", "ENTRY", "ACKED", ""),
+        ],
+    )
+
+    assert _edli_open_rest_priority_token_ids(conn) == {
+        "tok-posting",
+        "tok-acked",
+        "tok-partial",
+    }
+
+
+def test_market_channel_seed_first_includes_all_money_path_priority_tokens():
     from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
 
     assert _edli_market_channel_seed_first_token_ids(
         held_priority_token_ids={"held-yes", "held-no"},
+        open_rest_priority_token_ids={"rest-no"},
         candidate_priority_token_ids={"candidate-yes", "candidate-no"},
-    ) == {"held-yes", "held-no"}
+    ) == {"held-yes", "held-no", "rest-no", "candidate-yes", "candidate-no"}
 
 
 def test_market_channel_seed_first_falls_back_to_candidates_without_open_positions():
@@ -367,7 +401,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         ) VALUES (
             'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
             'question-1', 'yes-token', 'no-token', 1, 1, 0,
-                '2026-06-25T00:00:00+00:00', '0.01', '5', '{}',
+                '2026-07-25T00:00:00+00:00', '0.01', '5', '{}',
             '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-19T10:00:00+00:00',
             '2026-06-19T10:05:00+00:00'
@@ -468,7 +502,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         ) VALUES (
             'snap-1', 'gamma-1', 'event-1', 'weather-test', '0xcondition',
             'question-1', 'yes-token', 'no-token', 1, 1, 0,
-            '2026-06-25T12:00:00+00:00', '0.01', '5', '{}',
+            '2026-07-25T12:00:00+00:00', '0.01', '5', '{}',
             '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-19T10:00:00+00:00',
             '2026-06-19T10:05:00+00:00'
@@ -514,6 +548,107 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
     result = _edli_refresh_candidate_priority_quote_evidence(limit=4)
 
     assert result["candidate_priority_token_ids"] == 1
+    assert result["candidate_token_metadata"] == 1
+    assert result["candidate_quote_refresh_events"] == 1
+    check = sqlite3.connect(trade_path)
+    try:
+        assert (
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            == 2
+        )
+    finally:
+        check.close()
+
+
+def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkeypatch, tmp_path):
+    from src.data import polymarket_client
+    from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
+    from src.state import db as state_db
+    from src.state.db import init_schema, init_schema_trade_only
+
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trade.db"
+    world_conn = sqlite3.connect(world_path)
+    init_schema(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    init_schema_trade_only(trade_conn)
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (
+            'entry-resting-1', 'snap-resting', 'env-resting', 'pos-resting',
+            'decision-resting', 'idem-resting', 'ENTRY', '0xcondition',
+            'no-token', 'BUY', 5.0, 0.75, 'ACKED',
+            '2026-06-19T10:00:00+00:00', '2026-06-19T10:00:00+00:00'
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, enable_orderbook, active,
+            closed, market_end_at, min_tick_size, min_order_size,
+            fee_details_json, token_map_json, neg_risk, orderbook_top_bid,
+            orderbook_top_ask, orderbook_depth_json, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        ) VALUES (
+            'snap-resting', 'gamma-resting', 'event-resting', 'weather-test',
+            '0xcondition', 'question-resting', 'yes-token', 'no-token',
+            1, 1, 0, '2026-07-25T12:00:00+00:00', '0.01', '5',
+            '{}', '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
+            'CLOB', '2026-06-19T10:00:00+00:00',
+            '2026-06-19T10:05:00+00:00'
+        )
+        """
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    def _trade_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(trade_path)
+
+    def _world_conn(*, write_class=None):  # noqa: ARG001
+        return sqlite3.connect(world_path)
+
+    def _world_with_trades_required(*, write_class=None):  # noqa: ARG001
+        conn = sqlite3.connect(world_path)
+        conn.execute(f"ATTACH DATABASE '{trade_path}' AS trades")
+        return conn
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "timestamp": "1781863200000",
+                "hash": f"hash-{token_id}",
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.75", "size": "10"}],
+            }
+
+    monkeypatch.setattr(state_db, "get_trade_connection", _trade_conn)
+    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
+    monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _world_with_trades_required)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = _edli_refresh_candidate_priority_quote_evidence(limit=4)
+
+    assert result["candidate_priority_token_ids"] == 0
+    assert result["open_rest_priority_token_ids"] == 1
+    assert result["quote_priority_token_ids"] == 1
     assert result["candidate_token_metadata"] == 1
     assert result["candidate_quote_refresh_events"] == 1
     check = sqlite3.connect(trade_path)
@@ -607,9 +742,13 @@ def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(mon
 
         def get_orderbook_snapshot(self, token_id: str) -> dict:
             fetch_order.append(token_id)
+            market = {
+                "zz-new-token": "0xnew",
+                "aa-old-token": "0xold",
+            }[token_id]
             return {
                 "asset_id": token_id,
-                "market": "0xcondition",
+                "market": market,
                 "timestamp": "1781863200000",
                 "hash": f"hash-{token_id}",
                 "bids": [{"price": "0.70", "size": "10"}],

@@ -978,7 +978,7 @@ class MarketChannelOnlineService:
                             world_mutex=_world_mutex,
                             commit=commit,
                             logger=logger,
-                            chunk_size=max(1, len(seed_first)),
+                            chunk_size=REST_SEED_COMMIT_CHUNK_SIZE,
                         )
                     remaining = sorted(set(self.ingestor._active_token_ids) - set(seed_first))
                     self.seed_rest_books_in_chunks(

@@ -1443,6 +1443,58 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     return tokens
 
 
+def _edli_open_rest_priority_token_ids(trade_conn) -> set[str]:
+    """Selected tokens for live entry commands that still need rest/reprice evidence."""
+
+    if trade_conn is None:
+        return set()
+    try:
+        has_table = trade_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='venue_commands'"
+        ).fetchone()
+    except Exception:
+        return set()
+    if not has_table:
+        return set()
+    try:
+        columns = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+    except Exception:
+        return set()
+    required = {"token_id", "intent_kind", "state"}
+    if not required <= columns:
+        return set()
+    open_states = {
+        "POSTING",
+        "POST_ACKED",
+        "SUBMITTING",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "ACKED",
+        "PARTIAL",
+    }
+    placeholders = ",".join("?" for _ in open_states)
+    try:
+        rows = trade_conn.execute(
+            f"""
+            SELECT DISTINCT token_id
+              FROM venue_commands
+             WHERE intent_kind = 'ENTRY'
+               AND state IN ({placeholders})
+               AND token_id IS NOT NULL
+               AND token_id != ''
+            """,
+            tuple(sorted(open_states)),
+        ).fetchall()
+    except Exception:
+        return set()
+    tokens = {str(row[0] or "").strip() for row in rows}
+    tokens.discard("")
+    tokens.discard("None")
+    return tokens
+
+
 def _edli_order_token_ids_by_feasibility_age(
     trade_conn,
     token_ids,
@@ -1495,27 +1547,28 @@ def _edli_order_token_ids_by_feasibility_age(
 def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
+    open_rest_priority_token_ids: set[str] | None = None,
     candidate_priority_token_ids,
 ) -> set[str]:
     """REST-seed tokens that must be fresh before the broad market universe.
 
     Open exposure owns the strictest freshness SLA: monitor/redecision/exit can
-    act only when held-position quote evidence is current. Candidate tokens still
-    stay pinned in the subscribed universe, but seeding a large candidate set
-    before held tokens lets open exposure age past preflight/redecision limits.
-    When there is no open exposure, fall back to candidate seeding so entry
-    witness rows are still warmed promptly.
+    act only when held-position quote evidence is current. Resting entry orders
+    have the same SLA because cancel/reprice/hold decisions are live money-path
+    actions, not background discovery. Candidate tokens also stay seed-first so
+    the entry witness does not wait behind the broad market universe.
     """
 
     held = {str(token or "").strip() for token in held_priority_token_ids}
     held.discard("")
     held.discard("None")
-    if held:
-        return held
+    open_rest = {str(token or "").strip() for token in (open_rest_priority_token_ids or set())}
+    open_rest.discard("")
+    open_rest.discard("None")
     candidates = {str(token or "").strip() for token in candidate_priority_token_ids}
     candidates.discard("")
     candidates.discard("None")
-    return candidates
+    return held | open_rest | candidates
 
 
 def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
@@ -1700,14 +1753,24 @@ def _edli_refresh_candidate_priority_quote_evidence(
     started_monotonic = time.monotonic()
     budget = max(0.001, float(budget_seconds))
     deadline = started_monotonic + budget
-    if not candidate_token_ids:
-        return {"candidate_priority_token_ids": 0, "candidate_quote_refresh_events": 0}
-
     trade_read = get_trade_connection(write_class=None)
     try:
+        open_rest_token_ids = _edli_open_rest_priority_token_ids(trade_read)
+        priority_token_ids = list(
+            dict.fromkeys(
+                list(sorted(open_rest_token_ids))
+                + [str(token) for token in candidate_token_ids if str(token or "").strip()]
+            )
+        )
+        if not priority_token_ids:
+            return {
+                "candidate_priority_token_ids": 0,
+                "open_rest_priority_token_ids": 0,
+                "candidate_quote_refresh_events": 0,
+            }
         ordered_candidate_token_ids = _edli_order_token_ids_by_feasibility_age(
             trade_read,
-            candidate_token_ids,
+            priority_token_ids,
         )
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_read,
@@ -1719,6 +1782,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
     if not token_metadata:
         return {
             "candidate_priority_token_ids": len(candidate_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_token_ids),
             "candidate_quote_refresh_events": 0,
             "skipped": "no_candidate_token_metadata",
         }
@@ -1763,6 +1827,8 @@ def _edli_refresh_candidate_priority_quote_evidence(
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         return {
             "candidate_priority_token_ids": len(candidate_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_token_ids),
+            "quote_priority_token_ids": len(priority_token_ids),
             "candidate_token_metadata": len(token_metadata),
             "candidate_quote_refresh_events": int(written),
             "candidate_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
@@ -1873,10 +1939,13 @@ def _edli_market_channel_ingestor_cycle() -> None:
     trade_conn = get_trade_connection(write_class=None)
     try:
         held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
+        open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
         priority_token_ids = set(candidate_priority_token_ids)
         priority_token_ids.update(held_priority_token_ids)
+        priority_token_ids.update(open_rest_priority_token_ids)
         seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
             held_priority_token_ids=held_priority_token_ids,
+            open_rest_priority_token_ids=open_rest_priority_token_ids,
             candidate_priority_token_ids=candidate_priority_token_ids,
         )
         token_metadata = active_weather_token_metadata_for_tokens(
@@ -1895,6 +1964,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 "active_weather_token_ids": 0,
                 "priority_token_ids": len(priority_token_ids),
                 "held_priority_token_ids": len(held_priority_token_ids),
+                "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
                 "seed_first_token_ids": len(seed_first_token_ids),
                 "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
                 "fill_authority": "user_channel_or_reconcile_only",
@@ -2055,6 +2125,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
             "active_weather_token_ids": len(token_ids),
             "priority_token_ids": len(priority_token_ids),
             "held_priority_token_ids": len(held_priority_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
             "seed_first_token_ids": len(seed_first_token_ids),
             "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
             "fill_authority": "user_channel_or_reconcile_only",
