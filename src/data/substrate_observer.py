@@ -93,6 +93,31 @@ def _substrate_clob_timeout_seconds() -> float:
     )
 
 
+def _background_warm_refresh_budget_seconds() -> float:
+    """Bound background warm lock occupancy so money-path refresh gets windows."""
+    configured = max(
+        5.0,
+        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
+    )
+    background_cap = max(
+        5.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "12.0")),
+    )
+    return min(configured, background_cap)
+
+
+def _background_warm_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
+    configured = max(
+        1.0,
+        float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0")),
+    )
+    background_cap = max(
+        1.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "6.0")),
+    )
+    return min(configured, background_cap, max(0.1, refresh_budget_s - 0.1))
+
+
 def _settings_section(name: str, default=None):
     """Mirror of src.main._settings_section (precedent: replacement_forecast_production)."""
     source = settings._data if hasattr(settings, "_data") else settings
@@ -409,6 +434,8 @@ def _refresh_pending_family_snapshots(
     extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
     include_pending_families: bool = True,
     priority_condition_ids: Iterable[str] | None = None,
+    refresh_budget_seconds: float | None = None,
+    snapshot_reserve_seconds: float | None = None,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -612,11 +639,22 @@ def _refresh_pending_family_snapshots(
     # interval-fit invariant is asserted at job registration (see add_job below).
     refresh_budget_s = max(
         5.0,
-        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
+        float(
+            refresh_budget_seconds
+            if refresh_budget_seconds is not None
+            else os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")
+        ),
     )
     refresh_deadline = time.monotonic() + refresh_budget_s
     snapshot_reserve_s = min(
-        max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0"))),
+        max(
+            1.0,
+            float(
+                snapshot_reserve_seconds
+                if snapshot_reserve_seconds is not None
+                else os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0")
+            ),
+        ),
         max(0.1, refresh_budget_s - 0.1),
     )
     topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
@@ -1405,10 +1443,17 @@ def _edli_market_substrate_warm_cycle() -> None:
         if not substrate_process_acquired:
             logger.info("EDLI market-substrate warm skipped: cross-process executable substrate refresh already running")
             return
+        background_budget_s = _background_warm_refresh_budget_seconds()
+        background_snapshot_reserve_s = _background_warm_snapshot_reserve_seconds(background_budget_s)
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
-        summary = _refresh_pending_family_snapshots(conn, forecasts_conn)
+        summary = _refresh_pending_family_snapshots(
+            conn,
+            forecasts_conn,
+            refresh_budget_seconds=background_budget_s,
+            snapshot_reserve_seconds=background_snapshot_reserve_s,
+        )
         logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
     except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
         logger.error(

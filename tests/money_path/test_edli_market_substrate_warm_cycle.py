@@ -349,6 +349,21 @@ def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
         assert "refresh_executable_market_substrate_snapshots(" in src
 
 
+def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
+    """Background warming must not occupy the shared substrate lock for the full cadence."""
+
+    warm_src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
+    helper_src = inspect.getsource(substrate_observer._background_warm_refresh_budget_seconds)
+    reserve_src = inspect.getsource(substrate_observer._background_warm_snapshot_reserve_seconds)
+
+    assert "refresh_budget_seconds=background_budget_s" in warm_src
+    assert "snapshot_reserve_seconds=background_snapshot_reserve_s" in warm_src
+    assert "ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS" in helper_src
+    assert '"12.0"' in helper_src
+    assert "ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS" in reserve_src
+    assert '"6.0"' in reserve_src
+
+
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
     belief = SimpleNamespace(
         family_id="family-1",
