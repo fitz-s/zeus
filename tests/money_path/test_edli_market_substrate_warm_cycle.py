@@ -1121,6 +1121,126 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         assert capture.params == ("edli_reactor_v1", "2026-06-05", 2000)
 
 
+def test_open_rest_priority_requires_live_command_and_remaining_rest():
+    """Cancelled partial fills are historical fills, not live rests to reprice."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            venue_order_id TEXT,
+            token_id TEXT,
+            snapshot_id TEXT,
+            intent_kind TEXT,
+            state TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            remaining_size TEXT,
+            matched_size TEXT,
+            local_sequence INTEGER
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            phase TEXT
+        );
+        """
+    )
+
+    rows = [
+        (
+            "cancelled-partial",
+            "old-pos",
+            "old-order",
+            "CANCELLED",
+            "PARTIALLY_MATCHED",
+            "6286.757",
+            "quarantined",
+            "Hong Kong",
+            "2026-06-22",
+            "high",
+        ),
+        (
+            "acked-partial",
+            "live-pos",
+            "live-order",
+            "ACKED",
+            "PARTIALLY_MATCHED",
+            "11.25",
+            "pending_entry",
+            "Singapore",
+            "2026-06-26",
+            "high",
+        ),
+        (
+            "acked-zero",
+            "zero-pos",
+            "zero-order",
+            "ACKED",
+            "PARTIALLY_MATCHED",
+            "0",
+            "pending_entry",
+            "Tokyo",
+            "2026-06-26",
+            "high",
+        ),
+    ]
+    for (
+        command_id,
+        position_id,
+        order_id,
+        command_state,
+        fact_state,
+        remaining,
+        phase,
+        city,
+        target_date,
+        metric,
+    ) in rows:
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, position_id, venue_order_id, token_id, snapshot_id, intent_kind, state
+            ) VALUES (?, ?, ?, ?, ?, 'ENTRY', ?)
+            """,
+            (
+                command_id,
+                position_id,
+                order_id,
+                f"token-{command_id}",
+                f"snap-{command_id}",
+                command_state,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size, local_sequence
+            ) VALUES (?, ?, ?, ?, '1', 1)
+            """,
+            (order_id, command_id, fact_state, remaining),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, city, target_date, temperature_metric, phase
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (position_id, city, target_date, metric, phase),
+        )
+
+    expected = [("Singapore", "2026-06-26", "high")]
+    assert main_module._open_rest_family_rows_for_refresh(conn) == expected
+    assert substrate_observer._open_rest_family_rows_for_refresh(conn) == expected
+
+
 def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatch):
     """The pending-family warmer must progress by wall-clock budget, not by a hard
     family-count slice. A fixed 8-family cap lets a small prefix monopolise the

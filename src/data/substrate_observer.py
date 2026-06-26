@@ -214,11 +214,12 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
     try:
         commands = trade_conn.execute(
             """
-            SELECT command_id, position_id, venue_order_id
+            SELECT command_id, position_id, venue_order_id, state
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
                AND venue_order_id != ''
+               AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
             """
         ).fetchall()
     except Exception:  # noqa: BLE001
@@ -233,7 +234,7 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         try:
             fact = trade_conn.execute(
                 """
-                SELECT state
+                SELECT state, remaining_size
                   FROM venue_order_facts
                  WHERE venue_order_id = ?
                  ORDER BY local_sequence DESC
@@ -244,6 +245,16 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         except Exception:  # noqa: BLE001
             continue
         if fact is None or str(fact[0] or "") not in open_states:
+            continue
+        remaining_value = fact[1] if len(fact) > 1 else None
+        raw_remaining = "" if remaining_value is None else str(remaining_value).strip()
+        if raw_remaining:
+            try:
+                if float(raw_remaining) <= 0.000001:
+                    continue
+            except ValueError:
+                continue
+        if str(fact[0] or "") == "PARTIALLY_MATCHED" and not raw_remaining:
             continue
         position_id = str(row[1] or "")
         if not position_id:
