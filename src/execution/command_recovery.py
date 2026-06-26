@@ -10991,6 +10991,7 @@ def _reconcile_passes_inline(
         maker_fill_summary = reconcile_recorded_maker_fill_economics(
             conn,
             observed_at=started_at,
+            live_tick_scope=True,
         )
         summary["recorded_maker_fill_economics"] = maker_fill_summary
         summary["advanced"] += maker_fill_summary["corrected"]

@@ -1136,6 +1136,63 @@ def test_maker_fill_economics_repair_uses_canonical_trade_fact_over_later_weaker
     }
 
 
+def test_live_tick_maker_fill_repair_skips_downstream_entry_positions(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    seed_command(conn, size=5.17, price=0.37)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    conn.execute(
+        "UPDATE position_current SET phase = 'settled' WHERE position_id = 'pos-m5'"
+    )
+    raw = {
+        "id": "trade-maker-settled",
+        "taker_order_id": "ord-other-taker",
+        "status": "CONFIRMED",
+        "size": "1.5873",
+        "price": "0.63",
+        "transaction_hash": "0xabc",
+        "maker_orders": [
+            {
+                "order_id": "ord-m5",
+                "matched_amount": "1.5873",
+                "price": "0.37",
+                "asset_id": YES_TOKEN,
+                "side": "BUY",
+            }
+        ],
+    }
+    append(
+        conn,
+        trade_id="trade-maker-settled",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="1.5873",
+        fill_price="0.63",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    live_tick = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+        live_tick_scope=True,
+    )
+    full_sweep = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(seconds=2),
+    )
+
+    assert live_tick["scanned"] == 0
+    assert live_tick["corrected"] == 0
+    assert full_sweep["scanned"] == 1
+    assert full_sweep["corrected"] == 1
+
+
 def test_maker_fill_projection_uses_canonical_position_when_old_command_position_voided(conn):
     """A repaired maker fill must not reopen an old voided command position.
 

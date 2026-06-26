@@ -1766,6 +1766,7 @@ def reconcile_recorded_maker_fill_economics(
     conn: sqlite3.Connection,
     *,
     observed_at: datetime | str | None = None,
+    live_tick_scope: bool = False,
 ) -> dict[str, int]:
     """Repair recorded trade facts whose raw maker leg contradicts top-level trade economics.
 
@@ -1774,6 +1775,12 @@ def reconcile_recorded_maker_fill_economics(
     command-owned maker order.  This repair appends a corrected fact instead of
     rewriting the old row, then replays the entry-fill projection from the
     latest fact chain.
+
+    ``live_tick_scope`` keeps the high-cadence command-recovery tick on current
+    money-path rows. Historical terminal entry positions are still repaired by
+    the default/full sweep, but they must not be rescanned every live tick where
+    they can only log downstream-phase skips and steal time from entry/day0
+    redecision.
     """
 
     summary = {
@@ -1786,8 +1793,25 @@ def reconcile_recorded_maker_fill_economics(
     if not _table_exists(conn, "venue_trade_facts") or not _table_exists(conn, "venue_commands"):
         return summary
     observed = _coerce_dt(observed_at)
+    params: list[object] = []
+    live_tick_join = ""
+    live_tick_filter = ""
+    if live_tick_scope:
+        live_tick_join = """
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+        """
+        phase_placeholders = ", ".join("?" for _ in sorted(_ENTRY_FILL_PROJECTION_PHASES))
+        live_tick_filter = f"""
+           AND (
+                 UPPER(cmd.intent_kind) != 'ENTRY'
+              OR COALESCE(pc.phase, '') IN ({phase_placeholders})
+           )
+        """
+        params.extend(sorted(_ENTRY_FILL_PROJECTION_PHASES))
+
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte() + f"""
         SELECT
             tf.*,
             cmd.snapshot_id AS cmd_snapshot_id,
@@ -1808,10 +1832,13 @@ def reconcile_recorded_maker_fill_economics(
           FROM canonical_trade_fact tf
           JOIN venue_commands cmd
             ON cmd.command_id = tf.command_id
+          {live_tick_join}
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
+           {live_tick_filter}
          ORDER BY tf.observed_at, tf.trade_fact_id
-        """
+        """,
+        tuple(params),
     ).fetchall()
     for row in rows:
         summary["scanned"] += 1

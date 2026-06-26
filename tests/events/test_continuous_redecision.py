@@ -108,6 +108,43 @@ def test_recent_no_value_refutation_suppresses_same_evidence_only():
     ) is None
 
 
+def test_recent_no_value_refutation_ignores_operational_duplicate_summary():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    prior = _event_for_refutation()
+    store.insert_or_ignore(prior)
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            decision_time, city, target_date, metric, family_id, causal_snapshot_id,
+            created_at, schema_version
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  '2026-06-18T00:00:10+00:00', 'Shanghai', '2026-06-19', 'low',
+                  'family-shanghai-low', ?, '2026-06-18T00:00:10+00:00', 1)
+        """,
+        (
+            "regret-" + prior.event_id,
+            prior.event_id,
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=24C buy_yes missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:condition_id=0xabc"
+            ),
+            prior.causal_snapshot_id,
+        ),
+    )
+
+    same = _event_for_refutation()
+    assert cr.recent_no_value_event_refutation(
+        conn,
+        same,
+        decision_time=datetime.fromisoformat("2026-06-18T00:05:00+00:00"),
+    ) is None
+
+
 def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapshot_id: str = "snap1"):
     """Cache a 2-bin belief where the YES side of bin 'b30' has p_posterior_yes."""
     cr.cache_belief(
@@ -1071,6 +1108,88 @@ def test_all_candidates_rejected_row_is_family_backoff_not_candidate_backoff():
     assert not any(
         len(key) == 5 and key[:3] == ("London", "2026-06-18", "low")
         for key in rejections
+    )
+
+
+def test_operational_all_candidates_rejected_row_is_not_family_no_value_backoff():
+    conn = _mem_world()
+    label = "Will the highest temperature in Milan be 37°C on June 27?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_milan_hash",
+        city="Milan",
+        target_date="2026-06-27",
+        temperature_metric="high",
+        snapshot_id="snap-milan",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.25],
+        q_lcb_yes_vec=[0.14],
+        q_lcb_no_vec=[0.60],
+        recorded_at="2026-06-26T13:00:00+00:00",
+    )
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_lcb_5pct,
+            trade_score, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_milan_hash",
+            "Milan",
+            "2026-06-27",
+            "high",
+            None,
+            None,
+            "TRADE_SCORE",
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=Will the highest temperature in Milan be 37°C on June 27? "
+                "buy_yes reason_class=other missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:condition_id=0xabc"
+            ),
+            None,
+            None,
+            None,
+            "2026-06-26T13:01:00+00:00",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+
+    assert ("family", "Milan", "2026-06-27", "high") not in rejections
+    price_lookup = {
+        ("edli_family_milan_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.10,
+            freshness_deadline="2026-06-26T13:10:00+00:00",
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-26T13:02:00+00:00",
+        price_lookup=price_lookup,
+        min_edge=0.01,
+        recent_full_economics_rejections=rejections,
     )
 
 

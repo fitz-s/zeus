@@ -856,6 +856,8 @@ def _is_family_level_redecision_refutation(reason: str) -> bool:
     decision attempt.
     """
 
+    if _is_operational_non_value_summary(reason):
+        return False
     return (
         reason.startswith("TRADE_SCORE_NON_POSITIVE")
         or reason.startswith("TRADE_SCORE_BLOCKED")
@@ -865,6 +867,29 @@ def _is_family_level_redecision_refutation(reason: str) -> bool:
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:NO_SUBMIT_CERTIFICATE_REJECTED:"
         )
     )
+
+
+def _is_operational_non_value_summary(reason: str) -> bool:
+    """Reasons that say "not submit-able right now", not "no economic value".
+
+    Active-order duplicate suppression and held-position monitor ownership are
+    enforced at the submit/monitor boundary from current state. Persisted summary
+    rows carrying those labels must not become family-level no-value evidence;
+    doing so freezes unrelated bins/directions in the same weather family until
+    cooldown even though the original rejection was operational ownership.
+    """
+
+    reason_text = str(reason or "")
+    if not reason_text.startswith("EVENT_BOUND_ALL_CANDIDATES_REJECTED:"):
+        return False
+    operational_markers = (
+        "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED",
+        "held_family_monitor_owned",
+        "held_position_monitor_owned",
+        "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED",
+        "OPEN_POSITION_SAME_MARKET_MONITOR_OWNED",
+    )
+    return any(marker in reason_text for marker in operational_markers)
 
 
 def _full_decision_family_refutation_still_blocks(
@@ -1132,6 +1157,9 @@ def recent_no_value_event_refutation(
         return None
 
     for row in rows:
+        reason = str(row[1] or "")
+        if _is_operational_non_value_summary(reason):
+            continue
         row_event_type = str(row[6] or "").strip()
         if not _no_value_refutation_event_types_compatible(event.event_type, row_event_type):
             continue
@@ -1139,7 +1167,7 @@ def recent_no_value_event_refutation(
         if payload_digest and prior_payload_hash and payload_digest == prior_payload_hash:
             return RecentNoValueEventRefutation(
                 event_id=str(row[0] or ""),
-                rejection_reason=str(row[1] or ""),
+                rejection_reason=reason,
                 created_at=str(row[2] or ""),
                 evidence_match="payload_hash",
             )
@@ -1147,7 +1175,7 @@ def recent_no_value_event_refutation(
         if causal_snapshot_id and prior_causal and causal_snapshot_id == prior_causal:
             return RecentNoValueEventRefutation(
                 event_id=str(row[0] or ""),
-                rejection_reason=str(row[1] or ""),
+                rejection_reason=reason,
                 created_at=str(row[2] or ""),
                 evidence_match="causal_snapshot_id",
             )
