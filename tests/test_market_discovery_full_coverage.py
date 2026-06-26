@@ -2218,6 +2218,107 @@ def test_small_priority_refresh_uses_priority_fallback_caps(monkeypatch):
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
+def test_priority_refresh_fills_partial_batch_misses_with_singular_fallback(monkeypatch):
+    """Partial /books responses must still complete the priority condition sides."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "10",
+    )
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS", "1")
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES", "1")
+    conn = _make_in_memory_trade_db()
+    priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    priority_outcome = priority_market["outcomes"][0]
+    expected_tokens = [priority_outcome["token_id"], priority_outcome["no_token_id"]]
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            first = str(list(token_ids)[0])
+            return {
+                first: {
+                    "asset_id": first,
+                    "market": first,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+            }
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[priority_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={priority_outcome["condition_id"]},
+        )
+
+    assert singular_calls == [expected_tokens[1]]
+    assert captured_books == expected_tokens
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_full_family_nonpriority_batch_failure_defers_without_singular_storm(monkeypatch):
+    """Ordinary backlog refresh must not spend the live tick on serial /book retries."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "10",
+    )
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    singular_calls: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            raise TimeoutError("batch timeout")
+
+        def get_orderbook_snapshot(self, token_id):
+            singular_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    summary = refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=[market],
+        clob=_Clob(),
+        captured_at=_NOW,
+        scan_authority="VERIFIED",
+        max_outcomes=0,
+        budget_seconds=15.0,
+    )
+
+    assert singular_calls == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] == 2
+
+
 def test_capture_busy_timeout_denominator_uses_attemptable_prefetched_candidates():
     """Missing price books must not dilute the SQLite wait budget for writable rows."""
 

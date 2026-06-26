@@ -4165,6 +4165,9 @@ def _prefetch_selected_orderbooks(
                     split_books.update(sub_books)
             return split_books
         if isinstance(chunk_books, dict):
+            missing_tokens = [tok for tok in chunk if tok not in chunk_books]
+            if missing_tokens:
+                chunk_books.update(_singular_fallback(missing_tokens))
             return chunk_books
         return {}
 
@@ -4647,6 +4650,29 @@ def refresh_executable_market_substrate_snapshots(
             if full_family_capture
             else None
         )
+        singular_fallback_max_tokens_arg: int | None
+        singular_fallback_max_failures_arg: int | None
+        if priority_full_family_direct_clob_prefetch and priority_network_tokens:
+            singular_fallback_max_tokens_arg = max(
+                _positive_int_env(
+                    "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS",
+                    4,
+                ),
+                len(priority_network_tokens),
+            )
+            singular_fallback_max_failures_arg = max(
+                _positive_int_env(
+                    "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES",
+                    2,
+                ),
+                len(priority_network_tokens),
+            )
+        elif full_family_capture:
+            singular_fallback_max_tokens_arg = 0
+            singular_fallback_max_failures_arg = 0
+        else:
+            singular_fallback_max_tokens_arg = None
+            singular_fallback_max_failures_arg = None
         prefetched_books.update(
             _prefetch_selected_orderbooks(
                 clob,
@@ -4654,28 +4680,8 @@ def refresh_executable_market_substrate_snapshots(
                 deadline=prefetch_deadline,
                 max_retry_chunks=(0 if full_family_capture else None),
                 primary_chunk_size=full_family_primary_chunk_size,
-                singular_fallback_max_tokens=(
-                    max(
-                        _positive_int_env(
-                            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS",
-                            4,
-                        ),
-                        len(priority_network_tokens),
-                    )
-                    if priority_full_family_direct_clob_prefetch and priority_network_tokens
-                    else None
-                ),
-                singular_fallback_max_failures=(
-                    max(
-                        _positive_int_env(
-                            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES",
-                            2,
-                        ),
-                        len(priority_network_tokens),
-                    )
-                    if priority_full_family_direct_clob_prefetch and priority_network_tokens
-                    else None
-                ),
+                singular_fallback_max_tokens=singular_fallback_max_tokens_arg,
+                singular_fallback_max_failures=singular_fallback_max_failures_arg,
             )
         )
     prefetch_missing_skipped = 0
