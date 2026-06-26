@@ -8437,6 +8437,12 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     forecast_reader_authority = str(
         forecast_payload.get("reader_authority") or "read_executable_forecast"
     )
+    source_truth_source_id = (
+        payload.get("source_id")
+        or forecast_payload.get("forecast_source_id")
+        or forecast_payload.get("source_id")
+    )
+    source_truth_source_run_id = payload.get("source_run_id") or forecast_payload.get("source_run_id")
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -8457,8 +8463,8 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "completeness_status": payload.get("completeness_status"),
                 "required_fields_present": payload.get("required_fields_present"),
                 "required_steps_present": payload.get("required_steps_present"),
-                "source_id": payload.get("source_id"),
-                "source_run_id": payload.get("source_run_id"),
+                "source_id": source_truth_source_id,
+                "source_run_id": source_truth_source_run_id,
                 "snapshot_id": payload.get("snapshot_id") or event.causal_snapshot_id,
                 "payload_hash": event.payload_hash,
                 "causal_snapshot_id": event.causal_snapshot_id,
