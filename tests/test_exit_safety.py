@@ -1453,9 +1453,85 @@ def test_execute_exit_order_rejects_existing_idempotent_command_with_old_exit_sn
 
         assert first.status == "pending"
         assert second.status == "rejected"
-        assert second.reason == "exit_snapshot_identity:existing_command_snapshot_id_mismatch"
+        assert second.reason is not None
+        assert second.reason.startswith("active_prior_exit_sell:")
         assert len(calls) == 1
         assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id = ?", ("pos-exit-idem",)).fetchone()[0] == 1
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def test_execute_exit_order_retries_after_no_side_effect_reject_with_new_exit_snapshot(conn, monkeypatch):
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+
+    _enable_exit_submit_prereqs(conn, monkeypatch)
+    calls: list[dict] = []
+
+    class PolyApiException(Exception):
+        pass
+
+    class RetryClient:
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise PolyApiException(
+                    "PolyApiException[status_code=400, "
+                    "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
+                )
+            return _fake_submit_result(self.bound_envelope, order_id="ord-retry-2")
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", RetryClient)
+    try:
+        old_snapshot = _ensure_snapshot(conn, snapshot_id="snap-exit-retry-old")
+        new_snapshot = _ensure_snapshot(
+            conn,
+            snapshot_id="snap-exit-retry-new",
+            raw_orderbook_hash="d" * 64,
+        )
+        first = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-retry",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=old_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, old_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-retry-stable",
+        )
+        second = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="pos-exit-retry",
+                token_id=YES_TOKEN,
+                shares=5.0,
+                current_price=0.50,
+                best_bid=0.49,
+                executable_snapshot_id=new_snapshot,
+                executable_snapshot_hash=_snapshot_hash(conn, new_snapshot),
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+            ),
+            conn=conn,
+            decision_id="exit-retry-stable",
+        )
+
+        assert first.status == "rejected"
+        assert "venue_auth_invalid_signature_400" in (first.reason or "")
+        assert second.status == "pending"
+        assert len(calls) == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
+            ("pos-exit-retry",),
+        ).fetchone()[0] == 2
     finally:
         _clear_exit_submit_prereqs()
 

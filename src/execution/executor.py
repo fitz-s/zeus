@@ -1603,6 +1603,19 @@ def _exit_snapshot_identity_details(intent) -> dict[str, str] | None:
     }
 
 
+def _exit_idempotency_decision_component(effective_decision_id: str, intent) -> str:
+    """Scope exit idempotency to the executable snapshot while keeping decision_id stable."""
+
+    details = _exit_snapshot_identity_details(intent)
+    if details is None:
+        return effective_decision_id
+    snapshot_id = details.get("snapshot_id", "")
+    snapshot_hash = details.get("snapshot_hash", "")
+    if not snapshot_id or not snapshot_hash:
+        return effective_decision_id
+    return f"{effective_decision_id}:exit_snapshot:{snapshot_id}:{snapshot_hash}"
+
+
 def _exit_snapshot_identity_component(
     conn: sqlite3.Connection,
     intent,
@@ -3254,8 +3267,12 @@ def execute_exit_order(
     # supplied a real one. P1.S5 wires real decision_id from upstream;
     # exit path still uses synthetic when called without decision_id.
     effective_decision_id = decision_id or f"exit:{intent.trade_id}"
+    idempotency_decision_id = _exit_idempotency_decision_component(
+        effective_decision_id,
+        intent,
+    )
     idem = IdempotencyKey.from_inputs(
-        decision_id=effective_decision_id,
+        decision_id=idempotency_decision_id,
         token_id=intent.token_id,
         side="SELL",
         price=limit_price,
