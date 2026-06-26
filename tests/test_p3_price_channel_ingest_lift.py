@@ -392,6 +392,51 @@ def test_price_channel_money_path_tokens_resolve_to_redecision_families():
     }
 
 
+def test_price_channel_held_tokens_resolve_separately_from_entry_candidates():
+    from src.ingest.price_channel_ingest import _edli_held_family_keys_for_tokens
+
+    trade = sqlite3.connect(":memory:")
+    trade.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        )
+        """
+    )
+    trade.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?)",
+        [
+            ("pos-1", "active", "Paris", "2026-06-20", "low", "held-yes", "held-no"),
+            ("pos-2", "settled", "Tokyo", "2026-06-20", "high", "settled-yes", "settled-no"),
+        ],
+    )
+
+    assert _edli_held_family_keys_for_tokens(
+        trade,
+        {"held-no", "settled-no", "unknown-token"},
+    ) == {("Paris", "2026-06-20", "low")}
+
+
+def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
+    import src.ingest.price_channel_ingest as pci
+
+    src = inspect.getsource(pci._edli_emit_price_channel_redecisions_for_events)
+
+    assert "held_families = _edli_held_family_keys_for_tokens" in src
+    assert "entry_families = _edli_screened_entry_family_keys_for_price_channel" in src
+    assert "set(families) - set(held_families)" in src
+    assert "families = held_families | entry_families" in src
+    assert src.index("families = held_families | entry_families") < src.index(
+        "trigger.build_committed_snapshot_events"
+    )
+
+
 def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table

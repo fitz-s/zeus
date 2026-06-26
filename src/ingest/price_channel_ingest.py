@@ -1702,6 +1702,140 @@ def _edli_money_path_family_keys_for_tokens(
     }
 
 
+def _edli_held_family_keys_for_tokens(
+    trade_conn,
+    token_ids,
+    *,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    tokens = {
+        str(token or "").strip()
+        for token in (token_ids or set())
+        if str(token or "").strip() and str(token or "").strip() != "None"
+    }
+    if not tokens or not _edli_table_exists(trade_conn, "position_current", schema=trade_schema):
+        return set()
+    trade_prefix = _edli_schema_prefix(trade_schema)
+    placeholders = ",".join("?" for _ in tokens)
+    try:
+        rows = trade_conn.execute(
+            f"""
+            SELECT DISTINCT city, target_date, temperature_metric
+              FROM {trade_prefix}position_current
+             WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
+               AND (
+                    token_id IN ({placeholders})
+                 OR no_token_id IN ({placeholders})
+               )
+               AND city IS NOT NULL AND TRIM(city) != ''
+               AND target_date IS NOT NULL AND TRIM(target_date) != ''
+               AND temperature_metric IN ('high', 'low')
+            """,
+            (*tuple(tokens), *tuple(tokens)),
+        ).fetchall()
+    except Exception:
+        return set()
+    return {
+        (str(row[0]).strip(), str(row[1]).strip(), str(row[2]).strip())
+        for row in rows
+        if str(row[0]).strip() and str(row[1]).strip() and str(row[2]).strip() in {"high", "low"}
+    }
+
+
+def _edli_screened_entry_family_keys_for_price_channel(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    trade_schema: str = "",
+) -> set[tuple[str, str, str]]:
+    """Entry families whose current quote tick still clears the live screen.
+
+    The price-channel sidecar is a quote-evidence producer, not a trading
+    authority. A non-held family may enter Tier-0 redecision only after the same
+    continuous entry screen proves current q_lcb, fresh executable price, spine
+    inputs, and recent full-economics backoff all allow it. Held families are
+    handled separately because open exposure itself is money-path evidence.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in (families or set())
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return set()
+    try:
+        from src.events.continuous_redecision import (
+            _all_latest_beliefs,
+            filter_redecisions_with_spine_members,
+            screen_entry_redecisions,
+            screened_family_keys,
+        )
+    except Exception:
+        return set()
+    decision_iso = decision_time.astimezone(timezone.utc).isoformat()
+    try:
+        beliefs = [
+            belief
+            for belief in _all_latest_beliefs(world_conn, decision_time=decision_iso)
+            if (
+                str(belief.city or "").strip(),
+                str(belief.target_date or "").strip(),
+                str(belief.metric or "").strip(),
+            )
+            in clean_families
+        ]
+    except Exception:
+        return set()
+    if not beliefs:
+        return set()
+
+    screen_trade_conn = trade_conn
+    close_trade_conn = False
+    if trade_schema:
+        try:
+            from src.state.db import get_trade_connection_read_only
+
+            screen_trade_conn = get_trade_connection_read_only()
+            close_trade_conn = True
+        except Exception:
+            return set()
+    try:
+        redecisions = screen_entry_redecisions(
+            world_conn,
+            screen_trade_conn,
+            decision_time=decision_iso,
+            min_edge=0.01,
+            acted_state=None,
+            beliefs=beliefs,
+        )
+    except Exception:
+        return set()
+    finally:
+        if close_trade_conn:
+            try:
+                screen_trade_conn.close()
+            except Exception:
+                pass
+    if not redecisions:
+        return set()
+    try:
+        redecisions = filter_redecisions_with_spine_members(
+            forecasts_conn,
+            redecisions,
+            beliefs=beliefs,
+            decision_time=decision_iso,
+        )
+        return screened_family_keys(world_conn, redecisions, beliefs=beliefs)
+    except Exception:
+        return set()
+
+
 def _edli_pending_redecision_entity_keys(world_conn) -> set[str]:
     if not (
         _edli_table_exists(world_conn, "opportunity_events")
@@ -1774,8 +1908,6 @@ def _edli_emit_price_channel_redecisions_for_events(
         tokens,
         trade_schema=trade_schema,
     )
-    if not families:
-        return 0
     try:
         decision_time = datetime.fromisoformat(str(received_at).replace("Z", "+00:00"))
         if decision_time.tzinfo is None:
@@ -1783,6 +1915,22 @@ def _edli_emit_price_channel_redecisions_for_events(
         decision_time = decision_time.astimezone(timezone.utc)
     except Exception:
         decision_time = datetime.now(timezone.utc)
+    held_families = _edli_held_family_keys_for_tokens(
+        trade_conn,
+        tokens,
+        trade_schema=trade_schema,
+    )
+    entry_families = _edli_screened_entry_family_keys_for_price_channel(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        set(families) - set(held_families),
+        decision_time=decision_time,
+        trade_schema=trade_schema,
+    )
+    families = held_families | entry_families
+    if not families:
+        return 0
     from src.events.event_writer import EventWriter
     from src.events.triggers.forecast_snapshot_ready import (
         ForecastSnapshotReadyTrigger,
