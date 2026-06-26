@@ -3973,6 +3973,7 @@ def _prefetch_selected_orderbooks(
     selected_candidates: list[tuple],
     *,
     deadline: float | None = None,
+    max_retry_chunks: int | None = None,
 ) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
@@ -4030,9 +4031,13 @@ def _prefetch_selected_orderbooks(
         primary_chunk_size,
         _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_RETRY_CHUNK", _BATCH_ORDERBOOK_RETRY_CHUNK),
     )
-    max_retry_chunks = _positive_int_env(
-        "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS",
-        2,
+    retry_chunk_cap = (
+        _positive_int_env(
+            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS",
+            2,
+        )
+        if max_retry_chunks is None
+        else max(0, int(max_retry_chunks))
     )
     singular_getter = getattr(clob, "get_orderbook_snapshot", None)
     singular_fallback_cap = _positive_int_env(
@@ -4090,12 +4095,12 @@ def _prefetch_selected_orderbooks(
             split_books: dict[str, dict] = {}
             retry_chunks_attempted = 0
             for sub_start in range(0, len(chunk), retry_chunk_size):
-                if retry_chunks_attempted >= max_retry_chunks:
+                if retry_chunk_cap > 0 and retry_chunks_attempted >= retry_chunk_cap:
                     logger.info(
                         "Batch orderbook prefetch stopped retry split after %d chunks "
                         "(cap %d); remaining token prices deferred",
                         retry_chunks_attempted,
-                        max_retry_chunks,
+                        retry_chunk_cap,
                     )
                     break
                 if deadline is not None and (deadline - time.monotonic()) < min_prefetch_window:
@@ -4485,10 +4490,12 @@ def refresh_executable_market_substrate_snapshots(
     # fee_details are fetched once per family and reused only inside this
     # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
     batch_orderbook_supported = callable(getattr(clob, "get_orderbook_snapshots", None))
+    full_family_capture = per_city_limit == 0
     prefetched_books = _prefetch_selected_orderbooks(
         clob,
         selected_candidates,
         deadline=prefetch_deadline,
+        max_retry_chunks=(0 if full_family_capture else None),
     )
     if batch_orderbook_supported:
         prefetched_books.update(

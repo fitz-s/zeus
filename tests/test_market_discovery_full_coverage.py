@@ -1476,6 +1476,50 @@ def test_prefetch_failed_large_chunk_retries_bounded_priority_prefix_by_default(
     assert sorted(books) == ["yes-0", "yes-1", "yes-2", "yes-3"]
 
 
+def test_prefetch_failed_large_chunk_can_retry_full_family_until_deadline(monkeypatch):
+    """Money-path full-family refresh is deadline-bound, not fixed at two retry chunks."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            if len(call) == 6:
+                raise TimeoutError("handshake timeout")
+            return {t: {"asset_id": t, "bids": [], "asks": []} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(
+        _Clob(),
+        candidates,
+        deadline=None,
+        max_retry_chunks=0,
+    )
+
+    assert calls == [
+        ["yes-0", "yes-1", "yes-2", "yes-3", "yes-4", "yes-5"],
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+        ["yes-4", "yes-5"],
+    ]
+    assert sorted(books) == [f"yes-{i}" for i in range(6)]
+
+
 def test_prefetch_retry_chunk_falls_back_to_bounded_singular_get(monkeypatch):
     """If POST /books is unhealthy even for tiny chunks, fetch a bounded priority
     prefix with singular /book instead of returning an empty price surface."""
