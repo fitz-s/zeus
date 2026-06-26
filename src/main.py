@@ -6495,6 +6495,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 )
             all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
+        expired_stale_pending = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
@@ -6539,6 +6540,23 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         world_scan_ro = get_world_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
         try:
+            world_prune = get_world_connection()
+            prune_mutex = _world_write_mutex()
+            prune_mutex.acquire()
+            try:
+                expired_stale_pending = _edli_expire_unadmitted_redecision_pending(
+                    world_prune,
+                    set(all_families),
+                    decision_time=received_at,
+                    supersede_stale_admitted=True,
+                )
+                world_prune.commit()
+            finally:
+                prune_mutex.release()
+                try:
+                    world_prune.close()
+                except Exception:  # noqa: BLE001
+                    pass
             pending = _edli_pending_entity_keys(world_scan_ro, event_types=(REDECISION_EVENT_TYPE,))
             pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
             emit_families = set(all_families) - pending_families
@@ -6635,13 +6653,13 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             "entry_families=%d rest_pulls=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
-            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d",
+            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d expired_stale_pending=%d",
             len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
             len(held_reemit_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
-            len(emitted), cancelled, expired_unadmitted,
+            len(emitted), cancelled, expired_unadmitted, expired_stale_pending,
         )
         if confirm_refresh_summary:
             logger.info(
@@ -7532,6 +7550,7 @@ def _edli_expire_unadmitted_redecision_pending(
     admitted_families: set[tuple[str, str, str]],
     *,
     decision_time: str,
+    supersede_stale_admitted: bool = False,
 ) -> int:
     """Expire redecision rows no longer backed by entry edge or rest reprice value.
 
@@ -7616,7 +7635,7 @@ def _edli_expire_unadmitted_redecision_pending(
             )
     except Exception:  # noqa: BLE001
         return 0
-    expire_ids: list[str] = []
+    expire_by_reason: dict[str, list[str]] = {}
     for row in rows:
         try:
             event_id = str(row[0] or "")
@@ -7638,36 +7657,41 @@ def _edli_expire_unadmitted_redecision_pending(
                 decision_dt=decision_dt,
             ):
                 continue
-            expire_ids.append(event_id)
-    if not expire_ids:
+            reason = "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value"
+            expire_by_reason.setdefault(reason, []).append(event_id)
+        elif supersede_stale_admitted:
+            reason = "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed"
+            expire_by_reason.setdefault(reason, []).append(event_id)
+    if not expire_by_reason:
         return 0
     now = str(decision_time)
     changed = 0
-    for start in range(0, len(expire_ids), 250):
-        chunk = expire_ids[start : start + 250]
-        placeholders = ",".join("?" for _ in chunk)
-        cur = world_conn.execute(
-            f"""
-            UPDATE opportunity_event_processing
-               SET processing_status = 'expired',
-                   processed_at = ?,
-                   updated_at = ?,
-                   last_error = 'REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value'
-             WHERE consumer_name = 'edli_reactor_v1'
-               AND (
-                    processing_status = 'pending'
-                 OR (
-                    processing_status = 'processing'
-                    AND claimed_at IS NOT NULL
-                    AND ? != ''
-                    AND claimed_at <= ?
-                 )
-               )
-               AND event_id IN ({placeholders})
-            """,
-            (now, now, stale_processing_cutoff, stale_processing_cutoff, *chunk),
-        )
-        changed += int(cur.rowcount or 0)
+    for reason, expire_ids in expire_by_reason.items():
+        for start in range(0, len(expire_ids), 250):
+            chunk = expire_ids[start : start + 250]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = world_conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?,
+                       last_error = ?
+                 WHERE consumer_name = 'edli_reactor_v1'
+                   AND (
+                        processing_status = 'pending'
+                     OR (
+                        processing_status = 'processing'
+                        AND claimed_at IS NOT NULL
+                        AND ? != ''
+                        AND claimed_at <= ?
+                     )
+                   )
+                   AND event_id IN ({placeholders})
+                """,
+                (now, now, reason, stale_processing_cutoff, stale_processing_cutoff, *chunk),
+            )
+            changed += int(cur.rowcount or 0)
     return changed
 
 

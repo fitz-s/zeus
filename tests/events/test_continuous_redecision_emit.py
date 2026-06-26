@@ -751,6 +751,69 @@ def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
     assert tuple(row) == ("pending", None)
 
 
+def test_stale_admitted_redecision_pending_is_superseded_for_fresh_screen():
+    """A current family must not be suppressed forever by an old pending row.
+
+    The default expiry path preserves admitted rows; the screen can explicitly
+    supersede an admitted row after the claim grace when it has just re-confirmed
+    fresh scoped price substrate and is ready to emit a replacement event.
+    """
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    stale = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Shenzhen|2026-06-27|high|run-stale",
+        source="cycle-stale",
+        observed_at="2026-06-26T10:00:00+00:00",
+        available_at="2026-06-26T10:00:00+00:00",
+        received_at="2026-06-26T10:00:00+00:00",
+        causal_snapshot_id="snap-stale",
+        payload=_ready_payload(
+            city="Shenzhen",
+            target_date="2026-06-27",
+            metric="high",
+            source_run_id="run-stale",
+            snapshot_id="snap-stale",
+        ),
+        priority=50,
+        created_at="2026-06-26T10:00:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+
+    admitted = {("Shenzhen", "2026-06-27", "high")}
+    preserved = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-26T10:06:00+00:00",
+    )
+    assert preserved == 0
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-26T10:06:00+00:00",
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (stale.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
+    )
+
+
 def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
     """Cancel/reprice continuity must survive after the rest leaves the open-rest set."""
 
