@@ -161,6 +161,33 @@ def _bulk_tier2_fsr(city: str, snapshot_id: str, *, available_at: str, received_
     )
 
 
+def _day0_event(city: str, suffix: str, *, available_at: str):
+    payload = {
+        "city": city,
+        "target_date": _TARGET_DATE,
+        "metric": "high",
+        "rounded_value": 70,
+        "high_so_far": 70,
+        "live_authority_status": "live",
+        "source_authorized_status": "AUTHORIZED",
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+    }
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"day0|{city}|{_TARGET_DATE}|high|{suffix}",
+        source="day0_authority",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        payload=payload,
+        priority=60,
+    )
+
+
 def _city_of(event) -> str:
     return event.entity_key.split("|", 1)[0]
 
@@ -469,6 +496,38 @@ def test_bulk_lane_never_starves_a_tradeable_decision():
         f"the tradeable Tier-1 FSR must lead the claimed page, got {tiers_complete}"
     )
     assert tiers_complete.count("COMPLETE") == 1
+
+
+def test_day0_flood_cannot_occupy_the_whole_fetch_window_before_fsr():
+    """A Tier-0 Day0 flood must not hide FSR before the caller's limit is applied."""
+
+    conn = _world_conn()
+    store = EventStore(conn)
+    day0_cities = _REAL_CITIES[:30]
+    fsr_cities = _REAL_CITIES[30:34]
+    for idx, city in enumerate(day0_cities):
+        store.insert_or_ignore(
+            _day0_event(
+                city,
+                f"d{idx}",
+                available_at=f"2026-06-11T11:{idx % 60:02d}:00+00:00",
+            )
+        )
+    for idx, city in enumerate(fsr_cities):
+        store.insert_or_ignore(
+            _tradeable_fsr(
+                city,
+                f"fsr-lane-{idx}",
+                available_at=f"2026-06-11T06:{idx:02d}:00+00:00",
+                received_at=f"2026-06-11T06:{idx:02d}:30+00:00",
+            )
+        )
+
+    claimed = store.fetch_pending(decision_time=_DECISION_TIME, limit=8)
+    claimed_types = [event.event_type for event in claimed]
+    assert claimed_types[0] == "FORECAST_SNAPSHOT_READY"
+    assert claimed_types.count("FORECAST_SNAPSHOT_READY") == 4
+    assert claimed_types.count("DAY0_EXTREME_UPDATED") == 4
 
 
 def test_within_city_freshness_order_is_preserved():

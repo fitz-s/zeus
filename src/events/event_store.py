@@ -2054,7 +2054,43 @@ def _rank_pending_rows_python(
             item["event"].event_id,
         ),
     )
+    ranked = _fair_decision_lane_interleave(ranked)
     return [(item["event"], int(item["attempt_count"])) for item in ranked]
+
+
+def _is_forecast_decision_lane_item(item: dict) -> bool:
+    event = item["event"]
+    event_type = getattr(event, "event_type", "")
+    if event_type == "EDLI_REDECISION_PENDING":
+        return True
+    return event_type == "FORECAST_SNAPSHOT_READY" and int(item.get("tier", 99)) <= 1
+
+
+def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
+    """Keep the forecast/redecision lane visible under a Day0 Tier-0 flood.
+
+    Reactor-level interleave only works if the fetched page already contains both
+    lanes. Live can run with a work limit near one event while hundreds of current
+    Day0 observations sit ahead of FSR rows, so the fairness boundary must be the
+    store's final claim order, before ``limit`` is applied.
+    """
+
+    forecast = [item for item in records if _is_forecast_decision_lane_item(item)]
+    if not forecast:
+        return records
+    rest = [item for item in records if not _is_forecast_decision_lane_item(item)]
+    if not rest:
+        return records
+    out: list[dict] = []
+    i = j = 0
+    while i < len(forecast) or j < len(rest):
+        if i < len(forecast):
+            out.append(forecast[i])
+            i += 1
+        if j < len(rest):
+            out.append(rest[j])
+            j += 1
+    return out
 
 
 def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:

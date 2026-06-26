@@ -137,6 +137,9 @@ class MarketChannelIngestor:
         event = self.event_from_message(message, received_at=received_at)
         if event is None:
             return None
+        if self._market_top_of_book_unchanged(event):
+            self._cache_event_payload(event)
+            return None
         self._cache_event_payload(event)
         return self._write_market_event(event)
 
@@ -327,6 +330,35 @@ class MarketChannelIngestor:
                 gap_start=payload.get("gap_start"),
                 gap_recovered_at=payload.get("gap_recovered_at"),
             )
+        )
+
+    def _market_top_of_book_unchanged(self, event: OpportunityEvent) -> bool:
+        """Suppress append-only BBA rows when the executable touch did not move."""
+
+        if event.event_type != "BEST_BID_ASK_CHANGED":
+            return False
+        try:
+            payload = json.loads(event.payload_json)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        token_id = str(payload.get("token_id") or "")
+        if not token_id:
+            return False
+        previous = self.quote_cache.get(token_id)
+        if previous is None:
+            return False
+
+        def _same(a: object, b: object) -> bool:
+            av = _float_or_none(a)
+            bv = _float_or_none(b)
+            if av is None or bv is None:
+                return av is None and bv is None
+            return abs(av - bv) <= 1e-12
+
+        return _same(payload.get("best_bid"), previous.best_bid) and _same(
+            payload.get("best_ask"), previous.best_ask
         )
 
     def _write_feasibility_evidence(self, event: OpportunityEvent) -> None:

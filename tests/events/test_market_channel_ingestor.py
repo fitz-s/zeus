@@ -602,6 +602,46 @@ def test_market_channel_quote_notifies_inserted_event_sink_once():
     assert len(seen[0]) == 1
 
 
+def test_market_channel_same_top_of_book_bba_does_not_append_ignored_events():
+    conn, writer = _conn_writer()
+    seen: list[list[str]] = []
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=lambda events: seen.append([event.event_id for event in events]),
+    )
+
+    base = {
+        "event_type": "best_bid_ask",
+        "asset_id": "token-1",
+        "market": "0xcondition",
+        "outcome_label": "YES",
+        "best_bid": "0.48",
+        "best_ask": "0.52",
+        "hash": "hash-1",
+        "timestamp": "1766789469958",
+    }
+    first = ingestor.handle_message(base, received_at="2026-05-24T10:00:00+00:00")
+    same_touch = ingestor.handle_message(
+        {**base, "hash": "hash-2"},
+        received_at="2026-05-24T10:00:01+00:00",
+    )
+    moved = ingestor.handle_message(
+        {**base, "best_ask": "0.53", "hash": "hash-3"},
+        received_at="2026-05-24T10:00:02+00:00",
+    )
+
+    assert first.inserted is True
+    assert same_touch is None
+    assert moved.inserted is True
+    assert (
+        conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BEST_BID_ASK_CHANGED'").fetchone()[0]
+        == 2
+    )
+    assert len(seen) == 2
+
+
 def test_market_channel_can_write_feasibility_to_trade_connection():
     world_conn = sqlite3.connect(":memory:")
     init_schema(world_conn)
