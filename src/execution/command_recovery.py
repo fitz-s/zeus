@@ -135,6 +135,32 @@ _EXIT_PENDING_PROJECTION_TRADE_STATES = frozenset({
     "MATCHED",
     "MINED",
 })
+_SHIFT_BIN_EXIT_ACTIVE_STATUSES = frozenset({
+    "EXIT_SUBMITTED",
+    "EXIT_UNKNOWN",
+    "EXIT_PARTIAL",
+})
+_REBALANCE_LIVE_EXPOSURE_PHASES = frozenset({
+    "",
+    "open",
+    "pending",
+    "pending_entry",
+    "pending_tracked",
+    "active",
+    "entered",
+    "holding",
+    "day0_window",
+    "pending_exit",
+    "acked",
+    "live",
+    "partial",
+    "partially_filled",
+    "filled",
+    "submitted",
+    "submit_unknown_side_effect",
+    "unknown",
+    "review_required",
+})
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
     "entry_ack_persistence_failed_after_side_effect",
@@ -896,6 +922,154 @@ def _positive_probability_or_none(value: object) -> float | None:
 def _float_or_none(value: object) -> float | None:
     parsed = _decimal_or_none(value)
     return float(parsed) if parsed is not None else None
+
+
+def _family_rebalance_intents_table_ref(conn: sqlite3.Connection) -> str | None:
+    """Return the reachable family_rebalance_intents table for this connection."""
+
+    if _table_exists(conn, "family_rebalance_intents"):
+        return "family_rebalance_intents"
+    _maybe_attach_world_for_recovery(conn)
+    try:
+        if _attached_table_exists(conn, "world", "family_rebalance_intents"):
+            return "world.family_rebalance_intents"
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def _live_position_exposure_for_token_usd(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+) -> Decimal | None:
+    """Read live/in-flight exposure for a held token.
+
+    ``None`` means ambiguous schema/read failure and must not release a lease.
+    ``Decimal(0)`` means no positive live/in-flight position row remains.
+    """
+
+    token = str(token_id or "").strip()
+    if not token:
+        return None
+    cols = _table_columns(conn, "position_current")
+    token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
+    cost_cols = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
+    if "phase" not in cols or not token_cols or not cost_cols:
+        return None
+    phase_sql = ",".join("?" for _ in _REBALANCE_LIVE_EXPOSURE_PHASES)
+    token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
+    positive_sql = " OR ".join(f"COALESCE({c}, 0) > 0" for c in cost_cols)
+    select_sql = ", ".join(cost_cols)
+    params: list[object] = [
+        *sorted(_REBALANCE_LIVE_EXPOSURE_PHASES),
+        *(token for _ in token_cols),
+    ]
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {select_sql}
+              FROM position_current
+             WHERE phase IN ({phase_sql})
+               AND ({token_sql})
+               AND ({positive_sql})
+             ORDER BY updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    max_exposure = Decimal("0")
+    for row in rows:
+        data = _dict_row(row)
+        if not data and not isinstance(row, sqlite3.Row):
+            data = {cost_cols[i]: row[i] for i in range(min(len(cost_cols), len(row)))}
+        for col in cost_cols:
+            parsed = _decimal_or_none(data.get(col))
+            if parsed is not None and parsed > max_exposure:
+                max_exposure = parsed
+    return max_exposure
+
+
+def release_closed_shift_bin_exit_leases(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: str | datetime | None = None,
+) -> dict:
+    """Release SHIFT_BIN exit leases whose old leg is already economically closed.
+
+    Close-before-open requires the family to stay locked while the old leg has live
+    exposure. Once canonical ``position_current`` no longer has positive live exposure
+    for the held token, the lease has served its purpose. Keeping it active until a
+    later candidate happens to recapture ``may_submit`` deadlocks redecision and fresh
+    entries for the family.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    table_ref = _family_rebalance_intents_table_ref(conn)
+    if table_ref is None:
+        return summary
+    required = {"intent_id", "operation", "status", "held_token_id"}
+    if not _table_has_columns(conn, table_ref, required):
+        return summary
+    now_iso = (
+        observed_at.isoformat()
+        if isinstance(observed_at, datetime)
+        else str(observed_at or _now_iso())
+    )
+    statuses = tuple(sorted(_SHIFT_BIN_EXIT_ACTIVE_STATUSES))
+    placeholders = ",".join("?" for _ in statuses)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT intent_id, status, held_token_id
+              FROM {table_ref}
+             WHERE operation = 'SHIFT_BIN'
+               AND status IN ({placeholders})
+             ORDER BY updated_at ASC
+            """,
+            statuses,
+        ).fetchall()
+    except sqlite3.Error:
+        summary["errors"] += 1
+        return summary
+
+    for row in rows:
+        summary["scanned"] += 1
+        data = _dict_row(row)
+        intent_id = str(data.get("intent_id") or "")
+        held_token_id = str(data.get("held_token_id") or "")
+        exposure = _live_position_exposure_for_token_usd(conn, token_id=held_token_id)
+        if not intent_id or exposure is None:
+            summary["stayed"] += 1
+            continue
+        if exposure > 0:
+            summary["stayed"] += 1
+            continue
+        try:
+            cur = conn.execute(
+                f"""
+                UPDATE {table_ref}
+                   SET status = 'EXIT_ONLY_COMPLETE',
+                       updated_at = ?,
+                       abort_reason = COALESCE(
+                           abort_reason,
+                           'SHIFT_BIN_OLD_LEG_ECONOMICALLY_CLOSED_BY_COMMAND_RECOVERY'
+                       )
+                 WHERE intent_id = ?
+                   AND operation = 'SHIFT_BIN'
+                   AND status IN ({placeholders})
+                """,
+                (now_iso, intent_id, *statuses),
+            )
+        except sqlite3.Error:
+            summary["errors"] += 1
+            continue
+        if int(cur.rowcount or 0) > 0:
+            summary["advanced"] += 1
+        else:
+            summary["stayed"] += 1
+    return summary
 
 
 def _position_strategy_key(conn: sqlite3.Connection, position_id: str) -> str | None:
@@ -10575,6 +10749,15 @@ def _reconcile_passes_inline(
         summary["advanced"] += maker_fill_summary["corrected"]
         summary["errors"] += maker_fill_summary["errors"]
 
+        closed_shift_summary = release_closed_shift_bin_exit_leases(
+            conn,
+            observed_at=started_at,
+        )
+        summary["closed_shift_bin_exit_leases"] = closed_shift_summary
+        summary["advanced"] += closed_shift_summary["advanced"]
+        summary["stayed"] += closed_shift_summary["stayed"]
+        summary["errors"] += closed_shift_summary["errors"]
+
 
 def _accumulate(
     summary: dict,
@@ -10846,6 +11029,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fold_stayed=False,
             observed_at=started_at,
         )
+        _db_pass(
+            "closed_shift_bin_exit_leases",
+            release_closed_shift_bin_exit_leases,
+            "closed_shift_bin_exit_leases",
+            observed_at=started_at,
+        )
         _db_pass("cancel_ack_terminal_no_fill_facts",
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")
@@ -10912,3 +11101,6 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     _db_pass("recorded_maker_fill_economics",
              reconcile_recorded_maker_fill_economics, "recorded_maker_fill_economics",
              advanced_key="corrected", fold_stayed=False, observed_at=started_at)
+    _db_pass("closed_shift_bin_exit_leases",
+             release_closed_shift_bin_exit_leases, "closed_shift_bin_exit_leases",
+             observed_at=started_at)

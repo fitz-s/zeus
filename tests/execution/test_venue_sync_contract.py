@@ -274,6 +274,20 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
         fill_price="0.54",
         state="CONFIRMED",
     )
+    seed_conn.execute(
+        """
+        INSERT INTO family_rebalance_intents (
+            intent_id, family_key, operation, held_position_id, held_token_id,
+            held_bin_id, selected_token_id, selected_bin_id, status, generation,
+            created_at, updated_at, schema_version
+        ) VALUES (
+            'intent-live-tick-shift', 'live|Tokyo|2026-06-27|low', 'SHIFT_BIN',
+            'pos-live-tick-exit-fill', ?, '22C', 'new-token', '23C',
+            'EXIT_SUBMITTED', 1, ?, ?, 1
+        )
+        """,
+        (token, h.NOW.isoformat(), h.NOW.isoformat()),
+    )
     seed_conn.commit()
     seed_conn.close()
 
@@ -289,6 +303,12 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
     )
 
     assert summary["recorded_maker_fill_economics"]["exit_projected"] == 1
+    assert summary["closed_shift_bin_exit_leases"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
     check_conn = sqlite3.connect(str(db_path))
     check_conn.row_factory = sqlite3.Row
     projection = check_conn.execute(
@@ -302,7 +322,85 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
         "phase": "economically_closed",
         "exit_reason": "M5_EXCHANGE_RECONCILE",
     }
+    lease = check_conn.execute(
+        """
+        SELECT status, abort_reason
+          FROM family_rebalance_intents
+         WHERE intent_id = 'intent-live-tick-shift'
+        """
+    ).fetchone()
+    assert dict(lease) == {
+        "status": "EXIT_ONLY_COMPLETE",
+        "abort_reason": "SHIFT_BIN_OLD_LEG_ECONOMICALLY_CLOSED_BY_COMMAND_RECOVERY",
+    }
     check_conn.close()
+
+
+def test_closed_shift_bin_release_reads_attached_world_table(tmp_path):
+    """Production keeps the rebalance lease in world.db attached to the trade conn."""
+    from src.execution.command_recovery import release_closed_shift_bin_exit_leases
+    from src.state.schema.family_rebalance_intents_schema import ensure_table
+
+    trade_path = tmp_path / "trade.db"
+    world_path = tmp_path / "world.db"
+    world_conn = sqlite3.connect(str(world_path))
+    world_conn.row_factory = sqlite3.Row
+    ensure_table(world_conn)
+    world_conn.execute(
+        """
+        INSERT INTO family_rebalance_intents (
+            intent_id, family_key, operation, held_position_id, held_token_id,
+            held_bin_id, selected_token_id, selected_bin_id, status, generation,
+            created_at, updated_at, schema_version
+        ) VALUES (
+            'intent-attached-world', 'live|Tokyo|2026-06-27|low', 'SHIFT_BIN',
+            'pos-attached-world', 'tok-old', '22C', 'tok-new', '23C',
+            'EXIT_SUBMITTED', 1, 't0', 't0', 1
+        )
+        """
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    trade_conn = sqlite3.connect(str(trade_path))
+    trade_conn.row_factory = sqlite3.Row
+    trade_conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT, phase TEXT, token_id TEXT, no_token_id TEXT,
+            chain_cost_basis_usd REAL, cost_basis_usd REAL, size_usd REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, token_id, no_token_id, chain_cost_basis_usd,
+            cost_basis_usd, size_usd, updated_at
+        ) VALUES (
+            'pos-attached-world', 'economically_closed', 'tok-old', '',
+            6.10, 6.10, 6.10, 't1'
+        )
+        """
+    )
+    trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    summary = release_closed_shift_bin_exit_leases(trade_conn, observed_at="t2")
+
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    row = trade_conn.execute(
+        """
+        SELECT status, abort_reason
+          FROM world.family_rebalance_intents
+         WHERE intent_id = 'intent-attached-world'
+        """
+    ).fetchone()
+    assert dict(row) == {
+        "status": "EXIT_ONLY_COMPLETE",
+        "abort_reason": "SHIFT_BIN_OLD_LEG_ECONOMICALLY_CLOSED_BY_COMMAND_RECOVERY",
+    }
+    trade_conn.close()
 
 
 def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monkeypatch, tmp_path):
