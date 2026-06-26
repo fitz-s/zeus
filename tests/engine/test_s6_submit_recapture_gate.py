@@ -39,6 +39,7 @@ Mapped to spec §12.E + the S6 money-path invariants:
 """
 from __future__ import annotations
 
+import inspect
 import json as _json
 from dataclasses import replace as dataclass_replace
 from decimal import Decimal
@@ -283,6 +284,7 @@ def test_edge_reversal_aborts_submit():
     )
     proof = _proof_from_row(direction="buy_no", row=row, token_id="no-1",
                             q_posterior=0.45, q_lcb_5pct=0.30, bin_obj=_BIN_X)
+    proof = dataclass_replace(proof, c_cost_95pct=0.56)
 
     decision, stake, price = _recapture(proof, (proof,))
 
@@ -291,6 +293,40 @@ def test_edge_reversal_aborts_submit():
     assert decision.reversal_reason is ReversalReason.EDGE
     assert stake == 0.0
     assert price is None
+
+
+def test_edge_reversed_abort_receipt_recomputes_nonpositive_economics():
+    """Abort receipts must not persist the stale pre-recapture positive score.
+
+    The live regret row is consumed by redecision/audit screens after the submit
+    gate has re-run economics on the fresh curve. When that gate says
+    EDGE_REVERSED, the queryable receipt score has to be the recaptured robust
+    score, not the admission-time selected-proof score.
+    """
+    row = _snapshot_row(
+        yes_asks=(("0.40", "100000"),), no_asks=(("0.55", "100000"),),
+    )
+    proof = _proof_from_row(direction="buy_no", row=row, token_id="no-1",
+                            q_posterior=0.45, q_lcb_5pct=0.30, bin_obj=_BIN_X)
+    proof = dataclass_replace(proof, c_cost_95pct=0.56)
+    assert proof.trade_score > 0.0
+
+    recaptured_score = era._robust_trade_score_from_generated_inputs(
+        q_posterior=proof.q_posterior,
+        q_lcb_5pct=proof.q_lcb_5pct,
+        execution_price=proof.execution_price,
+        c_cost_95pct=proof.c_cost_95pct,
+        p_fill_lcb=proof.p_fill_lcb,
+    )
+    assert recaptured_score < 0.0
+
+    source = inspect.getsource(era._build_event_bound_no_submit_receipt_core)
+    assert (
+        "_recapture.state is CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED"
+        in source
+    )
+    assert "trade_score=_abort_trade_score" in source
+    assert "min(0.0, float(_abort_trade_score))" in source
 
 
 def test_forecast_stale_aborts_submit_as_edge_reversed():

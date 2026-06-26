@@ -4055,6 +4055,8 @@ def _build_event_bound_no_submit_receipt_core(
                     family_complete=True,
                     replacement_forecast=replacement_forecast_receipt_tag,
                 )
+    if provenance_capture is not None and proof.row is not None:
+        provenance_capture["snapshot_row"] = proof.row
     trade_score = proof.trade_score
     if trade_score <= 0.0:
         return EventSubmissionReceipt(
@@ -4842,6 +4844,18 @@ def _build_event_bound_no_submit_receipt_core(
         )
         _abort_reason = _SUBMIT_ABORT_RECEIPT_REASON[_recapture.state]
         _abort_detail = _recapture.detail or _abort_reason
+        _abort_trade_score = trade_score
+        if _recapture.state is CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED:
+            _abort_trade_score = _robust_trade_score_from_generated_inputs(
+                q_posterior=proof.q_posterior,
+                q_lcb_5pct=proof.q_lcb_5pct,
+                execution_price=execution_price,
+                c_cost_95pct=proof.c_cost_95pct,
+                p_fill_lcb=proof.p_fill_lcb,
+            )
+            if not math.isfinite(float(_abort_trade_score)):
+                _abort_trade_score = 0.0
+            _abort_trade_score = min(0.0, float(_abort_trade_score))
         return _with_shrink(EventSubmissionReceipt(
             False,
             event.event_id,
@@ -4861,7 +4875,7 @@ def _build_event_bound_no_submit_receipt_core(
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
-            trade_score=trade_score,
+            trade_score=_abort_trade_score,
             native_quote_available=True,
             source_status="MATCH",
             family_complete=True,

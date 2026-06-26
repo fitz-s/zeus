@@ -14,6 +14,7 @@ Cross-module invariant (builder -> NoTradeRegretEvent.envelope_json -> ledger IN
 """
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -502,6 +503,22 @@ def test_real_post_snapshot_rejection_carries_populated_book_and_settlement():
     assert str(env["posterior_id"]).startswith("UNAVAILABLE")
     # rejection is merged later by the reactor; the adapter materials carry none yet
     assert env["rejection"] is None
+
+
+def test_adapter_envelope_snapshot_row_is_rebound_to_final_selected_proof():
+    """The envelope book must describe the selected proof's executable snapshot.
+
+    A family can carry stale or sibling rows while the final selected proof points
+    at a different native snapshot. The adapter must overwrite the early capture
+    after proof selection so no-trade rows cannot display a sibling book.
+    """
+    from src.engine import event_reactor_adapter as era
+
+    source = inspect.getsource(era._build_event_bound_no_submit_receipt_core)
+    bind = 'provenance_capture["snapshot_row"] = proof.row'
+    trade_score_bind = "trade_score = proof.trade_score"
+    assert bind in source
+    assert source.index(bind) < source.index(trade_score_bind)
 
 
 def test_reactor_merges_rejection_into_adapter_envelope_materials():
