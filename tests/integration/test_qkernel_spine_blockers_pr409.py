@@ -961,9 +961,26 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
         "coherence_allows": True,
     }
 
-    assert era._valid_qkernel_execution_economics_payload(cert, direction="buy_yes") is None
+    assert era._valid_qkernel_execution_economics_payload(
+        {
+            **cert,
+            "q_lcb_guard_abstained": True,
+            "q_lcb_guard_cell_key": "",
+        },
+        direction="buy_yes",
+    ) is None
     assert era._valid_qkernel_execution_economics_payload(
         {**cert, "direction_law_ok": True},
+        direction="buy_yes",
+    ) is not None
+    assert era._valid_qkernel_execution_economics_payload(
+        {
+            **cert,
+            "direction_law_ok": False,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
+        },
         direction="buy_yes",
     ) is not None
     assert era._valid_qkernel_execution_economics_payload(
@@ -1060,6 +1077,113 @@ def test_fdr_maps_consume_selected_qkernel_overlay_authority():
     hypothesis_id = f"family-qkernel:{selected.token_id}"
     assert p_values[hypothesis_id] == pytest.approx(0.00025)
     assert prefilter[hypothesis_id] is True
+
+
+def test_qkernel_selected_route_fdr_is_not_legacy_bh_denominator():
+    """Qkernel FDR consumes the selected route's empirical false-edge rate.
+
+    The spine selects a coherent family payoff route. Re-running legacy BH over
+    many sibling binary hypotheses can reject a selected route whose own
+    payoff-band false-edge rate is inside the configured FDR budget.
+    """
+
+    from dataclasses import replace
+
+    from src.events.money_path_adapters import evaluate_fdr_full_family
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.02, q_dot_payoff=0.09, point_ev=0.07
+    )
+    selected = _overlay_proof(
+        q_posterior=0.70,
+        q_lcb_5pct=0.40,
+        economics=economics,
+    )
+    assert selected is not None
+    bin_id = era._candidate_bin_id(selected)
+    selected = replace(
+        selected,
+        p_value=0.02,
+        qkernel_execution_economics={
+            **selected.qkernel_execution_economics,
+            "candidate_id": f"NO:{bin_id}:DIRECT_NO:{bin_id}@proof",
+            "route_id": f"DIRECT_NO:{bin_id}@proof",
+            "bin_id": bin_id,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+    )
+    family_id = "family-qkernel-route"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+    all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
+        f"{family_id}:sibling-{idx}" for idx in range(19)
+    )
+    p_values = {hypothesis_id: 1.0 for hypothesis_id in all_hypothesis_ids}
+    p_values[selected_hypothesis_id] = 0.02
+    prefilter = {hypothesis_id: True for hypothesis_id in all_hypothesis_ids}
+
+    legacy_bh = evaluate_fdr_full_family(
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_ids=(selected_hypothesis_id,),
+        hypothesis_p_values=p_values,
+        passed_prefilter=prefilter,
+    )
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id=family_id,
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert legacy_bh.passed is False
+    assert qkernel_fdr is not None
+    assert qkernel_fdr.passed is True
+    assert qkernel_fdr.selected_post_fdr == (selected_hypothesis_id,)
+
+
+def test_qkernel_selected_route_fdr_rejects_high_false_edge_rate():
+    """The qkernel route gate remains fail-closed when the payoff band is weak."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.02, q_dot_payoff=0.09, point_ev=0.07
+    )
+    selected = _overlay_proof(
+        q_posterior=0.70,
+        q_lcb_5pct=0.40,
+        economics=economics,
+    )
+    assert selected is not None
+    bin_id = era._candidate_bin_id(selected)
+    selected = replace(
+        selected,
+        p_value=0.50,
+        qkernel_execution_economics={
+            **selected.qkernel_execution_economics,
+            "candidate_id": f"NO:{bin_id}:DIRECT_NO:{bin_id}@proof",
+            "route_id": f"DIRECT_NO:{bin_id}@proof",
+            "bin_id": bin_id,
+            "false_edge_rate": 0.50,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+    )
+    family_id = "family-qkernel-route"
+    selected_hypothesis_id = f"{family_id}:{selected.token_id}"
+
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id=family_id,
+        all_hypothesis_ids=(selected_hypothesis_id,),
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected,
+    )
+
+    assert qkernel_fdr is not None
+    assert qkernel_fdr.passed is False
+    assert qkernel_fdr.selected_post_fdr == ()
 
 
 def test_overlay_failure_returns_none_instead_of_original_proof():

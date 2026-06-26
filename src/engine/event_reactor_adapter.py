@@ -1924,11 +1924,34 @@ def _valid_qkernel_execution_economics_payload(
         return None
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         return None
-    if cert.get("direction_law_ok") is not True:
+    if not _qkernel_cert_direction_admitted(cert):
         return None
     if cert.get("coherence_allows") is not True:
         return None
     return cert
+
+
+def _qkernel_cert_direction_admitted(cert: Mapping[str, Any]) -> bool:
+    """Mirror FamilyDecisionEngine._direction_admitted for serialized certs."""
+
+    if cert.get("direction_law_ok") is True:
+        return True
+    try:
+        edge_lcb = float(cert.get("edge_lcb"))
+        optimal_delta_u = float(cert.get("optimal_delta_u"))
+    except (TypeError, ValueError):
+        return False
+    if edge_lcb <= 0.0 or optimal_delta_u <= 0.0:
+        return False
+    try:
+        from src.decision.family_decision_engine import _OOF_LIVE_RELIABILITY_BASES
+    except Exception:
+        return False
+    return (
+        str(cert.get("q_lcb_guard_basis") or "") in _OOF_LIVE_RELIABILITY_BASES
+        and cert.get("q_lcb_guard_abstained") is not True
+        and bool(str(cert.get("q_lcb_guard_cell_key") or "").strip())
+    )
 
 
 def _selected_opportunity_book_candidate(
@@ -3355,6 +3378,48 @@ def _fdr_maps_with_selected_authority(
     return p_values, prefilter
 
 
+def _qkernel_selected_route_fdr_proof(
+    *,
+    family_id: str,
+    all_hypothesis_ids: tuple[str, ...],
+    selected_hypothesis_id: str,
+    selected_proof: "_CandidateProof",
+) -> object | None:
+    """Return a qkernel-native FDR proof for a selected spine route.
+
+    The qkernel spine selects one coherent family payoff route, not an
+    independent scalar bin hypothesis. Its empirical false-edge rate is computed
+    from the same band samples and payoff vector that produced the selected
+    route's conservative edge. Re-running legacy full-family BH over sibling
+    binary hypotheses double-counts the old hypothesis denominator and can
+    reject the qkernel-selected route using unrelated legacy p-values.
+
+    Return ``None`` for non-qkernel proofs so the legacy BH path remains
+    byte-for-byte responsible for legacy selections.
+    """
+
+    cert = _qkernel_execution_economics(selected_proof)
+    if cert is None:
+        return None
+    try:
+        false_edge_rate = float(cert.get("false_edge_rate"))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(false_edge_rate):
+        return None
+    from src.events.money_path_adapters import FdrProof
+    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+    passed = bool(selected_proof.passed_prefilter) and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
+    return FdrProof(
+        fdr_family_id=family_id,
+        attempted_hypotheses=len(all_hypothesis_ids),
+        selected_hypotheses=(selected_hypothesis_id,),
+        selected_post_fdr=(selected_hypothesis_id,) if passed else tuple(),
+        passed=passed,
+    )
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -4117,6 +4182,9 @@ def _build_event_bound_no_submit_receipt_core(
             selection_authority=_shrink.selection_authority,
         )
 
+    all_hypothesis_ids = tuple(
+        f"{family.family_id}:{token}" for token in family.yes_token_ids + family.no_token_ids
+    )
     try:
         fdr_p_values, fdr_prefilter = _fdr_maps_with_selected_authority(
             family_id=family.family_id,
@@ -4124,15 +4192,20 @@ def _build_event_bound_no_submit_receipt_core(
             selected_proof=proof,
             selected_token_id=selected_token_id,
         )
-        fdr = evaluate_fdr_full_family(
+        fdr = _qkernel_selected_route_fdr_proof(
             family_id=family.family_id,
-            all_hypothesis_ids=tuple(
-                f"{family.family_id}:{token}" for token in family.yes_token_ids + family.no_token_ids
-            ),
-            selected_hypothesis_ids=(hypothesis_id,),
-            hypothesis_p_values=fdr_p_values,
-            passed_prefilter=fdr_prefilter,
+            all_hypothesis_ids=all_hypothesis_ids,
+            selected_hypothesis_id=hypothesis_id,
+            selected_proof=proof,
         )
+        if fdr is None:
+            fdr = evaluate_fdr_full_family(
+                family_id=family.family_id,
+                all_hypothesis_ids=all_hypothesis_ids,
+                selected_hypothesis_ids=(hypothesis_id,),
+                hypothesis_p_values=fdr_p_values,
+                passed_prefilter=fdr_prefilter,
+            )
     except (TypeError, ValueError) as exc:
         return _with_shrink(EventSubmissionReceipt(
             False,
