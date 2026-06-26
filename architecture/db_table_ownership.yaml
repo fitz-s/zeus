@@ -1816,6 +1816,19 @@ tables:
       check_db_table_delta gate, excluded from assert_db_matches_registry on-disk
       coherence check. Catalogued 2026-05-29 (PR #360 db_table_delta_gate fix).
 
+  - name: tail_stress_scenarios
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: "legacy Phase 3 T2 analytic DDL"
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: >
+      Empty legacy analytic/stress table observed on the live world DB with no
+      remaining src writer. Registered as legacy_archived so boot-time registry
+      coherence continues to fail-closed on genuinely unknown live tables while
+      tolerating this known non-money-path ghost until an audited cleanup
+      migration drops it.
+
   - name: evidence_tier_assignments_new
     db: world
     schema_class: legacy_archived
@@ -2176,6 +2189,19 @@ tables:
       Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Contains
       24k misplaced rows (INV-37 violation). Writes redirected to zeus-world.db
       in PR-S4b §3. Data migration deferred. Drop after 2026-08-09.
+
+  - name: tail_stress_scenarios
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_schema_pre_pr_s4b
+    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
+    notes: >
+      Empty ghost on zeus_trades.db from the same historical world-schema-on-trade
+      contamination family as the PR-S4b archived tables. No active source writer
+      remains; retained only so boot-time registry coherence can distinguish this
+      known non-money-path ghost from genuinely unknown trade tables. Drop after
+      an audited cleanup migration.
 
   - name: calibration_decision_group
     db: trade
