@@ -4513,6 +4513,10 @@ def refresh_executable_market_substrate_snapshots(
     batch_orderbook_supported = callable(getattr(clob, "get_orderbook_snapshots", None))
     full_family_capture = per_city_limit == 0
     prefetched_books: dict[str, dict] = {}
+    full_family_direct_clob_prefetch_enabled = _bool_env(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_ENABLED",
+        False,
+    )
     if batch_orderbook_supported:
         # Money-path redecision confirm refresh already has a live price-channel
         # witness surface. Hydrate from it first, then spend network time only on
@@ -4534,26 +4538,32 @@ def refresh_executable_market_substrate_snapshots(
         selected_candidates,
         prefetched_books,
     )
-    full_family_primary_chunk_size = (
-        min(
-            _BATCH_ORDERBOOK_CHUNK,
-            _positive_int_env(
-                "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK",
-                20,
-            ),
-        )
-        if full_family_capture
-        else None
+    direct_clob_prefetch_skipped = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and not full_family_direct_clob_prefetch_enabled
     )
-    prefetched_books.update(
-        _prefetch_selected_orderbooks(
-            clob,
-            candidates_needing_network_books,
-            deadline=prefetch_deadline,
-            max_retry_chunks=(0 if full_family_capture else None),
-            primary_chunk_size=full_family_primary_chunk_size,
+    if not direct_clob_prefetch_skipped:
+        full_family_primary_chunk_size = (
+            min(
+                _BATCH_ORDERBOOK_CHUNK,
+                _positive_int_env(
+                    "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK",
+                    20,
+                ),
+            )
+            if full_family_capture
+            else None
         )
-    )
+        prefetched_books.update(
+            _prefetch_selected_orderbooks(
+                clob,
+                candidates_needing_network_books,
+                deadline=prefetch_deadline,
+                max_retry_chunks=(0 if full_family_capture else None),
+                primary_chunk_size=full_family_primary_chunk_size,
+            )
+        )
     prefetch_missing_skipped = 0
     clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}
@@ -4695,6 +4705,7 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
         "prefetch_missing_skipped": prefetch_missing_skipped,
+        "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
     }
     if failures:
         summary["failure_samples"] = failures

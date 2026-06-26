@@ -1856,8 +1856,8 @@ def test_prefetch_missing_orderbook_hydrates_from_top_of_book_feasibility(monkey
     assert books["yes-1"]["min_order_size"] == "5"
 
 
-def test_full_family_refresh_uses_feasibility_before_network_prefetch(monkeypatch):
-    """A fresh price-channel book must not wait behind a slow money-path /books batch."""
+def test_full_family_refresh_uses_feasibility_instead_of_synchronous_network_prefetch(monkeypatch):
+    """Money-path redecision must not block capture behind direct /books latency."""
 
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK", "1")
     conn = _make_in_memory_trade_db()
@@ -1888,30 +1888,34 @@ def test_full_family_refresh_uses_feasibility_before_network_prefetch(monkeypatc
     outcome = market["outcomes"][0]
     yes_token = outcome["token_id"]
     no_token = outcome["no_token_id"]
-    conn.execute(
-        """
-        INSERT INTO execution_feasibility_evidence (
-            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
-            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
-            depth_before_json, created_at, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "e-yes",
-            market["event_id"],
-            outcome["condition_id"],
-            yes_token,
-            "YES",
-            "buy_yes",
-            _NOW.isoformat(),
-            "hash-yes",
-            0.24,
-            0.27,
-            '{"bids":[{"price":"0.24","size":"10"}],"asks":[{"price":"0.27","size":"12"}]}',
-            _NOW.isoformat(),
-            1,
-        ),
-    )
+    for evidence_id, token_id, outcome_label, direction, bid, ask in [
+        ("e-yes", yes_token, "YES", "buy_yes", 0.24, 0.27),
+        ("e-no", no_token, "NO", "buy_no", 0.70, 0.73),
+    ]:
+        conn.execute(
+            """
+            INSERT INTO execution_feasibility_evidence (
+                evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                market["event_id"],
+                outcome["condition_id"],
+                token_id,
+                outcome_label,
+                direction,
+                _NOW.isoformat(),
+                f"hash-{outcome_label.lower()}",
+                bid,
+                ask,
+                f'{{"bids":[{{"price":"{bid}","size":"10"}}],"asks":[{{"price":"{ask}","size":"12"}}]}}',
+                _NOW.isoformat(),
+                1,
+            ),
+        )
     conn.commit()
 
     network_calls: list[list[str]] = []
@@ -1946,12 +1950,49 @@ def test_full_family_refresh_uses_feasibility_before_network_prefetch(monkeypatc
             budget_seconds=15.0,
         )
 
-    assert network_calls == [[no_token]]
+    assert network_calls == []
     assert captured_books == [yes_token, no_token]
     assert summary["attempted"] == 2
     assert summary["inserted"] == 2
     assert summary["prefetched_orderbook_count"] == 2
     assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_skipped"] == 0
+
+
+def test_full_family_refresh_defers_missing_books_to_price_channel(monkeypatch):
+    """Missing money-path books are deferred instead of synchronously blocking capture."""
+
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            network_calls.append(list(token_ids))
+            raise AssertionError("full-family redecision must not synchronously call /books by default")
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+        )
+
+    assert network_calls == []
+    assert captured_books == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] == 2
+    assert summary["direct_clob_prefetch_skipped"] == 1
 
 
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
