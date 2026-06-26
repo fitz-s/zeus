@@ -130,7 +130,7 @@ OPENMETEO_MODEL_IDS: dict[str, str] = {
     "gem_hrdps_continental": "gem_hrdps_continental",
     # Source-clock vNext city one-scheme candidates (2026-06-25). These are not admitted by
     # the legacy provider-family selector globally; they are downloaded so the materializer can
-    # serve the per-city fixed source basket selected by state/fusion_source_compare/final_city_one_scheme_20260625.
+    # serve the per-city fixed source basket selected by the grid-aware source-clock artifact.
     "dmi_harmonie_europe": "dmi_harmonie_arome_europe",
     "knmi_harmonie_netherlands": "knmi_harmonie_arome_netherlands",
     "kma_gdps": "kma_gdps",

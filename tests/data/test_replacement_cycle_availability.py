@@ -123,7 +123,7 @@ class TestPollFetchDecision:
         monkeypatch.setattr(
             source_clock_probe,
             "probe_openmeteo_source_clock_updates",
-            lambda: _NoSourceClockChange(),
+            lambda **_kwargs: _NoSourceClockChange(),
         )
 
         class _FrozenDatetime(datetime):
@@ -201,7 +201,7 @@ class TestPollFetchDecision:
         monkeypatch.setattr(
             source_clock_probe,
             "probe_openmeteo_source_clock_updates",
-            lambda: _SourceClockChanged(),
+            lambda **_kwargs: _SourceClockChanged(),
         )
         monkeypatch.setattr(prod, "_probe_resolved_bayes_precision_fusion_extras_cycle", lambda: cycle)
         monkeypatch.setattr(prod, "_extras_cycle_incomplete", lambda cfg, resolved_cycle: False)

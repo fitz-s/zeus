@@ -168,7 +168,14 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
     )
-    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", lambda: _NoChange())
+    probe_kwargs: list[dict[str, object]] = []
+
+    def _probe(**kwargs):
+        probe_kwargs.append(kwargs)
+        return _NoChange()
+
+    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", _probe)
+    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
@@ -176,6 +183,7 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
     assert result["source_clock_status"] == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
     assert result["source_clock_updated_sources"] == []
+    assert probe_kwargs == [{"advance_cursor": False}]
 
 
 def test_replacement_availability_fast_poll_passes_changed_source_clock_report(monkeypatch) -> None:
@@ -211,7 +219,13 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
     )
-    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", lambda: changed_report)
+    probe_kwargs: list[dict[str, object]] = []
+
+    def _probe(**kwargs):
+        probe_kwargs.append(kwargs)
+        return changed_report
+
+    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", _probe)
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
     monkeypatch.setattr(
         prod,
@@ -224,6 +238,8 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["status"] == "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert result["source_clock_updated_sources"] == ["icon_global"]
     assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert result["source_clock_cursor_advanced_sources"] == ()
+    assert probe_kwargs == [{"advance_cursor": False}]
 
 
 def test_build_job_specs_owner_filter() -> None:

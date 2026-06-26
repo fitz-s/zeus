@@ -25,10 +25,11 @@ DEFAULT_CITY_ONE_SCHEME_PATH = (
     PROJECT_ROOT
     / "state"
     / "fusion_source_compare"
-    / "final_city_one_scheme_20260625"
-    / "city_one_scheme_final.csv"
+    / "grid_aware_retest_20260625"
+    / "city_one_scheme_grid_aware.csv"
 )
 ENV_CITY_ONE_SCHEME_PATH = "ZEUS_SOURCE_CLOCK_CITY_WEIGHTS"
+GRID_AWARE_ARTIFACT_NAME = "grid_aware_retest_20260625"
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,32 @@ def _parse_sources(text: str, weights: Mapping[str, float]) -> tuple[str, ...]:
     return tuple(weights)
 
 
+def _row_text(row: Mapping[str, object], *keys: str) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return ""
+
+
+def _row_int(row: Mapping[str, object], *keys: str) -> int:
+    for key in keys:
+        value = row.get(key)
+        if value is None or not str(value).strip():
+            continue
+        try:
+            return int(float(value))
+        except ValueError:
+            continue
+    return 0
+
+
+def _walkforward_or_grid_pass(row: Mapping[str, object]) -> bool:
+    if row.get("walkforward_pass") is not None:
+        return _truthy(row.get("walkforward_pass"))
+    return str(row.get("selection_status") or "").strip() == "GRID_CAP10_LIVE_READY"
+
+
 @lru_cache(maxsize=8)
 def load_city_one_schemes(path_text: str | None = None) -> Mapping[str, CityOneScheme]:
     path = Path(path_text).expanduser() if path_text else city_one_scheme_path()
@@ -121,21 +148,22 @@ def load_city_one_schemes(path_text: str | None = None) -> Mapping[str, CityOneS
             city = str(row.get("city") or "").strip()
             if not city:
                 continue
-            weights = _parse_weighted_sources(str(row.get("final_weighted_sources") or ""))
+            weights = _parse_weighted_sources(
+                _row_text(row, "final_weighted_sources", "grid_aware_weighted_sources")
+            )
             if not weights:
                 continue
-            try:
-                sample_n = int(float(row.get("sample_n") or 0))
-            except ValueError:
-                sample_n = 0
             out[city] = CityOneScheme(
                 city=city,
-                scheme_status=str(row.get("scheme_status") or ""),
-                final_sources=_parse_sources(str(row.get("final_sources") or ""), weights),
+                scheme_status=_row_text(row, "scheme_status", "selection_status"),
+                final_sources=_parse_sources(
+                    _row_text(row, "final_sources", "grid_aware_sources"),
+                    weights,
+                ),
                 weights=weights,
-                sample_n=sample_n,
-                walkforward_pass=_truthy(row.get("walkforward_pass")),
-                one_scheme_status=str(row.get("one_scheme_status") or ""),
+                sample_n=_row_int(row, "sample_n", "grid_best_sample_n", "candidate_count"),
+                walkforward_pass=_walkforward_or_grid_pass(row),
+                one_scheme_status=_row_text(row, "one_scheme_status", "selection_status"),
             )
     return out
 

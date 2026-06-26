@@ -24,13 +24,18 @@ from src.data.replacement_forecast_live_materialization_queue import (  # noqa: 
     process_replacement_forecast_live_materialization_queue,
 )
 from src.data.replacement_forecast_production import (  # noqa: E402
+    _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
     _download_bayes_precision_fusion_extra_raw_inputs_if_needed,
     _download_replacement_forecast_current_targets_if_needed,
     _enqueue_cycle_advance_reseeds_if_needed,
     _enqueue_fusion_upgrade_reseeds_if_needed,
     _replacement_forecast_live_materialization_queue_config,
 )
-from src.data.source_clock_update_probe import probe_openmeteo_source_clock_updates  # noqa: E402
+from src.data.source_clock_update_probe import (  # noqa: E402
+    advance_source_clock_cursor,
+    probe_openmeteo_source_clock_updates,
+    source_clock_scoped_download_allows_cursor_advance,
+)
 from src.engine.discovery_mode import DiscoveryMode  # noqa: E402
 
 
@@ -52,11 +57,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     source_clock_report = probe_openmeteo_source_clock_updates(
         endpoint_url=args.model_updates_url,
         use_network=not args.no_network,
+        advance_cursor=False,
     )
     report["source_clock_update_probe"] = source_clock_report.as_dict()
 
     current_download = _download_replacement_forecast_current_targets_if_needed(cfg)
     report["current_target_download"] = _jsonable(current_download)
+
+    scoped_source_clock_download = _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        cfg,
+        source_clock_report=source_clock_report,
+    )
+    report["source_clock_scoped_extra_model_download"] = _jsonable(scoped_source_clock_download)
+    if source_clock_scoped_download_allows_cursor_advance(scoped_source_clock_download):
+        report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
+    else:
+        report["source_clock_cursor_advanced_sources"] = ()
 
     extras_download = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     report["extra_model_download"] = _jsonable(extras_download)

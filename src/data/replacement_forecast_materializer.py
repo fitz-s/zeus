@@ -1516,6 +1516,7 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_dep_ids: set[int] = set()
         try:
             from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+                GRID_AWARE_ARTIFACT_NAME,
                 fixed_weight_center_from_values,
                 scheme_for_city,
             )
@@ -1643,7 +1644,7 @@ def _replacement_bayes_precision_fusion_override(
                             except Exception:
                                 pass
                     _source_clock_payload = {
-                        "artifact": "final_city_one_scheme_20260625",
+                        "artifact": GRID_AWARE_ARTIFACT_NAME,
                         "configured_sources": list(_scheme.final_sources),
                         "configured_weights": dict(_source_clock_center.configured_weights),
                         "used_weights": dict(_source_clock_center.used_weights),

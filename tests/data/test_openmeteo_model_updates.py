@@ -14,8 +14,13 @@ from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
 from src.data.bayes_precision_fusion_download import (
     MODEL_PUBLISH_CYCLE_HOURS,
     SINGLE_RUNS_UNSERVABLE_MODELS,
+    source_clock_metadata_run_is_single_runs_served,
 )
-from src.data.source_clock_update_probe import probe_openmeteo_source_clock_updates
+from src.data.source_clock_update_probe import (
+    advance_source_clock_cursor,
+    probe_openmeteo_source_clock_updates,
+    source_clock_scoped_download_allows_cursor_advance,
+)
 from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
 
 
@@ -100,6 +105,69 @@ def test_source_clock_probe_does_not_advance_cursor_before_public_availability(t
     assert report.status == "SOURCE_CLOCK_UPDATES_CHANGED"
     assert report.updated_sources == ("ecmwf_ifs",)
     assert cursor_path.exists()
+
+
+def test_source_clock_probe_can_defer_cursor_until_download_success(tmp_path) -> None:
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    write_model_updates_jsonl(
+        updates_path,
+        [
+            OpenMeteoModelUpdate(
+                model="ecmwf_ifs",
+                last_run_initialisation_time=datetime(2000, 1, 1, 0, 0, tzinfo=UTC),
+                last_run_availability_time=datetime(2000, 1, 1, 4, 0, tzinfo=UTC),
+            )
+        ],
+    )
+
+    report = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+
+    assert report.status == "SOURCE_CLOCK_UPDATES_CHANGED"
+    assert report.updated_sources == ("ecmwf_ifs",)
+    assert not cursor_path.exists()
+    assert not source_clock_scoped_download_allows_cursor_advance(
+        {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"}
+    )
+    assert source_clock_scoped_download_allows_cursor_advance(
+        {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"}
+    )
+    assert advance_source_clock_cursor(report) == ("ecmwf_ifs",)
+    assert cursor_path.exists()
+
+
+def test_source_clock_probe_filters_nbm_metadata_runs_not_served_by_single_runs(tmp_path) -> None:
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    write_model_updates_jsonl(
+        updates_path,
+        [
+            OpenMeteoModelUpdate(
+                model="ncep_nbm_conus",
+                last_run_initialisation_time=datetime(2000, 1, 1, 5, 0, tzinfo=UTC),
+                last_run_availability_time=datetime(2000, 1, 1, 6, 7, tzinfo=UTC),
+            )
+        ],
+    )
+
+    report = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        use_network=False,
+        advance_cursor=False,
+    )
+
+    assert report.status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+    assert report.updated_sources == ()
+    assert not cursor_path.exists()
+    assert not source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 5)
+    assert source_clock_metadata_run_is_single_runs_served("ncep_nbm_conus", 6)
+    assert source_clock_metadata_run_is_single_runs_served("gfs_hrrr", 5)
 
 
 def test_source_clock_openmeteo_model_ids_match_api_parameters() -> None:

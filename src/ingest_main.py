@@ -1057,13 +1057,15 @@ def _replacement_availability_poll_tick():
         _replacement_forecast_live_materialization_queue_config,
     )
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
+        advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
+        source_clock_scoped_download_allows_cursor_advance,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
-    source_clock_report = probe_openmeteo_source_clock_updates()
+    source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
         logger.info("replacement source-clock poll current: %s", source_clock_payload)
@@ -1085,6 +1087,10 @@ def _replacement_availability_poll_tick():
     if upgrade_report is not None:
         report["fusion_upgrade_status"] = upgrade_report.get("status")
         report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+    if source_clock_scoped_download_allows_cursor_advance(report):
+        report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
+    else:
+        report["source_clock_cursor_advanced_sources"] = ()
     logger.info("replacement source-clock scoped download report: %s", report)
     return report
 

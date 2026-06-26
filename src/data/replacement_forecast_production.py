@@ -884,7 +884,7 @@ def _replacement_cycle_availability_poll_if_needed(
                 probe_openmeteo_source_clock_updates,
             )
 
-            source_clock_report = probe_openmeteo_source_clock_updates()
+            source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
         source_clock_payload = source_clock_report.as_dict()
         report["source_clock_status"] = source_clock_payload.get("status")
         report["source_clock_updated_sources"] = source_clock_payload.get("updated_sources", [])
@@ -1139,7 +1139,7 @@ def _replacement_forecast_download_cycle() -> None:
             probe_openmeteo_source_clock_updates,
         )
 
-        source_clock_report = probe_openmeteo_source_clock_updates()
+        source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
         logger.info("source-clock model update probe report: %s", source_clock_report.as_dict())
     except Exception as exc:  # noqa: BLE001 - source-clock metadata cannot kill raw downloads
         logger.warning("source-clock model update probe skipped (fail-soft): %s", exc)

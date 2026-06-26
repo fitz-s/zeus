@@ -83,7 +83,18 @@ def test_gfs_12z_completes_at_1614():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("source", ["icon_previous_runs", "ukmo_previous_runs", "openmeteo_previous_runs"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "icon_previous_runs",
+        "icon_d2_previous_runs",
+        "ukmo_previous_runs",
+        "gem_previous_runs",
+        "jma_previous_runs",
+        "arome_previous_runs",
+        "openmeteo_previous_runs",
+    ],
+)
 def test_unverified_sources_return_reconstructed(source):
     base = datetime(2026, 4, 28, 0, 0, tzinfo=timezone.utc)
     _, prov = derive_availability(source, base, 0)
@@ -96,15 +107,17 @@ def test_unverified_sources_return_reconstructed(source):
 
 
 def test_known_sources_covers_all_forecasts_db_distribution():
-    """Every source actually present in state/zeus-world.db::forecasts must be
-    registered. Disk truth verified 2026-04-27/28: 5 sources distributed
-    openmeteo / gfs / ecmwf / icon / ukmo previous_runs."""
+    """Every enabled previous-runs forecast-table source must have a schedule row."""
     actual_sources = {
         "openmeteo_previous_runs",
         "gfs_previous_runs",
         "ecmwf_previous_runs",
         "icon_previous_runs",
+        "icon_d2_previous_runs",
         "ukmo_previous_runs",
+        "gem_previous_runs",
+        "jma_previous_runs",
+        "arome_previous_runs",
     }
     assert actual_sources.issubset(known_sources())
 
@@ -118,7 +131,11 @@ def test_verified_sources_includes_ecmwf_and_gfs():
 def test_unverified_sources_excluded_from_verified_set():
     verified = verified_sources()
     assert "icon_previous_runs" not in verified
+    assert "icon_d2_previous_runs" not in verified
     assert "ukmo_previous_runs" not in verified
+    assert "gem_previous_runs" not in verified
+    assert "jma_previous_runs" not in verified
+    assert "arome_previous_runs" not in verified
     assert "openmeteo_previous_runs" not in verified
 
 

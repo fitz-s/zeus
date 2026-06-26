@@ -15,6 +15,9 @@ from src.data.openmeteo_model_updates import (
     read_model_updates_jsonl,
     write_model_updates_jsonl,
 )
+from src.data.bayes_precision_fusion_download import (
+    source_clock_metadata_run_is_single_runs_served,
+)
 from src.strategy.live_inference.source_clock_city_weights import (
     affected_cities_for_source_updates,
     all_configured_source_ids,
@@ -24,6 +27,13 @@ from src.strategy.live_inference.source_clock_vnext import source_publicly_usabl
 
 DEFAULT_MODEL_UPDATES_JSONL = STATE_DIR / "source_updates" / "open_meteo_model_updates.jsonl"
 DEFAULT_CURSOR_JSON = STATE_DIR / "source_updates" / "open_meteo_model_updates_cursor.json"
+_DOWNLOAD_CURSOR_COMMIT_STATUSES = frozenset(
+    {
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+        "SOURCE_CLOCK_BPF_SCOPED_NO_AFFECTED_CITIES",
+        "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,7 @@ def probe_openmeteo_source_clock_updates(
     cursor_path: str | Path = DEFAULT_CURSOR_JSON,
     endpoint_url: str | None = None,
     use_network: bool = True,
+    advance_cursor: bool = True,
 ) -> SourceClockUpdateProbeReport:
     models = all_configured_source_ids()
     updates_path = Path(model_updates_path)
@@ -109,8 +120,11 @@ def probe_openmeteo_source_clock_updates(
     for model in changed:
         run = update_by_model[model].to_source_run_clock()
         if now >= source_publicly_usable_at(run):
+            init = update_by_model[model].last_run_initialisation_time.astimezone(UTC)
+            if not source_clock_metadata_run_is_single_runs_served(model, init.hour):
+                continue
             usable_changed.append(model)
-    if usable_changed:
+    if usable_changed and advance_cursor:
         next_cursor = dict(old)
         for model in usable_changed:
             next_cursor[model] = new[model]
@@ -128,3 +142,43 @@ def probe_openmeteo_source_clock_updates(
         cursor_path=str(cursor),
         error=None,
     )
+
+
+def source_clock_scoped_download_allows_cursor_advance(report: Mapping[str, object] | None) -> bool:
+    if not isinstance(report, Mapping):
+        return False
+    return str(report.get("status") or "") in _DOWNLOAD_CURSOR_COMMIT_STATUSES
+
+
+def advance_source_clock_cursor(
+    source_clock_report: SourceClockUpdateProbeReport | Mapping[str, object],
+    *,
+    sources: tuple[str, ...] | list[str] | None = None,
+) -> tuple[str, ...]:
+    payload = (
+        source_clock_report.as_dict()
+        if hasattr(source_clock_report, "as_dict")
+        else dict(source_clock_report)
+    )
+    requested = tuple(
+        str(source).strip()
+        for source in (sources if sources is not None else payload.get("updated_sources") or ())
+        if str(source).strip()
+    )
+    if not requested:
+        return ()
+    updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
+    cursor_path = Path(str(payload.get("cursor_path") or DEFAULT_CURSOR_JSON))
+    updates = read_model_updates_jsonl(updates_path)
+    next_by_model = _cursor_for_updates(updates)
+    old = _read_cursor(cursor_path)
+    committed: list[str] = []
+    for model in requested:
+        ts = next_by_model.get(model)
+        if ts is None:
+            continue
+        old[model] = ts
+        committed.append(model)
+    if committed:
+        _write_cursor(cursor_path, old)
+    return tuple(sorted(committed))

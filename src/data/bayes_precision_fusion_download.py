@@ -335,6 +335,14 @@ MODEL_PUBLISH_CYCLE_HOURS: dict[str, frozenset[int]] = {
     "italiameteo_icon_2i": frozenset({0, 12}),
 }
 _ALL_CYCLES: frozenset[int] = frozenset({0, 6, 12, 18})
+SOURCE_CLOCK_STANDARD_CYCLE_MODELS: frozenset[str] = frozenset(
+    {
+        # Open-Meteo model-updates advertises hourly NBM availability, but the
+        # single-runs Forecast API rejects off-standard runs observed live
+        # (for example 2026-06-26T05:00Z returned HTTP 400 for CONUS cities).
+        "ncep_nbm_conus",
+    }
+)
 
 
 def _model_publishes_cycle(model: str, cycle_hour: int) -> bool:
@@ -345,6 +353,12 @@ def _model_publishes_cycle(model: str, cycle_hour: int) -> bool:
     under a wrong source_cycle_time (R3 redundancy).
     """
     return cycle_hour in MODEL_PUBLISH_CYCLE_HOURS.get(model, _ALL_CYCLES)
+
+
+def source_clock_metadata_run_is_single_runs_served(model: str, cycle_hour: int) -> bool:
+    if model not in SOURCE_CLOCK_STANDARD_CYCLE_MODELS:
+        return True
+    return _model_publishes_cycle(model, cycle_hour)
 
 
 @dataclass(frozen=True)
@@ -380,6 +394,8 @@ def _read_source_clock_single_runs_requests(
             if decision_time < source_publicly_usable_at(run_clock):
                 continue
             run = update.last_run_initialisation_time.astimezone(UTC)
+            if not source_clock_metadata_run_is_single_runs_served(str(update.model), run.hour):
+                continue
             out[str(update.model)] = _SourceClockSingleRunsRequest(
                 run=run,
                 source_available_at=update.last_run_availability_time.astimezone(UTC).isoformat(),
