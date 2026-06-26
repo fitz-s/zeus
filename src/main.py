@@ -6845,7 +6845,15 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
             }
         except sqlite3.Error:
             return {}
-        required = {"city", "target_date", "temperature_metric", "phase", "condition_id"}
+        required = {
+            "city",
+            "target_date",
+            "temperature_metric",
+            "phase",
+            "condition_id",
+            "chain_state",
+            "chain_shares",
+        }
         if not required.issubset(cols):
             return {}
         rows = trade_ro.execute(
@@ -6855,6 +6863,8 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
              WHERE phase IN ('active', 'day0_window', 'pending_exit')
                AND condition_id IS NOT NULL
                AND TRIM(condition_id) != ''
+               AND COALESCE(chain_shares, 0) > 0.000001
+               AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')
             """
         ).fetchall()
         for row in rows:

@@ -4597,18 +4597,18 @@ def refresh_executable_market_substrate_snapshots(
         selected_candidates,
         prefetched_books,
     )
-    small_full_family_direct_clob_prefetch = bool(
-        full_family_capture
-        and candidates_needing_network_books
-        and full_family_direct_clob_candidate_threshold > 0
-        and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
-    )
     priority_full_family_direct_clob_prefetch = bool(
         full_family_capture
         and candidates_needing_network_books
         and priority_conditions
         and full_family_direct_clob_candidate_threshold > 0
-        and not small_full_family_direct_clob_prefetch
+    )
+    small_full_family_direct_clob_prefetch = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and full_family_direct_clob_candidate_threshold > 0
+        and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
+        and not priority_full_family_direct_clob_prefetch
     )
     full_family_direct_clob_prefetch_enabled = bool(
         full_family_direct_clob_prefetch_forced

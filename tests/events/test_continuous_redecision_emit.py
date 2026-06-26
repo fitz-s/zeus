@@ -1395,6 +1395,38 @@ def test_held_position_family_provider_accepts_chain_confirmed_quantity():
     assert _held_position_families(conn) == {("Shenzhen", "2026-06-19", "high")}
 
 
+def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            phase TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Hong Kong", "2026-06-09", "high", "ghost-cond", "local_only", 0.0, "active"),
+            ("Hong Kong", "2026-06-26", "low", "live-cond", "synced", 5.0, "day0_window"),
+            ("Singapore", "2026-06-26", "high", "exit-cond", "exit_pending_missing", 1.0, "pending_exit"),
+            ("Paris", "2026-06-26", "low", "zero-cond", "synced", 0.0, "active"),
+        ],
+    )
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: conn)
+
+    assert main._edli_current_held_position_condition_scope() == {
+        ("Hong Kong", "2026-06-26", "low"): {"live-cond"},
+        ("Singapore", "2026-06-26", "high"): {"exit-cond"},
+    }
+
+
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
     """The reactor cycle must prune the working set before taking the redecision skip snapshot."""
 
