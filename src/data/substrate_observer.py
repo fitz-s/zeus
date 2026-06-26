@@ -132,7 +132,13 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
         SELECT
             json_extract(e.payload_json, '$.city')        AS city,
             json_extract(e.payload_json, '$.target_date') AS target_date,
-            json_extract(e.payload_json, '$.metric')      AS metric
+            json_extract(e.payload_json, '$.metric')      AS metric,
+            MAX(CASE e.event_type
+                  WHEN 'DAY0_EXTREME_UPDATED' THEN 4
+                  WHEN 'EDLI_REDECISION_PENDING' THEN 3
+                  WHEN 'FORECAST_SNAPSHOT_READY' THEN 2
+                  ELSE 1
+                END) AS refresh_urgency
         FROM pending p
         JOIN opportunity_events e ON e.event_id = p.event_id
         GROUP BY city, target_date, metric
@@ -496,12 +502,21 @@ def _refresh_pending_family_snapshots(
         )
 
     pending_families: list[tuple[str, str, str]] = []
+    pending_urgent_families: list[tuple[str, str, str]] = []
     for row in pending_rows:
         city = _canonical_refresh_city_name(row[0])
         target_date = str(row[1] or "").strip()
         metric = _canonical_refresh_metric(row[2])
+        try:
+            refresh_urgency = int(row[3] or 0)
+        except (TypeError, ValueError, IndexError):
+            refresh_urgency = 0
         if city and target_date and metric:
-            pending_families.append((city, target_date, metric))
+            family = (city, target_date, metric)
+            if refresh_urgency >= 3:
+                pending_urgent_families.append(family)
+            else:
+                pending_families.append(family)
 
     open_rest_priority_families: list[tuple[str, str, str]] = []
     try:
@@ -524,6 +539,7 @@ def _refresh_pending_family_snapshots(
         explicit_priority_families
         + list(open_rest_priority_families)
         + list(held_position_priority_families)
+        + pending_urgent_families
     ):
         key = _refresh_family_key(*family)
         if key and key not in priority_keys:
