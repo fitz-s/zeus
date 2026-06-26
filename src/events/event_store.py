@@ -1699,7 +1699,7 @@ class EventStore:
         limit = max(1, min(int(batch_limit or 100), 1000))
         now = _utc_now()
         recent_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        cur = self.conn.execute(
+        self.conn.execute(
             """
             WITH malformed AS (
                 SELECT DISTINCT json_extract(loe.payload_json, '$.event_id') AS event_id
@@ -1725,7 +1725,8 @@ class EventStore:
             """,
             (recent_cutoff, limit, now, self.consumer_name),
         )
-        return int(cur.rowcount or 0)
+        row = self.conn.execute("SELECT changes()").fetchone()
+        return int(row[0] or 0) if row is not None else 0
 
     def _mark_terminal(
         self,

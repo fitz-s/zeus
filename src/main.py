@@ -5105,12 +5105,20 @@ def _edli_event_reactor_cycle() -> None:
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         _log_stage("day0_prefetch")
         _prune_mutex = _world_write_mutex()
-        _prune_mutex.acquire()
-        try:
-            _edli_prune_pending_working_set(store, decision_time=now)
-            conn.commit()
-        finally:
-            _prune_mutex.release()
+        _prune_lock_timeout_s = _edli_prune_lock_timeout_seconds(edli_cfg)
+        _prune_acquired = _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
+        if _prune_acquired:
+            try:
+                _edli_prune_pending_working_set(store, decision_time=now)
+                conn.commit()
+            finally:
+                _prune_mutex.release()
+        else:
+            logger.warning(
+                "EDLI reactor prune skipped: world write mutex unavailable after %.3fs; "
+                "deferring maintenance so the money-path reactor can drain events.",
+                _prune_lock_timeout_s,
+            )
         _log_stage("pending_prune")
         _fsr_events = []
         if edli_cfg.get("forecast_snapshot_trigger_enabled"):
@@ -7919,6 +7927,33 @@ def _edli_prune_interval_seconds(config: dict) -> float:
     return max(0.0, value)
 
 
+def _edli_prune_budget_seconds(config: dict) -> float:
+    raw = config.get("reactor_prune_budget_seconds", 6.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 6.0
+    return max(0.0, min(value, 20.0))
+
+
+def _edli_prune_lock_timeout_seconds(config: dict) -> float:
+    raw = config.get("reactor_prune_lock_timeout_seconds", 0.5)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 0.5
+    return max(0.0, min(value, 5.0))
+
+
+def _edli_prune_busy_timeout_ms(config: dict) -> int:
+    raw = config.get("reactor_prune_busy_timeout_ms", 750)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 750
+    return max(1, min(value, 5_000))
+
+
 def _edli_unready_fsr_prune_min_active_pending(config: dict) -> int:
     raw = config.get("reactor_unready_fsr_prune_min_active_pending", 1_000)
     try:
@@ -7990,6 +8025,16 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         return
     _EDLI_LAST_PRUNE_MONOTONIC = now_mono
     batch_limit = _edli_prune_batch_limit(edli_cfg)
+    budget_s = _edli_prune_budget_seconds(edli_cfg)
+    prune_started = time.monotonic()
+    saved_busy_timeout_ms: int | None = None
+
+    try:
+        row = store.conn.execute("PRAGMA busy_timeout").fetchone()
+        saved_busy_timeout_ms = int(row[0]) if row is not None else None
+        store.conn.execute("PRAGMA busy_timeout = %d" % _edli_prune_busy_timeout_ms(edli_cfg))
+    except Exception:  # noqa: BLE001
+        saved_busy_timeout_ms = None
 
     def _log_prune_step(step: str, started: float, count: int | None = None) -> None:
         elapsed = time.monotonic() - started
@@ -7997,7 +8042,35 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             count_suffix = "" if count is None else f" count={count}"
             logger.info("EDLI reactor prune step completed: %s elapsed_s=%.3f%s", step, elapsed, count_suffix)
 
+    def _restore_busy_timeout() -> None:
+        nonlocal saved_busy_timeout_ms
+        if saved_busy_timeout_ms is None:
+            return
+        try:
+            store.conn.execute("PRAGMA busy_timeout = %d" % saved_busy_timeout_ms)
+        except Exception:  # noqa: BLE001
+            pass
+        saved_busy_timeout_ms = None
+
+    def _budget_exhausted(next_step: str) -> bool:
+        if budget_s <= 0:
+            return False
+        elapsed = time.monotonic() - prune_started
+        if elapsed < budget_s:
+            return False
+        logger.warning(
+            "EDLI reactor prune budget exhausted before %s elapsed_s=%.3f budget_s=%.3f; "
+            "deferring remaining maintenance so the money-path reactor can drain events.",
+            next_step,
+            elapsed,
+            budget_s,
+        )
+        _restore_busy_timeout()
+        return True
+
     try:
+        if _budget_exhausted("archive_orphan_processing_rows"):
+            return
         _step_started = time.monotonic()
         _orphan_archived = store.archive_orphan_processing_rows(batch_limit=batch_limit)
         _log_prune_step("archive_orphan_processing_rows", _step_started, _orphan_archived)
@@ -8017,6 +8090,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
+        if _budget_exhausted("requeue_misclassified_local_pre_submit_rejections"):
+            return
         _step_started = time.monotonic()
         _recovered = store.requeue_misclassified_local_pre_submit_rejections(
             batch_limit=min(batch_limit, 1000),
@@ -8036,6 +8111,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
+        if _budget_exhausted("archive_expired_candidates"):
+            return
         _step_started = time.monotonic()
         _archived = store.archive_expired_candidates(
             decision_time=decision_time.isoformat(),
@@ -8057,6 +8134,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_superseded_channel_events"):
+            return
         _step_started = time.monotonic()
         _ch_archived = store.archive_superseded_channel_events(batch_limit=batch_limit)
         _log_prune_step("archive_superseded_channel_events", _step_started, _ch_archived)
@@ -8081,6 +8160,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     # starved the tradeable FORECAST_SNAPSHOT_READY (spine) lane to zero decisions.
     # Past-local-day day0 is handled by archive_expired_candidates (now day0-aware).
     try:
+        if _budget_exhausted("archive_superseded_day0_events"):
+            return
         _step_started = time.monotonic()
         _d0_archived = store.archive_superseded_day0_events(batch_limit=batch_limit)
         _log_prune_step("archive_superseded_day0_events", _step_started, _d0_archived)
@@ -8100,6 +8181,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("expire_unready_forecast_snapshot_pending"):
+            return
         _step_started = time.monotonic()
         _unready_fsr_min_active = _edli_unready_fsr_prune_min_active_pending(edli_cfg)
         _active_rmf_fsr_pending = _edli_active_rmf_forecast_snapshot_pending_count(
@@ -8138,6 +8221,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_recent_no_value_refuted_events"):
+            return
         _step_started = time.monotonic()
         _no_value_refuted_archived = store.archive_recent_no_value_refuted_events(
             decision_time=decision_time.astimezone(timezone.utc).isoformat(),
@@ -8159,6 +8244,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("ignore_channel_cache_events"):
+            return
         _step_started = time.monotonic()
         _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
         _log_prune_step("ignore_channel_cache_events", _step_started, _ch_ignored)
@@ -8179,6 +8266,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_invalid_forecast_snapshot_events"):
+            return
         _step_started = time.monotonic()
         _invalid_fsr_archived = store.archive_invalid_forecast_snapshot_events(
             batch_limit=batch_limit,
@@ -8200,6 +8289,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     )
 
     try:
+        if _budget_exhausted("archive_superseded_forecast_snapshot_events"):
+            return
         _step_started = time.monotonic()
         _fsr_archived = store.archive_superseded_forecast_snapshot_events(
             batch_limit=batch_limit,
@@ -8219,6 +8310,8 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "(non-fatal): %r",
             _fsr_sweep_exc,
         )
+    finally:
+        _restore_busy_timeout()
 
 
 def _edli_day0_fast_lane_enabled() -> bool:

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import json
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1453,3 +1455,139 @@ def test_reactor_prune_archives_orphan_processing_rows():
     src = inspect.getsource(main._edli_prune_pending_working_set)
     assert "archive_orphan_processing_rows" in src
     assert src.index("archive_orphan_processing_rows") < src.index("archive_expired_candidates")
+
+
+def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
+    """Maintenance prune may skip remaining work, but must not poison later claim waits."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    world.execute("PRAGMA busy_timeout = 30000")
+    store = EventStore(world)
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda name, default=None: {
+            "reactor_prune_interval_seconds": 0,
+            "reactor_prune_batch_limit": 10,
+            "reactor_prune_budget_seconds": 0.001,
+            "reactor_prune_busy_timeout_ms": 1,
+        }
+        if name == "edli"
+        else (default if default is not None else {}),
+    )
+
+    def _slow_first_step(*, batch_limit):
+        time.sleep(0.01)
+        return 0
+
+    monkeypatch.setattr(store, "archive_orphan_processing_rows", _slow_first_step)
+    monkeypatch.setattr(
+        store,
+        "requeue_misclassified_local_pre_submit_rejections",
+        lambda *, batch_limit: pytest.fail("budget exhaustion should skip later prune steps"),
+    )
+
+    main._edli_prune_pending_working_set(
+        store,
+        decision_time=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert world.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
+def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_changes():
+    """SQLite CTE UPDATE rowcount can be -1; live logs need the real change count."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Paris|2026-06-26|high|run-1",
+        source="forecast",
+        observed_at="2026-06-26T10:00:00+00:00",
+        available_at="2026-06-26T10:00:00+00:00",
+        received_at="2026-06-26T10:00:00+00:00",
+        payload=ForecastSnapshotReadyPayload(
+            city="Paris",
+            target_date="2026-06-26",
+            metric="high",
+            source_id="ecmwf-open-data",
+            source_run_id="run-1",
+            cycle="00",
+            track="ens",
+            snapshot_id="snap-1",
+            snapshot_hash="snap-1",
+            captured_at="2026-06-26T10:00:00+00:00",
+            available_at="2026-06-26T10:00:00+00:00",
+            required_fields_present=True,
+            required_steps_present=True,
+            member_count=51,
+            min_members_floor=40,
+            completeness_status="COMPLETE",
+            required_steps=[0, 3, 6],
+            observed_steps=[0, 3, 6],
+            expected_members=51,
+            source_run_status="COMMITTED",
+            source_run_completeness_status="COMPLETE",
+            coverage_completeness_status="COMPLETE",
+            coverage_readiness_status="LIVE_ELIGIBLE",
+        ),
+        created_at="2026-06-26T10:00:00+00:00",
+    )
+    store.insert_or_ignore(event)
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processed',
+               processed_at = '2026-06-26T10:00:01+00:00',
+               updated_at = '2026-06-26T10:00:01+00:00'
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    )
+    payload = {
+        "event_id": event.event_id,
+        "reason_code": "entries_paused:operator",
+        "pre_submit_rejection": 0,
+        "venue_order_id": "",
+    }
+    world.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "agg-event-1",
+            "agg-1",
+            1,
+            "SubmitRejected",
+            None,
+            "hash-1",
+            json.dumps(payload, sort_keys=True),
+            "payload-hash-1",
+            "existing_executor",
+            "2026-06-26T10:00:02+00:00",
+            "2026-06-26T10:00:02+00:00",
+            1,
+        ),
+    )
+
+    assert store.requeue_misclassified_local_pre_submit_rejections(batch_limit=10) == 1
+    row = world.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert row["processing_status"] == "pending"
+    assert row["last_error"] == "RECOVERED_MISCLASSIFIED_LOCAL_PRESUBMIT_REJECTION"
