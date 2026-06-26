@@ -36,6 +36,7 @@ from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
     _is_transient_money_path_reason,
+    _snapshot_block_retry_delay_seconds,
 )
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -86,6 +87,15 @@ def test_pre_submit_book_authority_gap_is_transient():
 
 def test_executable_snapshot_stale_still_transient():
     assert _is_transient_money_path_reason("EXECUTABLE_SNAPSHOT_STALE")
+
+
+def test_snapshot_block_retry_floor_backs_off_without_attempt_cap(monkeypatch):
+    monkeypatch.delenv("ZEUS_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS", raising=False)
+
+    assert _snapshot_block_retry_delay_seconds(attempt_count=1) == 60.0
+    assert _snapshot_block_retry_delay_seconds(attempt_count=3) == 180.0
+    assert _snapshot_block_retry_delay_seconds(attempt_count=33) == 600.0
 
 
 def test_empty_reason_not_transient():

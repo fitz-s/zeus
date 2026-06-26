@@ -63,6 +63,7 @@ UTC = timezone.utc
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
+DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -112,23 +113,41 @@ def _fetch_batch_limit() -> int:
     return max(1, min(250, limit))
 
 
-def _snapshot_block_retry_delay_seconds() -> float:
+def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
     """Retry floor for executable-snapshot substrate blocks.
 
     A blocked family is already delegated to the substrate refresher. Reclaiming
     the same event immediately only spends decision budget before that refresh
-    can land. The delay is short and horizon-bounded; it does not terminalize or
-    suppress the event.
+    can land. The delay is horizon-bounded; it does not terminalize or suppress
+    the event. Repeated substrate failures back off so one uncapturable Day0
+    family cannot spend a Tier-0 slot every scheduler minute.
     """
 
     raw = os.environ.get("ZEUS_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS")
     if raw is None:
-        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+        delay = DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    else:
+        try:
+            delay = float(raw)
+        except (TypeError, ValueError):
+            delay = DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
+    base_delay = max(5.0, min(300.0, delay))
+    max_raw = os.environ.get("ZEUS_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS")
     try:
-        delay = float(raw)
+        max_delay = (
+            float(max_raw)
+            if max_raw is not None
+            else DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS
+        )
     except (TypeError, ValueError):
-        return DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS
-    return max(5.0, min(300.0, delay))
+        max_delay = DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS
+    max_delay = max(base_delay, min(1800.0, max_delay))
+    try:
+        attempt = int(attempt_count or 1)
+    except (TypeError, ValueError):
+        attempt = 1
+    multiplier = max(1, min(attempt, 10))
+    return min(max_delay, base_delay * multiplier)
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
@@ -1549,9 +1568,17 @@ class OpportunityEventReactor:
                 last_reason = self._transient_requeue_reasons.get(event.event_id)
                 retry_not_before = None
                 if _money_path_reason_base(last_reason or "") == "EXECUTABLE_SNAPSHOT_BLOCKED":
+                    try:
+                        snapshot_block_attempts = self._store.attempt_count(event.event_id)
+                    except Exception:
+                        snapshot_block_attempts = 1
                     retry_not_before = (
                         decision_time.astimezone(UTC)
-                        + timedelta(seconds=_snapshot_block_retry_delay_seconds())
+                        + timedelta(
+                            seconds=_snapshot_block_retry_delay_seconds(
+                                attempt_count=snapshot_block_attempts
+                            )
+                        )
                     ).isoformat()
                 self._note_transient_requeue(event)
                 self._store.requeue_pending(

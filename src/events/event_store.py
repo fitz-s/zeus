@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -52,6 +53,15 @@ _TERMINAL_NO_VALUE_REFUTATION_SQL = """
     )
 """
 _FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
+_RECENT_RECAPTURE_EDGE_REVERSED_REASON = "SUBMIT_ABORTED_EDGE_REVERSED"
+
+
+def _recapture_edge_backoff_seconds() -> int:
+    try:
+        value = int(os.environ.get("ZEUS_RECAPTURE_EDGE_BACKOFF_SECONDS", "600"))
+    except (TypeError, ValueError):
+        value = 600
+    return max(0, min(value, 3600))
 
 
 def _no_value_refutation_event_types_compatible(
@@ -76,6 +86,10 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value or default)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_bool_int(value: object) -> int:
+    return 1 if _safe_int(value, 0) > 0 else 0
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -325,7 +339,30 @@ class EventStore:
                     event_tuple = tuple(row[: len(_EVENT_ROW_KEYS)])
                 rows.append(event_tuple + (attempt_by_event.get(event_id, 0),))
 
-        ranked = _rank_pending_rows_python(rows, day0_is_tradeable=day0_is_tradeable)
+        cooled_families = _recent_recapture_edge_reversed_families(
+            self.conn,
+            rows,
+            decision_time_utc=parsed_decision_time,
+        )
+        rank_rows = []
+        for row in rows:
+            event = _event_from_row(row)
+            payload = _event_payload_dict(event)
+            family_key = _forecast_family_key_from_payload(payload)
+            recapture_edge_backoff = (
+                event.event_type == "FORECAST_SNAPSHOT_READY"
+                and family_key is not None
+                and family_key in cooled_families
+            )
+            if isinstance(row, sqlite3.Row):
+                rank_rows.append(tuple(row[key] for key in _EVENT_ROW_KEYS) + (
+                    _pending_row_attempt_count(row),
+                    1 if recapture_edge_backoff else 0,
+                ))
+            else:
+                rank_rows.append(tuple(row) + (1 if recapture_edge_backoff else 0,))
+
+        ranked = _rank_pending_rows_python(rank_rows, day0_is_tradeable=day0_is_tradeable)
         events = [event for event, _attempt_count in ranked]
         timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
         return timely[:limit]
@@ -1759,6 +1796,71 @@ def _event_city_key(event: OpportunityEvent) -> str:
     return entity_key.strip() or str(event.event_type or "")
 
 
+def _forecast_family_key_from_payload(payload: dict) -> tuple[str, str, str] | None:
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("metric") or "").strip().lower()
+    if not (city and target_date and metric):
+        return None
+    return city, target_date, metric
+
+
+def _recent_recapture_edge_reversed_families(
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
+    *,
+    decision_time_utc: datetime,
+) -> set[tuple[str, str, str]]:
+    """Families that just failed submit recapture on a fresh executable book.
+
+    This is a queue-efficiency feedback signal, not a no-trade proof. The reactor
+    already consumed the failed event terminally; this short backoff only prevents
+    the next ordinary FSR row for the same family from immediately taking another
+    bounded-budget slot before other families are reached.
+    """
+
+    backoff_seconds = _recapture_edge_backoff_seconds()
+    if backoff_seconds <= 0 or not rows or not _table_exists(conn, "no_trade_regret_events"):
+        return set()
+
+    families: set[tuple[str, str, str]] = set()
+    for row in rows:
+        event = _event_from_row(row)
+        if event.event_type != "FORECAST_SNAPSHOT_READY":
+            continue
+        family_key = _forecast_family_key_from_payload(_event_payload_dict(event))
+        if family_key is not None:
+            families.add(family_key)
+    if not families:
+        return set()
+
+    floor = (decision_time_utc - timedelta(seconds=backoff_seconds)).isoformat()
+    try:
+        regret_rows = conn.execute(
+            """
+            SELECT city, target_date, metric
+              FROM no_trade_regret_events
+             WHERE created_at >= ?
+               AND rejection_reason LIKE ?
+               AND COALESCE(executable_snapshot_id, '') <> ''
+            """,
+            (floor, f"{_RECENT_RECAPTURE_EDGE_REVERSED_REASON}%"),
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+
+    cooled: set[tuple[str, str, str]] = set()
+    for row in regret_rows:
+        key = (
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            str(row[2] or "").strip().lower(),
+        )
+        if key in families:
+            cooled.add(key)
+    return cooled
+
+
 def _claim_tier_for_event(
     event: OpportunityEvent,
     payload: dict,
@@ -1824,6 +1926,18 @@ def _pending_row_attempt_count(row: sqlite3.Row | tuple) -> int:
         return 0
 
 
+def _pending_row_recapture_edge_backoff(row: sqlite3.Row | tuple) -> int:
+    if isinstance(row, sqlite3.Row):
+        try:
+            raw = row["_recapture_edge_backoff"]
+        except (IndexError, KeyError):
+            raw = None
+    else:
+        index = len(_EVENT_ROW_KEYS) + 1
+        raw = row[index] if len(row) > index else None
+    return _safe_bool_int(raw)
+
+
 def _live_redecision_retry_lane(event: OpportunityEvent, attempt_count: int) -> int:
     """Claim lane for live redecision rows already carrying retry debt.
 
@@ -1848,11 +1962,13 @@ def _rank_pending_rows_python(
     for row in rows:
         event = _event_from_row(row)
         attempt_count = _pending_row_attempt_count(row)
+        recapture_edge_backoff = _pending_row_recapture_edge_backoff(row)
         payload = _event_payload_dict(event)
         records.append(
             {
                 "event": event,
                 "attempt_count": attempt_count,
+                "recapture_edge_backoff": recapture_edge_backoff,
                 "payload": payload,
                 "tier": _claim_tier_for_event(
                     event,
@@ -1893,6 +2009,7 @@ def _rank_pending_rows_python(
         key=lambda item: (
             item["tier"],
             item["live_redecision_retry_lane"],
+            item["recapture_edge_backoff"],
             item.get("city_round", 1),
             -int(getattr(item["event"], "priority", 0) or 0),
             item["target_key"],
