@@ -630,9 +630,8 @@ The **maker-only, single-share** special case collapses to the familiar identity
 Σ_i b_i < K − 1      (NO basket,  r = 0)
 ```
 
-The constant `0.97` in `src/strategy/candidates/neg_risk_basket.py` is an empirical
-mis-statement of this condition (see §14.11). The correct gate is the fee-adjusted exact
-inequality above, evaluated on swept depth — not a top-ask sum vs a hand-tuned constant.
+The correct gate is the fee-adjusted exact inequality above, evaluated on swept
+depth, not a top-ask sum versus a hand-tuned constant.
 
 ### 11.7 Sizing by arbitrage optimization (NOT Kelly)
 
@@ -837,26 +836,6 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 ### 14.10 Outer-bin representation unconfirmed
 - `Bin.low`/`high` type is float per current `src/types/market.py`; `-inf`/`+inf` allowed by Python but unverified across all Bin consumers.
 - **Fix**: audit `find_bin`, `market_events` storage, and Bin construction for ±inf handling.
-
-### 14.11 `neg_risk_basket` uses a heuristic threshold, not the exact arbitrage condition (§11.6)
-- `src/strategy/candidates/neg_risk_basket.py:54` — `_BASKET_ARB_THRESHOLD = Decimal("0.97")`,
-  gated at line 195 as `yes_ask_sum >= 0.97 → no_trade`. This is an empirical mis-statement of
-  the §11.6 condition. Correct gate: fee-adjusted exact inequality `Π(q*) > 0` on swept depth
-  (maker-only special case: `Σ a_i < 1`), not a top-ask sum vs a hand-tuned constant.
-- The strategy only checks a scalar `neg_risk_yes_ask_sum`; it has no NO-basket scan (§11.6
-  `Π_N`) and no order-book sweep (§11.5) — it cannot detect the larger of the two arbitrages
-  nor size by §11.7 `q*`.
-- The required inputs are **unwired**: `neg_risk_family_complete`, `neg_risk_token_count`,
-  `neg_risk_yes_ask_sum` are documented "not yet wired in MarketAnalysisVNext" (file docstring
-  lines 20–23). `MarketAnalysisVNext` is a single-market snapshot and lacks a family-level
-  executable book (`A_i(q)`, `B_i(q)` level data per leg).
-- The enter-path `CandidateDecision` (lines 230–237) is predictive-shaped (`side`,
-  `target_price`, `edge`, `p_posterior`) and cannot express a multi-leg deterministic basket
-  (`legs`, `deterministic_profit_usd`, `basket_execution_id` per §11.8).
-- **Fix**: replace the threshold with the §11.6 exact condition; add a `FamilyOrderBookSnapshot`
-  + family book fields to `MarketAnalysisVNext`; scan both `Π_Y` and `Π_N` over depth breakpoints
-  (§11.7); emit a basket-shaped decision (§11.8). This converts the strategy from a permanent-
-  no_trade shadow stub into the application-grade arbitrage of §11.4–11.9.
 
 ---
 

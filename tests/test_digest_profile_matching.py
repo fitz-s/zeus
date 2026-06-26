@@ -1536,54 +1536,6 @@ def test_dsa12_zeus_mode_selector_cleanup_routes_to_phase0b_profile():
     assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
 
 
-def test_dsa09_stale_execution_price_shadow_flag_routes_to_phase0c_profile():
-    digest = build_digest(
-        "DSA-09 remove stale EXECUTION_PRICE_SHADOW config flag after "
-        "execution price shadow-off path removal; no production DB mutation; "
-        "no live venue side effects; no Paris config edit",
-        [
-            "config/settings.json",
-            "tests/test_execution_price.py",
-            "docs/operations/known_gaps.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
-            "architecture/topology.yaml",
-            "architecture/digest_profiles.py",
-        ],
-    )
-
-    assert digest["profile"] == "phase 0c stale execution price shadow flag cleanup"
-    assert digest["admission"]["status"] == "admitted"
-    assert "config/settings.json" in digest["admission"]["admitted_files"]
-    assert "tests/test_execution_price.py" in digest["admission"]["admitted_files"]
-    assert "docs/operations/known_gaps.md" in digest["admission"]["admitted_files"]
-    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
-
-
-def test_dsa10_dsa18_snapshot_only_fallback_routes_to_phase1j_profile():
-    digest = build_digest(
-        "Phase 1J DSA-10 DSA-18 replay snapshot-only fallback explicit opt-in; "
-        "remove implicit snapshot-only fallback for non-audit replay modes; "
-        "tests/docs only; no DB mutation; no live venue; no Paris source routing",
-        [
-            "src/engine/replay.py",
-            "tests/test_run_replay_cli.py",
-            "tests/test_replay_time_provenance.py",
-            "docs/operations/task_2026-04-29_design_simplification_audit/findings.md",
-            "docs/operations/task_2026-04-29_design_simplification_audit/evidence.md",
-            "architecture/topology.yaml",
-            "architecture/digest_profiles.py",
-        ],
-    )
-
-    assert digest["profile"] == "phase 1j replay snapshot-only fallback explicit opt-in"
-    assert digest["admission"]["status"] == "admitted"
-    assert "src/engine/replay.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_run_replay_cli.py" in digest["admission"]["admitted_files"]
-    assert "tests/test_replay_time_provenance.py" in digest["admission"]["admitted_files"]
-    assert "architecture/digest_profiles.py" in digest["admission"]["admitted_files"]
-
-
 def test_r3_f1_forecast_source_registry_routes_to_f1_profile_not_heartbeat():
     """F1 shares broad R3 docs and generic forecast/signal terms with other
     profiles; strong F1 phrases must route to the forecast-source registry

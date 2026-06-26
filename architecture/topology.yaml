@@ -160,12 +160,6 @@ coverage_roots:
     zone: online_code_graph_context
     authority_role: derived_diagnostic
     orientation_note: Code Review Graph is tracked online context for review/model orientation; it never authorizes topology, manifests, route context, or canonical truth.
-  - path: ".claude/worktrees"
-    status: shadow
-    scope: shadow
-    zone: shadow
-    authority_role: shadow_worktree
-    orientation_note: Shadow worktrees are not active repo topology.
   - path: "zeus_data_improvement_foundation_plus"
     status: generated
     scope: historical
@@ -2886,7 +2880,6 @@ digest_profiles:
       - "src/state/db.py"
       - "src/state/portfolio.py"
       - "scripts/equity_curve.py"
-      - "future corrected shadow/canary promotion evidence"
   - id: "phase 5 promotion grade economics readiness implementation"
     match:
       - "Phase 5 promotion-grade economics"
@@ -3952,8 +3945,6 @@ digest_profiles:
       - "v2 row-count observability"
       - "v2 row-count status"
       - "status summary v2 row-count world truth"
-      - "attached world DB over empty trade shadow"
-      - "row-count observability reads trade shadow tables before world truth"
     match_policy:
       strong_phrases:
         - "F4 status_summary v2 row counts"
@@ -3962,14 +3953,11 @@ digest_profiles:
         - "v2 row-count observability"
         - "v2 row-count status"
         - "status summary v2 row-count world truth"
-        - "attached world DB over empty trade shadow"
-        - "row-count observability reads trade shadow tables before world truth"
       weak_terms:
         - "status_summary"
         - "v2_row_counts"
         - "ensemble_snapshots"
         - "world DB"
-        - "trade shadow"
       negative_phrases:
         - "with production DB mutation"
         - "needs production DB mutation"
@@ -5024,72 +5012,6 @@ digest_profiles:
       - "scripts and tests that call get_mode() after ZEUS_MODE selector cleanup"
       - "state path helpers and DB env tag/query filters"
       - "live readiness false-positive prevention"
-  - id: "phase 0c stale execution price shadow flag cleanup"
-    match:
-      - "Phase 0C stale EXECUTION_PRICE_SHADOW flag cleanup"
-      - "DSA-09 remove stale EXECUTION_PRICE_SHADOW config flag"
-      - "stale EXECUTION_PRICE_SHADOW config flag"
-      - "execution price shadow-off path removal"
-      - "remove EXECUTION_PRICE_SHADOW from settings"
-      - "fee-adjusted execution price unconditional"
-    match_policy:
-      strong_phrases:
-        - "Phase 0C stale EXECUTION_PRICE_SHADOW flag cleanup"
-        - "DSA-09 remove stale EXECUTION_PRICE_SHADOW config flag"
-        - "stale EXECUTION_PRICE_SHADOW config flag"
-        - "execution price shadow-off path removal"
-        - "remove EXECUTION_PRICE_SHADOW from settings"
-        - "fee-adjusted execution price unconditional"
-      weak_terms:
-        - "EXECUTION_PRICE_SHADOW"
-        - "execution price"
-        - "shadow-off"
-        - "feature_flags"
-        - "settings.json"
-        - "tests/test_execution_price.py"
-      negative_phrases:
-        - "with production DB mutation"
-        - "needs production DB mutation"
-        - "with live venue side effects"
-        - "needs live venue side effects"
-        - "with Paris config edit"
-        - "needs Paris config edit"
-        - "with source routing"
-        - "needs source routing"
-        - "with evaluator behavior change"
-        - "needs evaluator behavior change"
-      single_terms_can_select: false
-      min_confidence: 0.5
-    file_patterns:
-      - "config/AGENTS.md"
-      - "config/settings.json"
-      - "docs/operations/AGENTS.md"
-      - "docs/operations/known_gaps.md"
-      - "docs/operations/task_2026-04-29_design_simplification_audit/**"
-      - "architecture/AGENTS.md"
-      - "architecture/topology.yaml"
-      - "architecture/digest_profiles.py"
-      - "architecture/test_topology.yaml"
-      - "tests/AGENTS.md"
-      - "tests/test_execution_price.py"
-      - "tests/test_digest_profile_matching.py"
-    allowed_files:
-      - "config/AGENTS.md"
-      - "config/settings.json"
-      - "docs/operations/AGENTS.md"
-      - "docs/operations/known_gaps.md"
-      - "docs/operations/task_2026-04-29_design_simplification_audit/**"
-      - "architecture/AGENTS.md"
-      - "architecture/topology.yaml"
-      - "architecture/digest_profiles.py"
-      - "architecture/test_topology.yaml"
-      - "tests/AGENTS.md"
-      - "tests/test_execution_price.py"
-      - "tests/test_digest_profile_matching.py"
-    downstream:
-      - "operator settings review"
-      - "ExecutionPrice evaluator boundary tests"
-      - "feature flag simplification plan"
   - id: "r3 forecast source registry implementation"
     match:
       - "F1 Forecast source registry"
