@@ -8911,7 +8911,51 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
     re-elected row remains stale.
     """
 
+    edli_cfg = _settings_section("edli", {})
+
+    def _float_setting(name: str, default: float, *, minimum: float, maximum: float) -> float:
+        raw = os.environ.get(f"ZEUS_{name.upper()}")
+        if raw is None:
+            raw = edli_cfg.get(name, default) if isinstance(edli_cfg, dict) else default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))
+
+    def _int_setting(name: str, default: int, *, minimum: int, maximum: int) -> int:
+        raw = os.environ.get(f"ZEUS_{name.upper()}")
+        if raw is None:
+            raw = edli_cfg.get(name, default) if isinstance(edli_cfg, dict) else default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))
+
+    cycle_started = time.monotonic()
+    cycle_budget_s = _float_setting(
+        "reactor_decision_refresh_cycle_budget_seconds",
+        6.0,
+        minimum=0.0,
+        maximum=20.0,
+    )
+    per_refresh_budget_s = _float_setting(
+        "reactor_decision_refresh_per_call_budget_seconds",
+        4.0,
+        minimum=0.5,
+        maximum=10.0,
+    )
+    max_refreshes_per_cycle = _int_setting(
+        "reactor_decision_refresh_max_per_cycle",
+        1,
+        minimum=0,
+        maximum=10,
+    )
+    refresh_attempts = 0
+
     def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
+        nonlocal refresh_attempts
         from src.data.market_scanner import (
             reconstruct_weather_market_from_static_topology,
             refresh_executable_market_substrate_snapshots,
@@ -8920,6 +8964,44 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         from src.engine.event_reactor_adapter import _event_family_market_topology_rows
         from src.state.db import _zeus_trade_db_path, get_trade_connection
         from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+        if max_refreshes_per_cycle <= 0:
+            logger.warning(
+                "decision family refresh: skipped for %s/%s/%s because per-cycle refresh cap is 0",
+                city, target_date, metric,
+            )
+            return False
+        elapsed = time.monotonic() - cycle_started
+        if refresh_attempts >= max_refreshes_per_cycle or (
+            cycle_budget_s > 0 and elapsed >= cycle_budget_s
+        ):
+            logger.warning(
+                "decision family refresh: deferred for %s/%s/%s attempts=%d cap=%d "
+                "elapsed_s=%.3f budget_s=%.3f; substrate sidecar/warm lane owns catch-up.",
+                city,
+                target_date,
+                metric,
+                refresh_attempts,
+                max_refreshes_per_cycle,
+                elapsed,
+                cycle_budget_s,
+            )
+            return False
+        remaining_budget_s = (
+            max(0.0, cycle_budget_s - elapsed) if cycle_budget_s > 0 else per_refresh_budget_s
+        )
+        call_budget_s = min(per_refresh_budget_s, remaining_budget_s)
+        if call_budget_s < 0.5:
+            logger.warning(
+                "decision family refresh: deferred for %s/%s/%s because remaining "
+                "refresh budget is %.3fs",
+                city,
+                target_date,
+                metric,
+                call_budget_s,
+            )
+            return False
+        refresh_attempts += 1
 
         payload = {"city": city, "target_date": target_date, "metric": metric}
         priority_condition_ids = {
@@ -8967,6 +9049,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             0.0,
             float(os.environ.get("ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS", "2.0")),
         )
+        lock_timeout_s = min(lock_timeout_s, call_budget_s)
         acquired = _market_substrate_refresh_lock.acquire(timeout=lock_timeout_s)
         if not acquired:
             logger.warning(
@@ -8999,6 +9082,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                         # FDR full-family proof + capital-efficiency economics; refreshing
                         # only the selected bin would leave stale sibling prices in q/FDR).
                         max_outcomes=0,
+                        budget_seconds=call_budget_s,
                         priority_condition_ids=priority_condition_ids,
                     )
                 write_conn.commit()

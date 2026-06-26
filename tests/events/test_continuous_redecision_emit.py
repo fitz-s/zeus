@@ -1498,6 +1498,16 @@ def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
     assert world.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
+def test_decision_triggered_refresh_is_cycle_bounded():
+    """Inline recapture is live value, but must not monopolize the reactor cycle."""
+
+    src = inspect.getsource(main._edli_decision_family_snapshot_refresher)
+    assert "reactor_decision_refresh_max_per_cycle" in src
+    assert "reactor_decision_refresh_cycle_budget_seconds" in src
+    assert "budget_seconds=call_budget_s" in src
+    assert "refresh_attempts += 1" in src
+
+
 def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_changes():
     """SQLite CTE UPDATE rowcount can be -1; live logs need the real change count."""
 
