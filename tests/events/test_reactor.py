@@ -660,6 +660,7 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
     assert result.processed == 0
     assert result.dead_lettered == 0
     assert result.retried == 1
+    assert result.rejection_reasons == ["WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"]
     assert _terminal_surfaces(conn, event.event_id) == {
         "verified_no_submit": 0,
         "execution_receipt": 0,

@@ -673,6 +673,7 @@ class ReactorConfig:
 # When a horizon fires the dead-letter label says WHY
 # (MONEY_PATH_HORIZON_EXPIRED:<horizon>:<last_reason>), NEVER an attempt count.
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
+_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
 
 # K2.1: once-per-process-per-base warning dedup for unregistered rejection-reason
 # bases (see _write_regret). Module-level so every reactor instance shares it.
@@ -1085,42 +1086,45 @@ class OpportunityEventReactor:
         mutex.acquire()
         try:
             try:
-                # Window A committed and released the WAL write lock; this conn has
-                # no open txn. Open one with BEGIN IMMEDIATE so the WAL write lock is
-                # acquired DETERMINISTICALLY up front (under busy_timeout) rather
-                # than lazily on the first DML — mirrors the claim()-first discipline
-                # of Window A and avoids an immediate "database is locked" when a
-                # concurrent writer holds the WAL write lock at first-DML time.
-                if not self._store.conn.in_transaction:
-                    self._store.conn.execute("BEGIN IMMEDIATE")
-                self._store.conn.execute("SAVEPOINT edli_reactor_event")
-                # FIX B (P1 zero-submit co-cause): capture the accept counter
-                # BEFORE post-submit so we can tell whether THIS event was
-                # actually EMITTED (committed) vs rejected downstream of Kelly.
-                _accepted_before = result.proof_accepted
-                post_disposition = self._process_one_post_submit(
-                    event, submit_result, decision_time=decision_time, result=result
-                )
-                # FIX B: finalize the per-cycle in-flight reservation. The adapter
-                # PROVISIONALLY reserved this event's stake when it passed
-                # Kelly+RiskGuard; commit it ONLY if the reactor emitted it
-                # (proof_accepted advanced), else roll it back so a candidate
-                # rejected at DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or a
-                # transient retry) never inflates corr/raw committed for the next
-                # sequential event. Runs before RELEASE so it shares this unit.
-                self._finalize_reservation(
-                    event, emitted=result.proof_accepted > _accepted_before
-                )
-                # Honour the post-submit disposition exactly as the legacy
-                # single-pass flow did: a transient (_EXECUTABLE_SNAPSHOT_RETRY)
-                # requeues without consuming; a terminal accept/reject (None) marks
-                # the event processed and counts it. ``_finalize_disposition`` runs
-                # inside this open savepoint.
-                self._finalize_disposition(
-                    event, post_disposition, decision_time=decision_time, result=result
-                )
-                self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                self._commit_event_unit()
+                with _scoped_sqlite_busy_timeout(
+                    self._store.conn, _reactor_claim_busy_timeout_ms()
+                ):
+                    # Window A committed and released the WAL write lock; this conn has
+                    # no open txn. Open one with BEGIN IMMEDIATE so the WAL write lock is
+                    # acquired DETERMINISTICALLY up front (under busy_timeout) rather
+                    # than lazily on the first DML — mirrors the claim()-first discipline
+                    # of Window A and avoids an immediate "database is locked" when a
+                    # concurrent writer holds the WAL write lock at first-DML time.
+                    if not self._store.conn.in_transaction:
+                        self._store.conn.execute("BEGIN IMMEDIATE")
+                    self._store.conn.execute("SAVEPOINT edli_reactor_event")
+                    # FIX B (P1 zero-submit co-cause): capture the accept counter
+                    # BEFORE post-submit so we can tell whether THIS event was
+                    # actually EMITTED (committed) vs rejected downstream of Kelly.
+                    _accepted_before = result.proof_accepted
+                    post_disposition = self._process_one_post_submit(
+                        event, submit_result, decision_time=decision_time, result=result
+                    )
+                    # FIX B: finalize the per-cycle in-flight reservation. The adapter
+                    # PROVISIONALLY reserved this event's stake when it passed
+                    # Kelly+RiskGuard; commit it ONLY if the reactor emitted it
+                    # (proof_accepted advanced), else roll it back so a candidate
+                    # rejected at DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or a
+                    # transient retry) never inflates corr/raw committed for the next
+                    # sequential event. Runs before RELEASE so it shares this unit.
+                    self._finalize_reservation(
+                        event, emitted=result.proof_accepted > _accepted_before
+                    )
+                    # Honour the post-submit disposition exactly as the legacy
+                    # single-pass flow did: a transient (_EXECUTABLE_SNAPSHOT_RETRY)
+                    # requeues without consuming; a terminal accept/reject (None) marks
+                    # the event processed and counts it. ``_finalize_disposition`` runs
+                    # inside this open savepoint.
+                    self._finalize_disposition(
+                        event, post_disposition, decision_time=decision_time, result=result
+                    )
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    self._commit_event_unit()
             except Exception as exc:
                 if _is_sqlite_lock_error(exc):
                     with contextlib.suppress(Exception):
@@ -1128,11 +1132,30 @@ class OpportunityEventReactor:
                         self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     with contextlib.suppress(Exception):
                         self._finalize_reservation(event, emitted=False)
+                    result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                     # If the lock failure happened before the savepoint opened
-                    # (for example BEGIN IMMEDIATE in Window B), we cannot safely
-                    # write requeue/dead-letter surfaces because the same writer
-                    # lock is unavailable. Leave the event in processing; the
-                    # store's stale-lease fetch path will retry it next cycle.
+                    # (for example BEGIN IMMEDIATE in Window B), try to return the
+                    # event to pending with a visible reason. If the same external
+                    # writer still holds the WAL write lock, fall back to the
+                    # existing stale-lease path rather than dead-lettering a live
+                    # money event for infrastructure contention.
+                    with contextlib.suppress(Exception):
+                        if getattr(self._store.conn, "in_transaction", False):
+                            self._store.conn.rollback()
+                    try:
+                        with _scoped_sqlite_busy_timeout(
+                            self._store.conn, _reactor_claim_busy_timeout_ms()
+                        ):
+                            self._store.requeue_pending(
+                                event.event_id,
+                                last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                            )
+                            self._commit_event_unit()
+                    except Exception as requeue_exc:
+                        if not _is_sqlite_lock_error(requeue_exc):
+                            raise
+                        with contextlib.suppress(Exception):
+                            self._store.conn.rollback()
                     result.retried += 1
                     return
                 with contextlib.suppress(Exception):
