@@ -449,7 +449,8 @@ class EventStore:
         # this is past in EVERY timezone and needs no per-city check.
         frontier_floor = _oceania_frontier_target_floor(decision_time_utc)
         # DAY0 uses a TODAY-INCLUSIVE frontier (2026-06-15). The -1 day margin exists for
-        # FSR, whose target can be a future TRADING day still ambiguous across timezones.
+        # forecast-decision rows whose target can be a future TRADING day still ambiguous
+        # across timezones.
         # A DAY0_EXTREME_UPDATED is a SAME-DAY realized-observation signal — it never refers
         # to a future trading day, so the margin only strands settled past-local-day day0
         # (e.g. yesterday's) in the FRONTIER BAND, where they pile up at the Tier-0 claim
@@ -478,11 +479,15 @@ class EventStore:
                 ON e.event_id = p.event_id
              WHERE p.consumer_name = ?
                AND p.processing_status IN ('pending', 'processing')
-               AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'DAY0_EXTREME_UPDATED')
+               AND e.event_type IN (
+                    'FORECAST_SNAPSHOT_READY',
+                    'EDLI_REDECISION_PENDING',
+                    'DAY0_EXTREME_UPDATED'
+               )
                AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
                AND (
                     (
-                        e.event_type = 'FORECAST_SNAPSHOT_READY'
+                        e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                         AND (
                             json_extract(e.payload_json, '$.target_date') < ?
                             OR json_extract(e.payload_json, '$.target_date') <= ?
@@ -515,7 +520,7 @@ class EventStore:
             city = row[1]
             target_date = row[2]
             event_type = str(row[3] or "")
-            if event_type == "FORECAST_SNAPSHOT_READY":
+            if event_type in _FORECAST_DECISION_EVENT_TYPES:
                 if not (target_date < frontier_floor or target_date <= venue_close_ceiling):
                     continue
             elif event_type == "DAY0_EXTREME_UPDATED":

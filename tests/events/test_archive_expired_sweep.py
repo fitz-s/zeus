@@ -88,6 +88,20 @@ def _fsr_event(city: str, target_date: str, snapshot_id: str, *, available_at: s
     )
 
 
+def _redecision_event(city: str, target_date: str, snapshot_id: str, *, available_at: str):
+    return make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",  # type: ignore[arg-type]
+        entity_key=f"redecision|{city}|{target_date}|high|{snapshot_id}",
+        source="continuous-redecision",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        causal_snapshot_id=snapshot_id,
+        payload={"city": city, "target_date": target_date, "metric": "high"},
+        priority=50,
+    )
+
+
 def _world_conn(*, factory=sqlite3.Connection) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:", factory=factory)
     conn.row_factory = sqlite3.Row
@@ -157,6 +171,31 @@ def test_expired_in_tz_candidate_archived_and_not_rescanned():
     returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
     assert expired.event_id not in [e.event_id for e in returned]
     # And it is no longer pending in the working set.
+    assert _pending_count(conn) == 0
+
+
+def test_expired_redecision_candidate_archived_and_not_rescanned():
+    """A stale continuous-redecision row is the same forecast decision family.
+
+    It must be pruned from the mutable working set; otherwise old held-position
+    redecision rows keep warming closed/non-active families and starve current
+    entry/redecision work even though fetch_pending already read-filters them.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    expired = _redecision_event(
+        "Chicago", "2026-06-04", "snap-redecision-exp", available_at="2026-06-04T13:00:00+00:00"
+    )
+    store.insert_or_ignore(expired)
+    assert _status_of(conn, expired.event_id) == "pending"
+
+    n = store.archive_expired_candidates(decision_time=_DECISION_TIME)
+    assert n == 1
+
+    assert _status_of(conn, expired.event_id) == "expired"
+    assert _event_row_still_present(conn, expired.event_id)
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
+    assert expired.event_id not in [e.event_id for e in returned]
     assert _pending_count(conn) == 0
 
 

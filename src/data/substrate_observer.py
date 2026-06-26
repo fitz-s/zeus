@@ -138,7 +138,14 @@ def _settings_section(name: str, default=None):
         return default
 
 
-def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
+def _pending_family_rows_for_refresh(
+    world_conn,
+    *,
+    consumer_name: str,
+    now_utc: datetime | None = None,
+):
+    from src.events.event_store import _oceania_frontier_target_floor
+
     event_window_limit = max(
         100,
         min(
@@ -146,12 +153,24 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
             int(os.environ.get("ZEUS_PENDING_FAMILY_REFRESH_EVENT_WINDOW_LIMIT", "2000")),
         ),
     )
+    decision_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    stale_target_floor = _oceania_frontier_target_floor(decision_utc)
     return world_conn.execute(
         """
         WITH pending AS (
             SELECT p.event_id
             FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e ON e.event_id = p.event_id
             WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+              AND (
+                    e.event_type NOT IN (
+                        'FORECAST_SNAPSHOT_READY',
+                        'EDLI_REDECISION_PENDING',
+                        'DAY0_EXTREME_UPDATED'
+                    )
+                    OR json_extract(e.payload_json, '$.target_date') IS NULL
+                    OR json_extract(e.payload_json, '$.target_date') >= ?
+              )
             ORDER BY p.updated_at DESC
             LIMIT ?
         )
@@ -185,7 +204,7 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
             MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name, event_window_limit),
+        (consumer_name, stale_target_floor, event_window_limit),
     ).fetchall()
 
 
@@ -481,7 +500,7 @@ def _refresh_pending_family_snapshots(
     if include_pending_families:
         try:
             pending_rows = _pending_family_rows_for_refresh(
-                world_conn, consumer_name=consumer_name
+                world_conn, consumer_name=consumer_name, now_utc=now_utc
             )
         except Exception as exc:
             logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)

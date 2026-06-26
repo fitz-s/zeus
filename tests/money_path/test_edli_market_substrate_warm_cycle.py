@@ -1015,9 +1015,8 @@ def test_market_substrate_warm_cycle_failsoft_on_refresh_error(monkeypatch):
     substrate_observer._edli_market_substrate_warm_cycle()
 
 
-def test_pending_family_refresh_order_prioritizes_new_target_dates():
-    """A stale target_date must not consume the bounded substrate-refresh budget
-    ahead of fresh families that can still emit a receipt."""
+def test_pending_family_refresh_filters_globally_stale_target_dates():
+    """A stale target_date must not consume the bounded substrate-refresh budget."""
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
@@ -1054,7 +1053,14 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
         """
     )
 
-    def insert_event(event_id: str, city: str, target_date: str, available_at: str) -> None:
+    def insert_event(
+        event_id: str,
+        city: str,
+        target_date: str,
+        available_at: str,
+        *,
+        event_type: str = "FORECAST_SNAPSHOT_READY",
+    ) -> None:
         payload = {"city": city, "target_date": target_date, "metric": "high"}
         conn.execute(
             """
@@ -1062,10 +1068,11 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
                 event_id, event_type, entity_key, source, observed_at, available_at,
                 received_at, payload_hash, idempotency_key, priority, payload_json,
                 schema_version, created_at
-            ) VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
+            ) VALUES (?, ?, ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
             """,
             (
                 event_id,
+                event_type,
                 event_id,
                 available_at,
                 available_at,
@@ -1085,24 +1092,33 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
             (event_id, available_at),
         )
 
-    insert_event("old-a", "Amsterdam", "2026-06-04", "2026-05-30T00:00:00+00:00")
+    insert_event(
+        "old-a",
+        "Amsterdam",
+        "2026-06-04",
+        "2026-05-30T00:00:00+00:00",
+        event_type="EDLI_REDECISION_PENDING",
+    )
     insert_event("old-b", "Milan", "2026-06-04", "2026-05-30T00:00:01+00:00")
     insert_event("fresh-a", "Seoul", "2026-06-06", "2026-06-05T00:00:00+00:00")
     insert_event("fresh-b", "Tokyo", "2026-06-06", "2026-06-05T00:00:01+00:00")
 
-    capture = _CaptureConn(conn)
-    rows = substrate_observer._pending_family_rows_for_refresh(
-        capture, consumer_name="edli_reactor_v1"
-    )
-    families = [(row[0], row[1], row[2]) for row in rows]
+    decision_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+    for module in (main_module, substrate_observer):
+        capture = _CaptureConn(conn)
+        rows = module._pending_family_rows_for_refresh(
+            capture,
+            consumer_name="edli_reactor_v1",
+            now_utc=decision_time,
+        )
+        families = [(row[0], row[1], row[2]) for row in rows]
 
-    assert [family[1] for family in families[:2]] == ["2026-06-06", "2026-06-06"]
-    assert [family[1] for family in families[-2:]] == ["2026-06-04", "2026-06-04"]
+        assert families == [("Tokyo", "2026-06-06", "high"), ("Seoul", "2026-06-06", "high")]
 
-    plan = _explain_plan(conn, capture.sql, capture.params)
-    assert "USING INDEX idx_opportunity_event_processing_status" in plan
-    assert "LIMIT ?" in capture.sql
-    assert capture.params == ("edli_reactor_v1", 2000)
+        plan = _explain_plan(conn, capture.sql, capture.params)
+        assert "USING INDEX idx_opportunity_event_processing_status" in plan
+        assert "LIMIT ?" in capture.sql
+        assert capture.params == ("edli_reactor_v1", "2026-06-05", 2000)
 
 
 def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatch):
