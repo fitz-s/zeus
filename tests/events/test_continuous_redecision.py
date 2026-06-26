@@ -1335,6 +1335,105 @@ def test_execution_quality_rejection_cools_entry_until_economics_improve():
     )
 
 
+def test_recapture_edge_reversal_cools_entry_until_economics_improve():
+    conn = _mem_world()
+    label = "Will the highest temperature in Wellington be 9°C on June 27?"
+    cr.cache_belief(
+        conn,
+        family_id="edli_family_wellington_hash",
+        city="Wellington",
+        target_date="2026-06-27",
+        temperature_metric="high",
+        snapshot_id="snap-wellington",
+        calibrator_model_hash="identity",
+        bin_labels=[label],
+        p_posterior_vec=[0.0455121228],
+        q_lcb_yes_vec=[0.0004764563],
+        q_lcb_no_vec=[0.90],
+        recorded_at="2026-06-26T10:39:00+00:00",
+    )
+    conn.execute(
+        """
+        CREATE TABLE no_trade_regret_events (
+            family_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            bin_label TEXT,
+            direction TEXT,
+            rejection_stage TEXT,
+            rejection_reason TEXT,
+            c_fee_adjusted REAL,
+            q_live REAL,
+            q_lcb_5pct REAL,
+            trade_score REAL,
+            created_at TEXT,
+            executable_snapshot_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            family_id, city, target_date, metric, bin_label, direction,
+            rejection_stage, rejection_reason, c_fee_adjusted, q_live,
+            q_lcb_5pct, trade_score, created_at, executable_snapshot_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "edli_family_wellington_hash",
+            "Wellington",
+            "2026-06-27",
+            "high",
+            label,
+            "buy_yes",
+            "TRADE_SCORE",
+            "SUBMIT_ABORTED_EDGE_REVERSED:recaptured robust marginal utility nonpositive",
+            0.005,
+            0.0455121228,
+            0.0004764563,
+            -0.0055224416,
+            "2026-06-26T10:39:51+00:00",
+            "ems2-stale-book",
+        ),
+    )
+
+    rejections = cr.read_recent_full_economics_rejections(conn, lookback_hours=24 * 365)
+    stable_key = ("Wellington", "2026-06-27", "high", label, "buy_yes")
+    assert stable_key in rejections
+    same_economics = {
+        ("edli_family_wellington_hash", label, "buy_yes"): cr.PriceQuote(
+            price=0.005,
+            freshness_deadline="2026-06-26T10:50:00+00:00",
+            tick_size=0.001,
+        ),
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-26T10:40:00+00:00",
+        price_lookup=same_economics,
+        min_edge=-0.01,
+        recent_full_economics_rejections=rejections,
+    ) == []
+
+    improved_belief = {
+        stable_key: cr.FullEconomicsReject(
+            execution_price=0.010,
+            q_lcb_5pct=0.0001,
+            trade_score=-0.0055224416,
+            created_at="2026-06-26T10:39:51+00:00",
+            rejection_reason="SUBMIT_ABORTED_EDGE_REVERSED:old",
+        )
+    }
+    assert cr.enqueue_live_redecisions(
+        conn,
+        decision_time="2026-06-26T10:40:00+00:00",
+        price_lookup=same_economics,
+        min_edge=-0.01,
+        recent_full_economics_rejections=improved_belief,
+    )
+
+
 def test_entry_screen_blocks_fdr_refuted_candidate_despite_positive_trade_score():
     conn = _mem_world()
     label = "Will the lowest temperature in Paris be 22°C on June 19?"

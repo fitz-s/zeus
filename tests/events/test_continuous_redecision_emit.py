@@ -607,6 +607,19 @@ def test_redecision_screen_skips_forecast_scan_when_pending_covers_admission():
     )
 
 
+def test_redecision_screen_full_refresh_still_requires_scoped_freshness():
+    """Refresh summary is not live authority; scoped condition freshness is."""
+
+    screen_src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+
+    assert "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate" in screen_src
+    assert "confirmation_refresh_verified" in screen_src
+    assert screen_src.index("_edli_confirmation_refresh_unavailable") < screen_src.index(
+        "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate"
+    )
+    assert "fresh_events.append(event)" not in screen_src
+
+
 def test_unadmitted_redecision_pending_is_expired():
     """Pending redecisions must remain backed by current edge/rest/held admission."""
 

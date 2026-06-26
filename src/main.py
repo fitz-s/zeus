@@ -6336,47 +6336,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 priority_condition_ids=priority_condition_ids,
             )
             confirm_status = str(confirm_refresh_summary.get("status") or "")
-            if _edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary):
-                fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                    entry_condition_scope,
-                    now_utc=now,
-                )
-                fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                    rest_condition_scope,
-                    now_utc=now,
-                )
-                fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                    held_condition_scope,
-                    now_utc=now,
-                )
-                fresh_confirmed_families = fresh_entry_scope | fresh_rest_scope | fresh_held_scope
-                confirmed_entry_scope &= fresh_entry_scope
-                confirmed_rest_scope &= fresh_rest_scope
-                confirmed_held_scope &= fresh_held_scope
-                confirm_families &= fresh_confirmed_families
-                logger.info(
-                    "edli_redecision_screen: incomplete confirmation refresh admitted "
-                    "fresh scoped families=%d/%d entry_scope=%d rest_scope=%d held_scope=%d "
-                    "entry_conditions=%d rest_conditions=%d held_conditions=%d summary=%r",
-                    len(fresh_confirmed_families),
-                    len(set(all_families) | set(held_families)),
-                    len(confirmed_entry_scope),
-                    len(confirmed_rest_scope),
-                    len(confirmed_held_scope),
-                    sum(len(v) for v in entry_condition_scope.values()),
-                    sum(len(v) for v in rest_condition_scope.values()),
-                    sum(len(v) for v in held_condition_scope.values()),
-                    confirm_refresh_summary,
-                )
-                if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
-                    logger.info(
-                        "edli_redecision_screen: confirmation refresh incomplete but no "
-                        "screened money-path condition has fresh substrate; skipping emit "
-                        "this tick rather than queueing stale redecision families=%d",
-                        len(set(all_families) | set(held_families)),
-                    )
-                    return
-            elif _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
+            if _edli_confirmation_refresh_unavailable(confirm_refresh_summary):
                 logger.info(
                     "edli_redecision_screen: confirmation refresh not available; "
                     "skipping emit this tick rather than queueing stale redecision "
@@ -6385,6 +6345,51 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     confirm_status,
                     confirm_refresh_summary.get("executable_substrate_coverage_status"),
                     confirm_refresh_summary,
+                )
+                return
+            fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                entry_condition_scope,
+                now_utc=now,
+            )
+            fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                rest_condition_scope,
+                now_utc=now,
+            )
+            fresh_held_scope = _edli_families_with_fresh_scoped_executable_substrate(
+                held_condition_scope,
+                now_utc=now,
+            )
+            fresh_confirmed_families = fresh_entry_scope | fresh_rest_scope | fresh_held_scope
+            confirmed_entry_scope &= fresh_entry_scope
+            confirmed_rest_scope &= fresh_rest_scope
+            confirmed_held_scope &= fresh_held_scope
+            confirm_families &= fresh_confirmed_families
+            scoped_filter_reason = (
+                "incomplete_confirmation_refresh"
+                if _edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary)
+                else "confirmation_refresh_verified"
+            )
+            logger.info(
+                "edli_redecision_screen: %s admitted fresh scoped families=%d/%d "
+                "entry_scope=%d rest_scope=%d held_scope=%d entry_conditions=%d "
+                "rest_conditions=%d held_conditions=%d summary=%r",
+                scoped_filter_reason,
+                len(fresh_confirmed_families),
+                len(set(all_families) | set(held_families)),
+                len(confirmed_entry_scope),
+                len(confirmed_rest_scope),
+                len(confirmed_held_scope),
+                sum(len(v) for v in entry_condition_scope.values()),
+                sum(len(v) for v in rest_condition_scope.values()),
+                sum(len(v) for v in held_condition_scope.values()),
+                confirm_refresh_summary,
+            )
+            if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
+                logger.info(
+                    "edli_redecision_screen: confirmation refresh produced no fresh "
+                    "screened money-path substrate; skipping emit this tick rather "
+                    "than queueing stale redecision families=%d",
+                    len(set(all_families) | set(held_families)),
                 )
                 return
 
@@ -6584,8 +6589,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     fresh_events.append(_redecision_event_with_origin(event, "held_position"))
                 elif event_family in family_keys:
                     fresh_events.append(_redecision_event_with_origin(event, "entry_screen"))
-                else:
-                    fresh_events.append(event)
             emitted = EventWriter(world).write_many(fresh_events)
             world.commit()
         finally:
