@@ -1336,6 +1336,24 @@ def _shift_exit_rejection_requires_retry(reason: str) -> bool:
     )
 
 
+def _shift_exit_collateral_proves_old_leg_closed(
+    exc: BaseException,
+    *,
+    old_token_id: str,
+) -> bool:
+    """Whether sell collateral truth proves the old SHIFT_BIN leg is already gone."""
+
+    normalized = " ".join(str(exc or "").lower().split())
+    token = str(old_token_id or "").strip().lower()
+    if not token:
+        return False
+    return (
+        "ctf_tokens_insufficient" in normalized
+        and f"token_id={token}" in normalized
+        and "available=0" in normalized
+    )
+
+
 def _submit_shift_bin_old_leg_exit(
     conn: sqlite3.Connection,
     *,
@@ -1440,6 +1458,22 @@ def _submit_shift_bin_old_leg_exit(
         )
     except Exception as exc:  # noqa: BLE001 — venue boundary unknown → block the family.
         reason = f"SHIFT_BIN_EXIT_EXCEPTION:{type(exc).__name__}:{exc}"
+        if _shift_exit_collateral_proves_old_leg_closed(exc, old_token_id=old_token_id):
+            _shift_bin_wiring.exit_only_complete(
+                conn,
+                intent_id,
+                now_iso=now_iso,
+                reason=f"SHIFT_BIN_OLD_LEG_CHAIN_ZERO_COLLATERAL:{reason}",
+            )
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "SHIFT_BIN old-leg exit released: chain collateral proves zero old-token "
+                "balance token_id=%s reason=%s",
+                old_token_id,
+                exc,
+            )
+            return
         lease_status = "EXIT_UNKNOWN"
         if not _shift_exit_has_durable_command(conn, decision_id=decision_id):
             _shift_bin_wiring.abort_shift_bin_lease(

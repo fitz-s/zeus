@@ -249,6 +249,52 @@ def test_exit_raises_without_durable_command_releases_for_retry(monkeypatch):
     assert "network blip at venue boundary" in (row["abort_reason"] or "")
 
 
+def test_ctf_available_zero_completes_old_leg_exit_without_retry(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch, shares=12.03)
+    import src.execution.exit_lifecycle as xl
+    from src.state.collateral_ledger import CollateralInsufficient
+
+    def _closed_on_chain(**kw):
+        raise CollateralInsufficient(
+            "ctf_tokens_insufficient: token_id=tok-A required=12030000 available=0"
+        )
+
+    monkeypatch.setattr(xl, "place_sell_order", _closed_on_chain)
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "EXIT_ONLY_COMPLETE"
+    assert str(row["abort_reason"]).startswith("SHIFT_BIN_OLD_LEG_CHAIN_ZERO_COLLATERAL:")
+
+
+def test_ctf_available_positive_shortfall_stays_blocking(monkeypatch):
+    conn = _conn()
+    _insert_old_leg(conn)
+    intent = _acquire_shift_lease(conn)
+    _stub_exit_inputs(monkeypatch, shares=12.03)
+    import src.execution.exit_lifecycle as xl
+    from src.state.collateral_ledger import CollateralInsufficient
+
+    def _partial_shortfall(**kw):
+        raise CollateralInsufficient(
+            "ctf_tokens_insufficient: token_id=tok-A required=12030000 available=100"
+        )
+
+    monkeypatch.setattr(xl, "place_sell_order", _partial_shortfall)
+    era._submit_shift_bin_old_leg_exit(conn, payload=_payload(intent), decision_time=_now())
+    row = conn.execute(
+        "SELECT status, abort_reason FROM family_rebalance_intents WHERE intent_id=?",
+        (intent,),
+    ).fetchone()
+    assert row["status"] == "ABORTED"
+    assert "NO_DURABLE_COMMAND" in (row["abort_reason"] or "")
+
+
 def test_old_leg_already_closed_leaves_lease_blocking(monkeypatch):
     """Old leg already gone (no inputs) → no exit submit, lease stays EXIT_SUBMITTED so
     the next redecision cycle re-evaluates (and will admit the counter-entry)."""
