@@ -1535,6 +1535,81 @@ def screen_entry_redecisions(
     )
 
 
+def entry_substrate_refresh_scope(
+    trade_conn: sqlite3.Connection,
+    *,
+    beliefs: list[CachedBelief],
+    decision_time: str | datetime,
+    max_families: int = 60,
+) -> dict[tuple[str, str, str], set[str]]:
+    """Families whose live beliefs cannot be screened because price substrate is stale.
+
+    The entry screen must not score stale books. But using that same stale-book
+    rejection as the only refresh trigger deadlocks discovery: once every book
+    expires, no family reaches confirmation refresh and entry trading collapses
+    to whichever family happens to have a fresh sidecar row. This helper is a
+    read-only input-refresh selector: it asks for fresh executable books for
+    open belief families with missing or expired YES/NO quotes, then the normal
+    post-refresh screen decides whether any edge exists. It never emits a
+    redecision by itself.
+    """
+
+    if not beliefs:
+        return {}
+    try:
+        limit = max(1, int(max_families))
+    except (TypeError, ValueError):
+        limit = 60
+    dt = _decision_time_utc(decision_time)
+    if dt is None:
+        return {}
+    all_cids: set[str] = set()
+    for belief in beliefs:
+        all_cids.update(
+            str(c or "").strip()
+            for c in (belief.condition_ids or [])
+            if str(c or "").strip()
+        )
+    price_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=all_cids)
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for belief in beliefs:
+        metric = str(
+            belief.metric
+            or _metric_from_family_id(belief.family_id)
+            or _metric_from_bin_labels(belief.bin_labels)
+            or ""
+        ).strip()
+        family_key = (
+            str(belief.city or "").strip(),
+            str(belief.target_date or "").strip(),
+            metric,
+        )
+        if not (family_key[0] and family_key[1] and family_key[2] in {"high", "low"}):
+            continue
+        condition_ids = [str(c or "").strip() for c in (belief.condition_ids or [])]
+        stale_or_missing: set[str] = set()
+        for condition_id in condition_ids:
+            if not condition_id:
+                continue
+            for direction in ("buy_yes", "buy_no"):
+                quote = price_by_cid.get((condition_id, direction))
+                if quote is None:
+                    stale_or_missing.add(condition_id)
+                    break
+                try:
+                    if _parse(quote.freshness_deadline).astimezone(timezone.utc) <= dt:
+                        stale_or_missing.add(condition_id)
+                        break
+                except (TypeError, ValueError):
+                    stale_or_missing.add(condition_id)
+                    break
+        if stale_or_missing:
+            out[family_key] = stale_or_missing
+            if len(out) >= limit:
+                break
+    return out
+
+
 def _latest_posterior_source_cycle_for_family(
     forecasts_conn: sqlite3.Connection,
     *,

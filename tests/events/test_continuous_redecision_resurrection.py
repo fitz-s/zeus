@@ -141,6 +141,7 @@ def _snapshot(
     bid="0.70",
     ask="0.72",
     snapshot_id="s1",
+    freshness_deadline="2026-06-12T02:00:00+00:00",
 ):
     conn.execute(
         "INSERT INTO executable_market_snapshots "
@@ -155,7 +156,7 @@ def _snapshot(
             selected_outcome_token_id,
             bid,
             ask,
-            "2026-06-12T02:00:00+00:00",
+            freshness_deadline,
             "2026-06-12T00:30:00+00:00",
         ),
     )
@@ -316,6 +317,50 @@ def test_entry_screen_fires_on_edge_appeared():
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_yes") in keys
+
+
+def test_stale_entry_price_requests_refresh_without_emit():
+    """A stale executable book is not a no-edge verdict; it must refresh first.
+
+    Regression: the live screen skipped stale quotes before confirmation refresh,
+    so once most executable snapshots expired only the one family with a fresh
+    sidecar row could ever be re-evaluated. This helper feeds confirmation
+    refresh; the post-refresh screen still owns whether any order-worthy edge
+    exists.
+    """
+
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Wuhan|2026-06-12|high|disc"
+    _cache(world, family_id=family_id, p_yes=0.99, cond="0xc30")
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        bid="0.30",
+        ask="0.70",
+        selected_outcome_token_id="yes-c30",
+        freshness_deadline="2026-06-12T00:10:00+00:00",
+    )
+    beliefs = cr._all_latest_beliefs(
+        world,
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    fired = cr.screen_entry_redecisions(
+        world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=beliefs,
+    )
+    refresh_scope = cr.entry_substrate_refresh_scope(
+        trade,
+        beliefs=beliefs,
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert fired == []
+    assert refresh_scope == {("Wuhan", "2026-06-12", "high"): {"0xc29", "0xc30"}}
 
 
 def test_entry_screen_fires_on_buy_no_edge_appeared():

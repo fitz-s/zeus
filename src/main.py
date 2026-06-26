@@ -6225,6 +6225,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
+            entry_substrate_refresh_scope,
             filter_redecisions_with_spine_members,
             screen_entry_redecisions,
             screened_family_keys,
@@ -6279,6 +6280,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 entry_redecisions = []
             raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
             open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
+            entry_refresh_condition_scope = entry_substrate_refresh_scope(
+                trade_ro,
+                beliefs=beliefs,
+                decision_time=received_at,
+                max_families=rd_cap,
+            )
             rest_pulls = screen_resting_orders(
                 world_ro,
                 trade_ro,
@@ -6317,19 +6324,21 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             held_families,
             decision_time=now,
         )
+        entry_refresh_families = set(entry_refresh_condition_scope)
         held_reemit_families = _edli_reemittable_held_position_family_keys(
             held_families,
             decision_time=now,
         )
         all_families = set(family_keys) | rest_pull_families | held_reemit_families
-        confirmed_entry_scope = set(family_keys)
+        confirmed_entry_scope = set(family_keys) | entry_refresh_families
         confirmed_rest_scope = set(rest_pull_families)
         confirmed_held_scope = set(held_reemit_families)
-        confirm_families = set(all_families) | set(held_families)
+        confirm_families = set(all_families) | set(held_families) | entry_refresh_families
         priority_condition_ids = {
             condition_id
             for scope in (
                 entry_condition_scope,
+                entry_refresh_condition_scope,
                 open_rest_condition_scope,
                 rest_condition_scope,
                 held_condition_scope,
@@ -6358,7 +6367,10 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 )
                 return
             fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate(
-                entry_condition_scope,
+                _edli_merge_condition_scopes(
+                    entry_condition_scope,
+                    entry_refresh_condition_scope,
+                ),
                 now_utc=now,
             )
             fresh_rest_scope = _edli_families_with_fresh_scoped_executable_substrate(
@@ -6385,11 +6397,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 "rest_conditions=%d held_conditions=%d summary=%r",
                 scoped_filter_reason,
                 len(fresh_confirmed_families),
-                len(set(all_families) | set(held_families)),
+                len(set(all_families) | set(held_families) | entry_refresh_families),
                 len(confirmed_entry_scope),
                 len(confirmed_rest_scope),
                 len(confirmed_held_scope),
-                sum(len(v) for v in entry_condition_scope.values()),
+                sum(len(v) for v in entry_condition_scope.values())
+                + sum(len(v) for v in entry_refresh_condition_scope.values()),
                 sum(len(v) for v in rest_condition_scope.values()),
                 sum(len(v) for v in held_condition_scope.values()),
                 confirm_refresh_summary,
@@ -7028,6 +7041,24 @@ def _edli_redecision_condition_scope(
             condition_id = str(condition_ids[idx] or "").strip()
             if condition_id:
                 out.setdefault(family_key, set()).add(condition_id)
+    return out
+
+
+def _edli_merge_condition_scopes(
+    *scopes: dict[tuple[str, str, str], set[str]],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Union condition scopes without mutating the caller-owned maps."""
+
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for scope in scopes:
+        for family_key, condition_ids in (scope or {}).items():
+            clean = {
+                str(condition_id or "").strip()
+                for condition_id in condition_ids
+                if str(condition_id or "").strip()
+            }
+            if clean:
+                out.setdefault(family_key, set()).update(clean)
     return out
 
 
