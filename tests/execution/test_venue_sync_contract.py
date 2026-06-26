@@ -183,8 +183,8 @@ def test_no_client_call_while_any_connection_open(monkeypatch, tmp_path):
         )
 
 
-def test_live_tick_scope_defers_heavy_recovery_passes(monkeypatch, tmp_path):
-    """The order-daemon cadence reconciles in-flight commands without full sweep work."""
+def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_path):
+    """The order-daemon cadence must not defer stale partial remainder release."""
     import tests.test_command_recovery as h
     from src.execution import command_recovery, venue_sync_contract
 
@@ -215,8 +215,67 @@ def test_live_tick_scope_defers_heavy_recovery_passes(monkeypatch, tmp_path):
     assert summary["scope"] == "live_tick"
     assert summary["deferred_full_sweep"] is True
     assert summary["scanned"] == 1
-    assert "partial_remainders" not in summary
+    assert summary["partial_remainders"] == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
     assert "recorded_maker_fill_economics" in summary
+
+
+def test_live_tick_scope_terminalizes_cancelled_partial_remainder(monkeypatch, tmp_path):
+    """A cancelled maker remainder must not wait for the deferred full sweep."""
+
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick-partial-remainder.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-partial", size=5.0)
+    h._advance_to_partial(seed_conn, command_id="cmd-partial", venue_order_id="vord-partial")
+    h._append_confirmed_trade_fact(
+        seed_conn,
+        command_id="cmd-partial",
+        order_id="vord-partial",
+        filled_size="1.25",
+        fill_price="0.50",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-partial": {"orderID": "vord-partial", "status": "CANCELED"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["partial_remainders"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    check_conn = sqlite3.connect(str(db_path))
+    check_conn.row_factory = sqlite3.Row
+    try:
+        state = check_conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-partial'"
+        ).fetchone()["state"]
+    finally:
+        check_conn.close()
+    assert state == "EXPIRED"
 
 
 def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):

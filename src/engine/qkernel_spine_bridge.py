@@ -1389,6 +1389,13 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         return None
     if not _direct_route_probability_matches_proof(proof, qkernel_execution_economics):
         return None
+    if not _qkernel_execution_direction_admitted(
+        qkernel_execution_economics,
+        direction=str(getattr(proof, "direction", "") or ""),
+    ):
+        return None
+    if qkernel_execution_economics.get("coherence_allows") is not True:
+        return None
     edge_lcb = float(qkernel_execution_economics["edge_lcb"])
     false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
     if false_edge_rate is None:
@@ -1412,6 +1419,36 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         return replace(proof, **overlay)
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
         return None
+
+
+def _qkernel_execution_direction_admitted(
+    qkernel_execution_economics: Mapping[str, Any],
+    *,
+    direction: str | None = None,
+) -> bool:
+    """Mirror the live family selector's structural direction admission."""
+
+    if qkernel_execution_economics.get("direction_law_ok") is True:
+        return True
+    side = str(qkernel_execution_economics.get("side") or "").upper()
+    if side != "NO" or str(direction or "") != "buy_no":
+        return False
+    try:
+        edge_lcb = float(qkernel_execution_economics.get("edge_lcb"))
+        optimal_delta_u = float(qkernel_execution_economics.get("optimal_delta_u"))
+    except (TypeError, ValueError):
+        return False
+    if edge_lcb <= 0.0 or optimal_delta_u <= 0.0:
+        return False
+    try:
+        from src.decision.family_decision_engine import _OOF_LIVE_RELIABILITY_BASES
+    except Exception:  # noqa: BLE001
+        return False
+    return (
+        str(qkernel_execution_economics.get("q_lcb_guard_basis") or "") in _OOF_LIVE_RELIABILITY_BASES
+        and qkernel_execution_economics.get("q_lcb_guard_abstained") is not True
+        and bool(str(qkernel_execution_economics.get("q_lcb_guard_cell_key") or "").strip())
+    )
 
 
 def _candidate_qkernel_execution_economics_payload(

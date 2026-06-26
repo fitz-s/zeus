@@ -7382,6 +7382,42 @@ class TestRecoveryResolutionTable:
 
         assert _latest_terminal_remainder_order_fact_exists(conn, command_id="cmd-001") is True
 
+    def test_cancel_confirmed_remainder_outranks_later_partial_order_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Lucknow-class regression: cancel truth closes the unfilled remainder."""
+
+        _insert(conn, size=5.0)
+        _advance_to_partial(conn, venue_order_id="ord-partial")
+        _append_confirmed_trade_fact(conn, order_id="ord-partial")
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="CANCEL_CONFIRMED",
+            matched_size="1.25",
+            remaining_size="3.75",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="1.25",
+            remaining_size="3.75",
+        )
+
+        from src.execution.command_recovery import _latest_terminal_remainder_order_fact_exists
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        assert _latest_terminal_remainder_order_fact_exists(conn, command_id="cmd-001") is True
+        mock_client.get_open_orders.return_value = []
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["partial_remainders"] == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+
     def test_legacy_filled_command_with_partial_economic_coverage_records_terminal_remainder_fact(
         self,
         conn,

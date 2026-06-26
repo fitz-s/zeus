@@ -208,7 +208,6 @@ def _canonical_order_truth_cte(
                                        THEN 600
                                        WHEN UPPER(COALESCE(fact.state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
                                             AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                                            AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
                                        THEN 550
                                        WHEN UPPER(COALESCE(fact.state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
                                             AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
@@ -4528,28 +4527,37 @@ def reconcile_exit_pending_projections(conn: sqlite3.Connection) -> dict:
     return summary
 
 
-def _latest_terminal_remainder_order_fact_exists(
+def _latest_terminal_remainder_order_fact(
     conn: sqlite3.Connection,
     *,
     command_id: str,
-) -> bool:
+) -> dict | None:
     if not _table_exists(conn, "venue_order_facts"):
-        return False
+        return None
     row = conn.execute(
         "WITH " + _canonical_order_truth_cte() + """
-        SELECT state, remaining_size, matched_size, source
+        SELECT fact_id, state, remaining_size, matched_size, source, observed_at
           FROM canonical_order_truth
          WHERE command_id = ?
         """,
         (command_id,),
     ).fetchone()
     data = _dict_row(row)
-    return (
+    if (
         str(data.get("state") or "") in _TERMINAL_NO_FILL_ORDER_FACT_STATES
         and str(data.get("source") or "") in _LIVE_TERMINAL_ORDER_FACT_SOURCES
-        and _decimal_is_zero(data.get("remaining_size"))
         and _decimal_is_positive(data.get("matched_size"))
-    )
+    ):
+        return data
+    return None
+
+
+def _latest_terminal_remainder_order_fact_exists(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> bool:
+    return _latest_terminal_remainder_order_fact(conn, command_id=command_id) is not None
 
 
 def _latest_position_env(conn: sqlite3.Connection, position_id: str) -> str:
@@ -6641,8 +6649,30 @@ def reconcile_partial_remainders(
             if command_state == CommandState.FILLED.value and fill_coverage != "partial":
                 summary["stayed"] += 1
                 continue
-            if _latest_terminal_remainder_order_fact_exists(conn, command_id=command_id):
-                summary["stayed"] += 1
+            existing_terminal_remainder = _latest_terminal_remainder_order_fact(
+                conn,
+                command_id=command_id,
+            )
+            if existing_terminal_remainder is not None:
+                if command_state == CommandState.PARTIAL.value:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=CommandEventType.EXPIRED.value,
+                        occurred_at=str(existing_terminal_remainder.get("observed_at") or _now_iso()),
+                        payload={
+                            "reason": "existing_terminal_remainder_order_fact",
+                            "venue_order_id": venue_order_id,
+                            "venue_order_fact_id": existing_terminal_remainder.get("fact_id"),
+                            "venue_order_fact_state": existing_terminal_remainder.get("state"),
+                            "proof_class": "canonical_terminal_remainder_order_fact",
+                            "positive_fill_size": existing_terminal_remainder.get("matched_size"),
+                            "remaining_size": existing_terminal_remainder.get("remaining_size"),
+                        },
+                    )
+                    summary["advanced"] += 1
+                else:
+                    summary["stayed"] += 1
                 continue
             if venue_order_id in open_order_ids:
                 summary["stayed"] += 1
@@ -11218,6 +11248,10 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
                 _harvest(candidate_fn(conn))
             except Exception:  # noqa: BLE001
                 logger.debug("recovery: priming candidate %s failed", candidate_fn.__name__, exc_info=True)
+        try:
+            _harvest(_partial_remainder_candidates(conn, updated_before=None))
+        except Exception:  # noqa: BLE001
+            logger.debug("recovery: priming candidate _partial_remainder_candidates failed", exc_info=True)
         return {
             "order_ids": order_ids,
             "idempotency_keys": idem_keys,
@@ -11468,6 +11502,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,
                  "edli_acknowledged_venue_command_sync")
+        _client_pass(
+            "partial_remainders",
+            reconcile_partial_remainders,
+            "partial_remainders",
+            updated_before=started_at,
+        )
         summary["scope"] = "live_tick"
         summary["deferred_full_sweep"] = True
         return

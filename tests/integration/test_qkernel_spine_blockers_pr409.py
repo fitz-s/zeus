@@ -848,7 +848,16 @@ def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev, side="NO"):
     )
 
 
-def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no", missing_reason=None):
+def _overlay_proof(
+    *,
+    q_posterior,
+    q_lcb_5pct,
+    economics,
+    direction="buy_no",
+    missing_reason=None,
+    direction_law_ok=True,
+    coherence_allows=True,
+):
     """Build a real reactor ``_CandidateProof`` and overlay the given spine economics."""
     from dataclasses import replace
     from types import SimpleNamespace
@@ -883,6 +892,8 @@ def _overlay_proof(*, q_posterior, q_lcb_5pct, economics, direction="buy_no", mi
         q_lcb_guard_basis="OOF_WILSON_95",
         q_lcb_guard_abstained=False,
         q_lcb_guard_cell_key="cell",
+        direction_law_ok=direction_law_ok,
+        coherence_allows=coherence_allows,
     )
     decision = SimpleNamespace(
         selected=economics,
@@ -933,6 +944,27 @@ def test_overlay_rejects_direct_route_probability_authority_split():
     )
     assert (
         _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.001, economics=economics)
+        is None
+    )
+
+
+def test_overlay_rejects_qkernel_selected_yes_without_direction_admission():
+    """Lucknow-class regression: qkernel cannot revive a YES rejected by live admission."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
+    )
+
+    assert (
+        _overlay_proof(
+            q_posterior=0.06,
+            q_lcb_5pct=0.06,
+            economics=economics,
+            direction="buy_yes",
+            missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            direction_law_ok=False,
+            coherence_allows=True,
+        )
         is None
     )
 
