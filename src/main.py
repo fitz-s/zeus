@@ -2851,14 +2851,9 @@ def _refresh_pending_family_snapshots(
         get_trade_connection_read_only,
     )
     from src.state.db_writer_lock import WriteClass, db_writer_lock
-    from src.strategy.market_phase import (
-        family_venue_closed as _family_venue_closed,
-    )
 
-    # Injected-now (tests / replay): the venue-close warm-skip and the snapshot
-    # freshness window both key off this single decision clock. Defaults to
-    # wall-clock UTC in production; a test passes a frozen instant so the
-    # venue-close skip is deterministic against fixed-date fixtures.
+    # Injected-now (tests / replay): the snapshot freshness window keys off this
+    # single decision clock. Defaults to wall-clock UTC in production.
     now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
     priority_conditions = {
@@ -3065,36 +3060,6 @@ def _refresh_pending_family_snapshots(
                     snapshot_reserve_s,
                 )
                 break
-            # VENUE-CLOSE WARM-SKIP (2026-06-13): a family whose Polymarket weather
-            # market has already entered POST_TRADING/RESOLVED (the F1 12:00-UTC
-            # close of target_date) can produce no fresh executable book — its
-            # capture froze at the last pre-close snapshot and Gamma returns an
-            # empty event list. Re-probing it (topology lookup + Gamma slug fetch)
-            # burns the bounded time-box that LIVE families (PRE_SETTLEMENT_DAY /
-            # SETTLEMENT_DAY) need, starving the live inventory of fresh snapshots.
-            #
-            # This is the EARLIER-than-strictly-past horizon: the venue closes at
-            # 12:00 UTC of target_date, hours before the target LOCAL-day end that
-            # the claim floor (EventStore._strictly_past_in_tz) and the prior STEP-4
-            # comment relied on. So a same-day-but-venue-closed family (e.g. a
-            # 2026-06-13 family at 17:44Z, post the 12:00Z close, pre local
-            # midnight) passes the claim floor and reaches this lane — exactly the
-            # 202/319 closed families measured live 2026-06-13 17:51Z that the
-            # 'gamma_slug_timebox_unattempted' tail re-probed for nothing.
-            #
-            # Authority: market_phase.family_venue_closed reuses the SAME F1
-            # 12:00-UTC POST_TRADING anchor (market_open_at_decision /
-            # market_phase_for_decision) the reactor's _venue_market_closed_horizon
-            # uses — single authority, no new clock. Fail-SOFT: an unresolvable
-            # city/tz/date returns False (NOT closed) so an uncertain family is
-            # KEPT, never dropped (a tradeable family must never be skipped). This
-            # is a focus/efficiency skip, NOT a cap or admission relaxation — it
-            # removes only families whose venue is provably closed.
-            if _family_venue_closed(
-                city=city, target_date=target_date, now_utc=now_utc
-            ):
-                venue_closed_skipped += 1
-                continue
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
@@ -3110,9 +3075,8 @@ def _refresh_pending_family_snapshots(
                 # 0-oscillation, measured 200/200 backed-off were next-day
                 # lows/highs). The family stays a pending event and is re-probed
                 # the moment the cooldown expires — captured as soon as the market
-                # lists. Symmetric twin of the _family_venue_closed past-skip: a
-                # focus/efficiency skip, never a terminal drop. Env
-                # ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS=0 disables.
+                # lists. This is a focus/efficiency skip, never a terminal drop.
+                # Env ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS=0 disables.
                 nb_key = _refresh_family_key(city, target_date, metric)
                 if (
                     _gamma_empty_backoff_s > 0.0
@@ -8270,6 +8234,32 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: local pre-submit rejection recovery sweep failed "
             "(non-fatal; normal pending events still drain): %r",
             _pre_submit_recovery_exc,
+        )
+
+    try:
+        if _budget_exhausted("requeue_false_static_venue_close_day0_dead_letters"):
+            return
+        _step_started = time.monotonic()
+        _static_close_recovered = store.requeue_false_static_venue_close_day0_dead_letters(
+            decision_time=decision_time.isoformat(),
+            batch_limit=min(batch_limit, 1000),
+        )
+        _log_prune_step(
+            "requeue_false_static_venue_close_day0_dead_letters",
+            _step_started,
+            _static_close_recovered,
+        )
+        if _static_close_recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d DAY0 events falsely dead-lettered by "
+                "old static F1 venue-close horizon",
+                _static_close_recovered,
+            )
+    except Exception as _static_close_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: false static venue-close DAY0 recovery sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _static_close_recovery_exc,
         )
 
     try:

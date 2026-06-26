@@ -109,16 +109,11 @@ def test_confirmation_refresh_prune_restricts_to_priority_conditions():
 
 
 def _venue_open_now(target_date: str) -> datetime:
-    """A frozen decision-clock instant at which a family's venue market is still
-    OPEN (NOT POST_TRADING) — 06:00 UTC of ``target_date``, six hours before the
-    F1 12:00-UTC venue close.
+    """A frozen decision-clock instant during the target local day.
 
-    The warm lane now skips families whose venue market has entered POST_TRADING
-    (``_refresh_pending_family_snapshots`` venue-close warm-skip, 2026-06-13). To
-    keep the fixed-date fixtures below exercising the live-family path, the tests
-    inject this venue-OPEN ``now`` instead of wall-clock (which would make every
-    fixed past-date fixture venue-closed → skipped). Clock-relative-by-injection:
-    the family's phase is pinned by the date+now pair, not by when the test runs.
+    Warm refresh no longer treats F1/Gamma endDate as venue-close proof, but
+    fixed-date fixtures still need an injected clock so they do not depend on
+    wall time.
     """
     return datetime.combine(
         date.fromisoformat(target_date), time(6, 0, 0), tzinfo=timezone.utc
@@ -1940,7 +1935,7 @@ def _venue_close_relationship_harness(monkeypatch, *, refresh_module=main_module
     """Wire a single Hong Kong / 2026-06-07 pending family through the warm
     refresh with all venue-I/O mocked. Returns a callable
     ``run(now_utc) -> (result, submitted)`` so a single fixture can be driven at
-    both a venue-OPEN and a venue-CLOSED decision clock."""
+    multiple decision clocks."""
     forecasts_conn = _FakeConn()
     write_conn = _FakeConn()
     topology_rows = [
@@ -2019,61 +2014,41 @@ def _venue_close_relationship_harness(monkeypatch, *, refresh_module=main_module
     return run
 
 
-def test_warm_lane_skips_venue_closed_family_keeps_venue_open_family(monkeypatch):
-    """RELATIONSHIP (warm lane ↔ market_phase venue-close authority): the SAME
-    pending family must be SKIPPED when its venue market is POST_TRADING and
-    REFRESHED when the venue is still open — the only thing that differs is the
-    decision clock, which both sites read through the F1 12:00-UTC anchor.
-
-    This is the live-inventory-focus invariant (2026-06-13): a 2026-06-07 family
-    re-probed AFTER its 12:00-UTC venue close (the closed-06-13 families measured
-    pinning the warm time-box) wastes the bounded budget the live PRE_SETTLEMENT /
-    SETTLEMENT families need. Venue-closed ⇒ skip (no topology lookup, no Gamma,
-    no CLOB submit); venue-open ⇒ flow through unchanged.
-
-    RED-on-revert: remove the ``family_venue_closed`` warm-skip in
-    ``_refresh_pending_family_snapshots`` and the venue-CLOSED branch refreshes the
-    family (``venue_closed_skipped == 0``, ``submitted`` non-empty) — this test goes
-    red. Fail-soft direction is pinned separately (an unresolvable family is kept).
-    """
+def test_warm_lane_keeps_family_active_after_gamma_enddate_while_local_day_open(monkeypatch):
+    """RELATIONSHIP: static Gamma endDate/F1 timing is not warm-lane close proof."""
     run = _venue_close_relationship_harness(monkeypatch)
 
-    # Venue OPEN: 06:00 UTC of target_date, before the 12:00-UTC close → refreshed.
+    # Local-day active before 12:00Z → refreshed.
     open_now = datetime(2026, 6, 7, 6, 0, tzinfo=timezone.utc)
     open_result, open_submitted = run(open_now)
     assert open_result["status"] == "refreshed"
     assert open_result["venue_closed_skipped"] == 0
-    assert open_result["cached_topology_families"] == 1
+    assert open_result["cached_topology_families"] >= 1
     assert len(open_submitted) == 1
 
-    # Venue CLOSED: 18:00 UTC of target_date, after the 12:00-UTC close but BEFORE
-    # Hong Kong local midnight (UTC+8 → local-day end is 16:00Z of 06-07's next
-    # boundary), so EventStore._strictly_past_in_tz alone would NOT skip it — the
-    # venue-close anchor is what makes this family skippable.
-    closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
-    closed_result, closed_submitted = run(closed_now)
-    assert closed_result["venue_closed_skipped"] == 1
-    # The closed family produced NO refresh work: no topology family, no submit.
-    assert closed_result.get("cached_topology_families", 0) == 0
-    assert closed_submitted == []
-    assert closed_result["status"] in {"venue_closed", "no_refreshable_families"}
+    # After Gamma endDate but before Hong Kong local midnight → still refreshed.
+    after_enddate_now = datetime(2026, 6, 7, 14, 0, tzinfo=timezone.utc)
+    after_enddate_result, after_enddate_submitted = run(after_enddate_now)
+    assert after_enddate_result["status"] == "refreshed"
+    assert after_enddate_result["venue_closed_skipped"] == 0
+    assert after_enddate_result["cached_topology_families"] == open_result["cached_topology_families"]
+    assert len(after_enddate_submitted) == 1
 
 
-def test_lifted_substrate_warm_lane_skips_venue_closed_family(monkeypatch):
-    """The sidecar-owned lifted warmer must carry the same venue-close eviction as
-    ``src.main``; otherwise a closed held family can pin the refresh queue head and
-    starve live executable substrate updates."""
+def test_lifted_substrate_warm_lane_keeps_after_gamma_enddate_family(monkeypatch):
+    """The sidecar-owned lifted warmer must carry the same static-endDate rule as
+    ``src.main``."""
     run = _venue_close_relationship_harness(
         monkeypatch, refresh_module=substrate_observer
     )
 
-    closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
-    closed_result, closed_submitted = run(closed_now)
+    after_enddate_now = datetime(2026, 6, 7, 14, 0, tzinfo=timezone.utc)
+    closed_result, closed_submitted = run(after_enddate_now)
 
-    assert closed_result["venue_closed_skipped"] == 1
-    assert closed_result.get("cached_topology_families", 0) == 0
-    assert closed_submitted == []
-    assert closed_result["status"] == "venue_closed"
+    assert closed_result["venue_closed_skipped"] == 0
+    assert closed_result.get("cached_topology_families", 0) >= 1
+    assert len(closed_submitted) == 1
+    assert closed_result["status"] == "refreshed"
 
 
 def test_lifted_substrate_warm_lane_backs_off_gamma_empty_family(monkeypatch):

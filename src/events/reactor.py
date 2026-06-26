@@ -304,24 +304,9 @@ def _fair_lane_interleave(events: list) -> list:
             j += 1
     return out
 
-# VENUE-CLOSE HORIZON eligibility (freshness-throughput starvation fix 2026-06-14,
-# #92 / docs/evidence/deadloop_2026-06-14/binding_wall.md). The geometric
-# venue-close terminal (horizon b) applies to EVERY family-keyed event that binds a
-# (city, target_date) weather market — NOT only the forecast-decision lane.
-# DAY0_EXTREME_UPDATED is family-keyed (carries city + target_date + metric) but is
-# NOT a forecast-decision type, so the prior horizon scope (forecast-decision types
-# only) NEVER terminalized a past-close DAY0 event: EventStore._is_timely returns
-# True for non-forecast-decision types (event_store.py L803) AND the venue-close
-# horizon skipped them (reactor L959), so a past-close DAY0 event whose market
-# settled at the F1 12:00-UTC close requeued FOREVER on EXECUTABLE_SNAPSHOT_BLOCKED.
-# Live 2026-06-14 19:36Z (daemon pid 8058): 4903 of 5180 pending events were
-# past-close DAY0_EXTREME_UPDATED (target_date 06-12/06-13), monopolizing the
-# reactor working set so the ~277 live 06-15 families were starved (processed≈0).
-# The venue-close predicate is purely geometric (city tz + target_date + F1 anchor)
-# and returns None for any live future-close family, so widening the scope can NEVER
-# terminalize a genuinely-live family — it only sweeps the dead past-close clog out
-# of the working set. The forecast-decision set keeps its other (non-horizon)
-# semantics (source-truth treatment, _is_timely floor) unchanged.
+# Event types that may carry explicit venue-closed evidence. Static city/date
+# geometry is not enough to terminalize them: Gamma endDate is a resolution
+# timestamp, while live order-entry authority is closed + accepting_orders.
 _VENUE_CLOSE_HORIZON_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
     {"DAY0_EXTREME_UPDATED"}
 )
@@ -1152,57 +1137,26 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
-          (b) MARKET_VENUE_CLOSED — the venue market has entered POST_TRADING
-              (RESOLVED). For a Polymarket weather family this is the F1 12:00-UTC
-              close of target_date (authority: src/strategy/market_phase). Once the
-              venue market is closed the family can produce no fresh executable book
-              (capture freezes at the last pre-close snapshot) and no receipt, so a
-              transient EXECUTABLE_SNAPSHOT_STALE block on it can NEVER clear — it
-              must terminalize at the venue close, not requeue.
+          (b) MARKET_VENUE_CLOSED — only explicit venue evidence says
+              ``closed=true`` and ``accepting_orders=false``. Static Gamma endDate
+              / F1 timing cannot terminalize a money-path event.
           (a) TIMELINESS_FLOOR_PAST — the event is no longer timely. Delegates to
               the SINGLE existing timeliness authority (EventStore._is_timely):
               a forecast-decision event whose target LOCAL day is strictly past
               has crossed its market horizon. This is the SAME predicate
               fetch_pending applies on its read floor — no second clock.
 
-        WHY (b) EXISTS — the local-day floor (a) is NOT the market-closed signal.
-        The prior design assumed "(a) subsumes market-closed (b): the
-        settlement-day-end floor IS the market-closed authority." That assumption
-        was FALSE: the venue closes at 12:00 UTC of target_date (POST_TRADING),
-        which is EARLIER than the target-LOCAL-day end for every city whose local
-        day extends past 12:00 UTC (UTC+, and UTC- before noon-local). In the window
-        [venue_close, local_day_end) the book is gone but (a) still reports the
-        event timely → an EXECUTABLE_SNAPSHOT_STALE block requeued FOREVER (measured
-        live 2026-06-13 15:48Z: 679 events / 51 families pinned at processed=0;
-        docs/evidence/no_order_root_2026-06-13/diagnosis.md). (b) closes that gap by
-        asking the venue-close authority directly. It invents NO new clock and runs
-        NO venue probe — it reuses the SAME market_phase POST_TRADING anchor the
-        reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, applied at the horizon
-        locus. It is a SEMANTIC horizon (venue close), never an attempt cap.
-
         Non-family-keyed events (no city+target_date) have no timeliness floor of
         their own — for them only the operator disarm horizon applies; absent that
         they requeue until consumed by another terminal path. They cannot leak the
         queue: the cross-city round-robin in fetch_pending interleaves fresh events
         fairly (see _note_transient_requeue docstring).
-
-        FAMILY-KEYED COVERAGE (2026-06-14, #92): the venue-close horizon (b) now
-        covers DAY0_EXTREME_UPDATED in addition to the forecast-decision lane (see
-        _VENUE_CLOSE_HORIZON_EVENT_TYPES). The timeliness floor (a) still applies only
-        to the forecast-decision lane (EventStore._is_timely L803), so for a past-close
-        DAY0 family the venue-close horizon (b) — which fires EARLIER and is geometric
-        — is the terminal that sweeps it out of the working set.
         """
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
             return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
 
-        # (b) Venue-close floor — the market has entered POST_TRADING/RESOLVED. A
-        # closed market yields no fresh book and no receipt, so a transient block on
-        # it cannot clear; terminalize at the venue close (which precedes the
-        # local-day floor (a) for most cities). Fail-soft: an unresolvable
-        # tz/date returns None (NOT closed) so the event keeps requeueing — never
-        # burned on a missing predicate.
+        # (b) Venue-close floor. This is evidence-based, not time-derived.
         venue_closed = self._venue_market_closed_horizon(event, decision_time=decision_time)
         if venue_closed is not None:
             return venue_closed
@@ -1230,62 +1184,38 @@ class OpportunityEventReactor:
     def _venue_market_closed_horizon(
         self, event: OpportunityEvent, *, decision_time: datetime
     ) -> tuple[str, str] | None:
-        """Horizon (b): the venue market is in POST_TRADING/RESOLVED at decision_time.
+        """Terminalize only on explicit venue-closed evidence.
 
-        For a family-keyed event (city + target_date), consult the canonical
-        market_phase authority with the F1 12:00-UTC fallback close anchor — the
-        SAME authority the reactor's EVENT_BOUND_MARKET_PHASE_CLOSED gate uses, so
-        the two sites cannot disagree on the venue-close instant. No venue probe, no
-        snapshot read: the phase is derived purely from city timezone + target_date
-        + decision_time + the F1 anchor.
-
-        SCOPE (freshness-throughput starvation fix 2026-06-14, #92): applies to every
-        ``_VENUE_CLOSE_HORIZON_EVENT_TYPES`` member — the forecast-decision lane AND
-        ``DAY0_EXTREME_UPDATED`` (also family-keyed). A past-close DAY0 event has a
-        real venue close (its market settled at the F1 12:00-UTC anchor) and must
-        terminalize at that horizon; before this fix it was scoped out and requeued
-        forever, clogging the working set (see ``_VENUE_CLOSE_HORIZON_EVENT_TYPES``).
-
-        Returns ``("MARKET_VENUE_CLOSED", detail)`` iff the phase is POST_TRADING or
-        RESOLVED; otherwise None (the family is still live, or the inputs are
-        unresolvable → fail-soft requeue, never a premature terminal).
+        Gamma ``endDate``/the old F1 12:00Z anchor is not enough: live weather
+        markets can remain ``closed=false`` and ``acceptingOrders=true`` after
+        that timestamp. A static city/date calculation therefore cannot burn a
+        money-path event. The executable snapshot and submit layers already use
+        the decomposed venue authority: orderbook enabled, not closed, and
+        accepting_orders not explicitly false.
         """
         if event.event_type not in _VENUE_CLOSE_HORIZON_EVENT_TYPES:
             return None
         payload = _payload_dict(event)
-        city = str(payload.get("city") or "").strip()
-        target_date = str(payload.get("target_date") or "").strip()
-        if not city or not target_date:
-            return None
-        try:
-            from datetime import date as _date_cls
-
-            from src.config import runtime_cities_by_name
-            from src.strategy.market_phase import (
-                MarketPhase,
-                _f1_fallback_end_utc,
-                market_phase_for_decision,
-            )
-
-            city_config = runtime_cities_by_name().get(city)
-            tz = getattr(city_config, "timezone", None) if city_config is not None else None
-            if not tz:
+        def _venue_bool(value: object) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if value is None:
                 return None
-            target_local_date = _date_cls.fromisoformat(target_date)
-            phase = market_phase_for_decision(
-                target_local_date=target_local_date,
-                city_timezone=tz,
-                decision_time_utc=decision_time.astimezone(UTC),
-                polymarket_start_utc=None,
-                polymarket_end_utc=_f1_fallback_end_utc(target_local_date),
-            )
-        except Exception:
-            # Fail-soft: an unresolvable city/tz/date must NOT terminalize a family
-            # that might still be live. Requeue (None); the local-day floor (a) is
-            # the backstop terminal once the whole local day ends.
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
             return None
-        if phase in (MarketPhase.POST_TRADING, MarketPhase.RESOLVED):
-            return ("MARKET_VENUE_CLOSED", f"venue market phase {phase.value} (F1 12:00-UTC close)")
+
+        closed = _venue_bool(payload.get("closed") or payload.get("market_closed"))
+        accepting = _venue_bool(
+            payload.get("accepting_orders")
+            if "accepting_orders" in payload
+            else payload.get("acceptingOrders")
+        )
+        if closed is True and accepting is False:
+            return ("MARKET_VENUE_CLOSED", "explicit venue closed=true accepting_orders=false")
         return None
 
     def _venue_market_not_listed_horizon(

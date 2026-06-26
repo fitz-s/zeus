@@ -424,7 +424,6 @@ def _refresh_pending_family_snapshots(
     )
     from src.data.market_topology_rows import _event_family_market_topology_rows
     from src.data.polymarket_client import PolymarketClient
-    from src.strategy.market_phase import family_venue_closed as _family_venue_closed
     from src.state.db import (
         _zeus_trade_db_path,
         get_trade_connection,
@@ -643,9 +642,6 @@ def _refresh_pending_family_snapshots(
                 )
                 break
             families_processed_this_cycle += 1
-            if _family_venue_closed(city=city, target_date=target_date, now_utc=now_utc):
-                venue_closed_skipped += 1
-                continue
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:

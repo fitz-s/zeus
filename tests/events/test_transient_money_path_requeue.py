@@ -278,12 +278,10 @@ def test_price_moved_requeues_indefinitely_until_timeliness_horizon():
 
 
 def test_horizon_dead_letter_carries_honest_horizon_and_cause():
-    """ANTIBODY (REWRITTEN from the exhaustion-label test): when a transient
-    terminalizes at its EVENT HORIZON the dead-letter must carry the horizon
-    (MARKET_VENUE_CLOSED — the F1 12:00-UTC venue close, which precedes the
-    local-day floor for Chicago 2026-06-05 at the 2026-06-07 decision_time) AND the
-    last honest transient cause — never an EXECUTABLE_SNAPSHOT_BLOCKED mask and
-    never an attempt count."""
+    """ANTIBODY: when a transient terminalizes at its EVENT HORIZON the
+    dead-letter must carry the horizon (TIMELINESS_FLOOR_PAST for this
+    strictly-past local day) AND the last honest transient cause — never an
+    EXECUTABLE_SNAPSHOT_BLOCKED mask and never an attempt count."""
     conn, store = _store()
     event = _event("snap-honest-label")
     store.insert_or_ignore(event)
@@ -313,7 +311,7 @@ def test_horizon_dead_letter_carries_honest_horizon_and_cause():
         "horizon terminal must be labeled MONEY_PATH_HORIZON_EXPIRED, never the "
         f"old count-based MONEY_PATH_TRANSIENT_EXHAUSTED: got {failure_stage!r}"
     )
-    assert "MARKET_VENUE_CLOSED" in (error_message or ""), error_message
+    assert "TIMELINESS_FLOOR_PAST" in (error_message or ""), error_message
     assert "SUBMIT_ABORTED_PRICE_MOVED" in (error_message or ""), (
         "the dead-letter must carry the last transient cause: "
         f"got {error_message!r}"
@@ -680,12 +678,11 @@ def test_riskguard_block_requeues_indefinitely_then_horizon_terminal():
     row = conn.execute(
         "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
-    # _DT_HORIZON_PAST (2026-06-07) is past BOTH horizons for Chicago 2026-06-05;
-    # the venue-close floor (b, F1 12:00-UTC of target_date) is EARLIER than the
-    # local-day floor (a) and so fires first. The load-bearing invariant for THIS
-    # test is unchanged: a horizon terminal fires and the honest riskguard cause
-    # survives in the MONEY_PATH_HORIZON_EXPIRED label, never an attempt count.
-    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED:MARKET_VENUE_CLOSED:RISK_GUARD_BLOCKED", (
+    # _DT_HORIZON_PAST (2026-06-07) is past the local-day horizon for Chicago
+    # 2026-06-05. Static F1/Gamma endDate timing must not relabel it as venue
+    # closed. The load-bearing invariant is unchanged: a horizon terminal fires
+    # and the honest riskguard cause survives in the label, never an attempt count.
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED:TIMELINESS_FLOOR_PAST:RISK_GUARD_BLOCKED", (
         f"the riskguard cause must survive into the horizon label: got {row[0]!r}"
     )
     assert "attempt" not in row[0].lower()
