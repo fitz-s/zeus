@@ -10833,13 +10833,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         # already enough local truth to clear a 0-share pending_entry projection;
         # waiting for the full sweep leaves stale duplicate-lock ghosts in the
         # live money path.
-        _db_pass("cancel_ack_terminal_no_fill_facts",
-                 reconcile_cancel_ack_terminal_no_fill_facts,
-                 "cancel_ack_terminal_no_fill_facts")
-        _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
-        _db_pass("edli_acknowledged_venue_command_sync",
-                 reconcile_edli_acknowledged_venue_command_sync,
-                 "edli_acknowledged_venue_command_sync")
+        # Confirmed maker/exit fills are even higher priority: they close live
+        # exposure and unblock close-before-open redecision leases, so run them
+        # before broader terminal-order maintenance that may contend on locks.
         from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
 
         _db_pass(
@@ -10850,6 +10846,13 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fold_stayed=False,
             observed_at=started_at,
         )
+        _db_pass("cancel_ack_terminal_no_fill_facts",
+                 reconcile_cancel_ack_terminal_no_fill_facts,
+                 "cancel_ack_terminal_no_fill_facts")
+        _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
+        _db_pass("edli_acknowledged_venue_command_sync",
+                 reconcile_edli_acknowledged_venue_command_sync,
+                 "edli_acknowledged_venue_command_sync")
         summary["scope"] = "live_tick"
         summary["deferred_full_sweep"] = True
         return
