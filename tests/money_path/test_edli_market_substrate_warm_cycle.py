@@ -355,6 +355,7 @@ def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     warm_src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
     helper_src = inspect.getsource(substrate_observer._background_warm_refresh_budget_seconds)
     reserve_src = inspect.getsource(substrate_observer._background_warm_snapshot_reserve_seconds)
+    refresh_src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
 
     assert "refresh_budget_seconds=background_budget_s" in warm_src
     assert "snapshot_reserve_seconds=background_snapshot_reserve_s" in warm_src
@@ -362,6 +363,8 @@ def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     assert '"12.0"' in helper_src
     assert "ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS" in reserve_src
     assert '"6.0"' in reserve_src
+    assert "executor.shutdown(wait=False, cancel_futures=True)" in refresh_src
+    assert "with ThreadPoolExecutor(" not in refresh_src
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():

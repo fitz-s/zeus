@@ -3411,10 +3411,11 @@ def _refresh_pending_family_snapshots(
                             raw_events_collected.append(event)
 
             if gamma_jobs:
-                with ThreadPoolExecutor(
+                executor = ThreadPoolExecutor(
                     max_workers=gamma_concurrency,
                     thread_name_prefix="zeus-gamma-refresh",
-                ) as executor:
+                )
+                try:
                     _submit_gamma_jobs(executor)
                     while pending_futures:
                         remaining = gamma_deadline - time.monotonic()
@@ -3523,6 +3524,11 @@ def _refresh_pending_family_snapshots(
                         for future in pending_futures:
                             future.cancel()
                         pending_futures.clear()
+                finally:
+                    for future in tuple(pending_futures):
+                        future.cancel()
+                    pending_futures.clear()
+                    executor.shutdown(wait=False, cancel_futures=True)
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
