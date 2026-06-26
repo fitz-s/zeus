@@ -6395,11 +6395,30 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 confirm_refresh_summary,
             )
             if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
+                from src.state.db import world_write_mutex as _world_write_mutex
+
+                world = get_world_connection()
+                emit_mutex = _world_write_mutex()
+                emit_mutex.acquire()
+                try:
+                    expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                        world,
+                        set(),
+                        decision_time=received_at,
+                    )
+                    world.commit()
+                finally:
+                    emit_mutex.release()
+                    try:
+                        world.close()
+                    except Exception:  # noqa: BLE001
+                        pass
                 logger.info(
                     "edli_redecision_screen: confirmation refresh produced no fresh "
                     "screened money-path substrate; skipping emit this tick rather "
-                    "than queueing stale redecision families=%d",
+                    "than queueing stale redecision families=%d expired_unadmitted=%d",
                     len(set(all_families) | set(held_families)),
+                    expired_unadmitted,
                 )
                 return
 

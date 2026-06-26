@@ -619,6 +619,14 @@ def test_redecision_screen_full_refresh_still_requires_scoped_freshness():
     assert screen_src.index("_edli_confirmation_refresh_unavailable") < screen_src.index(
         "fresh_entry_scope = _edli_families_with_fresh_scoped_executable_substrate"
     )
+    no_fresh_idx = screen_src.index("confirmation refresh produced no fresh")
+    assert screen_src.rindex(
+        "_edli_expire_unadmitted_redecision_pending",
+        0,
+        no_fresh_idx,
+    ) > screen_src.index(
+        "if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope"
+    )
     assert "fresh_events.append(event)" not in screen_src
 
 
