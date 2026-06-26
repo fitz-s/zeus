@@ -1520,6 +1520,48 @@ def test_prefetch_failed_large_chunk_can_retry_full_family_until_deadline(monkey
     assert sorted(books) == [f"yes-{i}" for i in range(6)]
 
 
+def test_prefetch_full_family_can_use_smaller_primary_chunk(monkeypatch):
+    """Scoped money-path refresh must avoid one huge /books call consuming the tick."""
+
+    monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 100)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_CHUNK", "100")
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(6)]
+    calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            calls.append(call)
+            return {t: {"asset_id": t, "bids": [], "asks": [{"price": "0.4", "size": "1"}]} for t in call}
+
+    books = ms._prefetch_selected_orderbooks(
+        _Clob(),
+        candidates,
+        deadline=None,
+        max_retry_chunks=0,
+        primary_chunk_size=2,
+    )
+
+    assert calls == [
+        ["yes-0", "yes-1"],
+        ["yes-2", "yes-3"],
+        ["yes-4", "yes-5"],
+    ]
+    assert sorted(books) == [f"yes-{i}" for i in range(6)]
+
+
 def test_prefetch_retry_chunk_falls_back_to_bounded_singular_get(monkeypatch):
     """If POST /books is unhealthy even for tiny chunks, fetch a bounded priority
     prefix with singular /book instead of returning an empty price surface."""
@@ -1812,6 +1854,104 @@ def test_prefetch_missing_orderbook_hydrates_from_top_of_book_feasibility(monkey
     assert books["yes-1"]["bids"] == [{"price": "0.24", "size": "1"}]
     assert books["yes-1"]["asks"] == [{"price": "0.27", "size": "1"}]
     assert books["yes-1"]["min_order_size"] == "5"
+
+
+def test_full_family_refresh_uses_feasibility_before_network_prefetch(monkeypatch):
+    """A fresh price-channel book must not wait behind a slow money-path /books batch."""
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK", "1")
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    yes_token = outcome["token_id"]
+    no_token = outcome["no_token_id"]
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+            quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "e-yes",
+            market["event_id"],
+            outcome["condition_id"],
+            yes_token,
+            "YES",
+            "buy_yes",
+            _NOW.isoformat(),
+            "hash-yes",
+            0.24,
+            0.27,
+            '{"bids":[{"price":"0.24","size":"10"}],"asks":[{"price":"0.27","size":"12"}]}',
+            _NOW.isoformat(),
+            1,
+        ),
+    )
+    conn.commit()
+
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+        )
+
+    assert network_calls == [[no_token]]
+    assert captured_books == [yes_token, no_token]
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetched_orderbook_count"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
 
 
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):

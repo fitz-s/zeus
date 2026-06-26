@@ -3974,6 +3974,7 @@ def _prefetch_selected_orderbooks(
     *,
     deadline: float | None = None,
     max_retry_chunks: int | None = None,
+    primary_chunk_size: int | None = None,
 ) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
@@ -4023,10 +4024,14 @@ def _prefetch_selected_orderbooks(
         0.75,
     )
 
-    primary_chunk_size = min(
-        _BATCH_ORDERBOOK_CHUNK,
-        _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_CHUNK", _BATCH_ORDERBOOK_CHUNK),
-    )
+    if primary_chunk_size is None:
+        resolved_primary_chunk_size = min(
+            _BATCH_ORDERBOOK_CHUNK,
+            _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_CHUNK", _BATCH_ORDERBOOK_CHUNK),
+        )
+    else:
+        resolved_primary_chunk_size = max(1, int(primary_chunk_size))
+    primary_chunk_size = resolved_primary_chunk_size
     retry_chunk_size = min(
         primary_chunk_size,
         _positive_int_env("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_RETRY_CHUNK", _BATCH_ORDERBOOK_RETRY_CHUNK),
@@ -4151,6 +4156,22 @@ def _prefetch_selected_orderbooks(
         chunk = token_ids[start : start + primary_chunk_size]
         books.update(_fetch_chunk_with_split(chunk))
     return books
+
+
+def _candidates_missing_prefetched_orderbooks(
+    selected_candidates: list[tuple],
+    prefetched_books: dict[str, dict],
+) -> list[tuple]:
+    """Return selected candidates whose direction token still needs a book."""
+
+    missing: list[tuple] = []
+    for candidate in selected_candidates:
+        _recency, _priority, _ordinal, _market, outcome, _condition_id, direction = candidate
+        token_id = _selected_token_for_direction(outcome, direction)
+        if token_id and token_id in prefetched_books:
+            continue
+        missing.append(candidate)
+    return missing
 
 
 def _prefetch_selected_orderbooks_from_feasibility(
@@ -4491,13 +4512,12 @@ def refresh_executable_market_substrate_snapshots(
     # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
     batch_orderbook_supported = callable(getattr(clob, "get_orderbook_snapshots", None))
     full_family_capture = per_city_limit == 0
-    prefetched_books = _prefetch_selected_orderbooks(
-        clob,
-        selected_candidates,
-        deadline=prefetch_deadline,
-        max_retry_chunks=(0 if full_family_capture else None),
-    )
+    prefetched_books: dict[str, dict] = {}
     if batch_orderbook_supported:
+        # Money-path redecision confirm refresh already has a live price-channel
+        # witness surface. Hydrate from it first, then spend network time only on
+        # missing books. Doing the CLOB batch first lets a single slow /books call
+        # consume the entire reserve before the cheap local witness can be used.
         prefetched_books.update(
             {
                 token_id: book
@@ -4510,6 +4530,30 @@ def refresh_executable_market_substrate_snapshots(
                 if token_id not in prefetched_books
             }
         )
+    candidates_needing_network_books = _candidates_missing_prefetched_orderbooks(
+        selected_candidates,
+        prefetched_books,
+    )
+    full_family_primary_chunk_size = (
+        min(
+            _BATCH_ORDERBOOK_CHUNK,
+            _positive_int_env(
+                "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_ORDERBOOK_PREFETCH_CHUNK",
+                20,
+            ),
+        )
+        if full_family_capture
+        else None
+    )
+    prefetched_books.update(
+        _prefetch_selected_orderbooks(
+            clob,
+            candidates_needing_network_books,
+            deadline=prefetch_deadline,
+            max_retry_chunks=(0 if full_family_capture else None),
+            primary_chunk_size=full_family_primary_chunk_size,
+        )
+    )
     prefetch_missing_skipped = 0
     clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}
