@@ -6250,7 +6250,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_read_only()
         try:
-            beliefs = _all_latest_beliefs(world_ro)
+            beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
             probe_acted_state = dict(_edli_redecision_acted_state)
             redecisions = screen_entry_redecisions(
                 world_ro,
@@ -6441,7 +6441,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             world_ro = get_world_connection_read_only()
             trade_ro = get_trade_connection_read_only()
             try:
-                beliefs = _all_latest_beliefs(world_ro)
+                beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
                 redecisions = screen_entry_redecisions(
                     world_ro,
                     trade_ro,

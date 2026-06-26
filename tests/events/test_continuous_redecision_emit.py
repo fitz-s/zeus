@@ -1622,6 +1622,14 @@ def test_day0_emit_is_reactor_budgeted():
     assert "EDLI day0 emit budget exhausted" in emit_src
 
 
+def test_redecision_screen_belief_read_filters_venue_closed_families():
+    """Continuous entry refresh must not revive venue-closed belief rows."""
+
+    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert "_all_latest_beliefs(world_ro, decision_time=received_at)" in src
+    assert "_all_latest_beliefs(world_ro)" not in src
+
+
 def test_decision_triggered_refresh_is_cycle_bounded():
     """Inline recapture is live value, but must not monopolize the reactor cycle."""
 
