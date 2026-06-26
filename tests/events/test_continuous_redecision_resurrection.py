@@ -557,7 +557,7 @@ def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
     assert pulls[0][1].detail > cr.IMPROVE_DELTA
 
 
-def test_rest_pull_holds_still_good_rest_without_material_reprice():
+def test_rest_pull_refreshes_confirmed_value_on_one_tick_cross_when_taker_edge_is_real():
     world = _mem_world()
     trade = _mem_trade()
     _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
@@ -577,7 +577,9 @@ def test_rest_pull_holds_still_good_rest_without_material_reprice():
         value_refresh_min_age_seconds=5 * 60,
     )
 
-    assert pulls == [], "a still-good maker rest needs material repricing before cancel-replace"
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "CONFIRMED_VALUE_REFRESH"
+    assert pulls[0][1].detail > cr.IMPROVE_DELTA
 
 
 def test_rest_pull_does_not_refresh_confirmed_value_on_stale_book():

@@ -1981,8 +1981,9 @@ def screen_resting_orders(
                         )
                         material_price_change = abs(float(ask.price) - float(rest.limit_price))
                         material_refresh_floor = _improve_delta_for_tick(ask.tick_size)
+                        executable_tick = _quote_tick_size(ask.tick_size)
                         if (
-                            material_price_change >= material_refresh_floor - _EPS
+                            material_price_change >= executable_tick - _EPS
                             and score >= material_refresh_floor - _EPS
                         ):
                             decision = RepriceDecision(
