@@ -2511,6 +2511,46 @@ class TestRecoveryResolutionTable:
         assert cancel_payload["requires_m5_reconcile"] is True
         assert clear_payload["proof_class"] == "cancel_unknown_venue_order_live"
 
+    def test_maker_rest_cancel_pending_live_order_missing_matched_size_stays(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-maker-live")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "venue_order_id": "vord-maker-live",
+                "source": "maker_rest_escalation",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "vord-maker-live",
+            "status": "LIVE",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        event_types = [event["event_type"] for event in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_REQUESTED"
+
     def test_acked_terminal_no_fill_order_fact_expires_command_and_voids_pending_entry(
         self,
         conn,
@@ -2673,6 +2713,44 @@ class TestRecoveryResolutionTable:
         assert payload["reason"] == "point_order_terminal_no_fill"
         assert payload["required_predicates"]["no_matching_open_orders"] is True
         assert payload["required_predicates"]["no_matching_trades"] is True
+
+    def test_acked_terminal_point_order_missing_matched_size_stays(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="LIVE", matched_size="0", remaining_size="10")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-001",
+            "status": "CANCELED",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_point_orders"] == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {"phase": "pending_entry", "shares": 0.0, "cost_basis_usd": 0.0}
+        latest_fact = conn.execute(
+            """
+            SELECT state, matched_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_fact) == {"state": "LIVE", "matched_size": "0"}
 
     def test_cancelled_terminal_no_fill_order_without_pending_projection_recovers_and_voids(
         self,

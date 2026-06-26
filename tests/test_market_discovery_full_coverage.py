@@ -2390,6 +2390,46 @@ def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
     assert summary["executable_substrate_coverage_status"] == "FULL"
 
 
+def test_priority_condition_missing_batch_book_still_attempts_capture(monkeypatch):
+    """Redecision priority conditions must not vanish when batch /books is partial."""
+
+    market = _make_market("Tokyo", 1, metric="lowest", target_date="2026-06-08")
+    priority_condition = market["outcomes"][0]["condition_id"]
+    captured: list[tuple[str, str | None]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(
+            (
+                str(decision.edge.direction),
+                kwargs.get("prefetched_orderbook", {}).get("asset_id")
+                if kwargs.get("prefetched_orderbook") is not None
+                else None,
+            )
+        )
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.return_value = {}
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=5.0,
+            max_outcomes=0,
+            priority_condition_ids={priority_condition},
+        )
+
+    assert captured == [("buy_yes", None), ("buy_no", None)]
+    assert summary["attempted"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["inserted"] == 2
+    assert summary["executable_substrate_coverage_status"] == "FULL"
+
+
 def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(monkeypatch):
     """The default pending-family path must reserve a real capture phase.
 

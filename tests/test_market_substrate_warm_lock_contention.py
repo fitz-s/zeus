@@ -320,6 +320,24 @@ def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(mo
     assert batch >= 150
 
 
+def test_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
+    """Money-path priority rows must not inherit broad-batch fail-fast waits."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+
+    broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+    priority = _snapshot_capture_busy_timeout_ms(
+        12.0,
+        remaining_candidates=46,
+        priority_candidate=True,
+    )
+
+    assert broad_batch < priority
+    assert priority >= 4000
+
+
 # ---------------------------------------------------------------------------
 # R-INTERVAL: the warm-cycle refresh budget must fit inside the scheduler interval
 # (the OTHER half of the coverage-starvation: even when inserts succeed, a cycle

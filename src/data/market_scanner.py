@@ -81,6 +81,7 @@ def _snapshot_capture_busy_timeout_ms(
     remaining_seconds: float,
     *,
     remaining_candidates: int | None = None,
+    priority_candidate: bool = False,
 ) -> int:
     """Return the per-row SQLite wait budget for background substrate capture.
 
@@ -126,7 +127,11 @@ def _snapshot_capture_busy_timeout_ms(
     # ceiling, but it must never drop the wait below the durable floor: a contended
     # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
-    if remaining_candidates is not None and remaining_candidates > 1:
+    if (
+        remaining_candidates is not None
+        and remaining_candidates > 1
+        and not priority_candidate
+    ):
         # Live 2026-06-25: the batch warmer had 46 selected candidates and one
         # locked insert consumed the 8s per-row ceiling, producing
         # attempted=1 inserted=0 coverage=NONE. Batch substrate refresh is a
@@ -4715,7 +4720,13 @@ def refresh_executable_market_substrate_snapshots(
         # HTTP reads and overrun the warm cadence.
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
-        if batch_orderbook_supported and selected_token and prefetched_book is None:
+        priority_candidate = str(condition_id or "").strip() in priority_conditions
+        if (
+            batch_orderbook_supported
+            and selected_token
+            and prefetched_book is None
+            and not priority_candidate
+        ):
             skipped += 1
             prefetch_missing_skipped += 1
             continue
@@ -4737,6 +4748,7 @@ def refresh_executable_market_substrate_snapshots(
                     _snapshot_capture_busy_timeout_ms(
                         remaining_seconds,
                         remaining_candidates=remaining_candidates,
+                        priority_candidate=priority_candidate,
                     ),
                 )
                 try:

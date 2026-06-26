@@ -1587,6 +1587,8 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
         "expected direction_law_ok=False on the selected candidate — the test proves the "
         "admission is via the side-aware YES OOF license, not bare direction-law legality"
     )
+    assert engine._direction_admitted(yes_on_non_modal_cand) is False
+    assert engine._direction_admitted(licensed_yes_on_non_modal_cand) is True
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):

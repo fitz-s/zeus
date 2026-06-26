@@ -502,9 +502,10 @@ def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
     * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
       wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
 
-    This function stays purely structural: ``point_q`` and empirical reliability are not read
-    here. The q_lcb reliability guard can make a lower bound honest and can license market
-    coherence for an otherwise direction-clean candidate; it cannot replace this direction law.
+    This function stays purely structural: ``point_q`` and empirical reliability
+    are not read here. Empirical OOF reliability is applied later by
+    ``FamilyDecisionEngine._direction_admitted`` so the receipt can distinguish
+    the structural direction flag from an evidence-licensed admission.
     """
     if route.side == "YES":
         return route.bin_id == forecast_bin
@@ -1016,7 +1017,15 @@ class FamilyDecisionEngine:
 
     # ------------------------------------------------ portfolio comparison
     def _direction_admitted(self, d: CandidateDecision) -> bool:
-        return d.direction_law_ok
+        if d.direction_law_ok:
+            return True
+        return (
+            d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
+            and not d.q_lcb_guard_abstained
+            and bool(d.q_lcb_guard_cell_key)
+            and d.economics.edge_lcb > 0.0
+            and d.economics.optimal_delta_u > 0.0
+        )
 
     def _utility_density(self, d: CandidateDecision) -> float:
         try:
@@ -1434,11 +1443,10 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # Direction law is structural. The q_lcb reliability guard is empirical settlement
-        # evidence that makes the candidate's served lower bound honest and may license market
-        # coherence for a direction-clean model/market disagreement, but it must not replace the
-        # direction law itself. Tokyo 22C LOW YES at 0.5c showed the old substitution path could
-        # turn a non-modal lottery-like YES into a live order on a coarse OOF cell.
+        # Direction law is structural. The admission predicate may also accept a
+        # candidate with active side-aware OOF evidence for the exact claim; that
+        # empirical license is separate from the raw direction flag and remains
+        # visible on the receipt.
         after_direction = [d for d in after_executable if self._direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW

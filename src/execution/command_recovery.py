@@ -6485,12 +6485,17 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             if fact_state is None:
                 summary["stayed"] += 1
                 continue
-            matched_size = _point_order_matched_size(
-                point_order,
-                fallback=row.get("order_fact_matched_size") or "0",
-                side=row.get("side"),
+            no_fill_proven, no_fill_reason = _terminal_point_order_zero_fill_proven(
+                conn,
+                command_id=command_id,
+                point_order=point_order,
             )
-            if _is_positive_decimal(matched_size):
+            if not no_fill_proven:
+                logger.info(
+                    "recovery: terminal point-order candidate %s stayed; no zero-fill proof (%s)",
+                    command_id,
+                    no_fill_reason,
+                )
                 summary["stayed"] += 1
                 continue
             matching_open_orders = _matching_open_orders_for_command(client, row, open_orders=open_orders)
@@ -10648,7 +10653,7 @@ def _reconcile_row(
             if (
                 cmd.intent_kind == IntentKind.ENTRY
                 and venue_status in _LIVE_ORDER_STATUSES
-                and not _is_positive_decimal(_order_matched_size(venue_resp))
+                and _decimal_is_zero(_explicit_point_order_matched_size(venue_resp))
             ):
                 events = _command_events(conn, cmd.command_id)
                 cancel_requested_payload = _latest_maker_rest_cancel_requested_payload(events)

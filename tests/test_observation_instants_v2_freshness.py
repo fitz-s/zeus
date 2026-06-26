@@ -251,6 +251,63 @@ def test_obs_v2_live_tick_uses_city_local_fetch_window_for_day0() -> None:
     assert end_date.isoformat() == "2026-06-08"
 
 
+def test_obs_v2_live_tick_connection_carries_busy_timeout(monkeypatch, tmp_path: Path) -> None:
+    from scripts.obs_live_tick import _open_obs_tick_connection
+
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "12345")
+    db_path = tmp_path / "world.db"
+
+    conn = _open_obs_tick_connection(db_path)
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 12345
+    finally:
+        conn.close()
+
+
+def test_obs_v2_live_tick_retries_sqlite_lock_per_city(monkeypatch) -> None:
+    from scripts.obs_live_tick import TickResult, _run_city_with_sqlite_retry
+
+    class Conn:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    conn = Conn()
+    calls = []
+    sleeps = []
+
+    def _tick(city_name, conn, *, start_date, end_date, dry_run):
+        calls.append(city_name)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return TickResult(city=city_name, tier="WU_ICAO", rows_ready=1, rows_written=1)
+
+    monkeypatch.setenv("ZEUS_OBS_LIVE_TICK_SQLITE_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr("scripts.obs_live_tick.time.sleep", lambda delay: sleeps.append(delay))
+
+    result = _run_city_with_sqlite_retry(
+        _tick,
+        "Tokyo",
+        conn,
+        start_date=date(2026, 6, 26),
+        end_date=date(2026, 6, 26),
+        dry_run=False,
+    )
+
+    assert result.failure_reason is None
+    assert result.rows_written == 1
+    assert calls == ["Tokyo", "Tokyo"]
+    assert sleeps == [0.01]
+    assert conn.rollbacks == 1
+    assert conn.commits == 1
+
+
 def test_obs_v2_live_tick_does_not_use_openmeteo_source() -> None:
     """The live-tick script must not use openmeteo_archive_hourly as a source.
 
