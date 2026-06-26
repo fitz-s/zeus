@@ -9361,7 +9361,24 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         process_lock_ctx = acquire_lock("market_substrate_refresh")
         substrate_process_acquired = False
         try:
-            substrate_process_acquired = process_lock_ctx.__enter__()
+            process_lock_deadline = time.monotonic() + call_budget_s
+            while True:
+                substrate_process_acquired = process_lock_ctx.__enter__()
+                if substrate_process_acquired:
+                    break
+                try:
+                    process_lock_ctx.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+                if time.monotonic() >= process_lock_deadline:
+                    break
+                time.sleep(
+                    min(
+                        0.25,
+                        max(0.0, process_lock_deadline - time.monotonic()),
+                    )
+                )
+                process_lock_ctx = acquire_lock("market_substrate_refresh")
             if not substrate_process_acquired:
                 logger.info(
                     "decision family refresh: cross-process substrate refresh lock busy "
