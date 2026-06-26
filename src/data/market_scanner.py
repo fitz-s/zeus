@@ -1573,13 +1573,18 @@ def _event_has_active_children(
     The `closed=false` API filter returns 0 results for these events.
 
     An event is admitted iff:
-      1. endDate is present, parseable, and >= now_utc — OR endDate is missing/
-         unparseable (best-effort; missing endDate is deferred to _parse_event)
-      2. At least one child market has acceptingOrders=True AND (when
+      1. At least one child market has acceptingOrders=True AND (when
          ``clob_crosscheck=True``) passes CLOB archived cross-check (Gamma lies
          for archived markets post-V2 cutover 2026-05-11; CLOB /markets/{cid}
          is authoritative). If CLOB is unreachable, Gamma's acceptingOrders is
          trusted as fallback.
+
+    Parent ``endDate`` is intentionally not a tradeability veto here. Weather
+    events can keep accepting orders after the nominal 12:00Z market end while
+    waiting for same-day observation/settlement evidence. Using parent endDate
+    as a hard discovery veto drops exactly the Day0 markets this scanner must
+    keep visible; positive ``min_hours_to_resolution`` policy remains in
+    ``_parse_event`` for callers that require future-only markets.
 
     Args:
         clob_crosscheck: When True (default), each ``acceptingOrders=True``
@@ -1593,15 +1598,6 @@ def _event_has_active_children(
             one HTTP call per child per event, making a 50-city scan take ~10
             minutes instead of <90 seconds.
     """
-    end_str = event.get("endDate") or event.get("end_date")
-    if end_str:
-        try:
-            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            if end_dt < now_utc:
-                return False
-        except (ValueError, TypeError):
-            pass  # unparseable endDate: let _parse_event reject it downstream
-
     children = event.get("markets") or []
     for child in children:
         if child.get("acceptingOrders") is not True:
@@ -2074,7 +2070,10 @@ def _parse_event(
         try:
             end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
             hours_to_resolution = (end_dt - now).total_seconds() / 3600
-            if hours_to_resolution < min_hours:
+            if hours_to_resolution < min_hours and not (
+                min_hours <= 0.0
+                and _event_has_active_children(event, now, clob_crosscheck=False)
+            ):
                 return None
         except (ValueError, TypeError):
             logger.warning(

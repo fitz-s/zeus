@@ -90,9 +90,15 @@ def test_find_weather_markets_negrisk_event_closed_true_with_accepting_children_
     assert _event_has_active_children(event, _now_utc()) is True
 
 
-def test_find_weather_markets_excludes_past_enddate():
-    """Event with endDate in the past must be excluded even if child is accepting."""
+def test_find_weather_markets_keeps_accepting_child_after_parent_enddate():
+    """Parent endDate is not a tradeability veto when children still accept orders."""
     event = _negrisk_event(end_date=_past_iso(2), child_accepting=True)
+    assert _event_has_active_children(event, _now_utc()) is True
+
+
+def test_find_weather_markets_excludes_past_enddate_without_accepting_child():
+    """Past-endDate events still require a tradeable child; no accepting child is excluded."""
+    event = _negrisk_event(end_date=_past_iso(2), child_accepting=False)
     assert _event_has_active_children(event, _now_utc()) is False
 
 
