@@ -7287,11 +7287,6 @@ def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:
     status = str(summary.get("status") or "")
     if status == "skipped_lock_busy" or status.startswith("error"):
         return True
-    if _edli_refresh_summary_has_sqlite_lock_failures(summary):
-        return True
-    coverage = str(summary.get("executable_substrate_coverage_status") or "")
-    if coverage in {"NONE", "PARTIAL"}:
-        return True
     return False
 
 

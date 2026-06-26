@@ -395,10 +395,11 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
 
 
 def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
-    """The emit gate must fail closed when confirmation refresh did not prove
-    any executable-price coverage for the current money-path families. A PARTIAL
-    capture is not globally sufficient; it must be resolved by scoped freshness
-    proof before any family can be emitted."""
+    """The refresh summary is not live authority for PARTIAL/NONE coverage.
+
+    A PARTIAL capture is not globally sufficient, but it must be resolved by
+    scoped condition freshness proof instead of freezing every current family.
+    """
 
     assert main_module._edli_confirmation_refresh_unavailable(
         {
@@ -409,6 +410,19 @@ def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_
     )
     assert main_module._edli_confirmation_refresh_unavailable(
         {"status": "error_refresh_failed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert not main_module._edli_confirmation_refresh_unavailable(
+        {"status": "refreshed", "executable_substrate_coverage_status": "PARTIAL"}
+    )
+    assert not main_module._edli_confirmation_refresh_unavailable(
+        {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "PARTIAL",
+            "failure_samples": [{"error": "database is locked"}],
+        }
+    )
+    assert not main_module._edli_confirmation_refresh_unavailable(
+        {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
     )
     assert main_module._edli_confirmation_refresh_needs_scoped_freshness_filter(
         {"status": "refreshed", "executable_substrate_coverage_status": "NONE"}
