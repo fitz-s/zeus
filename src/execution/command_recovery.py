@@ -1449,12 +1449,23 @@ def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
           FROM exchange_reconcile_findings finding
           JOIN venue_commands cmd
             ON cmd.venue_order_id = finding.subject_id
-          JOIN canonical_order_truth fact
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          LEFT JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
          WHERE finding.kind = 'local_orphan_order'
            AND finding.resolved_at IS NULL
            AND cmd.intent_kind = 'ENTRY'
            AND cmd.state IN (?, ?)
+           AND (
+                fact.fact_id IS NOT NULL
+                OR (
+                    pc.phase = 'pending_entry'
+                    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+                    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                )
+           )
          ORDER BY finding.recorded_at, finding.finding_id
         """
     rows = conn.execute(
@@ -6315,12 +6326,13 @@ def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) ->
             if not _finding_proves_trade_enumeration(evidence):
                 summary["stayed"] += 1
                 continue
-            if str(row.get("order_fact_source") or "") not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
-                summary["stayed"] += 1
-                continue
-            if not _decimal_is_zero(row.get("order_fact_matched_size")):
-                summary["stayed"] += 1
-                continue
+            if row.get("order_fact_id") is not None:
+                if str(row.get("order_fact_source") or "") not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
+                    summary["stayed"] += 1
+                    continue
+                if not _decimal_is_zero(row.get("order_fact_matched_size")):
+                    summary["stayed"] += 1
+                    continue
             if _fill_trade_fact_count(conn, command_id) > 0:
                 summary["stayed"] += 1
                 continue
@@ -11198,6 +11210,14 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
     if scope == "live_tick":
+        for candidate_fn in (
+            _local_orphan_no_fill_candidates,
+            _terminal_point_order_candidates,
+        ):
+            try:
+                _harvest(candidate_fn(conn))
+            except Exception:  # noqa: BLE001
+                logger.debug("recovery: priming candidate %s failed", candidate_fn.__name__, exc_info=True)
         return {
             "order_ids": order_ids,
             "idempotency_keys": idem_keys,
@@ -11395,11 +11415,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
 
     if scope == "live_tick":
-        # Keep the high-cadence live tick light, but do not defer DB-only
-        # terminal-no-fill reducers. A confirmed CANCEL_ACKED zero-fill entry is
-        # already enough local truth to clear a 0-share pending_entry projection;
-        # waiting for the full sweep leaves stale duplicate-lock ghosts in the
-        # live money path.
+        # Keep the high-cadence live tick light, but do not defer terminal
+        # no-fill release for zero-exposure pending entries. A confirmed local
+        # CANCEL_ACKED fact, or a pre-primed point-order terminal read, is enough
+        # to clear the duplicate lock; waiting for the full sweep leaves stale
+        # ghosts in the live money path.
         # Confirmed maker/exit fills are even higher priority: they close live
         # exposure and unblock close-before-open redecision leases, so run them
         # before broader terminal-order maintenance that may contend on locks.
@@ -11425,6 +11445,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "stale_rebalance_entry_leases",
             observed_at=started_at,
         )
+        _client_pass("local_orphan_no_fill_findings",
+                     reconcile_local_orphan_no_fill_findings,
+                     "local_orphan_no_fill_findings")
+        _client_pass("terminal_point_orders",
+                     reconcile_terminal_point_orders,
+                     "terminal_point_orders")
         _db_pass("cancel_ack_terminal_no_fill_facts",
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")

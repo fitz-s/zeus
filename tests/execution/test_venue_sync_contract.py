@@ -596,6 +596,110 @@ def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monke
         check.close()
 
 
+def test_live_tick_scope_clears_terminal_point_order_zero_fill_pending_entry(monkeypatch, tmp_path):
+    """A venue-canceled ACKED maker rest must not wait for the full sweep.
+
+    This pins the Jeddah-shaped failure: command ACKED, latest order fact LIVE,
+    pending-entry projection has zero exposure, and CLOB point-order truth says
+    CANCELED with zero matched size. Live tick must append terminal no-fill
+    truth and immediately void the pending entry, without network under a DB
+    connection.
+    """
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick-terminal-point.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-terminal-point", size=21.99, price=0.98)
+    h._advance_to_acked(
+        seed_conn,
+        command_id="cmd-terminal-point",
+        venue_order_id="vord-terminal-point",
+    )
+    h._seed_pending_entry_projection(
+        seed_conn,
+        command_id="cmd-terminal-point",
+        order_id="vord-terminal-point",
+    )
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-terminal-point",
+        order_id="vord-terminal-point",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="21.99",
+        source="REST",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={
+            "vord-terminal-point": {
+                "orderID": "vord-terminal-point",
+                "status": "CANCELED",
+                "original_size": "21.99",
+                "size_matched": "0",
+            }
+        },
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["deferred_full_sweep"] is True
+    assert summary["terminal_point_orders"]["advanced"] == 1
+    assert summary["terminal_order_facts"]["advanced"] == 1
+    assert any(call[0] == "get_order" for call in recorder.client_calls)
+    for method, open_ids, open_labels in recorder.client_calls:
+        assert not open_ids, (
+            f"venue call {method} occurred while DB connections were open: {open_labels}"
+        )
+
+    check = sqlite3.connect(str(db_path))
+    check.row_factory = sqlite3.Row
+    try:
+        current = check.execute(
+            "SELECT phase, shares, cost_basis_usd, order_status "
+            "FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+        fact = check.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id='cmd-terminal-point'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "CANCEL_CONFIRMED",
+            "remaining_size": "0",
+            "matched_size": "0",
+            "source": "REST",
+        }
+    finally:
+        check.close()
+
+
 def test_no_connection_spans_more_than_one_pass(monkeypatch, tmp_path):
     """R2: every connection's open..close window contains at most one sub-pass.
 
