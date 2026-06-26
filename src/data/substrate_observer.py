@@ -343,13 +343,7 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     snapshot_reserve_s: float,
     cached_topology_count: int,
 ) -> float:
-    del refresh_budget_s
-    if cached_topology_count > 0:
-        cached_gamma_s = max(
-            0.0,
-            float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "14.0")),
-        )
-        return refresh_deadline - cached_gamma_s
+    del refresh_budget_s, cached_topology_count
     return refresh_deadline - snapshot_reserve_s
 def _topology_lookup_deadline_for_snapshot_refresh(
     *,
@@ -822,8 +816,8 @@ def _refresh_pending_family_snapshots(
             gamma_slug_failed = 0
             gamma_slug_invalid = 0
             gamma_slug_timebox_unattempted = 0
-            gamma_attempted_family_keys: set[tuple[str, str, str]] = set()
             gamma_empty_family_keys: set[tuple[str, str, str]] = set()
+            gamma_harvested_family_keys: set[tuple[str, str, str]] = set()
 
             gamma_jobs: list[dict] = []
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
@@ -894,8 +888,26 @@ def _refresh_pending_family_snapshots(
                     job = gamma_jobs[next_job_index]
                     next_job_index += 1
                     gamma_slug_attempted += 1
-                    gamma_attempted_family_keys.add(job["family_key"])
                     pending_futures[executor.submit(_fetch_gamma_slug, job)] = job
+
+            def _harvest_gamma_result(result: dict) -> None:
+                nonlocal gamma_slug_http_non_200, gamma_slug_empty
+                gamma_harvested_family_keys.add(result["family_key"])
+                if result["status"] == "http_non_200":
+                    gamma_slug_http_non_200 += 1
+                    logger.debug(
+                        "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
+                        result["slug"], result.get("status_code"),
+                    )
+                elif result["status"] == "empty":
+                    gamma_slug_empty += 1
+                    gamma_empty_family_keys.add(result["family_key"])
+                else:
+                    for event in result["events"]:
+                        event_id = event.get("id") or event.get("slug")
+                        if event_id and event_id not in raw_events_seen:
+                            raw_events_seen.add(event_id)
+                            raw_events_collected.append(event)
 
             if gamma_jobs:
                 with ThreadPoolExecutor(
@@ -907,18 +919,16 @@ def _refresh_pending_family_snapshots(
                         remaining = gamma_deadline - time.monotonic()
                         if remaining <= 0.0:
                             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
-                            for future in pending_futures:
-                                future.cancel()
                             logger.info(
                                 "refresh_pending_family_snapshots: Gamma time-box %.0fs hit after %d/%d "
-                                "submitted families; reserving %.1fs for CLOB capture",
+                                "submitted families; draining %d in-flight, reserving %.1fs for CLOB capture",
                                 max(0.1, gamma_deadline - (refresh_deadline - refresh_budget_s)),
                                 gamma_slug_attempted,
                                 len(gamma_jobs),
+                                len(pending_futures),
                                 snapshot_reserve_s,
                             )
                             next_job_index = len(gamma_jobs)
-                            pending_futures.clear()
                             break
                         try:
                             future = next(
@@ -940,22 +950,42 @@ def _refresh_pending_family_snapshots(
                             )
                             _submit_gamma_jobs(executor)
                             continue
-                        if result["status"] == "http_non_200":
-                            gamma_slug_http_non_200 += 1
-                            logger.debug(
-                                "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
-                                result["slug"], result.get("status_code"),
-                            )
-                        elif result["status"] == "empty":
-                            gamma_slug_empty += 1
-                            gamma_empty_family_keys.add(result["family_key"])
-                        else:
-                            for event in result["events"]:
-                                event_id = event.get("id") or event.get("slug")
-                                if event_id and event_id not in raw_events_seen:
-                                    raw_events_seen.add(event_id)
-                                    raw_events_collected.append(event)
+                        _harvest_gamma_result(result)
                         _submit_gamma_jobs(executor)
+
+                    if pending_futures:
+                        grace_s = max(
+                            0.0,
+                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "2.0")),
+                        )
+                        grace_deadline = min(time.monotonic() + grace_s, refresh_deadline)
+                        while pending_futures:
+                            remaining_grace = grace_deadline - time.monotonic()
+                            if remaining_grace <= 0.0:
+                                break
+                            try:
+                                future = next(
+                                    as_completed(
+                                        tuple(pending_futures),
+                                        timeout=remaining_grace,
+                                    )
+                                )
+                            except FuturesTimeoutError:
+                                break
+                            job = pending_futures.pop(future)
+                            try:
+                                result = future.result()
+                            except Exception as _exc:
+                                gamma_slug_failed += 1
+                                logger.debug(
+                                    "refresh_pending_family_snapshots: Gamma drain fetch failed for %s: %s",
+                                    job["slug"], _exc,
+                                )
+                                continue
+                            _harvest_gamma_result(result)
+                        for future in pending_futures:
+                            future.cancel()
+                        pending_futures.clear()
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
             if _gamma_empty_backoff_s > 0.0 and gamma_empty_family_keys:
@@ -1024,7 +1054,7 @@ def _refresh_pending_family_snapshots(
             key = _refresh_family_key(city, target_date, metric)
             ev = gamma_by_family.get(key)
             if ev is None:
-                if key in gamma_attempted_family_keys:
+                if key in gamma_harvested_family_keys:
                     skipped_not_found += 1
                     if key in gamma_empty_family_keys:
                         logger.warning(
@@ -1040,7 +1070,7 @@ def _refresh_pending_family_snapshots(
                         )
                 else:
                     logger.info(
-                        "refresh_pending_family_snapshots: Gamma not attempted before time-box for "
+                        "refresh_pending_family_snapshots: Gamma not harvested before time-box for "
                         "%s/%s/%s — family remains retryable",
                         city, target_date, metric,
                     )
