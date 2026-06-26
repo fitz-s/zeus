@@ -277,6 +277,11 @@ def test_decision_refresher_reinjects_family_identity() -> None:
         "the refresher must re-inject city AND target_date alongside "
         "temperature_metric -- reconstruct's identity guard requires all three"
     )
+    assert "priority_condition_ids=priority_condition_ids" in body, (
+        "decision-triggered family refresh must pass the event's condition ids into "
+        "refresh_executable_market_substrate_snapshots so the family-completion lane "
+        "keeps the blocked/price-moved condition first while still capturing siblings"
+    )
 
 
 def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh(monkeypatch) -> None:

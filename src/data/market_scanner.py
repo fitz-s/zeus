@@ -166,6 +166,29 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
     return configured if configured > 0 else None
 
 
+def _full_family_direct_clob_prefetch_candidate_threshold() -> int:
+    """Bound direct CLOB fill for targeted full-family refreshes.
+
+    Broad background completion can span hundreds of direction candidates; that
+    path should keep leaning on price-channel evidence and defer misses. A
+    decision-triggered or small pending-family refresh is different: if the live
+    price-channel has only partial books, deferring the missing siblings leaves
+    the family undecidable and submit recapture fails with no fresh executable
+    snapshot.
+    """
+
+    try:
+        configured = int(
+            os.environ.get(
+                "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+                "64",
+            )
+        )
+    except ValueError:
+        configured = 64
+    return max(0, configured)
+
+
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
 
@@ -4534,9 +4557,14 @@ def refresh_executable_market_substrate_snapshots(
     batch_orderbook_supported = callable(getattr(clob, "get_orderbook_snapshots", None))
     full_family_capture = per_city_limit == 0
     prefetched_books: dict[str, dict] = {}
-    full_family_direct_clob_prefetch_enabled = _bool_env(
+    full_family_direct_clob_prefetch_forced = _bool_env(
         "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_ENABLED",
         False,
+    )
+    full_family_direct_clob_candidate_threshold = (
+        _full_family_direct_clob_prefetch_candidate_threshold()
+        if full_family_capture
+        else 0
     )
     if batch_orderbook_supported:
         # Money-path redecision confirm refresh already has a live price-channel
@@ -4558,6 +4586,16 @@ def refresh_executable_market_substrate_snapshots(
     candidates_needing_network_books = _candidates_missing_prefetched_orderbooks(
         selected_candidates,
         prefetched_books,
+    )
+    small_full_family_direct_clob_prefetch = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and full_family_direct_clob_candidate_threshold > 0
+        and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
+    )
+    full_family_direct_clob_prefetch_enabled = bool(
+        full_family_direct_clob_prefetch_forced
+        or small_full_family_direct_clob_prefetch
     )
     direct_clob_prefetch_skipped = bool(
         full_family_capture
@@ -4732,6 +4770,8 @@ def refresh_executable_market_substrate_snapshots(
         "prefetched_orderbook_count": len(prefetched_books),
         "prefetch_missing_skipped": prefetch_missing_skipped,
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
+        "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
+        "direct_clob_prefetch_small_family_enabled": int(small_full_family_direct_clob_prefetch),
     }
     if failures:
         summary["failure_samples"] = failures

@@ -8617,6 +8617,11 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         from src.state.db import get_trade_connection
 
         payload = {"city": city, "target_date": target_date, "metric": metric}
+        priority_condition_ids = {
+            str(condition_id or "").strip()
+            for condition_id in (condition_ids or ())
+            if str(condition_id or "").strip()
+        }
         try:
             topology_rows = _event_family_market_topology_rows(topology_conn, payload)
         except Exception as exc:  # noqa: BLE001 — fail-soft: stale rejection stands
@@ -8688,6 +8693,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                     # FDR full-family proof + capital-efficiency economics; refreshing
                     # only the selected bin would leave stale sibling prices in q/FDR).
                     max_outcomes=0,
+                    priority_condition_ids=priority_condition_ids,
                 )
             write_conn.commit()
             return int(summary.get("inserted", 0) or 0) > 0
