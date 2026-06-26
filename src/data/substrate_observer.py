@@ -624,7 +624,7 @@ def _refresh_pending_family_snapshots(
     venue_closed_skipped = 0
     no_topology_backed_off = 0
 
-    write_conn = get_trade_connection(write_class="live")
+    snapshot_read_conn = get_trade_connection_read_only()
     try:
         families_processed_this_cycle = 0
         for index, (city, target_date, metric) in enumerate(families):
@@ -676,13 +676,13 @@ def _refresh_pending_family_snapshots(
                 cid = str(trow.get("condition_id") or "").strip()
                 if not cid:
                     continue
-                if not _condition_buy_sides_fresh(write_conn, cid, now_iso):
+                if not _condition_buy_sides_fresh(snapshot_read_conn, cid, now_iso):
                     any_stale = True
                     break
 
             if any_stale:
                 reconstructed = reconstruct_weather_market_from_static_topology(
-                    write_conn,
+                    snapshot_read_conn,
                     topology_rows=topology_rows,
                     now_utc=now_utc,
                 )
@@ -1054,7 +1054,7 @@ def _refresh_pending_family_snapshots(
         _clob_timeout = _substrate_clob_timeout_seconds()
         markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
             _prune_fresh_market_outcomes_for_snapshot_refresh(
-                write_conn,
+                snapshot_read_conn,
                 markets,
                 fresh_at_iso=now_iso,
             )
@@ -1085,24 +1085,29 @@ def _refresh_pending_family_snapshots(
             refresh_deadline=refresh_deadline,
             snapshot_reserve_s=snapshot_reserve_s,
         )
+        snapshot_read_conn.close()
         with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                summary = refresh_executable_market_substrate_snapshots(
-                    write_conn,
-                    markets=markets_for_refresh,
-                    clob=clob,
-                    captured_at=datetime.now(timezone.utc),
-                    scan_authority="VERIFIED",
-                    max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
-                    budget_seconds=snapshot_budget_s,
-                )
-            write_conn.commit()
+            write_conn = get_trade_connection(write_class="live")
+            try:
+                with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                    summary = refresh_executable_market_substrate_snapshots(
+                        write_conn,
+                        markets=markets_for_refresh,
+                        clob=clob,
+                        captured_at=datetime.now(timezone.utc),
+                        scan_authority="VERIFIED",
+                        max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                        budget_seconds=snapshot_budget_s,
+                    )
+                write_conn.commit()
+            finally:
+                write_conn.close()
 
     except Exception as exc:
         logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
         return {"status": "error", "reason": str(exc)}
     finally:
-        write_conn.close()
+        snapshot_read_conn.close()
 
     result = {
         "status": "refreshed",
