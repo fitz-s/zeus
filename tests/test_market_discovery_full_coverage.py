@@ -1995,6 +1995,41 @@ def test_full_family_refresh_defers_missing_books_to_price_channel(monkeypatch):
     assert summary["direct_clob_prefetch_skipped"] == 1
 
 
+def test_capture_busy_timeout_denominator_uses_attemptable_prefetched_candidates():
+    """Missing price books must not dilute the SQLite wait budget for writable rows."""
+
+    def _cand(i: int) -> tuple:
+        return (
+            0,
+            0,
+            i,
+            {"slug": f"m{i}"},
+            {"token_id": f"yes-{i}", "no_token_id": f"no-{i}"},
+            f"cond-{i}",
+            "buy_yes",
+        )
+
+    candidates = [_cand(i) for i in range(129)]
+    prefetched = {
+        "yes-0": {"asset_id": "yes-0"},
+        "yes-1": {"asset_id": "yes-1"},
+    }
+
+    assert (
+        ms._remaining_attemptable_snapshot_candidates(
+            candidates,
+            0,
+            batch_orderbook_supported=True,
+            prefetched_books=prefetched,
+        )
+        == 2
+    )
+    assert ms._snapshot_capture_busy_timeout_ms(18.0, remaining_candidates=2) > ms._snapshot_capture_busy_timeout_ms(
+        18.0,
+        remaining_candidates=129,
+    )
+
+
 def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
     """A transient trade-DB WAL lock must not drop an otherwise fresh bin."""
 

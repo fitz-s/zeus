@@ -4174,6 +4174,27 @@ def _candidates_missing_prefetched_orderbooks(
     return missing
 
 
+def _remaining_attemptable_snapshot_candidates(
+    selected_candidates: list[tuple],
+    start_index: int,
+    *,
+    batch_orderbook_supported: bool,
+    prefetched_books: dict[str, dict],
+) -> int:
+    """Count remaining candidates that can actually reach a snapshot write."""
+
+    if not batch_orderbook_supported:
+        return max(1, len(selected_candidates) - start_index)
+    count = 0
+    for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates[
+        start_index:
+    ]:
+        token_id = _selected_token_for_direction(outcome, direction)
+        if not token_id or token_id in prefetched_books:
+            count += 1
+    return max(1, count)
+
+
 def _prefetch_selected_orderbooks_from_feasibility(
     conn,
     selected_candidates: list[tuple],
@@ -4606,7 +4627,12 @@ def refresh_executable_market_substrate_snapshots(
         try:
             while True:
                 remaining_seconds = max(0.001, deadline - time.monotonic())
-                remaining_candidates = max(1, len(selected_candidates) - index)
+                remaining_candidates = _remaining_attemptable_snapshot_candidates(
+                    selected_candidates,
+                    index,
+                    batch_orderbook_supported=batch_orderbook_supported,
+                    prefetched_books=prefetched_books,
+                )
                 _set_busy_timeout_ms(
                     conn,
                     _snapshot_capture_busy_timeout_ms(
