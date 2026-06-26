@@ -475,10 +475,22 @@ def test_day0_supersession_candidate_query_uses_processing_status_index():
     )
 
 
-def test_day0_supersession_keeper_query_scans_active_processing_set_once():
-    """Live-perf antibody: keeper lookup must not index historical event JSON at boot."""
+def test_day0_supersession_keeper_query_uses_day0_family_extreme_index():
+    """Live-perf antibody: keeper lookup must not scan the whole active Day0 backlog."""
     conn = _world_conn(factory=CaptureConnection)
     store = EventStore(conn)
+
+    index_names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='opportunity_events'"
+        ).fetchall()
+    }
+    assert "idx_opportunity_events_day0_family_extreme" in index_names, (
+        "idx_opportunity_events_day0_family_extreme must be declared in "
+        "opportunity_events_schema.ensure_table(); index is absent from sqlite_master."
+    )
+
     for fam in range(15):
         for j in range(20):
             store.insert_or_ignore(
@@ -494,15 +506,30 @@ def test_day0_supersession_keeper_query_scans_active_processing_set_once():
 
     conn.executed_sql.clear()
     store.archive_superseded_day0_events()
-    keeper_sql, keeper_params = next(
+    extreme_sql, extreme_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "extreme_value" in sql
-        and "INDEXED BY idx_opportunity_event_processing_status" in sql
+        if "ORDER BY" in sql
+        and "LIMIT 1" in sql
+        and "INDEXED BY idx_opportunity_events_day0_family_extreme" in sql
+    )
+    tied_keeper_sql, tied_keeper_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "SELECT e.event_id" in sql
+        and "INDEXED BY idx_opportunity_events_day0_family_extreme" in sql
         and "e.event_type = 'DAY0_EXTREME_UPDATED'" in sql
     )
-    plan = _plan_text(conn, keeper_sql, keeper_params)
-    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan, (
-        f"day0 keeper query must scan active processing set by status index, got: {plan!r}"
-    )
-    assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY" not in plan
+
+    for label, sql, params in (
+        ("extreme", extreme_sql, extreme_params),
+        ("tied-keeper", tied_keeper_sql, tied_keeper_params),
+    ):
+        plan = _plan_text(conn, sql, params)
+        assert "IDX_OPPORTUNITY_EVENTS_DAY0_FAMILY_EXTREME" in plan, (
+            f"{label} query must use idx_opportunity_events_day0_family_extreme after ANALYZE "
+            f"(got: {plan!r}). The expression text in the DDL must match the WHERE/ORDER terms."
+        )
+        assert "SCAN E" not in plan and "SCAN OPPORTUNITY_EVENTS" not in plan, (
+            f"{label} query must not full-scan opportunity_events, got: {plan!r}"
+        )

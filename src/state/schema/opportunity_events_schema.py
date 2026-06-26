@@ -65,6 +65,27 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_events_channel_token
     ON opportunity_events(event_type, json_extract(payload_json, '$.token_id'), available_at)
 """
 
+# Expression index backing EventStore.archive_superseded_day0_events keeper probes.
+# Day0 is keyed by city + local target date + metric, and the keeper is the
+# absorbing extreme value (MAX for high, MIN for low).  This prevents the live
+# reactor from scanning every active Day0 row while still preserving keepers that
+# are outside a small candidate batch.
+CREATE_DAY0_FAMILY_EXTREME_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_opportunity_events_day0_family_extreme
+    ON opportunity_events(
+        event_type,
+        json_extract(payload_json, '$.city'),
+        json_extract(payload_json, '$.target_date'),
+        json_extract(payload_json, '$.metric'),
+        CAST(COALESCE(
+            json_extract(payload_json, '$.rounded_value'),
+            json_extract(payload_json, '$.high_so_far'),
+            json_extract(payload_json, '$.low_so_far')
+        ) AS REAL),
+        available_at
+    )
+"""
+
 CREATE_NO_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER IF NOT EXISTS trg_opportunity_events_no_update
 BEFORE UPDATE ON opportunity_events
@@ -118,5 +139,6 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TYPE_AVAILABLE_INDEX_SQL)
     conn.execute(CREATE_FSR_TARGET_DATE_INDEX_SQL)
     conn.execute(CREATE_CHANNEL_TOKEN_INDEX_SQL)
+    conn.execute(CREATE_DAY0_FAMILY_EXTREME_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
