@@ -2754,6 +2754,11 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # boundary has not been crossed, so no order can exist; re-run the full event
     # decision on the next cycle instead of terminally burning a valuable intent.
     "pre_submit_db_locked_transient",
+    # Synchronous Polymarket 400 submit rejection with no venue order id. The
+    # submit crossed the HTTP boundary but the venue rejected before creating an
+    # order. This is a stale maker-price/mode race; release the command/cap and
+    # re-decide from a fresh book instead of treating it as unknown string drift.
+    "venue_rejected_400",
     # Operator/manual entry pause is a pre-venue control state. No new order is
     # posted while active; once cleared, the event must be re-decided from fresh
     # belief/price evidence rather than burned as terminal or logged as an

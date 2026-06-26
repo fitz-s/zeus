@@ -59,6 +59,13 @@ def test_price_moved_is_transient():
     assert _is_transient_money_path_reason(_PRICE_MOVED_REASON)
 
 
+def test_venue_rejected_400_is_submit_race_transient():
+    assert _is_transient_money_path_reason(
+        "venue_rejected_400: PolyApiException[status_code=400, "
+        "error_message={'error': 'invalid post-only order: order crosses book'}]"
+    )
+
+
 def test_would_cross_book_certificate_failure_is_transient():
     assert _is_transient_money_path_reason(_WOULD_CROSS_REASON)
 

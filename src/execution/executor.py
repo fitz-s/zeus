@@ -4942,35 +4942,52 @@ def _live_order(
                 idempotency_key=idem.value,
             )
             try:
-                if deterministic_rejection_payload is not None:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_REJECTED",
-                        occurred_at=unk_time,
-                        payload=deterministic_rejection_payload,
-                    )
-                else:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_TIMEOUT_UNKNOWN",
-                        occurred_at=unk_time,
-                        payload={
-                            "reason": "post_submit_exception_possible_side_effect",
-                            "exception_type": type(exc).__name__,
-                            "exception_message": str(exc),
-                            "idempotency_key": idem.value,
-                        },
-                    )
-                # Commit UNCONDITIONALLY (same rule as the post-ACK path and the
-                # exit-order twin): the request crossed the venue boundary, so the
-                # venue may hold a live order. Under a caller-owned connection the
-                # old `if _own_conn` guard let a crash/rollback before the outer
-                # commit ERASE the unknown-side-effect fence — the next cycle then
-                # re-submits the same economic intent (duplicate live order).
-                # External review 2026-06-12 CRITICAL-2.
-                conn.commit()
+                terminal_event_type = (
+                    "SUBMIT_REJECTED"
+                    if deterministic_rejection_payload is not None
+                    else "SUBMIT_TIMEOUT_UNKNOWN"
+                )
+                terminal_payload = (
+                    deterministic_rejection_payload
+                    if deterministic_rejection_payload is not None
+                    else {
+                        "reason": "post_submit_exception_possible_side_effect",
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                        "idempotency_key": idem.value,
+                    }
+                )
+                last_inner: Exception | None = None
+                for attempt_idx, delay_s in enumerate((0.0, 0.05, 0.15, 0.35), start=1):
+                    if delay_s:
+                        time.sleep(delay_s)
+                    try:
+                        append_event(
+                            conn,
+                            command_id=command_id,
+                            event_type=terminal_event_type,
+                            occurred_at=unk_time,
+                            payload={
+                                **terminal_payload,
+                                "terminal_write_attempt": attempt_idx,
+                            },
+                        )
+                        # Commit UNCONDITIONALLY (same rule as the post-ACK path and the
+                        # exit-order twin): the request crossed the venue boundary, so the
+                        # venue may hold a live order. Under a caller-owned connection the
+                        # old `if _own_conn` guard let a crash/rollback before the outer
+                        # commit ERASE the unknown-side-effect fence — the next cycle then
+                        # re-submits the same economic intent (duplicate live order).
+                        # External review 2026-06-12 CRITICAL-2.
+                        conn.commit()
+                        last_inner = None
+                        break
+                    except sqlite3.OperationalError as inner:
+                        if "locked" not in str(inner).lower() and "busy" not in str(inner).lower():
+                            raise
+                        last_inner = inner
+                if last_inner is not None:
+                    raise last_inner
             except Exception as inner:
                 logger.error(
                     "_live_order: terminal SDK-exception event append/commit failed — "

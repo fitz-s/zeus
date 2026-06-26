@@ -963,33 +963,51 @@ class TestRecoveryResolutionTable:
         assert payload["venue_order_created"] is False
         assert payload["safe_replay_permitted"] is True
 
-    # Case 2: SUBMITTING + no venue_order_id -> REVIEW_REQUIRED
-    # Grammar note: SUBMITTING->EXPIRED is not a legal transition (_TRANSITIONS
-    # has no such edge). Recovery uses REVIEW_REQUIRED (legal from SUBMITTING)
-    # so the operator can resolve: was this never placed, or was the ack lost?
-    def test_submitting_without_order_id_resolves_to_expired(self, conn, mock_client):
+    # Case 2: SUBMITTING + no venue_order_id -> idempotency/absence recovery
+    # A deterministic venue 400 can fail to persist SUBMIT_REJECTED if the local
+    # DB is locked after the HTTP response. Recovery must not park that row in
+    # manual review; it proves venue absence and releases the command.
+    def test_submitting_without_order_id_safe_absence_resolves_to_rejected(self, conn):
         _insert(conn)
-        # Advance to SUBMITTING without setting venue_order_id
         _advance_to_submitting(conn, venue_order_id=None)
-        mock_client.get_order.return_value = None  # shouldn't be called
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = None
 
         from src.execution.command_recovery import reconcile_unresolved_commands
-        summary = reconcile_unresolved_commands(conn, mock_client)
+        summary = reconcile_unresolved_commands(conn, client)
 
-        # EXPIRED is not a legal grammar transition from SUBMITTING;
-        # recovery emits REVIEW_REQUIRED instead (operator-handoff).
-        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert _get_state(conn, "cmd-001") == "REJECTED"
         assert summary["advanced"] == 1
-        # get_order should NOT be called when venue_order_id is missing
-        mock_client.get_order.assert_not_called()
+        client.get_order.assert_not_called()
         events = _get_events(conn, "cmd-001")
         event_types = [e["event_type"] for e in events]
-        assert "REVIEW_REQUIRED" in event_types
-        # verify payload has expected reason
-        import json
-        rr_event = next(e for e in events if e["event_type"] == "REVIEW_REQUIRED")
-        payload = json.loads(rr_event["payload_json"])
-        assert payload["reason"] == "recovery_no_venue_order_id"
+        assert "SUBMIT_REJECTED" in event_types
+        rejected = next(e for e in events if e["event_type"] == "SUBMIT_REJECTED")
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "safe_replay_permitted_no_order_found"
+        assert payload["safe_replay_permitted"] is True
+        assert payload["recovered_from_state"] == "SUBMITTING"
+        assert payload["lookup_method"] == "idempotency_key"
+
+    def test_submitting_without_order_id_waits_for_safe_replay_window(self, conn):
+        created_at = datetime.now(timezone.utc).isoformat()
+        _insert(conn, created_at=created_at)
+        _advance_to_submitting(conn, venue_order_id=None)
+        conn.execute(
+            "UPDATE venue_commands SET updated_at = ? WHERE command_id = 'cmd-001'",
+            (created_at,),
+        )
+        conn.commit()
+        client = MagicMock()
+        client.find_order_by_idempotency_key.return_value = None
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, client)
+
+        assert _get_state(conn, "cmd-001") == "SUBMITTING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] >= 1
+        assert "SUBMIT_REJECTED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
 
     def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
         self, conn, mock_client

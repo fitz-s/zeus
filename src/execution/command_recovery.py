@@ -10202,6 +10202,145 @@ def clear_submit_unknown_geoblock_403(
     return payload
 
 
+def _recover_no_venue_order_id_submit(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+    client,
+    *,
+    now: str,
+) -> str:
+    """Resolve a post-HTTP submit row that has no venue order id.
+
+    A deterministic synchronous venue rejection can fail to persist its terminal
+    event if the trade DB is locked after the HTTP response. Treat that row like
+    unknown-side-effect recovery: prove whether the idempotency key exists at
+    the venue, adopt it if found, otherwise release after the safe replay window.
+    """
+
+    lookup_status, venue_resp, venue_absence_proof, lookup_method = (
+        _lookup_unknown_side_effect_order(cmd, client)
+    )
+    if lookup_status == "unavailable":
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.REVIEW_REQUIRED.value,
+            occurred_at=now,
+            payload={
+                "reason": "recovery_no_venue_order_id_lookup_unavailable",
+                "lookup_method": lookup_method,
+            },
+        )
+        logger.warning(
+            "recovery: command %s SUBMITTING without venue_order_id -> REVIEW_REQUIRED "
+            "(lookup unavailable)",
+            cmd.command_id,
+        )
+        return "advanced"
+
+    venue_order_id = _extract_order_id(venue_resp, cmd.venue_order_id)
+    if venue_resp is not None:
+        venue_status = _order_status(venue_resp)
+        payload = {
+            "venue_order_id": venue_order_id,
+            "venue_status": venue_status,
+            "venue_response": venue_resp,
+            "idempotency_key": cmd.idempotency_key.value,
+            "lookup_method": lookup_method,
+        }
+        if venue_status == "CONFIRMED":
+            append_event(
+                conn,
+                command_id=cmd.command_id,
+                event_type=CommandEventType.REVIEW_REQUIRED.value,
+                occurred_at=now,
+                payload={
+                    **payload,
+                    "reason": "recovery_confirmed_requires_trade_fact",
+                    "semantic_guard": (
+                        "order_status_confirmed_is_not_fill_economics_authority"
+                    ),
+                },
+            )
+            logger.warning(
+                "recovery: command %s SUBMITTING/no-venue-id -> REVIEW_REQUIRED "
+                "(venue status=%s order %s; explicit trade fact required)",
+                cmd.command_id, venue_status, venue_order_id,
+            )
+            return "advanced"
+        if venue_status in {"FILLED", "MATCHED", "MINED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
+            append_event(
+                conn,
+                command_id=cmd.command_id,
+                event_type=CommandEventType.PARTIAL_FILL_OBSERVED.value,
+                occurred_at=now,
+                payload=payload,
+            )
+            logger.info(
+                "recovery: command %s SUBMITTING/no-venue-id -> PARTIAL "
+                "(venue status=%s order %s)",
+                cmd.command_id, venue_status, venue_order_id,
+            )
+            return "advanced"
+        if venue_status == "REJECTED":
+            append_event(
+                conn,
+                command_id=cmd.command_id,
+                event_type=CommandEventType.SUBMIT_REJECTED.value,
+                occurred_at=now,
+                payload={**payload, "reason": "recovery_venue_rejected_no_venue_order_id"},
+            )
+            logger.info(
+                "recovery: command %s SUBMITTING/no-venue-id -> REJECTED (venue status=%s)",
+                cmd.command_id, venue_status,
+            )
+            return "advanced"
+        append_event(
+            conn,
+            command_id=cmd.command_id,
+            event_type=CommandEventType.SUBMIT_ACKED.value,
+            occurred_at=now,
+            payload=payload,
+        )
+        logger.info(
+            "recovery: command %s SUBMITTING/no-venue-id -> ACKED "
+            "(venue status=%s order %s)",
+            cmd.command_id, venue_status, venue_order_id,
+        )
+        return "advanced"
+
+    age = _age_seconds(cmd, now=datetime.now(timezone.utc))
+    if age is None or age < _SAFE_REPLAY_MIN_AGE_SECONDS:
+        logger.info(
+            "recovery: command %s SUBMITTING/no-venue-id not found but age=%s; "
+            "staying until safe replay window elapses",
+            cmd.command_id, age,
+        )
+        return "stayed"
+    append_event(
+        conn,
+        command_id=cmd.command_id,
+        event_type=CommandEventType.SUBMIT_REJECTED.value,
+        occurred_at=now,
+        payload={
+            "reason": "safe_replay_permitted_no_order_found",
+            "safe_replay_permitted": True,
+            "previous_unknown_command_id": cmd.command_id,
+            "idempotency_key": cmd.idempotency_key.value,
+            "age_seconds": age,
+            "lookup_method": lookup_method,
+            "venue_absence_proof": venue_absence_proof,
+            "recovered_from_state": "SUBMITTING",
+        },
+    )
+    logger.warning(
+        "recovery: command %s SUBMITTING/no-venue-id -> SUBMIT_REJECTED "
+        "(safe replay permitted; idempotency key not found after %.1fs)",
+        cmd.command_id, age,
+    )
+    return "advanced"
+
+
 def _reconcile_row(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
@@ -10232,25 +10371,13 @@ def _reconcile_row(
         now = _now_iso()
 
         # ------------------------------------------------------------------ #
-        # SUBMITTING without venue_order_id: the submit was never acked and   #
-        # we have no venue_order_id to look up. We cannot distinguish         #
-        # "never placed" from "placed but ack lost". Grammar does not allow   #
-        # EXPIRED from SUBMITTING (_TRANSITIONS has no such edge); use        #
-        # REVIEW_REQUIRED (legal from SUBMITTING) so operator can resolve.    #
+        # SUBMITTING without venue_order_id: no ACK was persisted. This may be #
+        # an ack-lost live order or a deterministic venue reject whose terminal#
+        # SUBMIT_REJECTED write hit a transient DB lock. Use the same          #
+        # idempotency/absence proof path as unknown-side-effect recovery.      #
         # ------------------------------------------------------------------ #
         if state == CommandState.SUBMITTING and not cmd.venue_order_id:
-            append_event(
-                conn,
-                command_id=cmd.command_id,
-                event_type=CommandEventType.REVIEW_REQUIRED.value,
-                occurred_at=now,
-                payload={"reason": "recovery_no_venue_order_id"},
-            )
-            logger.warning(
-                "recovery: command %s SUBMITTING without venue_order_id -> REVIEW_REQUIRED",
-                cmd.command_id,
-            )
-            return "advanced"
+            return _recover_no_venue_order_id_submit(conn, cmd, client, now=now)
 
         # ------------------------------------------------------------------ #
         # M2: SUBMIT_UNKNOWN_SIDE_EFFECT                                      #
