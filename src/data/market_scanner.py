@@ -203,6 +203,28 @@ def _full_family_direct_clob_prefetch_candidate_threshold() -> int:
     return max(0, configured)
 
 
+def _priority_direct_clob_prefetch_condition_limit() -> int:
+    """Return max priority conditions allowed to use synchronous CLOB fill.
+
+    A small held/rest family recapture may need direct CLOB books to complete
+    both sides in the same tick.  A broad entry/redecision confirmation scope is
+    different: dozens of priority conditions mean the price-channel witness is
+    the live substrate source for this tick, and missing books must be deferred
+    instead of turning the warm path into a synchronous HTTP sweep.
+    """
+
+    try:
+        configured = int(
+            os.environ.get(
+                "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
+                "12",
+            )
+        )
+    except ValueError:
+        configured = 12
+    return max(0, configured)
+
+
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
 
@@ -4593,6 +4615,16 @@ def refresh_executable_market_substrate_snapshots(
         if full_family_capture
         else 0
     )
+    priority_direct_clob_condition_limit = (
+        _priority_direct_clob_prefetch_condition_limit()
+        if full_family_capture and priority_conditions
+        else 0
+    )
+    priority_direct_clob_scope_allowed = bool(
+        priority_conditions
+        and priority_direct_clob_condition_limit > 0
+        and len(priority_conditions) <= priority_direct_clob_condition_limit
+    )
     if batch_orderbook_supported:
         # Money-path redecision confirm refresh already has a live price-channel
         # witness surface. Hydrate from it first, then spend network time only on
@@ -4618,6 +4650,7 @@ def refresh_executable_market_substrate_snapshots(
         full_family_capture
         and candidates_needing_network_books
         and priority_conditions
+        and priority_direct_clob_scope_allowed
         and full_family_direct_clob_candidate_threshold > 0
     )
     small_full_family_direct_clob_prefetch = bool(
@@ -4626,6 +4659,7 @@ def refresh_executable_market_substrate_snapshots(
         and full_family_direct_clob_candidate_threshold > 0
         and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
         and not priority_full_family_direct_clob_prefetch
+        and not priority_conditions
     )
     full_family_direct_clob_prefetch_enabled = bool(
         full_family_direct_clob_prefetch_forced
@@ -4734,7 +4768,7 @@ def refresh_executable_market_substrate_snapshots(
             batch_orderbook_supported
             and selected_token
             and prefetched_book is None
-            and not priority_candidate
+            and not (priority_candidate and priority_direct_clob_scope_allowed)
         ):
             skipped += 1
             prefetch_missing_skipped += 1
@@ -4853,6 +4887,8 @@ def refresh_executable_market_substrate_snapshots(
         "prefetch_missing_skipped": prefetch_missing_skipped,
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
         "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
+        "direct_clob_prefetch_priority_condition_limit": priority_direct_clob_condition_limit,
+        "direct_clob_prefetch_priority_scope_allowed": int(priority_direct_clob_scope_allowed),
         "direct_clob_prefetch_small_family_enabled": int(small_full_family_direct_clob_prefetch),
         "direct_clob_prefetch_priority_enabled": int(priority_full_family_direct_clob_prefetch),
     }

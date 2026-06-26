@@ -2319,6 +2319,117 @@ def test_full_family_nonpriority_batch_failure_defers_without_singular_storm(mon
     assert summary["prefetch_missing_skipped"] == 2
 
 
+def test_broad_priority_refresh_writes_price_channel_books_before_deferring_missing(monkeypatch):
+    """Broad entry/redecision scopes must not let synchronous /books starve writes."""
+
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
+        "1",
+    )
+    conn = _make_in_memory_trade_db()
+    conn.executescript(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            evidence_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        );
+        CREATE INDEX idx_execution_feasibility_evidence_token_time
+            ON execution_feasibility_evidence(token_id, quote_seen_at);
+        CREATE INDEX idx_execution_feasibility_evidence_token_created
+            ON execution_feasibility_evidence(token_id, created_at DESC);
+        """
+    )
+    market_with_witness = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    missing_market = _make_market("Seoul", 2, metric="lowest", target_date="2026-05-25")
+    outcome = market_with_witness["outcomes"][0]
+    yes_token = outcome["token_id"]
+    no_token = outcome["no_token_id"]
+    for evidence_id, token_id, outcome_label, direction, bid, ask in [
+        ("broad-yes", yes_token, "YES", "buy_yes", 0.24, 0.27),
+        ("broad-no", no_token, "NO", "buy_no", 0.70, 0.73),
+    ]:
+        conn.execute(
+            """
+            INSERT INTO execution_feasibility_evidence (
+                evidence_id, event_id, condition_id, token_id, outcome_label, direction,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                market_with_witness["event_id"],
+                outcome["condition_id"],
+                token_id,
+                outcome_label,
+                direction,
+                _NOW.isoformat(),
+                f"hash-{outcome_label.lower()}",
+                bid,
+                ask,
+                f'{{"bids":[{{"price":"{bid}","size":"10"}}],"asks":[{{"price":"{ask}","size":"12"}}]}}',
+                _NOW.isoformat(),
+                1,
+            ),
+        )
+    conn.commit()
+
+    network_calls: list[list[str]] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            network_calls.append(call)
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "market": token_id,
+                    "bids": [{"price": "0.70", "size": "10"}],
+                    "asks": [{"price": "0.73", "size": "10"}],
+                }
+                for token_id in call
+            }
+
+    captured_books: list[str] = []
+
+    def _capture(conn, *, market, decision, prefetched_orderbook, **kwargs):
+        captured_books.append(str((prefetched_orderbook or {}).get("asset_id") or ""))
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market_with_witness, missing_market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=14.0,
+            priority_condition_ids={
+                outcome["condition_id"],
+                missing_market["outcomes"][0]["condition_id"],
+            },
+        )
+
+    assert network_calls == []
+    assert captured_books == [yes_token, no_token]
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetch_missing_skipped"] == 2
+    assert summary["direct_clob_prefetch_priority_scope_allowed"] == 0
+    assert summary["direct_clob_prefetch_priority_enabled"] == 0
+
+
 def test_capture_busy_timeout_denominator_uses_attemptable_prefetched_candidates():
     """Missing price books must not dilute the SQLite wait budget for writable rows."""
 
