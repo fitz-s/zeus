@@ -320,8 +320,8 @@ def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(mo
     assert batch >= 150
 
 
-def test_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
-    """Money-path priority rows must not inherit broad-batch fail-fast waits."""
+def test_small_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
+    """Small money-path priority recaptures must not inherit broad-batch waits."""
 
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
@@ -330,12 +330,31 @@ def test_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
     broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
     priority = _snapshot_capture_busy_timeout_ms(
         12.0,
-        remaining_candidates=46,
+        remaining_candidates=2,
         priority_candidate=True,
     )
 
     assert broad_batch < priority
     assert priority >= 4000
+
+
+def test_large_priority_capture_busy_timeout_splits_batch_budget(monkeypatch):
+    """A broad priority batch must make progress past one locked row."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
+    priority_batch = _snapshot_capture_busy_timeout_ms(
+        12.0,
+        remaining_candidates=46,
+        priority_candidate=True,
+    )
+
+    assert priority_batch == broad_batch
+    assert 0 < priority_batch < 4000
 
 
 # ---------------------------------------------------------------------------

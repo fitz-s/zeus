@@ -1540,9 +1540,9 @@ def entry_substrate_refresh_scope(
     *,
     beliefs: list[CachedBelief],
     decision_time: str | datetime,
-    max_families: int = 60,
+    max_families: int = 6,
     min_edge: float = 0.01,
-    refresh_margin: float = 0.02,
+    refresh_margin: float = 0.0,
     max_conditions_per_family: int = 2,
 ) -> dict[tuple[str, str, str], set[str]]:
     """Families whose live beliefs cannot be screened because price substrate is stale.
@@ -1621,15 +1621,13 @@ def entry_substrate_refresh_scope(
                 except (IndexError, TypeError, ValueError):
                     posterior = float(q_lcb)
                 if quote is None:
-                    # No executable price exists in the local substrate. Rank by
-                    # conservative belief only; the family cap prevents missing
-                    # low-value bins from flooding the CLOB refresher.
-                    score = float(q_lcb) - 0.5
-                    best_refresh_score = (
-                        score
-                        if best_refresh_score is None
-                        else max(best_refresh_score, score)
-                    )
+                    # A missing executable quote is not evidence of value. The
+                    # previous 0.50 placeholder made high-probability NO legs on
+                    # almost every non-winning bin outrank an actually priced YES
+                    # edge, expanding confirm-refresh into broad family warming.
+                    # Broad discovery owns missing substrate; this live money
+                    # path only refreshes candidates whose current/stale price can
+                    # still prove a near-edge before the post-refresh screen emits.
                     continue
                 try:
                     if _parse(quote.freshness_deadline).astimezone(timezone.utc) <= dt:

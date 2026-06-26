@@ -360,7 +360,7 @@ def test_stale_entry_price_requests_refresh_without_emit():
     )
 
     assert fired == []
-    assert refresh_scope == {("Wuhan", "2026-06-12", "high"): {"0xc29", "0xc30"}}
+    assert refresh_scope == {("Wuhan", "2026-06-12", "high"): {"0xc30"}}
 
 
 def test_entry_screen_fires_on_buy_no_edge_appeared():

@@ -135,6 +135,34 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
+class FakeInvalidSafeSignatureThenSuccessClient(FakeOneStepClient):
+    def __init__(self):
+        super().__init__(response={"orderID": "ord-recovered", "status": "LIVE"})
+        self._refreshed = False
+        self.derived_creds = FakeApiCreds(
+            "derived-submit-key",
+            "derived-submit-secret",
+            "derived-submit-passphrase",
+        )
+
+    def derive_api_key(self):
+        self.calls.append(("derive_api_key",))
+        return self.derived_creds
+
+    def set_api_creds(self, creds):
+        self.calls.append(("set_api_creds", creds))
+        self._refreshed = True
+
+    def create_and_post_order(self, order_args, options=None, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("create_and_post_order", order_args, options, order_type, post_only, defer_exec))
+        if not self._refreshed:
+            raise RuntimeError(
+                "PolyApiException[status_code=400, "
+                "error_message={'error':'invalid POLY_GNOSIS_SAFE signature'}]"
+            )
+        return self.response
+
+
 class FakeBalanceAllowanceClient:
     def __init__(self, response=None):
         self.response = response or {"balance": "100000000", "allowance": "50000000"}
@@ -1185,6 +1213,34 @@ def test_post_order_exception_still_bubbles_as_possible_unknown_side_effect(tmp_
         adapter.submit(envelope)
 
     assert any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_submit_rederives_l2_creds_once_on_invalid_safe_signature(tmp_path):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    adapter_mod._DERIVED_API_CREDS_CACHE.clear()
+    fake = FakeInvalidSafeSignatureThenSuccessClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "accepted"
+    assert result.envelope.order_id == "ord-recovered"
+    assert [call[0] for call in fake.calls] == [
+        "get_ok",
+        "create_and_post_order",
+        "derive_api_key",
+        "set_api_creds",
+        "create_and_post_order",
+    ]
+    assert adapter_mod._cached_derived_api_creds(
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        signer_key="test-key",
+        signature_type=2,
+        funder_address="0xfunder",
+    ) is fake.derived_creds
 
 
 def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):

@@ -123,6 +123,9 @@ def _snapshot_capture_busy_timeout_ms(
     progress_floor_ms = int(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
     )
+    priority_floor_candidate_cap = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "4")
+    )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
     # insert that waits only a few ms is the exact failure that starved coverage.
@@ -130,7 +133,10 @@ def _snapshot_capture_busy_timeout_ms(
     if (
         remaining_candidates is not None
         and remaining_candidates > 1
-        and not priority_candidate
+        and (
+            not priority_candidate
+            or remaining_candidates > max(1, priority_floor_candidate_cap)
+        )
     ):
         # Live 2026-06-25: the batch warmer had 46 selected candidates and one
         # locked insert consumed the 8s per-row ceiling, producing
@@ -138,7 +144,10 @@ def _snapshot_capture_busy_timeout_ms(
         # coverage producer, not a single critical recapture; no one condition may
         # spend the whole capture reserve. Split the remaining wall-clock budget
         # across the remaining selected candidates while preserving a small
-        # non-zero wait so transient locks can still clear.
+        # non-zero wait so transient locks can still clear. Large priority batches
+        # are still batches: a broad redecision confirmation scope must make
+        # progress across families instead of letting the first locked row consume
+        # the whole tick. Only small priority recaptures keep the durable floor.
         share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
         return max(1, min(configured, share_ms))
     capped = min(configured, max(floor_ms, remaining_ms))

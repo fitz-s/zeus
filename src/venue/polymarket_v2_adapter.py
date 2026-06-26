@@ -574,38 +574,74 @@ class PolymarketV2Adapter:
             )
         signed_order = None
         signed_hash = None
-        if callable(getattr(client, "create_and_post_order", None)):
-            raw_response = client.create_and_post_order(
-                order_args,
-                options=options,
-                order_type=envelope.order_type,
-                post_only=envelope.post_only,
-                defer_exec=False,
-            )
-        elif callable(getattr(client, "create_order", None)) and callable(getattr(client, "post_order", None)):
-            try:
-                signed_order = client.create_order(order_args, options=options)
-                signed_bytes = _signed_order_bytes(signed_order)
-                signed_hash = hashlib.sha256(signed_bytes).hexdigest()
-            except Exception as exc:
-                return _rejected_submit_result(
-                    envelope,
-                    error_code="V2_PRE_SUBMIT_EXCEPTION",
-                    error_message=str(exc),
+
+        def _submit_once(active_client: Any) -> Any:
+            nonlocal signed_order, signed_hash
+            signed_order = None
+            signed_hash = None
+            if callable(getattr(active_client, "create_and_post_order", None)):
+                return active_client.create_and_post_order(
+                    order_args,
+                    options=options,
+                    order_type=envelope.order_type,
+                    post_only=envelope.post_only,
+                    defer_exec=False,
                 )
-            raw_response = client.post_order(
-                signed_order,
+            local_signed_order = active_client.create_order(order_args, options=options)
+            signed_bytes = _signed_order_bytes(local_signed_order)
+            signed_hash = hashlib.sha256(signed_bytes).hexdigest()
+            signed_order = signed_bytes
+            raw = active_client.post_order(
+                local_signed_order,
                 order_type=envelope.order_type,
                 post_only=envelope.post_only,
                 defer_exec=False,
             )
-            signed_order = signed_bytes
-        else:
+            return raw
+
+        if not callable(getattr(client, "create_and_post_order", None)) and not (
+            callable(getattr(client, "create_order", None))
+            and callable(getattr(client, "post_order", None))
+        ):
             return _rejected_submit_result(
                 envelope,
                 error_code="V2_SUBMIT_UNSUPPORTED",
                 error_message="SDK client exposes neither one-step nor two-step order submission",
             )
+
+        if callable(getattr(client, "create_order", None)) and not callable(
+            getattr(client, "create_and_post_order", None)
+        ):
+            try:
+                raw_response = _submit_once(client)
+            except Exception as exc:
+                if _is_polymarket_invalid_safe_signature_error(exc):
+                    self._refresh_signer_bound_l2_api_creds(client)
+                    raw_response = _submit_once(client)
+                    logger.warning(
+                        "VENUE_ORDER_SIGNATURE_RECOVERED: invalid Safe signature "
+                        "recovered after signer-bound L2 credential refresh"
+                    )
+                elif signed_order is None:
+                    return _rejected_submit_result(
+                        envelope,
+                        error_code="V2_PRE_SUBMIT_EXCEPTION",
+                        error_message=str(exc),
+                    )
+                else:
+                    raise
+        else:
+            try:
+                raw_response = _submit_once(client)
+            except Exception as exc:
+                if not _is_polymarket_invalid_safe_signature_error(exc):
+                    raise
+                self._refresh_signer_bound_l2_api_creds(client)
+                raw_response = _submit_once(client)
+                logger.warning(
+                    "VENUE_ORDER_SIGNATURE_RECOVERED: invalid Safe signature "
+                    "recovered after signer-bound L2 credential refresh"
+                )
         return _submit_result_from_response(
             envelope,
             raw_response,
@@ -2552,6 +2588,11 @@ def _derive_l2_api_creds(client: Any) -> Any:
 def _is_l2_auth_error(exc: BaseException) -> bool:
     text = f"{type(exc).__name__}:{exc}".lower()
     return "unauthorized" in text or "invalid api key" in text or "status_code=401" in text
+
+
+def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
+    text = " ".join(f"{type(exc).__name__}:{exc}".split())
+    return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
 
 
 def _api_creds_from_runtime() -> Any | None:
