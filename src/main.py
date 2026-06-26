@@ -2845,7 +2845,12 @@ def _refresh_pending_family_snapshots(
     )
     from src.data.polymarket_client import PolymarketClient
     from src.engine.event_reactor_adapter import _event_family_market_topology_rows
-    from src.state.db import get_trade_connection, get_trade_connection_read_only
+    from src.state.db import (
+        _zeus_trade_db_path,
+        get_trade_connection,
+        get_trade_connection_read_only,
+    )
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
     from src.strategy.market_phase import (
         family_venue_closed as _family_venue_closed,
     )
@@ -3640,18 +3645,19 @@ def _refresh_pending_family_snapshots(
             refresh_deadline=refresh_deadline,
             snapshot_reserve_s=snapshot_reserve_s,
         )
-        with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-            summary = refresh_executable_market_substrate_snapshots(
-                write_conn,
-                markets=markets_for_refresh,
-                clob=clob,
-                captured_at=datetime.now(timezone.utc),
-                scan_authority="VERIFIED",
-                max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
-                budget_seconds=snapshot_budget_s,
-                priority_condition_ids=priority_conditions,
-            )
-        write_conn.commit()
+        with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    write_conn,
+                    markets=markets_for_refresh,
+                    clob=clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                    max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                    budget_seconds=snapshot_budget_s,
+                    priority_condition_ids=priority_conditions,
+                )
+            write_conn.commit()
 
     except Exception as exc:
         logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
@@ -8816,7 +8822,8 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         )
         from src.data.polymarket_client import PolymarketClient
         from src.engine.event_reactor_adapter import _event_family_market_topology_rows
-        from src.state.db import get_trade_connection
+        from src.state.db import _zeus_trade_db_path, get_trade_connection
+        from src.state.db_writer_lock import WriteClass, db_writer_lock
 
         payload = {"city": city, "target_date": target_date, "metric": metric}
         priority_condition_ids = {
@@ -8883,21 +8890,22 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 # lost executable identity). The warm-job Gamma slug path owns that
                 # recovery; the decision-time fast path does NOT do a Gamma fetch.
                 return False
-            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                summary = refresh_executable_market_substrate_snapshots(
-                    write_conn,
-                    markets=[market],
-                    clob=clob,
-                    captured_at=datetime.now(timezone.utc),
-                    scan_authority="VERIFIED",
-                    refresh_reason="decision_triggered_targeted_refresh",
-                    # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
-                    # FDR full-family proof + capital-efficiency economics; refreshing
-                    # only the selected bin would leave stale sibling prices in q/FDR).
-                    max_outcomes=0,
-                    priority_condition_ids=priority_condition_ids,
-                )
-            write_conn.commit()
+            with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
+                with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                    summary = refresh_executable_market_substrate_snapshots(
+                        write_conn,
+                        markets=[market],
+                        clob=clob,
+                        captured_at=datetime.now(timezone.utc),
+                        scan_authority="VERIFIED",
+                        refresh_reason="decision_triggered_targeted_refresh",
+                        # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
+                        # FDR full-family proof + capital-efficiency economics; refreshing
+                        # only the selected bin would leave stale sibling prices in q/FDR).
+                        max_outcomes=0,
+                        priority_condition_ids=priority_condition_ids,
+                    )
+                write_conn.commit()
             return int(summary.get("inserted", 0) or 0) > 0
         except Exception as exc:  # noqa: BLE001 — fail-soft: never block the decision
             logger.warning(

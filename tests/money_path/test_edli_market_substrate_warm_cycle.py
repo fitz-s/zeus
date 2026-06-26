@@ -246,7 +246,8 @@ def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
 
     src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
 
-    assert "get_trade_connection, get_trade_connection_read_only" in src
+    assert "get_trade_connection" in src
+    assert "get_trade_connection_read_only" in src
     assert "held_position_priority_families" in src
     assert "priority_families + new_priority_families + rotated_ordinary_families" in src
     assert "ordinary_families[start_offset:] + ordinary_families[:start_offset]" in src
@@ -284,6 +285,32 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
     assert "confirmed_rest_scope &= fresh_rest_scope" in screen_src
     assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
+
+
+def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
+    """Live snapshot writers must serialize across daemon processes.
+
+    `_market_substrate_refresh_lock` is process-local. The live daemon and the
+    substrate observer are separate processes, so every path that writes
+    executable_market_snapshots must also take the shared trade-DB LIVE writer
+    lock.
+    """
+
+    main_pending_src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+    decision_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    observer_pending_src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
+    observer_discovery_src = inspect.getsource(substrate_observer._market_discovery_cycle)
+
+    for src in (
+        main_pending_src,
+        decision_src,
+        observer_pending_src,
+        observer_discovery_src,
+    ):
+        assert "_zeus_trade_db_path" in src
+        assert "WriteClass.LIVE" in src
+        assert "with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):" in src
+        assert "refresh_executable_market_substrate_snapshots(" in src
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
