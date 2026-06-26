@@ -870,13 +870,37 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
 
 
 def test_money_path_targeted_refresh_marks_substrate_priority():
+    cycle_src = inspect.getsource(main_module._edli_event_reactor_cycle)
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
 
+    assert "mark_money_path_substrate_priority(" in cycle_src
+    assert 'reason="edli_event_reactor_cycle"' in cycle_src
+    assert "clear_money_path_substrate_priority(" in cycle_src
     assert "mark_money_path_substrate_priority(" in refresh_src
     assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
+
+
+def test_substrate_priority_clear_is_pid_scoped(tmp_path, monkeypatch):
+    import src.config as config
+    from src.data.substrate_priority import (
+        clear_money_path_substrate_priority,
+        mark_money_path_substrate_priority,
+        money_path_substrate_priority_active,
+    )
+
+    monkeypatch.setattr(config, "state_path", lambda rel: tmp_path / rel)
+
+    mark_money_path_substrate_priority(reason="test", ttl_seconds=60.0)
+    assert money_path_substrate_priority_active()
+
+    clear_money_path_substrate_priority(pid=999999)
+    assert money_path_substrate_priority_active()
+
+    clear_money_path_substrate_priority()
+    assert not money_path_substrate_priority_active()
 
 
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):

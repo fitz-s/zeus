@@ -39,6 +39,29 @@ def mark_money_path_substrate_priority(*, reason: str, ttl_seconds: float | None
     tmp.replace(path)
 
 
+def clear_money_path_substrate_priority(*, pid: int | None = None) -> None:
+    """Clear this process' broad-warmer yield marker after the money path is done."""
+
+    path = _priority_marker_path()
+    if pid is not None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        try:
+            marker_pid = int(payload.get("pid"))
+        except (TypeError, ValueError):
+            return
+        if marker_pid != int(pid):
+            return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
 def money_path_substrate_priority_active(now: datetime | None = None) -> bool:
     path = _priority_marker_path()
     try:
