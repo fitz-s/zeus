@@ -5414,11 +5414,11 @@ def _edli_event_reactor_cycle() -> None:
             forecasts_conn
         )
         # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): a blocked event must
-        # create visible refresh work, but the live reactor is a consumer, not the
-        # executable-substrate producer. Requeueing the event keeps its family on the
-        # substrate-observer sidecar's pending-family work surface; the reactor drain
-        # records the nudge and stays out of Gamma/CLOB producer I/O.
-        _reactor_family_snapshot_refresher = _edli_reactor_family_snapshot_refresher()
+        # create visible refresh work. The substrate-observer sidecar owns broad
+        # universe warming, but an event that just blocked on stale executable
+        # evidence needs a targeted family recapture; otherwise stale events can
+        # requeue forever while broad warming rotates past them.
+        _reactor_family_snapshot_refresher = _decision_family_snapshot_refresher
         _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
@@ -9299,8 +9299,6 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 call_budget_s,
             )
             return False
-        refresh_attempts += 1
-
         payload = {"city": city, "target_date": target_date, "metric": metric}
         priority_condition_ids = {
             str(condition_id or "").strip()
@@ -9370,6 +9368,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                     metric,
                 )
                 return False
+            refresh_attempts += 1
             write_conn = get_trade_connection(write_class="live")
             try:
                 market = reconstruct_weather_market_from_static_topology(

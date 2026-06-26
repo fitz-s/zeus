@@ -1359,20 +1359,17 @@ class OpportunityEventReactor:
         SHARED across both buckets and HELD-position families are drained FIRST (money at risk),
         so a budget can never starve a held family's refresh.
         """
-        if _substrate_sidecar_owns_broad_refresh():
+        sidecar_owns_broad = _substrate_sidecar_owns_broad_refresh()
+        if sidecar_owns_broad:
             blocked = len(self._pending_snapshot_refreshes) + len(self._pending_cycle_advances)
             if blocked:
                 import logging as _logging
 
                 _logging.getLogger("zeus.events.reactor").info(
-                    "always-decidable broad drain skipped: substrate observer sidecar owns "
-                    "broad refresh; deferred_families=%d (reactor keeps targeted selected-row "
-                    "refresh and transient requeue)",
+                    "always-decidable broad drain delegated to substrate observer sidecar; "
+                    "draining targeted blocked-family refreshes locally deferred_families=%d",
                     blocked,
                 )
-            self._pending_snapshot_refreshes.clear()
-            self._pending_cycle_advances.clear()
-            return
         # HELD-POSITION set, computed ONCE per cycle (fail-soft): families with money at risk now.
         held = self._held_families_failsoft()
         if held:

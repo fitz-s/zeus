@@ -378,6 +378,58 @@ def test_fresh_substrate_sidecar_owns_broad_refresh(monkeypatch, tmp_path):
     )
 
 
+def test_sidecar_broad_ownership_still_drains_targeted_blocked_family(monkeypatch, tmp_path):
+    """The sidecar owns broad universe warming, not blocked-event targeted recapture."""
+
+    heartbeat = tmp_path / "daemon-heartbeat-substrate-observer.json"
+    heartbeat.write_text(
+        '{"daemon":"substrate-observer","alive_at":"2026-06-26T15:43:34+00:00","pid":123}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEUS_SUBSTRATE_OBSERVER_HEARTBEAT_PATH", str(heartbeat))
+    monkeypatch.delenv("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_SIDECAR_OWNS_BROAD_REFRESH", raising=False)
+    monkeypatch.setattr(
+        "src.events.reactor.datetime",
+        type(
+            "FixedDateTime",
+            (datetime,),
+            {
+                "now": classmethod(
+                    lambda cls, tz=None: datetime(2026, 6, 26, 15, 44, 0, tzinfo=timezone.utc)
+                )
+            },
+        ),
+    )
+
+    conn, store = _store()
+    calls: list[tuple[str, str, str]] = []
+
+    def _refresher(*, city, target_date, metric, **_kw):
+        calls.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda _event, _dt: None,
+        reject=lambda *_a: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresher,
+    )
+    reactor._pending_snapshot_refreshes = [("Chicago", "2026-06-26", "high")]
+    reactor._pending_cycle_advances = []
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._drain_substrate_refreshes(result=res)
+
+    assert calls == [("Chicago", "2026-06-26", "high")]
+    assert res.snapshot_refreshes == 1
+
+
 def test_timeliness_floor_is_backstop_when_venue_phase_unresolvable(monkeypatch):
     """RELATIONSHIP (reactor<->event_store): TIMELINESS_FLOOR_PAST remains the
     backstop horizon. When the venue-close phase authority cannot resolve (here:

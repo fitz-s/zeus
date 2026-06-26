@@ -356,6 +356,24 @@ def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
     )
 
 
+def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
+    """Stale event requeues must trigger the same targeted family recapture path."""
+
+    cycle_src = inspect.getsource(main_module._edli_event_reactor_cycle)
+    assert "_reactor_family_snapshot_refresher = _decision_family_snapshot_refresher" in cycle_src
+    assert "family_snapshot_refresher=_reactor_family_snapshot_refresher" in cycle_src
+
+
+def test_decision_refresh_lock_busy_does_not_consume_quota():
+    """A shared-lock miss is not a refresh attempt and must not spend the one-family quota."""
+
+    refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    quota_pos = refresh_src.index("refresh_attempts += 1")
+    process_lock_pos = refresh_src.index("if not substrate_process_acquired:")
+    write_conn_pos = refresh_src.index("write_conn = get_trade_connection")
+    assert process_lock_pos < quota_pos < write_conn_pos
+
+
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     """Background warming must not occupy the shared substrate lock for the full cadence."""
 
