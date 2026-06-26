@@ -665,7 +665,6 @@ def _all_latest_beliefs(
           FROM probability_trace_fact
          WHERE decision_id >= ?
            AND decision_id < ?
-         ORDER BY recorded_at DESC, decision_id DESC
          LIMIT ?
         """,
         (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
@@ -1882,6 +1881,9 @@ class OpenRest:
     created_at: str = ""
     fact_state: str = ""
     matched_size: float | None = None
+    city: str = ""
+    target_date: str = ""
+    metric: str = ""
 
 
 def screen_resting_orders(

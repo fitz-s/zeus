@@ -1125,6 +1125,40 @@ def test_redecision_screen_separates_entry_from_held_reemit():
     )
 
 
+def test_rest_pull_condition_scope_uses_rest_family_identity_without_belief():
+    """Open maker-rest pulls must not disappear when the entry belief subset is empty."""
+
+    from src.events.continuous_redecision import OpenRest, RepriceDecision
+
+    rest = OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="family-rest",
+        bin_label="20C",
+        side="buy_yes",
+        condition_id="cond-rest",
+        resting_posterior=0.7,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.4,
+        quote_age_ms=301_000,
+        city="Paris",
+        target_date="2026-06-20",
+        metric="low",
+    )
+    decision = RepriceDecision(
+        family_id="family-rest",
+        bin_label="20C",
+        side="buy_yes",
+        action="CANCEL_REPLACE",
+        reason="BOOK_MOVED",
+        detail=0.02,
+    )
+
+    assert main._edli_rest_pull_condition_scope([(rest, decision)], []) == {
+        ("Paris", "2026-06-20", "low"): {"cond-rest"}
+    }
+
+
 def test_entry_redecision_excludes_current_held_families(monkeypatch):
     monkeypatch.setattr(
         main,

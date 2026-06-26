@@ -1924,18 +1924,25 @@ def _valid_qkernel_execution_economics_payload(
         return None
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         return None
-    if not _qkernel_cert_direction_admitted(cert):
+    if not _qkernel_cert_direction_admitted(cert, direction=direction):
         return None
     if cert.get("coherence_allows") is not True:
         return None
     return cert
 
 
-def _qkernel_cert_direction_admitted(cert: Mapping[str, Any]) -> bool:
+def _qkernel_cert_direction_admitted(
+    cert: Mapping[str, Any],
+    *,
+    direction: str | None = None,
+) -> bool:
     """Mirror FamilyDecisionEngine._direction_admitted for serialized certs."""
 
     if cert.get("direction_law_ok") is True:
         return True
+    native_side = _native_curve_side_for_direction(str(direction or ""))
+    if native_side != "NO":
+        return False
     try:
         edge_lcb = float(cert.get("edge_lcb"))
         optimal_delta_u = float(cert.get("optimal_delta_u"))
@@ -1996,7 +2003,35 @@ def _assert_receipt_qkernel_execution_economics(
         raise ValueError("EDLI_LIVE_QKERNEL_BOOK_EXECUTION_ECONOMICS_INVALID")
     if stable_hash(dict(book_cert)) != stable_hash(dict(receipt_cert)):
         raise ValueError("EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_MISMATCH")
+    if not _qkernel_direct_route_matches_receipt_probability(receipt, receipt_cert):
+        raise ValueError("EDLI_LIVE_QKERNEL_RECEIPT_PROBABILITY_SPLIT")
     return receipt_cert
+
+
+def _qkernel_direct_route_matches_receipt_probability(
+    receipt: EventSubmissionReceipt,
+    cert: Mapping[str, Any],
+) -> bool:
+    route_id = str(cert.get("route_id") or "")
+    if not route_id.startswith(("DIRECT_YES:", "DIRECT_NO:")):
+        return True
+    try:
+        payoff_q_point = float(cert.get("payoff_q_point"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+        receipt_q_point = float(receipt.q_live)
+        receipt_q_lcb = float(receipt.q_lcb_5pct)
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (payoff_q_point, payoff_q_lcb, receipt_q_point, receipt_q_lcb)
+    ):
+        return False
+    if abs(payoff_q_point - receipt_q_point) > 1e-6:
+        return False
+    if payoff_q_lcb > receipt_q_lcb + 1e-6:
+        return False
+    return True
 
 
 def _opportunity_book_candidate_id_for_receipt(

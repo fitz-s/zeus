@@ -279,14 +279,27 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
     """Families with live unfilled entry rests that need fresh executable books."""
 
     try:
+        command_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+        fact_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()
+        }
+        state_select = "state" if "state" in command_cols else "'' AS state"
+        state_filter = (
+            "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
+        )
+        remaining_select = "remaining_size" if "remaining_size" in fact_cols else "NULL AS remaining_size"
         commands = trade_conn.execute(
-            """
-            SELECT command_id, position_id, venue_order_id, state
+            f"""
+            SELECT command_id, position_id, venue_order_id, {state_select}
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
                AND venue_order_id != ''
-               AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
+               {state_filter}
             """
         ).fetchall()
     except Exception:  # noqa: BLE001
@@ -300,8 +313,8 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
             continue
         try:
             fact = trade_conn.execute(
-                """
-                SELECT state, remaining_size
+                f"""
+                SELECT state, {remaining_select}
                   FROM venue_order_facts
                  WHERE venue_order_id = ?
                  ORDER BY local_sequence DESC

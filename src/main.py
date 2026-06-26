@@ -111,6 +111,23 @@ _SUBSTRATE_REFRESH_CURSOR = 0
 # DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
 # (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
+SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 5000
+SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 1000
+
+
+def _snapshot_trade_write_context_factory(owner: str):
+    def _factory():
+        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+        )
+
+    return _factory
 
 
 def _substrate_clob_timeout_seconds() -> float:
@@ -2534,16 +2551,25 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
             str(row[1])
             for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
         }
+        fact_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()
+        }
         token_select = "token_id" if "token_id" in command_cols else "'' AS token_id"
         snapshot_select = "snapshot_id" if "snapshot_id" in command_cols else "'' AS snapshot_id"
+        state_select = "state" if "state" in command_cols else "'' AS state"
+        state_filter = (
+            "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
+        )
+        remaining_select = "remaining_size" if "remaining_size" in fact_cols else "NULL AS remaining_size"
         commands = trade_conn.execute(
             f"""
-            SELECT command_id, position_id, venue_order_id, {token_select}, {snapshot_select}, state
+            SELECT command_id, position_id, venue_order_id, {token_select}, {snapshot_select}, {state_select}
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
                AND venue_order_id != ''
-               AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
+               {state_filter}
             """
         ).fetchall()
     except Exception:  # noqa: BLE001
@@ -2557,8 +2583,8 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
             continue
         try:
             fact = trade_conn.execute(
-                """
-                SELECT state, remaining_size
+                f"""
+                SELECT state, {remaining_select}
                   FROM venue_order_facts
                  WHERE venue_order_id = ?
                  ORDER BY local_sequence DESC
@@ -2936,11 +2962,9 @@ def _refresh_pending_family_snapshots(
     from src.data.polymarket_client import PolymarketClient
     from src.engine.event_reactor_adapter import _event_family_market_topology_rows
     from src.state.db import (
-        _zeus_trade_db_path,
         get_trade_connection,
         get_trade_connection_read_only,
     )
-    from src.state.db_writer_lock import WriteClass, db_writer_lock
 
     # Injected-now (tests / replay): the snapshot freshness window keys off this
     # single decision clock. Defaults to wall-clock UTC in production.
@@ -3740,24 +3764,25 @@ def _refresh_pending_family_snapshots(
             snapshot_reserve_s=snapshot_reserve_s,
         )
         snapshot_read_conn.close()
-        with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-            write_conn = get_trade_connection(write_class="live")
-            try:
-                with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                    summary = refresh_executable_market_substrate_snapshots(
-                        write_conn,
-                        markets=markets_for_refresh,
-                        clob=clob,
-                        captured_at=datetime.now(timezone.utc),
-                        scan_authority="VERIFIED",
-                        max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
-                        budget_seconds=snapshot_budget_s,
-                        capture_reserve_seconds=snapshot_reserve_s,
-                        priority_condition_ids=priority_conditions,
-                    )
-                write_conn.commit()
-            finally:
-                write_conn.close()
+        write_conn = get_trade_connection(write_class="live")
+        try:
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    write_conn,
+                    markets=markets_for_refresh,
+                    clob=clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                    max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                    budget_seconds=snapshot_budget_s,
+                    capture_reserve_seconds=snapshot_reserve_s,
+                    priority_condition_ids=priority_conditions,
+                    snapshot_write_context_factory=_snapshot_trade_write_context_factory(
+                        "main_pending_family_snapshot_refresh"
+                    ),
+                )
+        finally:
+            write_conn.close()
 
     except Exception as exc:
         logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
@@ -6243,6 +6268,9 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         cond = cond_by_token.get(token_id, "")
         belief_hit = bin_by_cond.get(cond)
         family_id = belief_hit[0].family_id if belief_hit else ""
+        city = str(getattr(belief_hit[0], "city", "") or "") if belief_hit else ""
+        target_date = str(getattr(belief_hit[0], "target_date", "") or "") if belief_hit else ""
+        metric = str(getattr(belief_hit[0], "metric", "") or "") if belief_hit else ""
         bin_label = belief_hit[1] if belief_hit else ""
         resting_posterior = belief_hit[2] if belief_hit else 0.0
         # quote_age_ms from the command's creation (the order has rested since created_at).
@@ -6272,6 +6300,9 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 created_at=created_at,
                 fact_state=fact_state,
                 matched_size=None if matched_size is None else float(matched_size),
+                city=city,
+                target_date=target_date,
+                metric=metric,
             )
         )
     return out
@@ -6411,7 +6442,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
             }
             for rest, _decision in rest_pulls:
-                key = by_family.get(rest.family_id)
+                key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
                 if key is not None and all(key):
                     rest_pull_families.add(key)
         held_condition_scope = _edli_current_held_position_condition_scope()
@@ -6595,7 +6626,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
                 }
                 for rest, _decision in rest_pulls:
-                    key = by_family.get(rest.family_id)
+                    key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
                     if key is not None and all(key):
                         rest_pull_families.add(key)
             rest_pull_families &= confirmed_rest_scope
@@ -7172,10 +7203,10 @@ def _edli_rest_pull_condition_scope(
     by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
     out: dict[tuple[str, str, str], set[str]] = {}
     for rest, _decision in rest_pulls or ():
-        belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
-        if belief is None:
-            continue
-        family_key = _edli_family_key_from_belief(belief)
+        family_key = _edli_family_key_from_rest(rest)
+        if family_key is None:
+            belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
+            family_key = _edli_family_key_from_belief(belief) if belief is not None else None
         if family_key is None:
             continue
         condition_id = str(getattr(rest, "condition_id", "") or "").strip()
@@ -7198,16 +7229,25 @@ def _edli_open_rest_condition_scope(
     by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
     out: dict[tuple[str, str, str], set[str]] = {}
     for rest in open_rests or ():
-        belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
-        if belief is None:
-            continue
-        family_key = _edli_family_key_from_belief(belief)
+        family_key = _edli_family_key_from_rest(rest)
+        if family_key is None:
+            belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
+            family_key = _edli_family_key_from_belief(belief) if belief is not None else None
         if family_key is None:
             continue
         condition_id = str(getattr(rest, "condition_id", "") or "").strip()
         if condition_id:
             out.setdefault(family_key, set()).add(condition_id)
     return out
+
+
+def _edli_family_key_from_rest(rest: Any) -> tuple[str, str, str] | None:
+    city = str(getattr(rest, "city", "") or "").strip()
+    target_date = str(getattr(rest, "target_date", "") or "").strip()
+    metric = str(getattr(rest, "metric", "") or "").strip()
+    if city and target_date and metric:
+        return (city, target_date, metric)
+    return None
 
 
 def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], set[str]]:
@@ -9370,8 +9410,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         )
         from src.data.polymarket_client import PolymarketClient
         from src.engine.event_reactor_adapter import _event_family_market_topology_rows
-        from src.state.db import _zeus_trade_db_path, get_trade_connection
-        from src.state.db_writer_lock import WriteClass, db_writer_lock
+        from src.state.db import get_trade_connection
 
         if max_refreshes_per_cycle <= 0:
             logger.warning(
@@ -9520,27 +9559,28 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                     # lost executable identity). The warm-job Gamma slug path owns that
                     # recovery; the decision-time fast path does NOT do a Gamma fetch.
                     return False
-                with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-                    with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                        summary = refresh_executable_market_substrate_snapshots(
-                            write_conn,
-                            markets=[market],
-                            clob=clob,
-                            captured_at=datetime.now(timezone.utc),
-                            scan_authority="VERIFIED",
-                            refresh_reason="decision_triggered_targeted_refresh",
-                            # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
-                            # FDR full-family proof + capital-efficiency economics; refreshing
-                            # only the selected bin would leave stale sibling prices in q/FDR).
-                            max_outcomes=0,
-                            budget_seconds=call_budget_s,
-                            capture_reserve_seconds=min(
-                                max(1.0, call_budget_s * 0.5),
-                                max(0.05, call_budget_s - 0.05),
-                            ),
-                            priority_condition_ids=priority_condition_ids,
-                        )
-                    write_conn.commit()
+                with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                    summary = refresh_executable_market_substrate_snapshots(
+                        write_conn,
+                        markets=[market],
+                        clob=clob,
+                        captured_at=datetime.now(timezone.utc),
+                        scan_authority="VERIFIED",
+                        refresh_reason="decision_triggered_targeted_refresh",
+                        # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
+                        # FDR full-family proof + capital-efficiency economics; refreshing
+                        # only the selected bin would leave stale sibling prices in q/FDR).
+                        max_outcomes=0,
+                        budget_seconds=call_budget_s,
+                        capture_reserve_seconds=min(
+                            max(1.0, call_budget_s * 0.5),
+                            max(0.05, call_budget_s - 0.05),
+                        ),
+                        priority_condition_ids=priority_condition_ids,
+                        snapshot_write_context_factory=_snapshot_trade_write_context_factory(
+                            "main_decision_family_snapshot_refresh"
+                        ),
+                    )
                 return int(summary.get("inserted", 0) or 0) > 0
             finally:
                 write_conn.close()

@@ -538,8 +538,8 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
         # YES mids are coherent with the live sigma-floor distribution around 20C.
         yes_asks=[0.13, 0.24, 0.27, 0.24, 0.13],
         no_asks=[0.87, 0.76, 0.73, 0.76, 0.87],
-        q_by_bin=[0.12, 0.23, 0.30, 0.23, 0.12],
-        q_lcb_by_bin=[0.08, 0.18, 0.25, 0.18, 0.08],
+        q_by_bin=[0.0, 0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.0, 0.999, 0.0, 0.0],
         no_execution_prices=[0.87, 0.74, 0.73, 0.74, 0.87],
     )
     payload = _payload(mu=20.0, sigma=0.05, members=[20, 20, 20, 20, 20])
@@ -583,8 +583,8 @@ def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypa
         family,
         yes_asks=[0.90, 0.05, 0.90, 0.90],
         no_asks=[0.79, 0.90, 0.80, 0.95],
-        q_by_bin=[0.10, 0.80, 0.10, 0.00],
-        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        q_by_bin=[0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
         no_execution_prices=[0.79, 0.90, 0.80, 0.95],
     )
 
@@ -627,8 +627,8 @@ def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypa
         family,
         yes_asks=[0.90, 0.27, 0.90, 0.90],
         no_asks=[0.79, 0.90, 0.80, 0.95],
-        q_by_bin=[0.10, 0.80, 0.10, 0.00],
-        q_lcb_by_bin=[0.08, 0.65, 0.08, 0.00],
+        q_by_bin=[0.0, 1.0, 0.0, 0.0],
+        q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
         no_execution_prices=[0.79, 0.90, 0.80, 0.95],
     )
 
@@ -824,15 +824,16 @@ def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
 # where a buy_yes proof carried a NO-like lower bound. The overlay updates selection score
 # provenance only.
 # ===========================================================================
-def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
+def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev, side="NO"):
     """A minimal spine ``CandidateEconomics`` for the overlay."""
     from decimal import Decimal as _D
 
     from src.contracts.execution_price import ExecutionPrice
     from src.decision.payoff_vector import CandidateEconomics
 
+    route_side = "YES" if str(side).upper() == "YES" else "NO"
     return CandidateEconomics(
-        candidate_id="NO:b1:DIRECT_NO:b1@proof",
+        candidate_id=f"{route_side}:b1:DIRECT_{route_side}:b1@proof",
         point_ev=float(point_ev),
         edge_lcb=float(edge_lcb),
         delta_u_at_min=0.01,
@@ -843,7 +844,7 @@ def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev):
             float(cost), price_type="fee_adjusted", fee_deducted=True,
             currency="probability_units",
         ),
-        route_id="DIRECT_NO:b1@proof",
+        route_id=f"DIRECT_{route_side}:b1@proof",
     )
 
 
@@ -901,10 +902,10 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
-    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+    new_proof = _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.052, economics=economics)
 
-    assert new_proof.q_posterior == pytest.approx(0.80)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.990)
+    assert new_proof.q_posterior == pytest.approx(0.202)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
     assert new_proof.trade_score == pytest.approx(0.050)
     assert new_proof.q_source != "qkernel_spine"
     assert new_proof.selection_authority_applied == "qkernel_spine"
@@ -917,6 +918,23 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
     assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
+
+
+def test_overlay_rejects_direct_route_probability_authority_split():
+    """Direct qkernel routes must share the same selected-side probability as monitor."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.052, economics=economics)
+        is None
+    )
+    assert (
+        _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.001, economics=economics)
+        is None
+    )
 
 
 def test_overlay_rejects_nonfinite_qkernel_execution_economics():
@@ -982,11 +1000,43 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
             "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
         },
         direction="buy_yes",
+    ) is None
+    assert era._valid_qkernel_execution_economics_payload(
+        {
+            **cert,
+            "candidate_id": "NO:b24:DIRECT_NO:b24@proof",
+            "route_id": "DIRECT_NO:b24@proof",
+            "side": "NO",
+            "direction_law_ok": False,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb2|coarse_global",
+        },
+        direction="buy_no",
     ) is not None
     assert era._valid_qkernel_execution_economics_payload(
         {**cert, "direction_law_ok": True, "coherence_allows": False},
         direction="buy_yes",
     ) is None
+
+
+def test_qkernel_direct_route_receipt_probability_must_match_monitor_belief():
+    """Jeddah-class regression: direct NO cannot size on qkernel q above receipt q."""
+
+    from types import SimpleNamespace
+
+    receipt = SimpleNamespace(q_live=0.986261171798223, q_lcb_5pct=0.986261171798223)
+    cert = {
+        "route_id": "DIRECT_NO:b24@proof",
+        "payoff_q_point": 0.9999999257352632,
+        "payoff_q_lcb": 0.998678563135879,
+    }
+
+    assert era._qkernel_direct_route_matches_receipt_probability(receipt, cert) is False
+    assert era._qkernel_direct_route_matches_receipt_probability(
+        receipt,
+        {**cert, "payoff_q_point": receipt.q_live, "payoff_q_lcb": receipt.q_lcb_5pct},
+    ) is True
 
 
 def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
@@ -998,11 +1048,11 @@ def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
     qkernel winner as a rejected loser.
     """
     economics = _selected_economics(
-        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20, side="YES"
     )
     new_proof = _overlay_proof(
-        q_posterior=0.80,
-        q_lcb_5pct=0.65,
+        q_posterior=0.32,
+        q_lcb_5pct=0.32,
         economics=economics,
         direction="buy_yes",
         missing_reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH:legacy-pre-spine",
@@ -1040,8 +1090,8 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
         candidate_decisions=(selected_decision,),
     )
     base = _overlay_proof(
-        q_posterior=0.80,
-        q_lcb_5pct=0.70,
+        q_posterior=0.08,
+        q_lcb_5pct=0.06,
         economics=economics,
     )
     new_proof = bridge._overlay_spine_economics_onto_proof(base, decision)
@@ -1060,8 +1110,8 @@ def test_fdr_maps_consume_selected_qkernel_overlay_authority():
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.052, point_ev=0.050
     )
     base = _overlay_proof(
-        q_posterior=0.80,
-        q_lcb_5pct=0.70,
+        q_posterior=0.052,
+        q_lcb_5pct=0.052,
         economics=economics,
     )
     stale_base = era.dataclass_replace(base, p_value=1.0, passed_prefilter=False)
@@ -1095,8 +1145,8 @@ def test_qkernel_selected_route_fdr_is_not_legacy_bh_denominator():
         edge_lcb=0.05, cost=0.02, q_dot_payoff=0.09, point_ev=0.07
     )
     selected = _overlay_proof(
-        q_posterior=0.70,
-        q_lcb_5pct=0.40,
+        q_posterior=0.09,
+        q_lcb_5pct=0.07,
         economics=economics,
     )
     assert selected is not None
@@ -1152,8 +1202,8 @@ def test_qkernel_selected_route_fdr_rejects_high_false_edge_rate():
         edge_lcb=0.05, cost=0.02, q_dot_payoff=0.09, point_ev=0.07
     )
     selected = _overlay_proof(
-        q_posterior=0.70,
-        q_lcb_5pct=0.40,
+        q_posterior=0.09,
+        q_lcb_5pct=0.07,
         economics=economics,
     )
     assert selected is not None
@@ -1211,6 +1261,7 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
         cost=0.41,
         q_dot_payoff=0.199009684818666,
         point_ev=-0.220821533,
+        side="YES",
     )
     new_proof = _overlay_proof(
         q_posterior=0.199009684818666,
@@ -1219,10 +1270,7 @@ def test_overlay_does_not_create_milan_buy_yes_probability_contradiction():
         direction="buy_yes",
     )
 
-    assert new_proof.direction == "buy_yes"
-    assert new_proof.q_posterior == pytest.approx(0.199009684818666)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.04625961651748593)
-    assert new_proof.q_lcb_5pct <= new_proof.q_posterior
+    assert new_proof is None
 
 
 def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypatch, tmp_path):

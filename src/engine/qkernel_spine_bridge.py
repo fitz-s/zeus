@@ -1387,6 +1387,8 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     )
     if qkernel_execution_economics is None:
         return None
+    if not _direct_route_probability_matches_proof(proof, qkernel_execution_economics):
+        return None
     edge_lcb = float(qkernel_execution_economics["edge_lcb"])
     false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
     if false_edge_rate is None:
@@ -1486,6 +1488,49 @@ def _candidate_qkernel_execution_economics_payload(
     except (TypeError, ValueError, AttributeError):
         return None
     return payload
+
+
+def _direct_route_probability_matches_proof(
+    proof: Any,
+    qkernel_execution_economics: Mapping[str, Any],
+) -> bool:
+    """Fail closed when a direct qkernel route uses a different belief than the proof.
+
+    The live submit path executes a single native YES/NO leg for DIRECT routes. For that
+    route, ``q_dot_payoff`` is the same selected-side probability the receipt/monitor use
+    (YES_i for buy_yes, 1-YES_i for buy_no). If the qkernel certificate is materially more
+    optimistic than the proof's point probability or lower bound, entry and monitoring are
+    no longer evaluating the same belief surface. That split produced live orders whose
+    entry proof was positive while the first monitor refresh immediately saw negative edge.
+    """
+
+    route_id = str(qkernel_execution_economics.get("route_id") or "")
+    if not route_id.startswith(("DIRECT_YES:", "DIRECT_NO:")):
+        return True
+    direction = str(getattr(proof, "direction", "") or "")
+    native_side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else "")
+    cert_side = str(qkernel_execution_economics.get("side") or "").upper()
+    if cert_side and native_side and cert_side != native_side:
+        return False
+    try:
+        payoff_q_point = float(qkernel_execution_economics.get("payoff_q_point"))
+        payoff_q_lcb = float(qkernel_execution_economics.get("payoff_q_lcb"))
+        proof_q_point = float(getattr(proof, "q_posterior"))
+        proof_q_lcb = float(getattr(proof, "q_lcb_5pct"))
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (payoff_q_point, payoff_q_lcb, proof_q_point, proof_q_lcb)
+    ):
+        return False
+    if abs(payoff_q_point - proof_q_point) > 1e-6:
+        return False
+    # The execution lower bound may be more conservative, but never more optimistic than
+    # the receipt/monitor lower bound for the same direct leg.
+    if payoff_q_lcb > proof_q_lcb + 1e-6:
+        return False
+    return True
 
 
 def qkernel_candidate_economics_by_bin_side(

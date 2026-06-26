@@ -117,10 +117,10 @@ DIRECTION LAW (spec lines 947-951):
 forecast/modal bin); ``NO_i`` is structurally direction-law-clean when its bin is NOT the
 forecast bin. The forecast bin is the μ*-containing settlement bin of the family. This flag is a
 receipt proof, not the whole selector: a side-aware empirical OOF reliability verdict may license
-an otherwise non-directional Arrow claim onto the family optimizer when the candidate's own
-q_safe, edge, ΔU, and coherence evidence all survive. That license is symmetric across YES and
-NO; the old asymmetric bypass recreated an all-NO live bias and prevented family-level best
-expression selection.
+a NO-on-forecast-bin claim when the candidate's own q_safe, edge, ΔU, and coherence evidence all
+survive. It must not license a non-forecast YES: direct YES is buying a specific settlement bin,
+and a non-forecast YES with positive payoff-space edge is a probability-authority mismatch, not a
+safe alternate expression.
 
 GREENFIELD / WAVE-5 WIRING. The spec ``decide(case, family, snapshots, portfolio)``
 references ``fresh_model_reader``, ``day0_reader``, ``predictive_builder``,
@@ -1019,6 +1019,8 @@ class FamilyDecisionEngine:
     def _direction_admitted(self, d: CandidateDecision) -> bool:
         if d.direction_law_ok:
             return True
+        if d.route.side != "NO":
+            return False
         return (
             d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
             and not d.q_lcb_guard_abstained
