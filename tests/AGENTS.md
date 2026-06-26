@@ -56,7 +56,6 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_identity_column_defaults.py` | Pytest wrapper for check_identity_column_defaults.py; INV-14 identity-column DEFAULT antibody (created 2026-05-01) |
 | `test_ingest_boot_time_semantics.py` | PR45a relationship contract: city-local time, DST, scope identity, source-health, and data-coverage substrate facts cannot collapse into live readiness (created 2026-05-02) |
 | `test_ingest_provenance_contract.py` | Antibody #9: IngestionGuard provenance contract tests (two-system independence; created 2026-04-30) |
-| `test_inv_prototype.py` | Prototype evidence tests for @enforced_by INV decorator experiment; advisory only (created 2026-04-28) |
 | `test_invariant_citations.py` | Pytest wrapper for check_invariant_test_citations.py; two-ring invariant citation enforcement (created 2026-05-01) |
 | `test_learning_loop_observation.py` | Cross-module antibody: settlement-corpus->calibration update pipeline per R3 §1 #2 LEARNING_LOOP packet (created 2026-04-29) |
 | `test_learning_loop_observation_weekly.py` | End-to-end runner antibody for learning loop batch-3 weekly dispatch (created 2026-04-29) |

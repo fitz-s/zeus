@@ -4221,7 +4221,6 @@ def test_operation_vector_admits_runtime_governance_profile_boundary():
         ".claude/settings.json",
         ".gitignore",
         "architecture/kernel_manifest.yaml",
-        "architecture/inv_prototype.py",
         "architecture/ast_rules/semgrep_zeus.yml",
         "architecture/ast_rules/forbidden_patterns.md",
         "scripts/check_kernel_manifests.py",

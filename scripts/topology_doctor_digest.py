@@ -1038,7 +1038,6 @@ def _operation_vector_resolution(
         ".claude/hooks/pre-merge-commit",
         ".claude/hooks/registry.yaml",
         "architecture/kernel_manifest.yaml",
-        "architecture/inv_prototype.py",
         "architecture/ast_rules/semgrep_zeus.yml",
         "architecture/ast_rules/forbidden_patterns.md",
         "scripts/check_kernel_manifests.py",

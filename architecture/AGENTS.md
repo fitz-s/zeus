@@ -75,7 +75,6 @@ Changes here are architecture or governance changes, never “just docs.”
 | `packet_templates/*.md` | Work packet templates (bugfix, feature, refactor, schema) |
 | `worktree_merge_protocol.yaml` | Cross-session merge protocol per Stage 4 Gate B (verdict.md §6) — conflict-first merge inspection; MERGE_AUDIT_EVIDENCE critic verdict required only for escalated broad/high-risk conflict surfaces |
 | `preflight_overrides_2026-04-28.yaml` | Operator-approved preflight drift overrides for WU ICAO history residuals (schema_version 1; created 2026-04-28) |
-| `inv_prototype.py` | @enforced_by decorator prototype for round-2 §H1 INV annotation experiment (created 2026-04-28) |
 | `world_schema_version.yaml` | Legacy world DB schema version sentinel retained for historical two-system independence registry; live boot authority is direct `zeus-world.db` and `zeus-forecasts.db` `PRAGMA user_version` checks in `src/main.py` |
 | `runtime_posture.yaml` | Runtime posture YAML — read-only at runtime per INV-26 (created 2026-04-26) |
 | `scope_schema.json` | JSON Schema for Zeus packet scope.yaml sidecar; machine-read by zpkt and pre-commit hook |
