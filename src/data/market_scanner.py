@@ -225,6 +225,21 @@ def _priority_direct_clob_prefetch_condition_limit() -> int:
     return max(0, configured)
 
 
+def _feasibility_prefetch_busy_timeout_ms() -> int:
+    """Bound local price-witness reads so they cannot starve snapshot writes."""
+
+    try:
+        configured = int(
+            os.environ.get(
+                "ZEUS_MARKET_DISCOVERY_FEASIBILITY_PREFETCH_BUSY_TIMEOUT_MS",
+                "50",
+            )
+        )
+    except ValueError:
+        configured = 50
+    return max(1, configured)
+
+
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
 
@@ -4273,6 +4288,7 @@ def _prefetch_selected_orderbooks_from_feasibility(
     *,
     captured: datetime,
     already_prefetched: set[str] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, dict]:
     """Use fresh live price-channel book evidence when direct CLOB batch misses.
 
@@ -4292,31 +4308,47 @@ def _prefetch_selected_orderbooks_from_feasibility(
     )
     cutoff = captured.astimezone(timezone.utc) - timedelta(seconds=max_age_seconds)
     books: dict[str, dict] = {}
-    for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
-        token_id = _selected_token_for_direction(outcome, direction)
-        if not token_id or token_id in already or token_id in books:
-            continue
-        row = conn.execute(
-            """
-            SELECT token_id, direction, quote_seen_at, book_hash_before,
-                   best_bid_before, best_ask_before, depth_before_json
-              FROM execution_feasibility_evidence
-             WHERE token_id = ?
-             ORDER BY CASE WHEN direction = ? THEN 0 ELSE 1 END,
-                      quote_seen_at DESC, created_at DESC
-             LIMIT 1
-            """,
-            (token_id, str(direction)),
-        ).fetchone()
-        if row is None:
-            continue
-        data = dict(row)
-        quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
-        if quote_seen_at is None or quote_seen_at < cutoff:
-            continue
-        book = _orderbook_from_feasibility_row(data, outcome=outcome)
-        if book is not None:
-            books[token_id] = book
+    prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
+    try:
+        _set_busy_timeout_ms(conn, _feasibility_prefetch_busy_timeout_ms())
+        for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            token_id = _selected_token_for_direction(outcome, direction)
+            if not token_id or token_id in already or token_id in books:
+                continue
+            try:
+                row = conn.execute(
+                    """
+                    SELECT token_id, direction, quote_seen_at, book_hash_before,
+                           best_bid_before, best_ask_before, depth_before_json
+                      FROM execution_feasibility_evidence
+                     WHERE token_id = ?
+                     ORDER BY CASE WHEN direction = ? THEN 0 ELSE 1 END,
+                              quote_seen_at DESC, created_at DESC
+                     LIMIT 1
+                    """,
+                    (token_id, str(direction)),
+                ).fetchone()
+            except Exception as exc:
+                if _is_sqlite_locked_error(exc):
+                    logger.info(
+                        "Execution feasibility prefetch deferred on SQLite lock after %d books",
+                        len(books),
+                    )
+                    break
+                raise
+            if row is None:
+                continue
+            data = dict(row)
+            quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
+            if quote_seen_at is None or quote_seen_at < cutoff:
+                continue
+            book = _orderbook_from_feasibility_row(data, outcome=outcome)
+            if book is not None:
+                books[token_id] = book
+    finally:
+        _set_busy_timeout_ms(conn, prior_busy_timeout_ms)
     return books
 
 
@@ -4638,6 +4670,7 @@ def refresh_executable_market_substrate_snapshots(
                     selected_candidates,
                     captured=captured,
                     already_prefetched=set(prefetched_books),
+                    deadline=prefetch_deadline,
                 ).items()
                 if token_id not in prefetched_books
             }
