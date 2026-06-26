@@ -387,11 +387,18 @@ def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     assert "refresh_budget_seconds=background_budget_s" in warm_src
     assert "snapshot_reserve_seconds=background_snapshot_reserve_s" in warm_src
     assert "ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS" in helper_src
-    assert '"12.0"' in helper_src
+    assert '"6.0"' in helper_src
     assert "ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS" in reserve_src
-    assert '"6.0"' in reserve_src
+    assert '"3.0"' in reserve_src
     assert "executor.shutdown(wait=False, cancel_futures=True)" in refresh_src
     assert "with ThreadPoolExecutor(" not in refresh_src
+
+
+def test_targeted_decision_refresh_defaults_cover_multiple_blocked_families():
+    refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+
+    assert '"reactor_decision_refresh_cycle_budget_seconds",\n        10.0,' in refresh_src
+    assert '"reactor_decision_refresh_max_per_cycle",\n        4,' in refresh_src
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():

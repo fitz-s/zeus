@@ -101,7 +101,7 @@ def _background_warm_refresh_budget_seconds() -> float:
     )
     background_cap = max(
         5.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "12.0")),
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "6.0")),
     )
     return min(configured, background_cap)
 
@@ -113,7 +113,7 @@ def _background_warm_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
     )
     background_cap = max(
         1.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "6.0")),
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "3.0")),
     )
     return min(configured, background_cap, max(0.1, refresh_budget_s - 0.1))
 

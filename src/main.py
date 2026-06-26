@@ -9234,7 +9234,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
     refresh_window_started: float | None = None
     cycle_budget_s = _float_setting(
         "reactor_decision_refresh_cycle_budget_seconds",
-        6.0,
+        10.0,
         minimum=0.0,
         maximum=20.0,
     )
@@ -9246,7 +9246,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
     )
     max_refreshes_per_cycle = _int_setting(
         "reactor_decision_refresh_max_per_cycle",
-        1,
+        4,
         minimum=0,
         maximum=10,
     )
