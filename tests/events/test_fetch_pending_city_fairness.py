@@ -102,6 +102,22 @@ def _tradeable_fsr(
     )
 
 
+def _market_price_redecision(event):
+    payload = json.loads(event.payload_json)
+    payload["redecision_origin"] = "market_price"
+    return make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key=event.entity_key,
+        source="market_channel_price:fixture",
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=event.received_at,
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=payload,
+        priority=event.priority,
+    )
+
+
 def _bulk_tier2_fsr(city: str, snapshot_id: str, *, available_at: str, received_at: str):
     """A NOT-COMPLETE / NOT-LIVE_ELIGIBLE FSR — falls to the claim tier ELSE
     branch (Tier 2), strictly below a tradeable Tier-1 FSR. Stands in for the
@@ -362,6 +378,40 @@ def test_recapture_edge_backoff_expires_without_permanent_family_suppression():
     returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
 
     assert [event.event_id for event in returned] == [cooled.event_id]
+
+
+def test_recent_recapture_edge_reversed_redecision_backoff_reaches_other_redecision_family():
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    cooled_city, open_city = _REAL_CITIES[:2]
+    cooled = _market_price_redecision(
+        _tradeable_fsr(
+            cooled_city,
+            "snap-cooled-rd",
+            available_at="2026-06-11T06:00:00+00:00",
+            received_at="2026-06-11T06:00:30+00:00",
+        )
+    )
+    open_event = _market_price_redecision(
+        _tradeable_fsr(
+            open_city,
+            "snap-open-rd",
+            available_at="2026-06-11T06:00:00+00:00",
+            received_at="2026-06-11T06:00:30+00:00",
+        )
+    )
+    store.insert_or_ignore(cooled)
+    store.insert_or_ignore(open_event)
+    _insert_recapture_edge_reversed_regret(
+        conn,
+        cooled,
+        created_at="2026-06-11T11:57:00+00:00",
+    )
+
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=1)
+
+    assert [event.event_id for event in returned] == [open_event.event_id]
 
 
 def test_bulk_lane_never_starves_a_tradeable_decision():

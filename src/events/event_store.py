@@ -349,8 +349,15 @@ class EventStore:
             event = _event_from_row(row)
             payload = _event_payload_dict(event)
             family_key = _forecast_family_key_from_payload(payload)
+            redecision_origin = str(payload.get("redecision_origin") or "").strip().lower()
             recapture_edge_backoff = (
-                event.event_type == "FORECAST_SNAPSHOT_READY"
+                (
+                    event.event_type == "FORECAST_SNAPSHOT_READY"
+                    or (
+                        event.event_type == "EDLI_REDECISION_PENDING"
+                        and redecision_origin in {"entry_screen", "market_price", ""}
+                    )
+                )
                 and family_key is not None
                 and family_key in cooled_families
             )
@@ -1826,9 +1833,17 @@ def _recent_recapture_edge_reversed_families(
     families: set[tuple[str, str, str]] = set()
     for row in rows:
         event = _event_from_row(row)
-        if event.event_type != "FORECAST_SNAPSHOT_READY":
+        payload = _event_payload_dict(event)
+        redecision_origin = str(payload.get("redecision_origin") or "").strip().lower()
+        if not (
+            event.event_type == "FORECAST_SNAPSHOT_READY"
+            or (
+                event.event_type == "EDLI_REDECISION_PENDING"
+                and redecision_origin in {"entry_screen", "market_price", ""}
+            )
+        ):
             continue
-        family_key = _forecast_family_key_from_payload(_event_payload_dict(event))
+        family_key = _forecast_family_key_from_payload(payload)
         if family_key is not None:
             families.add(family_key)
     if not families:
