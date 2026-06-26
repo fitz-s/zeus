@@ -681,12 +681,11 @@ class TestSelectionFamilySubstrate:
 
         hypotheses = scan_full_hypothesis_family(FakeAnalysis(), n_bootstrap=2)
 
-        assert len(hypotheses) == 4
+        assert len(hypotheses) == 3
         assert [hypothesis.direction for hypothesis in hypotheses] == [
             "buy_yes",
             "buy_no",
             "buy_yes",
-            "buy_no",
         ]
 
     def test_full_family_selection_uses_one_candidate_family_across_strategies(self, tmp_path):
@@ -767,18 +766,11 @@ class TestSelectionFamilySubstrate:
         # S4 R9 P10B: temperature_metric inserted after target_date.
         assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|high|update_reaction|snap=snap-1"]
         assert family_strategy_keys == [""]
-        # S6-FDR (2026-06-01): the buy_no shoulder hypothesis classifies as
-        # shoulder_impossible_tail_capture, NOT the retired/refuted
-        # shoulder_sell. Commit d07fed213a (2026-05-22, "retire shoulder_sell
-        # (refuted) + add shoulder_impossible_tail_capture") made shoulder_sell
-        # dead law; _classify_via_registry now routes a shoulder buy_no
-        # hypothesis to the current physical-bound key. This test assertion
-        # carried the stale strategy name (legacy-until-audited); updated to the
-        # authoritative production classification. Assertion strength unchanged
-        # — still an exact two-key set, just with the current key.
+        # Open-shoulder buy_no is not runtime-classified until the physical-bound
+        # tail-capture implementation is actually wired.
         assert {meta["hypothesis_strategy_key"] for meta in hypothesis_meta} == {
+            "",
             "center_buy",
-            "shoulder_impossible_tail_capture",
         }
 
     def test_full_family_selection_keeps_family_strategy_blank_when_partially_unclassified(self, tmp_path):
@@ -1104,22 +1096,16 @@ class TestSelectionFamilySubstrate:
         meta = json.loads(conn.execute("SELECT meta_json FROM selection_family_fact").fetchone()["meta_json"])
         conn.close()
 
-        # Native NO quote evidence makes bin 0 buy_no executable; FDR selected
-        # the same hypothesis that evaluate_candidate materialized as a BinEdge.
-        assert decisions[0].rejection_stage == "SIZING_TOO_SMALL"
-        assert decisions[0].edge.direction == "buy_no"
-        assert decisions[0].edge.p_market == pytest.approx(0.5)
-        # entry_price is typed ExecutionPrice (INV-38); compare the scalar
-        # explicitly — EP does not equal a bare float (PR #348 Blocker 1).
-        assert float(decisions[0].edge.entry_price) == pytest.approx(0.5)
-        assert decisions[0].edge.vwmp == pytest.approx(0.5)
+        # The dormant shoulder buy_no path no longer materializes through a
+        # scaffold strategy key; FDR filters the unclassified inverse quadrant.
+        assert decisions[0].rejection_stage == "FDR_FILTERED"
         assert family_count == 1
-        assert hypothesis_count == 5
-        assert meta["tested_hypotheses"] == 5
-        assert meta["active_fdr_selected"] == 1
+        assert hypothesis_count == 4
+        assert meta["tested_hypotheses"] == 4
+        assert meta["active_fdr_selected"] == 0
         assert analysis_kwargs["buy_no_quote_available"].tolist() == [True, True, True, True]
         assert analysis_kwargs["p_market_no"].tolist() == [0.5, 0.5, 0.5, 0.5]
-        assert fee_rate_tokens == ["no0"]
+        assert fee_rate_tokens == []
 
     def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with

@@ -425,10 +425,6 @@ _102 base tables_
     strategy_key:TEXT, as_of:TEXT, open_exposure_usd:REAL, settled_trades_30d:INTEGER,
     realized_pnl_30d:REAL, unrealized_pnl:REAL, win_rate_30d:REAL, brier_30d:REAL, fill_rate_14d:REAL,
     edge_trend_30d:REAL, risk_level:TEXT, execution_decay_flag:INTEGER, edge_compression_flag:INTEGER
-- **tail_stress_scenarios**  (rows≈0, cols=9)
-    market_slug:TEXT, temperature_metric:TEXT, target_date:TEXT, observation_time:TEXT,
-    decision_seq:INTEGER, scenarios:TEXT, max_loss_pct:REAL, tail_probability_stressed:REAL,
-    schema_version:INTEGER
 - **temp_persistence**  (rows≈0, cols=6)
     city:TEXT, season:TEXT, delta_bucket:TEXT, frequency:REAL, avg_next_day_reversion:REAL,
     n_samples:INTEGER
@@ -1342,10 +1338,6 @@ _116 base tables_
     strategy_key:TEXT, as_of:TEXT, open_exposure_usd:REAL, settled_trades_30d:INTEGER,
     realized_pnl_30d:REAL, unrealized_pnl:REAL, win_rate_30d:REAL, brier_30d:REAL, fill_rate_14d:REAL,
     edge_trend_30d:REAL, risk_level:TEXT, execution_decay_flag:INTEGER, edge_compression_flag:INTEGER
-- **tail_stress_scenarios**  (rows≈0, cols=9)
-    market_slug:TEXT, temperature_metric:TEXT, target_date:TEXT, observation_time:TEXT,
-    decision_seq:INTEGER, scenarios:TEXT, max_loss_pct:REAL, tail_probability_stressed:REAL,
-    schema_version:INTEGER
 - **temp_persistence**  (rows≈0, cols=6)
     city:TEXT, season:TEXT, delta_bucket:TEXT, frequency:REAL, avg_next_day_reversion:REAL,
     n_samples:INTEGER

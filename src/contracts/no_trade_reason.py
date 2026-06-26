@@ -125,11 +125,7 @@ class NoTradeReason(StrEnum):
     RISK_LIMITS_EXCEEDED = auto()
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = auto()
 
-    # ── Shoulder strategy gates (Phase 3 T2) ─────────────────────────────────
-    # Live shoulder gates with real evaluator emitters. The 4 data-gated
-    # SHOULDER_* members (STRESS_FAIL, REGIME_MISMATCH, NATIVE_NO_DEPTH_INSUFFICIENT,
-    # DAY0_BOUND_NOT_ELIMINATED) were removed 2026-06-14 — no live emitter.
-    SHOULDER_NO_TRADE_GATE = auto()
+    # ── Shoulder exposure guard ──────────────────────────────────────────────
     SHOULDER_CLUSTER_CAP_EXCEEDED = auto()
 
     # ── Retired candidate strategy gates: REMOVED 2026-06-14 ──────────────────

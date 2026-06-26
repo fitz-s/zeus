@@ -839,7 +839,6 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- T2 Phase-2 no_trade_events scripts (2026-05-20) ---
         "scripts/migrate_no_trade_events_create_2026_05_21.py",            # operator_invoked: idempotent CREATE TABLE/INDEX only; no PRAGMA user_version bump; not daemon path
         # --- Phase 3 T2 migration (2026-05-21) ---
-        "scripts/migrate_no_trade_events_rebuild_phase3_t2.py",             # operator_invoked: SAVEPOINT-gated ensure_table + PRAGMA user_version=18; daemon never imports
         # --- Phase 3 T3 (2026-05-21) ---
         "scripts/rollback_phase3_t3.py",                 # operator_invoked: SCAFFOLD stub; run() raises NotImplementedError until T3 production pass
         # --- Phase 7 T4 (2026-05-21) ---

@@ -41,7 +41,7 @@ Zeus must not classify strategies by names such as `center_buy` or `stale_quote_
 
    for NO buys.
 
-The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `ShoulderStrategyVNext`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, candidate strategy files, `decision_events`, `no_trade_events`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values or return scaffold no-trade classifications instead of producing theorem-backed decision records.
+The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, candidate strategy files, `decision_events`, `no_trade_events`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values instead of producing theorem-backed decision records.
 
 The strongest actionable strategy family is **deterministic/vector payoff arbitrage**, especially `neg_risk_basket` and YES/NO parity baskets. The strongest existing live family is **settlement/observation deterministic capture**, especially `settlement_capture` and the proposed production form of `resolution_window_maker`. The strongest forecast family remains **calibrated finite-bin center trading**. The weakest original thesis is **ex-ante `shoulder_sell` as retail-lottery short-tail**; it is refuted in sign by the supplied shoulder proof and must be replaced by a physical impossible-tail capture theorem.
 
@@ -86,12 +86,11 @@ where \(C\) is shares, \(p\) is share price, and \(r\) is category taker fee rat
 This packet uses the following code/document surfaces as implementation ground truth:
 
 - `architecture/strategy_profile_registry.yaml`: current live/shadow/blocked strategy registry.
-- `src/strategy/strategy_profile.py`: `StrategyProfile`, `is_runtime_live`, `live_allowed_keys`, and `_classify_via_registry`.
+- `src/strategy/strategy_profile.py`: `StrategyProfile`, `is_runtime_live`, and `live_allowed_keys`.
 - `src/contracts/evidence_tier.py`: `EvidenceTier` IntEnum.
 - `src/analysis/evidence_report.py`: Beta(2,2) CI, decision/regret/no-trade aggregation.
 - `src/analysis/live_readiness_tribunal.py`: canonical `promotion_predicate`.
 - `src/analysis/promotion_readiness.py`: read-only validator.
-- `src/contracts/shoulder_strategy_vnext.py`: shoulder dataclass and current scaffold classifier.
 - `src/analysis/market_analysis_vnext.py`: `MicrostructureMetrics` and current missing field state.
 - `src/contracts/executable_market_snapshot.py`: executable snapshot fields.
 - `src/contracts/execution_intent.py`: execution order types and depth status vocabulary.
@@ -403,8 +402,7 @@ Current strategic state from registry and code:
 
 - Runtime live old strategies: `settlement_capture`, `center_buy`, `opening_inertia`, `imminent_open_capture`.
 - Shadow/block status new strategies: `shoulder_sell`, `shoulder_buy`, `center_sell`, and six Phase-4 candidates.
-- Current `shoulder_strategy_vnext.py` classifier is a scaffold: it returns a `ShoulderStrategyVNext` object with probabilistic fields `nan`, native quotes `None`, `liquidity_gate=False`, and `no_trade_reason=SHOULDER_NO_TRADE_GATE`.
-- Current `_classify_via_registry` only routes open-shoulder `buy_no`, effectively serving `shoulder_sell` topology, not `shoulder_buy`.
+- The retired shoulder vNext scaffold classifier has been removed. Blocked shoulder strategies do not classify into runtime strategy keys until a real physical-bound or tail model is implemented.
 - Current candidate strategies mostly write placeholder shadow edges and do not yet compute theorem-grade EV.
 
 This document therefore distinguishes **current code behavior** from **target mathematical implementation** for every strategy.
@@ -792,7 +790,7 @@ Application-grade as a bridge between calibrated forecast and physical settlemen
 
 ### 11.1 Current code state
 
-Registry marks `shoulder_sell` shadow with blockers. `_classify_via_registry` currently routes only open-shoulder `buy_no`, and `classify_shoulder_candidate` returns scaffold no-trade.
+Registry marks `shoulder_sell` shadow with blockers. No runtime classifier remains for the retired retail-bias shoulder path.
 
 ### 11.2 Original thesis failure
 
@@ -865,7 +863,7 @@ Original `shoulder_sell` is not application-grade. Reformed impossible-tail capt
 
 ### 12.1 Current code state
 
-`shoulder_buy` is blocked/IDEA in registry. There is no buy_yes shoulder routing in current `_classify_via_registry`.
+`shoulder_buy` is blocked/IDEA in registry. There is no buy_yes shoulder runtime routing.
 
 ### 12.2 Correct mathematical model
 

@@ -234,13 +234,8 @@ def test_inv_evaluator_callsite_count() -> None:
 # would be category-wrong for them. The original shadow-candidate research-harness
 # reasons (19 members) were DELETED 2026-06-14 in the gate-mass-collapse wave
 # (src/strategy/candidates/* + shadow_candidate_dispatch.py removed), so they no
-# longer exist as enum members and are gone from this exempt set. The two
-# survivors below are live, non-evaluator-emitted reasons:
-#   - shoulder_no_trade_gate: emitted by src/contracts/shoulder_strategy_vnext.py
-#     (no_trade_reason=...), consumed by the backtest harness, not via evaluator.
-_SHADOW_CANDIDATE_REASONS: FrozenSet[str] = frozenset({
-    "shoulder_no_trade_gate",
-})
+# longer exist as enum members and are gone from this exempt set.
+_SHADOW_CANDIDATE_REASONS: FrozenSet[str] = frozenset()
 
 
 def test_inv_no_orphan_enum_members() -> None:

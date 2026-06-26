@@ -1833,21 +1833,6 @@ tables:
       (PR #352 Part-5) when the schema_version CHECK list was extended to 40
       and the gate re-scanned the touched phase6_evidence_schema.py.
 
-  - name: tail_stress_scenarios
-    db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema (daemon boot, SCHEMA_VERSION 16) + migrate_no_trade_events_rebuild_phase3_t2.py (operator one-shot)"
-    pk_col: "[market_slug, temperature_metric, target_date, observation_time, decision_seq]"
-    notes: >
-      Phase 3 T2 (04_PHASE_3_SHOULDER.md §"Schema impact", 2026-05-21):
-      per-shoulder-decision stress probe results. Columns: market_slug, temperature_metric,
-      target_date, observation_time, decision_seq, scenarios (JSON array of scenario_ids),
-      max_loss_pct REAL, tail_probability_stressed REAL, schema_version CHECK (15, 16).
-      PK matches decision_events natural key for FK-like joins.
-      SCHEMA_VERSION 15→16. DDL in src/state/schema/tail_stress_scenarios_schema.py.
-      SCAFFOLD — writer/reader wired in T2 production pass.
-
   - name: shoulder_exposure_ledger
     db: world
     schema_class: world_class
@@ -2480,14 +2465,6 @@ tables:
     notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
 
   - name: shoulder_exposure_ledger
-    db: trade
-    schema_class: legacy_archived
-    schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b_residual
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b/init_schema(trade_conn) residual drift. Drop after 2026-08-09.
-
-  - name: tail_stress_scenarios
     db: trade
     schema_class: legacy_archived
     schema_version_owner: null

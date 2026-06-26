@@ -3283,10 +3283,6 @@ def init_schema(
     _migrate_decision_events_schema(conn)
     _migrate_world_strategy_key_checks(conn)
 
-    # Phase 3 T2 (2026-05-21): tail_stress_scenarios table (SCHEMA_VERSION 16).
-    from src.state.schema.tail_stress_scenarios_schema import ensure_table as _ensure_tail_stress_scenarios_table
-    _ensure_tail_stress_scenarios_table(conn)
-
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
     _ensure_shoulder_exposure_ledger_table(conn)

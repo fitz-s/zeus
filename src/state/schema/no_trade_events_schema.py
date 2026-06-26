@@ -18,9 +18,8 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
   - 15: P2 T2 production pass
   - 16: MUTUALLY_EXCLUSIVE_FAMILY_DEDUP added (PR #249, 2026-05-21)
   - 17: live-money no_trade reason taxonomy (PR #253, 2026-05-21)
-  - 18: Phase 3 T2 (2026-05-21) — 6 SHOULDER_* NoTradeReason members added;
-        table-rebuild migration under ATTACH+SAVEPOINT per INV-37 in
-        scripts/migrate_no_trade_events_rebuild_phase3_t2.py.
+  - 18: Phase 3 T2 (2026-05-21) — retired shoulder scaffold reason expansion
+        later removed; current CHECK is enum-derived from live reasons.
   - 19: executable snapshot tradeability evidence, no no_trade_events DDL change.
   - 20: P0-3 live release proof — schema_compatibility marks degraded
         compatibility rows so live learning/report trust can exclude them.

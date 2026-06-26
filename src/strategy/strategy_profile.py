@@ -1,6 +1,6 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-23
-# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence) + Phase 3 T2 (2026-05-21): _classify_via_registry SCAFFOLD per 04_PHASE_3_SHOULDER.md §2 T2.
+# Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 + Bug review §D (scattered strategy lists) + §E (LIVE_SAFE / _LIVE_ALLOWED divergence).
 """StrategyProfile registry — single source of per-strategy authority.
 
 What this module replaces
@@ -619,82 +619,6 @@ def kelly_default_multiplier(strategy_key: str) -> float:
         return 0.0
     return profile.kelly_default_multiplier
 
-
-
-# ── Phase 3 T2 — registry-driven shoulder classifier ─────────────── #
-
-# Type alias: Optional[ShoulderStrategyVNext] — avoids circular import at
-# module level (ShoulderStrategyVNext imports NoTradeReason + WeatherRegimeTag;
-# lazy import inside function body is the safe pattern).
-# Deviation from dispatch literal "ClassificationResult": ClassificationResult
-# is defined here as an alias so dispatch signature works and v3 callsite shape
-# aligns (Optional[ShoulderStrategyVNext] is the concrete type).
-ClassificationResult = object  # Runtime: Optional["ShoulderStrategyVNext"]; see body.
-
-
-def _classify_via_registry(strategy_id: str, context) -> "ClassificationResult":
-    """Registry-driven shoulder classification helper (canonical home per plan §2 T2 m2).
-
-    Replaces hardcoded shoulder branches at evaluator.py L1462/L1478/L1494
-    and cycle_runner.py L456. Called ONLY for shoulder paths; cycle-axis
-    short-circuits (settlement_capture / opening_inertia / imminent_open_capture)
-    ARE UNCHANGED per AR1.
-
-    Args:
-        strategy_id: Strategy key from the profile registry (e.g. "shoulder_sell").
-        context:     EdgeContext or equivalent carrier; provides edge, candidate,
-                     market_phase, conn fields for classify_shoulder_candidate.
-
-    Returns:
-        ClassificationResult = Optional[ShoulderStrategyVNext]:
-          - ShoulderStrategyVNext instance if candidate passes all gates.
-          - None if strategy is unknown, blocked, or context is insufficient.
-
-    Fail-closed: ProfileNotFound (unknown strategy_id) returns None.
-
-    T2 thin (Pattern B): returns ShoulderStrategyVNext with all probabilistic
-    fields = nan and no_trade_reason = SHOULDER_NO_TRADE_GATE when topology
-    matches. Probabilistic fields wired in T3+.
-    """
-    # Fail-closed: unknown strategy → None (no entry, no risk).
-    profile = try_get(strategy_id)
-    if profile is None:
-        return None
-
-    # Live-status gate: blocked strategies (including refuted shoulder_sell) must not
-    # classify any edges. Empty allowed_bin_topology is a subset of everything so
-    # it does not implicitly block; this explicit gate does.
-    if profile.live_status == "blocked":
-        return None
-
-    # Profile gate — only pure-shoulder strategies (open_shoulder topology ONLY)
-    # route through this classifier. Strategies that allow mixed topologies
-    # (e.g. opening_inertia allows point + finite_range + open_shoulder) use
-    # their own classification path; routing them here would misclassify.
-    # Also blocks strategies with empty allowed_bin_topology.
-    if not profile.allowed_bin_topology:
-        return None
-    if not (profile.allowed_bin_topology <= frozenset({"open_shoulder"})):
-        return None
-
-    edge = getattr(context, "edge", None)
-    if edge is None:
-        return None
-
-    # Topology gate — only open-shoulder buy_no edges route to shoulder classifier.
-    if not (getattr(edge, "direction", None) == "buy_no" and
-            getattr(getattr(edge, "bin", None), "is_shoulder", False)):
-        return None
-
-    # Lazy import avoids circular dependency: shoulder_strategy_vnext imports
-    # NoTradeReason + WeatherRegimeTag; this module imports strategy_profile.
-    from src.contracts.shoulder_strategy_vnext import classify_shoulder_candidate
-
-    candidate = getattr(context, "candidate", None)
-    market_phase = getattr(context, "market_phase", None)
-    conn = getattr(context, "conn", None)
-
-    return classify_shoulder_candidate(edge, candidate, market_phase, conn)
 
 
 # ── test helper ────────────────────────────────────────────────────── #
