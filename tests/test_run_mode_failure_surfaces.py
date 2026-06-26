@@ -803,8 +803,9 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     assert ("edli_command_recovery", False, None) in health_calls
 
 
-def test_edli_command_recovery_defers_to_active_redecision(monkeypatch) -> None:
-    """Frequent recovery sweeps must not contend with the live management lane."""
+def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypatch) -> None:
+    """Confirmed fill projection is part of the live management lane and must
+    not starve behind continuous redecision activity."""
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
 
@@ -822,9 +823,9 @@ def test_edli_command_recovery_defers_to_active_redecision(monkeypatch) -> None:
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda **kwargs: calls.append("reconcile") or {"scanned": 1, "advanced": 1},
+        lambda **kwargs: calls.append(str(kwargs.get("scope"))) or {"scanned": 1, "advanced": 0},
     )
 
     main_module._edli_command_recovery_cycle()
 
-    assert calls == []
+    assert calls == ["live_tick"]

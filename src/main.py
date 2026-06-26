@@ -5615,12 +5615,6 @@ def _edli_command_recovery_cycle() -> None:
     from src.execution.command_recovery import reconcile_unresolved_commands
     from src.state.db import get_trade_connection_with_world_required
 
-    if _edli_reactor_active() or _edli_redecision_screen_lock.locked():
-        logger.info(
-            "edli_command_recovery deferred: active trading lane owns the trade DB "
-            "write window this tick"
-        )
-        return
     summary = reconcile_unresolved_commands(scope="live_tick")
     if summary.get("scanned"):
         logger.info("edli_command_recovery: %s", summary)
