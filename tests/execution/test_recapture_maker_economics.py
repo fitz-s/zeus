@@ -66,6 +66,12 @@ def _fresh_snapshot_with_min_order_size(*, top_ask, min_order_size):
     return snap
 
 
+def _fresh_snapshot_with_neg_risk(*, top_ask, neg_risk):
+    snap = _fresh_snapshot(top_ask=top_ask)
+    snap.neg_risk = neg_risk
+    return snap
+
+
 def _stale_snapshot():
     return SimpleNamespace(
         snapshot_id="snap-stale",
@@ -177,6 +183,27 @@ def test_same_selected_token_min_order_size_drift_updates_envelope(_patched_reca
 
     assert out.executable_snapshot_id == "snap-fresh"
     assert out.executable_snapshot_min_order_size == Decimal("1")
+
+
+def test_same_selected_token_neg_risk_drift_updates_envelope(_patched_recapture):
+    """Fresh recapture may correct stale/missing negRisk metadata for the same token."""
+
+    from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+    _patched_recapture["fresh"] = _fresh_snapshot_with_neg_risk(
+        top_ask=Decimal("0.20"),
+        neg_risk=True,
+    )
+
+    out = _recapture_fresh_entry_snapshot_if_needed(
+        _LegacyIntent(executable_snapshot_neg_risk=False),
+        _final_intent(post_only=True, limit=0.14),
+        conn=object(),
+        submitted_shares=5.0,
+    )
+
+    assert out.executable_snapshot_id == "snap-fresh"
+    assert out.executable_snapshot_neg_risk is True
 
 
 def test_recapture_rejects_when_submitted_shares_below_fresh_min_order_size(_patched_recapture):

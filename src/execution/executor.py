@@ -2951,8 +2951,12 @@ def _recapture_fresh_entry_snapshot_if_needed(
             "recaptured executable snapshot submitted_shares below fresh min_order_size: "
             f"submitted_shares={submitted_shares} fresh_min_order_size={fresh.min_order_size}"
         )
-    if fresh.neg_risk != final_intent.neg_risk:
-        raise ValueError("recaptured executable snapshot neg_risk mismatch")
+    # neg_risk is venue metadata attached to the same condition/token identity.
+    # Older elected/JIT snapshots can be missing the CLOB negRisk fact and carry
+    # the default False; the fresh recapture below is the authority that gets
+    # threaded into the submit envelope. Do not reject solely because this
+    # metadata was corrected, provided selected token, tick/min-order, and
+    # economics still validate against the fresh book.
     # MODE-CORRECT ECONOMICS VALIDATION (live 2026-06-12 02:16:49Z, Helsinki
     # POST_ONLY 219.77@0.14): the crossable-depth sweep is TAKER economics — a
     # post_only maker rest ADDS liquidity and by construction has no crossable
