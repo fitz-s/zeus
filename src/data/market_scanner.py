@@ -124,7 +124,7 @@ def _snapshot_capture_busy_timeout_ms(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
     )
     priority_floor_candidate_cap = int(
-        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "24")
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "32")
     )
     priority_share_candidate_cap = int(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_SHARE_MAX_CANDIDATES", "8")

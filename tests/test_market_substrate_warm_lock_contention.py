@@ -358,6 +358,23 @@ def test_family_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
     assert priority_family >= 4000
 
 
+def test_claim_priority_batch_capture_busy_timeout_keeps_durable_floor(monkeypatch):
+    """A live claim-order warm batch must not fail-fast under normal WAL contention."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    priority_claim_batch = _snapshot_capture_busy_timeout_ms(
+        5.0,
+        remaining_candidates=32,
+        priority_candidate=True,
+    )
+
+    assert priority_claim_batch >= 4000
+
+
 def test_large_priority_capture_busy_timeout_splits_batch_budget(monkeypatch):
     """An oversized priority batch must make progress past one locked row."""
 
