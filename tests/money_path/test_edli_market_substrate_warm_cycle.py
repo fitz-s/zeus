@@ -271,6 +271,8 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "confirmed_entry_scope = set(family_keys)" in screen_src
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
+    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)" in screen_src
+    assert "open_rest_condition_scope," in screen_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS" in retry_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
@@ -282,6 +284,21 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
     assert "confirmed_rest_scope &= fresh_rest_scope" in screen_src
     assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
+
+
+def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
+    belief = SimpleNamespace(
+        family_id="family-1",
+        city="Singapore",
+        target_date="2026-06-27",
+        metric="high",
+    )
+    rest = SimpleNamespace(family_id="family-1", condition_id="cond-rest")
+    unrelated = SimpleNamespace(family_id="family-2", condition_id="cond-other")
+
+    assert main_module._edli_open_rest_condition_scope([rest, unrelated], [belief]) == {
+        ("Singapore", "2026-06-27", "high"): {"cond-rest"}
+    }
 
 
 def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatch):

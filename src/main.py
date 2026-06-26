@@ -6128,6 +6128,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 decision_time=received_at,
             )
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
+            open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)
             rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
         finally:
             try:
@@ -6169,7 +6170,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         confirm_families = set(all_families) | set(held_families)
         priority_condition_ids = {
             condition_id
-            for scope in (entry_condition_scope, rest_condition_scope, held_condition_scope)
+            for scope in (
+                entry_condition_scope,
+                open_rest_condition_scope,
+                rest_condition_scope,
+                held_condition_scope,
+            )
             for condition_ids in scope.values()
             for condition_id in condition_ids
             if str(condition_id or "").strip()
@@ -6817,6 +6823,32 @@ def _edli_rest_pull_condition_scope(
     by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
     out: dict[tuple[str, str, str], set[str]] = {}
     for rest, _decision in rest_pulls or ():
+        belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
+        if belief is None:
+            continue
+        family_key = _edli_family_key_from_belief(belief)
+        if family_key is None:
+            continue
+        condition_id = str(getattr(rest, "condition_id", "") or "").strip()
+        if condition_id:
+            out.setdefault(family_key, set()).add(condition_id)
+    return out
+
+
+def _edli_open_rest_condition_scope(
+    open_rests: Iterable[Any],
+    beliefs: Iterable[Any],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Map all live maker rests to condition_ids that need price refresh.
+
+    A rest cannot decide whether to cancel/reprice from stale books. This scope is
+    intentionally built before ``screen_resting_orders`` so the confirmation
+    refresh can make the rest screen's price inputs current.
+    """
+
+    by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
+    out: dict[tuple[str, str, str], set[str]] = {}
+    for rest in open_rests or ():
         belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
         if belief is None:
             continue
