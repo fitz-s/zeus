@@ -7304,6 +7304,18 @@ def _edli_refresh_continuous_money_path_families(
     }
     if not clean_families:
         return {"status": "no_families", "families_requested": 0}
+    try:
+        from src.data.substrate_priority import mark_money_path_substrate_priority
+
+        mark_money_path_substrate_priority(
+            reason="continuous_redecision_confirm_refresh",
+            ttl_seconds=35.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "edli_redecision_screen: substrate priority marker write failed: %r",
+            exc,
+        )
     lock_timeout_s = max(
         0.0,
         float(os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS", "25.0")),
@@ -9308,6 +9320,15 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             for condition_id in (condition_ids or ())
             if str(condition_id or "").strip()
         }
+        try:
+            from src.data.substrate_priority import mark_money_path_substrate_priority
+
+            mark_money_path_substrate_priority(
+                reason="decision_triggered_targeted_refresh",
+                ttl_seconds=max(call_budget_s + 15.0, 20.0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("decision family refresh: priority marker write failed: %r", exc)
         try:
             topology_rows = _event_family_market_topology_rows(topology_conn, payload)
         except Exception as exc:  # noqa: BLE001 — fail-soft: stale rejection stands

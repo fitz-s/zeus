@@ -852,6 +852,33 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     assert calls == [1]
 
 
+def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
+    """Broad substrate warm must not occupy the shared lock while live recapture is queued."""
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(1),
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls == []
+
+
+def test_money_path_targeted_refresh_marks_substrate_priority():
+    refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
+    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+
+    assert "mark_money_path_substrate_priority(" in refresh_src
+    assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
+    assert "mark_money_path_substrate_priority(" in confirm_src
+    assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
+
+
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
     """Config gate: disabled edli → no refresh side effect."""
     calls: list[int] = []

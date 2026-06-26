@@ -56,6 +56,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from src.config import settings
+from src.data.substrate_priority import money_path_substrate_priority_active
 
 logger = logging.getLogger("zeus.substrate_observer")
 
@@ -1412,6 +1413,12 @@ def _edli_market_substrate_warm_cycle() -> None:
 
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled"):
+        return
+    if money_path_substrate_priority_active():
+        logger.info(
+            "EDLI market-substrate warm skipped: live-money targeted substrate "
+            "refresh has priority"
+        )
         return
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
 
