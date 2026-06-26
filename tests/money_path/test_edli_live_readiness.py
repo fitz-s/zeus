@@ -1755,6 +1755,20 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         assert float(proof["taker_fee_adjusted_edge"]) > 0.0
         assert proof["passed"] is True
 
+    def test_matched_stamped_cert_is_not_capped_by_receipt_probability_lcb(self):
+        """Qkernel taker proof consumes the qkernel execution certificate only.
+
+        ``q_lcb_5pct`` remains receipt provenance on a spine-selected proof. A
+        low legacy/provenance qLCB must not overwrite the already validated
+        qkernel payoff qLCB, or center-YES selections disappear at submit time.
+        """
+        proof = self._proof(q_lcb_5pct=0.01)
+        assert proof is not None
+        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+        assert float(proof["q_exec_lcb"]) == pytest.approx(0.72)
+        assert float(proof["taker_fee_adjusted_edge"]) > 0.0
+        assert proof["passed"] is True
+
     def test_candidate_identity_mismatch_fails_closed(self):
         """RED-ON-REVERT. Cert.candidate_id (DIRECT_YES:bin-1) != payload.candidate_id
         (a DIFFERENT selected candidate). On the unfixed tree the foreign cert is
@@ -3103,6 +3117,8 @@ def _qkernel_execution_cert(**overrides):
         "false_edge_rate": 0.02,
         "side": "YES",
         "bin_id": "bin-1",
+        "direction_law_ok": True,
+        "coherence_allows": True,
     }
     cert.update(overrides)
     if (

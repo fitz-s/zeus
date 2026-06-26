@@ -391,8 +391,10 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
         q_source="qkernel_spine",
         qkernel_execution_economics={
             "source": "qkernel_spine",
-            "candidate_id": "YES:bin-1:DIRECT_YES",
-            "route_id": "DIRECT_YES:bin-1@proof",
+            "candidate_id": f"YES:{era._candidate_bin_id(unguarded)}:DIRECT_YES",
+            "route_id": f"DIRECT_YES:{era._candidate_bin_id(unguarded)}@proof",
+            "side": "YES",
+            "bin_id": era._candidate_bin_id(unguarded),
             "payoff_q_lcb": 0.30,
             "edge_lcb": 0.10,
             "point_ev": 0.70,
@@ -403,6 +405,8 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
             "cost": 0.20,
             "false_edge_rate": 0.02,
             "q_lcb_guard_basis": "OOF_WILSON_95",
+            "direction_law_ok": True,
+            "coherence_allows": True,
         },
     )
 
@@ -424,6 +428,65 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
     )
 
     assert unguarded_stake > 100.0
+    assert guarded_stake == pytest.approx(6.25)
+    assert guarded_price is not None
+    assert guarded_price.value == pytest.approx(0.20)
+
+
+def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
+    """Qkernel submit sizing uses the selected execution cert, not stale receipt q_lcb.
+
+    ``q_lcb_5pct`` is preserved on qkernel proofs for receipt-facing probability
+    provenance. Once the proof carries the qkernel selection stamp and a valid
+    route/side/bin-bound execution certificate, submit sizing must not apply the
+    old proof lower bound a second time.
+    """
+
+    from src.types.market import Bin
+
+    bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
+    row = _snapshot_row(yes_asks=(("0.20", "1000000"),))
+    base = _proof_from_row(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-1",
+        q_posterior=0.90,
+        q_lcb_5pct=0.01,
+        bin_obj=bin_x,
+    )
+    guarded = replace(
+        base,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": f"YES:{era._candidate_bin_id(base)}:DIRECT_YES",
+            "route_id": f"DIRECT_YES:{era._candidate_bin_id(base)}@proof",
+            "side": "YES",
+            "bin_id": era._candidate_bin_id(base),
+            "payoff_q_lcb": 0.30,
+            "edge_lcb": 0.10,
+            "point_ev": 0.70,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "6.25",
+            "optimal_delta_u": 0.02,
+            "q_dot_payoff": 0.90,
+            "cost": 0.20,
+            "false_edge_rate": 0.02,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+    )
+
+    guarded_stake, guarded_price = era._robust_marginal_utility_stake_and_price(
+        family_key="fam",
+        selected_proof=guarded,
+        all_proofs=(guarded,),
+        extra_exposure_by_bin_id={},
+        bankroll_usd=10000.0,
+        kelly_multiplier=1.0,
+    )
+
     assert guarded_stake == pytest.approx(6.25)
     assert guarded_price is not None
     assert guarded_price.value == pytest.approx(0.20)

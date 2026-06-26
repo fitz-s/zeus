@@ -5729,11 +5729,6 @@ def _build_event_bound_taker_quality_proof(
                 "incremental_expected_profit_usd": "0",
             }
         q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
-        # BLOCKER #1 (2026-06-23): floor the taker-quality q_lcb to the certified
-        # settlement-coverage authority bound (q_lcb_5pct). Monotone-safe (only lowers).
-        _authority_q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
-        if q_lcb is not None and _authority_q_lcb is not None:
-            q_lcb = min(q_lcb, _authority_q_lcb)
         q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
     else:
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
@@ -9604,26 +9599,19 @@ def _qkernel_execution_float(
 def _qkernel_execution_q_lcb(proof: "_CandidateProof") -> float | None:
     """The guarded payoff-space lower bound the qkernel selected and sized on.
 
-    BLOCKER #1 (2026-06-23 Moscow garbage autopsy + consult REQ-20260623-065021): the
-    qkernel band payoff_q_lcb is a JointQBand parameter-posterior simplex resample that can
-    be NARROWER / more confident than the certified settlement-coverage bootstrap the
-    BeliefCertificate publishes (proof.q_lcb_5pct, byte-equal to forecast_posteriors.
-    q_lcb_json for the bin). The Probability Authority chain is "q_lcb conservative floor ->
-    Edge"; the certified bootstrap IS that floor. The band may LOWER the trade-against q_lcb
-    but NEVER RAISE it above the certified bound. The live bug let the band (0.0928) override
-    the authority (0.0354) for Moscow 16C YES, admitting a buy_yes @5c with NEGATIVE
-    conservative edge by the belief's own floor. Clamp at this SINGLE chokepoint every
-    consumer reads (candidate materialization AND qkernel marginal-utility sizing). Monotone-
-    safe: min() only LOWERS -> can only reject, never manufacture a trade.
+    Qkernel-spine proofs deliberately preserve ``q_posterior`` / ``q_lcb_5pct``
+    as receipt-facing selected-side probability provenance. They are not the
+    execution-sizing authority once ``selection_authority_applied`` stamps the
+    proof as qkernel-selected. The money path may use the payoff qLCB only after
+    ``_qkernel_execution_economics`` validates the authority stamp and route/side/bin
+    identity; after that validation, applying the old proof qLCB again creates a
+    second decision authority and starves valid center-YES / payoff-vector trades.
     """
     q_lcb = _qkernel_execution_float(proof, "payoff_q_lcb")
     if q_lcb is None:
         return None
     if not (0.0 <= q_lcb <= 1.0):
         return None
-    authority_floor = _optional_float(getattr(proof, "q_lcb_5pct", None))
-    if authority_floor is not None and math.isfinite(float(authority_floor)):
-        q_lcb = min(q_lcb, float(authority_floor))
     return q_lcb
 
 
@@ -12041,15 +12029,10 @@ def _robust_marginal_utility_stake_and_price(
             )
         except (ArithmeticError, TypeError, ValueError):
             qkernel_optimal_stake = Decimal("0")
-        # BLOCKER #1 (2026-06-23 Moscow garbage autopsy + consult REQ-20260623-065021):
-        # qkernel_q_lcb is FLOORED to the certified settlement-coverage authority bound
-        # (_qkernel_execution_q_lcb), but qkernel_edge / qkernel_optimal_stake are read from
-        # the cert computed on the (possibly inflated) JointQBand. Gate the stake on the
-        # AUTHORITY-FLOORED edge (qkernel_q_lcb - qkernel_cost): if the conservative floor the
-        # belief publishes does not clear the all-in cost, the trade is negative-EV by the
-        # probability authority and must NOT size, even when the band edge_lcb is positive.
-        # Moscow 16C YES kill: floored 0.0354 - cost 0.0837 = -0.048 -> no stake. Monotone-safe.
-        qkernel_floored_edge = (
+        # Gate the stake on the same validated qkernel execution certificate the
+        # qkernel family optimizer selected. The preserved proof q_lcb_5pct is
+        # receipt probability provenance, not a second submit-time authority.
+        qkernel_submit_edge = (
             None
             if (qkernel_q_lcb is None or qkernel_cost is None)
             else float(qkernel_q_lcb) - float(qkernel_cost)
@@ -12063,8 +12046,8 @@ def _robust_marginal_utility_stake_and_price(
             or qkernel_edge <= 0.0
             or qkernel_optimal_delta_u <= 0.0
             or qkernel_optimal_stake <= Decimal("0")
-            or qkernel_floored_edge is None
-            or qkernel_floored_edge <= 0.0
+            or qkernel_submit_edge is None
+            or qkernel_submit_edge <= 0.0
         ):
             return 0.0, None
 
@@ -12148,6 +12131,7 @@ def _robust_marginal_utility_stake_and_price(
         if stake_floor_out is not None:
             stake_floor_out["qkernel_execution_economics"] = {
                 "payoff_q_lcb": float(qkernel_q_lcb),
+                "submit_edge": float(qkernel_submit_edge),
                 "edge_lcb": float(qkernel_edge),
                 "optimal_stake_usd": float(qkernel_optimal_stake),
                 "optimal_delta_u": float(qkernel_optimal_delta_u),
