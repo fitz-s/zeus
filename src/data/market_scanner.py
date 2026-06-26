@@ -4593,15 +4593,32 @@ def refresh_executable_market_substrate_snapshots(
         and full_family_direct_clob_candidate_threshold > 0
         and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
     )
+    priority_full_family_direct_clob_prefetch = bool(
+        full_family_capture
+        and candidates_needing_network_books
+        and priority_conditions
+        and full_family_direct_clob_candidate_threshold > 0
+        and not small_full_family_direct_clob_prefetch
+    )
     full_family_direct_clob_prefetch_enabled = bool(
         full_family_direct_clob_prefetch_forced
         or small_full_family_direct_clob_prefetch
+        or priority_full_family_direct_clob_prefetch
     )
     direct_clob_prefetch_skipped = bool(
         full_family_capture
         and candidates_needing_network_books
         and not full_family_direct_clob_prefetch_enabled
     )
+    network_book_candidates = candidates_needing_network_books
+    if priority_full_family_direct_clob_prefetch:
+        network_book_candidates = [
+            candidate
+            for candidate in candidates_needing_network_books
+            if str(candidate[5] or "").strip() in priority_conditions
+        ]
+        if not network_book_candidates:
+            direct_clob_prefetch_skipped = True
     if not direct_clob_prefetch_skipped:
         full_family_primary_chunk_size = (
             min(
@@ -4617,7 +4634,7 @@ def refresh_executable_market_substrate_snapshots(
         prefetched_books.update(
             _prefetch_selected_orderbooks(
                 clob,
-                candidates_needing_network_books,
+                network_book_candidates,
                 deadline=prefetch_deadline,
                 max_retry_chunks=(0 if full_family_capture else None),
                 primary_chunk_size=full_family_primary_chunk_size,
@@ -4772,6 +4789,7 @@ def refresh_executable_market_substrate_snapshots(
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
         "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
         "direct_clob_prefetch_small_family_enabled": int(small_full_family_direct_clob_prefetch),
+        "direct_clob_prefetch_priority_enabled": int(priority_full_family_direct_clob_prefetch),
     }
     if failures:
         summary["failure_samples"] = failures
