@@ -187,6 +187,7 @@ def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
+DEFAULT_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS = 75.0
 
 
 def _drain_budget_seconds() -> float | None:
@@ -228,6 +229,57 @@ def _drain_budget_seconds() -> float | None:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS
     return budget if budget > 0 else None
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _substrate_sidecar_owns_broad_refresh(*, now: datetime | None = None) -> bool:
+    """True when the dedicated substrate observer is fresh enough to own broad warmup.
+
+    The live split moved market-substrate warming out of ``src.main``. Keeping the
+    old end-of-cycle broad drain in the reactor duplicates the sidecar's writer and
+    turns stale executable prices into DB-lock stalls. The reactor still supports a
+    bounded fallback when the sidecar is absent/stale, and the adapter's targeted
+    single-family refresh remains available for the selected stale row.
+    """
+
+    if _truthy_env(os.environ.get("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN")):
+        return False
+    if str(os.environ.get("ZEUS_SUBSTRATE_SIDECAR_OWNS_BROAD_REFRESH", "1")).strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return False
+
+    path = os.environ.get(
+        "ZEUS_SUBSTRATE_OBSERVER_HEARTBEAT_PATH",
+        os.path.join(os.getcwd(), "state", "daemon-heartbeat-substrate-observer.json"),
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        alive_raw = str(payload.get("alive_at") or "").strip()
+        alive_at = _parse_utc_instant(alive_raw)
+        if alive_at is None:
+            return False
+        checked_at = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+        age_seconds = (checked_at - alive_at).total_seconds()
+    except Exception:
+        return False
+    try:
+        max_age = float(
+            os.environ.get(
+                "ZEUS_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS",
+                str(DEFAULT_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS),
+            )
+        )
+    except (TypeError, ValueError):
+        max_age = DEFAULT_SUBSTRATE_SIDECAR_HEARTBEAT_MAX_AGE_SECONDS
+    return 0.0 <= age_seconds <= max(1.0, max_age)
 
 
 def _operator_disarm_active() -> bool:
@@ -1137,9 +1189,6 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
-          (d) SELECTION_DEADLINE_PAST — an event-bound executable snapshot
-              selected a concrete deadline, and that deadline has passed. This is
-              not a retry cap: the stale proof's own executable window is over.
           (b) MARKET_VENUE_CLOSED — only explicit venue evidence says
               ``closed=true`` and ``accepting_orders=false``. Static Gamma endDate
               / F1 timing cannot terminalize a money-path event.
@@ -1158,16 +1207,6 @@ class OpportunityEventReactor:
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
             return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
-
-        selection_deadline = _selection_deadline_horizon_utc(
-            event,
-            self._transient_requeue_reasons.get(event.event_id),
-        )
-        if selection_deadline is not None and decision_time.astimezone(UTC) >= selection_deadline:
-            return (
-                "SELECTION_DEADLINE_PAST",
-                f"selection_deadline={selection_deadline.isoformat()}",
-            )
 
         # (b) Venue-close floor. This is evidence-based, not time-derived.
         venue_closed = self._venue_market_closed_horizon(event, decision_time=decision_time)
@@ -1320,6 +1359,20 @@ class OpportunityEventReactor:
         SHARED across both buckets and HELD-position families are drained FIRST (money at risk),
         so a budget can never starve a held family's refresh.
         """
+        if _substrate_sidecar_owns_broad_refresh():
+            blocked = len(self._pending_snapshot_refreshes) + len(self._pending_cycle_advances)
+            if blocked:
+                import logging as _logging
+
+                _logging.getLogger("zeus.events.reactor").info(
+                    "always-decidable broad drain skipped: substrate observer sidecar owns "
+                    "broad refresh; deferred_families=%d (reactor keeps targeted selected-row "
+                    "refresh and transient requeue)",
+                    blocked,
+                )
+            self._pending_snapshot_refreshes.clear()
+            self._pending_cycle_advances.clear()
+            return
         # HELD-POSITION set, computed ONCE per cycle (fail-soft): families with money at risk now.
         held = self._held_families_failsoft()
         if held:
@@ -1554,7 +1607,10 @@ class OpportunityEventReactor:
                 # attempt cap — the event requeues until a horizon terminal fires.
                 last_reason = self._transient_requeue_reasons.get(event.event_id)
                 retry_not_before = None
-                if _money_path_reason_base(last_reason or "") == "EXECUTABLE_SNAPSHOT_BLOCKED":
+                if _money_path_reason_base(last_reason or "") in {
+                    "EXECUTABLE_SNAPSHOT_BLOCKED",
+                    "EXECUTABLE_SNAPSHOT_STALE",
+                }:
                     try:
                         snapshot_block_attempts = self._store.attempt_count(event.event_id)
                     except Exception:
@@ -2438,44 +2494,6 @@ def _parse_utc_instant(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
-
-
-def _selection_deadline_from_reason(reason: str | None) -> datetime | None:
-    """Extract the event-bound selection deadline from a transient reason string."""
-    if not reason:
-        return None
-    marker = "selection_deadline="
-    start = reason.find(marker)
-    if start < 0:
-        return None
-    value_start = start + len(marker)
-    tail = reason[value_start:]
-    end = len(tail)
-    for delimiter in (
-        ":decision_time=",
-        ":freshness_deadline=",
-        ":event_id=",
-        ":snapshot_id=",
-        ":condition_id=",
-        ":token_id=",
-        ":reason=",
-    ):
-        idx = tail.find(delimiter)
-        if idx >= 0:
-            end = min(end, idx)
-    return _parse_utc_instant(tail[:end])
-
-
-def _selection_deadline_horizon_utc(
-    event: OpportunityEvent,
-    last_transient_reason: str | None,
-) -> datetime | None:
-    payload = _payload_dict(event)
-    for key in ("selection_deadline", "selectionDeadline"):
-        deadline = _parse_utc_instant(payload.get(key))
-        if deadline is not None:
-            return deadline
-    return _selection_deadline_from_reason(last_transient_reason)
 
 
 def _receipt_or_payload(

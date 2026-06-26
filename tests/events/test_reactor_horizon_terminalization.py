@@ -43,6 +43,7 @@ from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
     _is_transient_money_path_reason,
+    _substrate_sidecar_owns_broad_refresh,
 )
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -311,10 +312,10 @@ def test_horizon_terminalizes_with_horizon_label():
     assert "attempt" not in regret[0].lower()
 
 
-def test_selection_deadline_past_terminalizes_stale_snapshot_retry():
-    """A selected executable snapshot carries its own execution window. Once that
-    deadline is past, the stale proof cannot become executable again; requeueing
-    it would only consume reactor budget ahead of fresh redecision events."""
+def test_selection_deadline_past_requeues_stale_snapshot_retry():
+    """A selected executable snapshot's deadline is price-evidence freshness, not
+    an event horizon. Stale price evidence must requeue for fresh substrate until
+    the market/day horizon itself expires."""
     conn, store = _store()
     event = _day0_event(city="New York", target_date="2026-06-26", suffix="stale-deadline")
     store.insert_or_ignore(event)
@@ -331,22 +332,50 @@ def test_selection_deadline_past_terminalizes_stale_snapshot_retry():
         result=res,
     )
 
-    assert res.dead_lettered == 1
-    assert res.retried == 0
-    assert _status(conn, event.event_id) == "dead_letter"
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
     row = conn.execute(
-        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        "SELECT last_error, claimed_at FROM opportunity_event_processing WHERE event_id = ?",
         (event.event_id,),
     ).fetchone()
     assert row is not None
-    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
-    assert "SELECTION_DEADLINE_PAST" in (row[1] or "")
-    assert "EXECUTABLE_SNAPSHOT_STALE" in (row[1] or "")
-    regret = conn.execute(
-        "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    assert regret is not None
-    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:SELECTION_DEADLINE_PAST:")
+    assert str(row[0]).startswith("EXECUTABLE_SNAPSHOT_STALE:")
+    assert row[1] is not None
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_fresh_substrate_sidecar_owns_broad_refresh(monkeypatch, tmp_path):
+    """When the substrate observer sidecar is alive, broad substrate warmup is
+    owned outside the reactor. The reactor keeps targeted selected-row refresh,
+    but must not duplicate the sidecar's broad writer and lock the live DB."""
+
+    heartbeat = tmp_path / "daemon-heartbeat-substrate-observer.json"
+    heartbeat.write_text(
+        '{"daemon":"substrate-observer","alive_at":"2026-06-26T15:43:34+00:00","pid":123}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZEUS_SUBSTRATE_OBSERVER_HEARTBEAT_PATH", str(heartbeat))
+    monkeypatch.delenv("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_SIDECAR_OWNS_BROAD_REFRESH", raising=False)
+
+    assert _substrate_sidecar_owns_broad_refresh(
+        now=datetime(2026, 6, 26, 15, 44, 0, tzinfo=timezone.utc)
+    )
+    assert not _substrate_sidecar_owns_broad_refresh(
+        now=datetime(2026, 6, 26, 15, 46, 0, tzinfo=timezone.utc)
+    )
+
+    monkeypatch.setenv("ZEUS_REACTOR_FORCE_BROAD_SUBSTRATE_DRAIN", "1")
+    assert not _substrate_sidecar_owns_broad_refresh(
+        now=datetime(2026, 6, 26, 15, 44, 0, tzinfo=timezone.utc)
+    )
 
 
 def test_timeliness_floor_is_backstop_when_venue_phase_unresolvable(monkeypatch):
