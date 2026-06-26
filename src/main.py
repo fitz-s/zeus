@@ -5216,6 +5216,7 @@ def _edli_event_reactor_cycle() -> None:
                             day0_is_tradeable=day0_is_tradeable_for_scope(
                                 str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
                             ),
+                            budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
                         )
                         _log_stage("day0_emit")
                     except sqlite3.OperationalError as _day0_emit_lock_exc:
@@ -7965,6 +7966,15 @@ def _edli_forecast_snapshot_build_budget_seconds(config: dict) -> float:
     return max(0.0, min(value, 20.0))
 
 
+def _edli_day0_emit_budget_seconds(config: dict) -> float:
+    raw = config.get("reactor_day0_emit_budget_seconds", 8.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 8.0
+    return max(0.0, min(value, 20.0))
+
+
 def _edli_install_sqlite_deadline(conn, *, deadline_monotonic: float | None) -> None:
     """Interrupt long SQLite reads/writes once the caller's wall-clock budget is spent."""
 
@@ -8566,6 +8576,7 @@ def _edli_emit_day0_extreme_events(
     limit: int,
     fast_prefetch=None,
     day0_is_tradeable: bool = True,
+    budget_seconds: float | None = None,
 ) -> int:
     """Emit EDLI Day0 extreme events from live observation truth surfaces.
 
@@ -8581,43 +8592,63 @@ def _edli_emit_day0_extreme_events(
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
+    deadline_monotonic = (
+        time.monotonic() + float(budget_seconds)
+        if budget_seconds is not None and float(budget_seconds) > 0
+        else None
+    )
+    _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
+    _edli_install_sqlite_deadline(trade_conn, deadline_monotonic=deadline_monotonic)
     fast_emitted = 0
-    if fast_prefetch is not None:
-        try:
-            from src.data.day0_fast_obs import get_fast_obs_emitter
+    try:
+        if fast_prefetch is not None:
+            try:
+                from src.data.day0_fast_obs import get_fast_obs_emitter
 
-            fast_emitted = get_fast_obs_emitter().emit_prefetched(
-                world_conn=world_conn,
-                prefetch=fast_prefetch,
-                received_at=received_at,
-                limit=limit,
-                day0_is_tradeable=day0_is_tradeable,
-            )
-        except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+                fast_emitted = get_fast_obs_emitter().emit_prefetched(
+                    world_conn=world_conn,
+                    prefetch=fast_prefetch,
+                    received_at=received_at,
+                    limit=limit,
+                    day0_is_tradeable=day0_is_tradeable,
+                )
+            except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+                logger.warning(
+                    "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
+                    _fast_exc,
+                )
+
+        trigger = Day0ExtremeUpdatedTrigger(
+            EventWriter(world_conn),
+            day0_is_tradeable=day0_is_tradeable,
+            suppress_recent_no_value_refutations=True,
+        )
+        authority_results, observation_results = _edli_scan_day0_with_lock_retry(
+            trigger=trigger,
+            trade_conn=trade_conn,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=limit,
+        )
+        # Structured per-lane counters (PR#404 P2 observability fix).
+        logger.info(
+            "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
+            "day0_observation_instants_emitted=%d",
+            fast_emitted, len(authority_results), len(observation_results),
+        )
+        return fast_emitted + len(authority_results) + len(observation_results)
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
             logger.warning(
-                "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
-                _fast_exc,
+                "EDLI day0 emit budget exhausted after %.3fs; skipping remaining "
+                "Day0 catch-up this cycle and draining already-queued candidates.",
+                float(budget_seconds or 0.0),
             )
-
-    trigger = Day0ExtremeUpdatedTrigger(
-        EventWriter(world_conn),
-        day0_is_tradeable=day0_is_tradeable,
-        suppress_recent_no_value_refutations=True,
-    )
-    authority_results, observation_results = _edli_scan_day0_with_lock_retry(
-        trigger=trigger,
-        trade_conn=trade_conn,
-        decision_time=decision_time,
-        received_at=received_at,
-        limit=limit,
-    )
-    # Structured per-lane counters (PR#404 P2 observability fix).
-    logger.info(
-        "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
-        "day0_observation_instants_emitted=%d",
-        fast_emitted, len(authority_results), len(observation_results),
-    )
-    return fast_emitted + len(authority_results) + len(observation_results)
+            return fast_emitted
+        raise
+    finally:
+        _edli_clear_sqlite_progress_handler(trade_conn)
+        _edli_clear_sqlite_progress_handler(world_conn)
 
 
 def _edli_scan_day0_with_lock_retry(

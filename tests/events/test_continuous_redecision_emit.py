@@ -1532,6 +1532,20 @@ def test_forecast_snapshot_build_is_reactor_budgeted():
     assert "budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg)" in src
 
 
+def test_day0_emit_is_reactor_budgeted():
+    """Day0 catch-up runs under the world mutex, so it needs a hard SQLite deadline."""
+
+    cycle_src = inspect.getsource(main._edli_event_reactor_cycle)
+    emit_src = inspect.getsource(main._edli_emit_day0_extreme_events)
+    assert "reactor_day0_emit_budget_seconds" in inspect.getsource(
+        main._edli_day0_emit_budget_seconds
+    )
+    assert "budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg)" in cycle_src
+    assert "_edli_install_sqlite_deadline(world_conn" in emit_src
+    assert "_edli_install_sqlite_deadline(trade_conn" in emit_src
+    assert "EDLI day0 emit budget exhausted" in emit_src
+
+
 def test_decision_triggered_refresh_is_cycle_bounded():
     """Inline recapture is live value, but must not monopolize the reactor cycle."""
 
