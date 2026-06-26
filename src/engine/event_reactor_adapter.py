@@ -1336,22 +1336,133 @@ def _shift_exit_rejection_requires_retry(reason: str) -> bool:
     )
 
 
+_SHIFT_EXIT_TERMINAL_COMMAND_STATES = frozenset({
+    "CANCELLED",
+    "CANCELED",
+    "EXPIRED",
+    "FILLED",
+    "REJECTED",
+    "SUBMIT_REJECTED",
+})
+
+
+def _latest_shift_exit_inflight_command(
+    conn: sqlite3.Connection,
+    *,
+    decision_id: str,
+    old_token_id: str,
+) -> dict[str, str] | None:
+    """Return an existing non-terminal old-leg exit command for this shift, if any."""
+
+    token = str(old_token_id or "").strip()
+    if not (decision_id and token):
+        return None
+    terminal_placeholders = ",".join("?" for _ in _SHIFT_EXIT_TERMINAL_COMMAND_STATES)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT command_id,
+                   COALESCE(state, '') AS state,
+                   COALESCE(venue_order_id, '') AS venue_order_id
+              FROM venue_commands
+             WHERE decision_id = ?
+               AND intent_kind = 'EXIT'
+               AND token_id = ?
+               AND UPPER(COALESCE(state, '')) NOT IN ({terminal_placeholders})
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (decision_id, token, *sorted(_SHIFT_EXIT_TERMINAL_COMMAND_STATES)),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        command_id = str(row["command_id"] or "")
+        state = str(row["state"] or "")
+        venue_order_id = str(row["venue_order_id"] or "")
+    except (TypeError, KeyError, IndexError):
+        command_id = str(row[0] or "")
+        state = str(row[1] or "")
+        venue_order_id = str(row[2] or "")
+    if not command_id:
+        return None
+    return {"command_id": command_id, "state": state, "venue_order_id": venue_order_id}
+
+
+def _shift_exit_lease_status_for_command(state: str) -> str:
+    normalized = str(state or "").upper()
+    if normalized == "PARTIAL":
+        return "EXIT_PARTIAL"
+    if normalized in {"UNKNOWN", "SUBMIT_UNKNOWN_SIDE_EFFECT", "REVIEW_REQUIRED"}:
+        return "EXIT_UNKNOWN"
+    return "EXIT_SUBMITTED"
+
+
+def _latest_chain_ctf_token_balance_micro(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+) -> int | None:
+    """Latest CHAIN total CTF balance for a token, independent of sell reservations."""
+
+    token = str(token_id or "").strip()
+    if not token:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT ctf_token_balances_json
+              FROM collateral_ledger_snapshots
+             WHERE authority_tier = 'CHAIN'
+             ORDER BY captured_at DESC, id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        raw = row["ctf_token_balances_json"]
+    except (TypeError, KeyError, IndexError):
+        raw = row[0]
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    try:
+        return int(payload.get(token, 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _shift_exit_collateral_proves_old_leg_closed(
+    conn: sqlite3.Connection,
     exc: BaseException,
     *,
     old_token_id: str,
 ) -> bool:
-    """Whether sell collateral truth proves the old SHIFT_BIN leg is already gone."""
+    """Whether CHAIN collateral truth proves the old SHIFT_BIN leg is already gone.
+
+    ``ctf_tokens_insufficient ... available=0`` is not proof by itself: the token can
+    still be held while fully reserved by an already-ACKED sell. Only the latest CHAIN
+    total balance being zero proves the old leg is gone.
+    """
 
     normalized = " ".join(str(exc or "").lower().split())
     token = str(old_token_id or "").strip().lower()
     if not token:
         return False
-    return (
+    if not (
         "ctf_tokens_insufficient" in normalized
         and f"token_id={token}" in normalized
         and "available=0" in normalized
-    )
+    ):
+        return False
+    balance = _latest_chain_ctf_token_balance_micro(conn, token_id=old_token_id)
+    return balance is not None and balance <= 0
 
 
 def _submit_shift_bin_old_leg_exit(
@@ -1390,6 +1501,24 @@ def _submit_shift_bin_old_leg_exit(
         # EXIT_SUBMITTED (blocking) so the next redecision cycle re-evaluates.
         return
     shares, current_price, best_bid, snap_ctx = inputs
+    existing_exit = _latest_shift_exit_inflight_command(
+        conn,
+        decision_id=decision_id,
+        old_token_id=old_token_id,
+    )
+    if existing_exit is not None:
+        _shift_bin_wiring.record_exit_submitted(
+            conn,
+            intent_id,
+            now_iso=now_iso,
+            old_exit_command_id=existing_exit["command_id"],
+            status=_shift_exit_lease_status_for_command(existing_exit["state"]),
+            reason=(
+                "SHIFT_BIN_EXIT_ALREADY_IN_FLIGHT:"
+                f"{existing_exit['state']}:{existing_exit['command_id']}"
+            ),
+        )
+        return
     if not str(snap_ctx.get("executable_snapshot_id") or "").strip():
         identity = snap_ctx.get("_exit_identity_seed")
         if isinstance(identity, Mapping):
@@ -1458,7 +1587,7 @@ def _submit_shift_bin_old_leg_exit(
         )
     except Exception as exc:  # noqa: BLE001 — venue boundary unknown → block the family.
         reason = f"SHIFT_BIN_EXIT_EXCEPTION:{type(exc).__name__}:{exc}"
-        if _shift_exit_collateral_proves_old_leg_closed(exc, old_token_id=old_token_id):
+        if _shift_exit_collateral_proves_old_leg_closed(conn, exc, old_token_id=old_token_id):
             _shift_bin_wiring.exit_only_complete(
                 conn,
                 intent_id,
@@ -1471,6 +1600,33 @@ def _submit_shift_bin_old_leg_exit(
                 "SHIFT_BIN old-leg exit released: chain collateral proves zero old-token "
                 "balance token_id=%s reason=%s",
                 old_token_id,
+                exc,
+            )
+            return
+        existing_exit = _latest_shift_exit_inflight_command(
+            conn,
+            decision_id=decision_id,
+            old_token_id=old_token_id,
+        )
+        if existing_exit is not None:
+            _shift_bin_wiring.record_exit_submitted(
+                conn,
+                intent_id,
+                now_iso=now_iso,
+                old_exit_command_id=existing_exit["command_id"],
+                status=_shift_exit_lease_status_for_command(existing_exit["state"]),
+                reason=(
+                    "SHIFT_BIN_EXIT_EXCEPTION_EXISTING_COMMAND:"
+                    f"{existing_exit['state']}:{existing_exit['command_id']}:{reason}"
+                ),
+            )
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "SHIFT_BIN old-leg exit reattached existing command after exception: "
+                "command_id=%s state=%s reason=%s",
+                existing_exit["command_id"],
+                existing_exit["state"],
                 exc,
             )
             return
