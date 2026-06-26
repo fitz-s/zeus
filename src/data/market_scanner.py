@@ -124,7 +124,7 @@ def _snapshot_capture_busy_timeout_ms(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", "150")
     )
     priority_floor_candidate_cap = int(
-        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "4")
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "24")
     )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
@@ -147,7 +147,14 @@ def _snapshot_capture_busy_timeout_ms(
         # non-zero wait so transient locks can still clear. Large priority batches
         # are still batches: a broad redecision confirmation scope must make
         # progress across families instead of letting the first locked row consume
-        # the whole tick. Only small priority recaptures keep the durable floor.
+        # the whole tick.
+        #
+        # Live 2026-06-26: money-path confirmation refreshes commonly carry a
+        # family-sized priority scope (roughly 17-21 YES/NO orderbook rows). The
+        # old cap of 4 misclassified those scoped recaptures as broad batches,
+        # split the wait budget down to a few hundred ms, then failed every
+        # contended write with "database is locked". Keep the durable floor for
+        # normal priority scopes and split only oversized priority batches.
         share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
         return max(1, min(configured, share_ms))
     capped = min(configured, max(floor_ms, remaining_ms))
