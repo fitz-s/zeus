@@ -735,13 +735,22 @@ class PolymarketV2Adapter:
             raise V2AdapterError("balance allowance response missing balance")
         return balance
 
-    def _pusd_collateral_payload_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
+    def _pusd_collateral_payload_from_raw(
+        self,
+        raw: dict[str, Any],
+        *,
+        allow_chain_allowance_fallback: bool = True,
+    ) -> dict[str, Any]:
         pusd_allowance_raw = raw.get("allowance")
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
         allowance_source = "clob_balance_allowance"
         if allowance_int is None or allowance_int == 0:
-            chain_allowance = self._chain_collateral_allowance_micro()
+            chain_allowance = (
+                self._chain_collateral_allowance_micro()
+                if allow_chain_allowance_fallback
+                else None
+            )
             if chain_allowance is not None:
                 pusd_allowance_raw = chain_allowance
                 allowance_source = "chain_erc20_allowance"
@@ -768,7 +777,10 @@ class PolymarketV2Adapter:
         """Return pUSD balance/allowance facts without CTF position enumeration."""
 
         raw = self._collateral_balance_allowance_raw(refresh_allowance=refresh_allowance)
-        return self._pusd_collateral_payload_from_raw(raw)
+        return self._pusd_collateral_payload_from_raw(
+            raw,
+            allow_chain_allowance_fallback=refresh_allowance,
+        )
 
     def get_collateral_payload(self) -> dict[str, Any]:
         """Return SDK-derived collateral facts for CollateralLedger.refresh().

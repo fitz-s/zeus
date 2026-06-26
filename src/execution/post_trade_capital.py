@@ -152,12 +152,12 @@ def collateral_snapshot_refresh_cycle() -> None:
         )
     except TimeoutError as exc:
         logger.error(
-            "collateral_snapshot_refresh: pUSD refresh exceeded %.1fs; exiting sidecar so launchd "
-            "kills the wedged worker and restarts fresh: %s",
+            "collateral_snapshot_refresh: pUSD refresh exceeded %.1fs; preserving sidecar "
+            "liveness and leaving the previous collateral snapshot in force/fail-closed: %s",
             deadline_seconds,
             exc,
         )
-        os._exit(75)
+        raise
     logger.info(
         "collateral_snapshot_refresh: authority=%s captured_at=%s pusd_available_micro=%s ctf_tokens=%d mode=pusd_only",
         snapshot.authority_tier,

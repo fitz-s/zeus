@@ -637,6 +637,37 @@ def test_pusd_collateral_payload_can_skip_allowance_update_for_heartbeat(tmp_pat
     assert [call[0] for call in fake.calls] == ["get_balance_allowance"]
 
 
+def test_pusd_collateral_payload_skips_chain_allowance_fallback_for_heartbeat(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        rpc_calls.append((method, params))
+        raise AssertionError("pUSD heartbeat must not call chain allowance fallback")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload(refresh_allowance=False)
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == 0
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "missing"
+    assert rpc_calls == []
+
+
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter

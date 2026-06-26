@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 
 def test_post_trade_collateral_refresh_publishes_pusd_without_ctf_enumeration(
     monkeypatch,
@@ -69,3 +71,32 @@ def test_post_trade_collateral_refresh_publishes_pusd_without_ctf_enumeration(
     assert row[2] == 12_000_000
     assert json.loads(row[3]) == {}
     assert json.loads(row[4]) == {}
+
+
+def test_post_trade_collateral_timeout_does_not_exit_or_publish_fake_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    from src.execution import post_trade_capital
+    from src.runtime import timeout_guard as timeout_guard_module
+
+    db_path = tmp_path / "trades.db"
+    exit_calls = []
+
+    def _timeout(*_args, **_kwargs):
+        raise TimeoutError("simulated pUSD heartbeat timeout")
+
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(timeout_guard_module, "run_with_timeout", _timeout)
+    monkeypatch.setattr(post_trade_capital.os, "_exit", lambda code: exit_calls.append(code))
+
+    with pytest.raises(TimeoutError, match="simulated pUSD heartbeat timeout"):
+        post_trade_capital.collateral_snapshot_refresh_cycle()
+
+    assert exit_calls == []
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM collateral_ledger_snapshots").fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 0
