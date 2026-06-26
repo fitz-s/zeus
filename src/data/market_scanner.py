@@ -126,18 +126,26 @@ def _snapshot_capture_busy_timeout_ms(
     priority_floor_candidate_cap = int(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "24")
     )
+    priority_share_candidate_cap = int(
+        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_SHARE_MAX_CANDIDATES", "8")
+    )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
     # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
-    if (
-        remaining_candidates is not None
-        and remaining_candidates > 1
-        and (
+    if remaining_candidates is not None and remaining_candidates > 1:
+        split_priority_scope = bool(
+            priority_candidate
+            and remaining_candidates <= max(1, priority_share_candidate_cap)
+        )
+        split_batch_scope = bool(
             not priority_candidate
             or remaining_candidates > max(1, priority_floor_candidate_cap)
         )
-    ):
+    else:
+        split_priority_scope = False
+        split_batch_scope = False
+    if split_priority_scope or split_batch_scope:
         # Live 2026-06-25: the batch warmer had 46 selected candidates and one
         # locked insert consumed the 8s per-row ceiling, producing
         # attempted=1 inserted=0 coverage=NONE. Batch substrate refresh is a
@@ -166,6 +174,23 @@ def _snapshot_capture_sqlite_lock_retries() -> int:
         return max(0, int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_SQLITE_LOCK_RETRIES", "2")))
     except ValueError:
         return 2
+
+
+def _snapshot_capture_effective_lock_retries(
+    *,
+    configured_retries: int,
+    remaining_candidates: int | None,
+) -> int:
+    """Do not let one locked row spend the whole multi-row capture window."""
+
+    retries = max(0, int(configured_retries or 0))
+    try:
+        remaining = int(remaining_candidates or 0)
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining > 1:
+        return 0
+    return retries
 
 
 def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> int | None:
@@ -4908,6 +4933,10 @@ def refresh_executable_market_substrate_snapshots(
                     batch_orderbook_supported=batch_orderbook_supported,
                     prefetched_books=prefetched_books,
                 )
+                effective_lock_retry_count = _snapshot_capture_effective_lock_retries(
+                    configured_retries=lock_retry_count,
+                    remaining_candidates=remaining_candidates,
+                )
                 _set_busy_timeout_ms(
                     conn,
                     _snapshot_capture_busy_timeout_ms(
@@ -4965,7 +4994,7 @@ def refresh_executable_market_substrate_snapshots(
                         pass
                     if (
                         _is_sqlite_locked_error(exc)
-                        and capture_attempt < lock_retry_count
+                        and capture_attempt < effective_lock_retry_count
                         and time.monotonic() < deadline
                     ):
                         capture_attempt += 1

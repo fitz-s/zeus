@@ -320,12 +320,13 @@ def test_batch_capture_busy_timeout_splits_budget_across_remaining_candidates(mo
     assert batch >= 150
 
 
-def test_small_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
-    """Small money-path priority recaptures must not inherit broad-batch waits."""
+def test_small_priority_capture_busy_timeout_splits_candidate_budget(monkeypatch):
+    """Small priority recaptures must not let one locked row spend the reserve."""
 
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_SHARE_MAX_CANDIDATES", raising=False)
 
     broad_batch = _snapshot_capture_busy_timeout_ms(12.0, remaining_candidates=46)
     priority = _snapshot_capture_busy_timeout_ms(
@@ -334,8 +335,8 @@ def test_small_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
         priority_candidate=True,
     )
 
-    assert broad_batch < priority
-    assert priority >= 4000
+    assert broad_batch < priority < 8000
+    assert priority == 6000
 
 
 def test_family_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
@@ -374,6 +375,19 @@ def test_large_priority_capture_busy_timeout_splits_batch_budget(monkeypatch):
 
     assert priority_batch == broad_batch
     assert 0 < priority_batch < 4000
+
+
+def test_multi_candidate_lock_retries_yield_to_next_candidate():
+    """A locked candidate in a multi-row refresh should not retry in place."""
+
+    assert ms._snapshot_capture_effective_lock_retries(
+        configured_retries=2,
+        remaining_candidates=4,
+    ) == 0
+    assert ms._snapshot_capture_effective_lock_retries(
+        configured_retries=2,
+        remaining_candidates=1,
+    ) == 2
 
 
 # ---------------------------------------------------------------------------
