@@ -2110,6 +2110,7 @@ def _edli_refresh_held_position_quote_evidence(
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
+                fetch_orderbooks=clob.get_orderbook_snapshots,
             )
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
@@ -2229,6 +2230,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
+                fetch_orderbooks=clob.get_orderbook_snapshots,
             )
             ordered_metadata_tokens = [
                 token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
@@ -2510,6 +2512,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         market_event_sink=_edli_price_channel_redecision_sink(conn),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
+                    fetch_orderbooks=clob.get_orderbook_snapshots,
                     invalidate_snapshot=_invalidate_snapshot_action,
                     refresh_snapshot=_refresh_snapshot_action,
                     max_refresh_actions_per_window=_edli_bounded_positive_int(

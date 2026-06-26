@@ -85,6 +85,7 @@ class QuoteCache:
 
 
 RestOrderbookFetch = Callable[[str], dict[str, Any]]
+RestOrderbookBatchFetch = Callable[[list[str]], dict[str, dict]]
 
 
 class MarketChannelIngestor:
@@ -700,6 +701,7 @@ class MarketChannelOnlineService:
 
     ingestor: MarketChannelIngestor
     fetch_orderbook: RestOrderbookFetch | None = None
+    fetch_orderbooks: RestOrderbookBatchFetch | None = None
     invalidate_snapshot: Callable[[MarketChannelAction], None] | None = None
     refresh_snapshot: Callable[[MarketChannelAction], None] | None = None
     connected: bool = False
@@ -782,27 +784,12 @@ class MarketChannelOnlineService:
                     )
                 break
             chunk = ordered[offset: offset + size]
-            pre_captured_books: dict[str, dict] = {}
-            for token_id in chunk:
-                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                    if logger is not None:
-                        logger.warning(
-                            "EDLI market-channel REST seed budget exhausted inside chunk: "
-                            "written=%d remaining=%d",
-                            written,
-                            max(0, len(ordered) - offset),
-                        )
-                    break
-                try:
-                    pre_captured_books[token_id] = self.fetch_orderbook(token_id)
-                except Exception as exc:
-                    _logger.warning(
-                        "market_channel: REST seed pre-fetch failed for token %s"
-                        " (will skip seed for this token): %s: %s",
-                        token_id,
-                        type(exc).__name__,
-                        exc,
-                    )
+            pre_captured_books = self._fetch_rest_seed_books(
+                chunk,
+                deadline_monotonic=deadline_monotonic,
+                logger=logger,
+                log_prefix="market_channel: REST seed",
+            )
             if not pre_captured_books:
                 continue
             with world_mutex:
@@ -822,6 +809,59 @@ class MarketChannelOnlineService:
                     len(results),
                 )
         return written
+
+    def _fetch_rest_seed_books(
+        self,
+        token_ids: list[str],
+        *,
+        deadline_monotonic: float | None = None,
+        logger: Any | None = None,
+        log_prefix: str = "market_channel: REST seed",
+    ) -> dict[str, dict]:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return {}
+        if self.fetch_orderbooks is not None:
+            try:
+                books = self.fetch_orderbooks(token_ids)
+            except Exception as exc:
+                _logger.warning(
+                    "%s batch pre-fetch failed for %d tokens: %s: %s",
+                    log_prefix,
+                    len(token_ids),
+                    type(exc).__name__,
+                    exc,
+                )
+                books = {}
+            if isinstance(books, dict) and books:
+                wanted = set(token_ids)
+                return {
+                    str(token_id): dict(book)
+                    for token_id, book in books.items()
+                    if str(token_id) in wanted and isinstance(book, dict)
+                }
+
+        pre_captured_books: dict[str, dict] = {}
+        for token_id in token_ids:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                if logger is not None:
+                    logger.warning(
+                        "%s budget exhausted inside chunk: captured=%d remaining=%d",
+                        log_prefix,
+                        len(pre_captured_books),
+                        max(0, len(token_ids) - len(pre_captured_books)),
+                    )
+                break
+            try:
+                pre_captured_books[token_id] = self.fetch_orderbook(token_id)
+            except Exception as exc:
+                _logger.warning(
+                    "%s pre-fetch failed for token %s (will skip seed for this token): %s: %s",
+                    log_prefix,
+                    token_id,
+                    type(exc).__name__,
+                    exc,
+                )
+        return pre_captured_books
 
     def on_disconnect(self, *, gap_start: str) -> None:
         self.connected = False
@@ -918,18 +958,11 @@ class MarketChannelOnlineService:
         written = 0
         for offset in range(0, len(ordered), size):
             chunk = ordered[offset: offset + size]
-            pre_captured_books: dict[str, dict] = {}
-            for token_id in chunk:
-                try:
-                    pre_captured_books[token_id] = self.fetch_orderbook(token_id)
-                except Exception as exc:
-                    _logger.warning(
-                        "market_channel: reconnect REST pre-fetch failed for token %s"
-                        " (will skip seed for this token): %s: %s",
-                        token_id,
-                        type(exc).__name__,
-                        exc,
-                    )
+            pre_captured_books = self._fetch_rest_seed_books(
+                chunk,
+                logger=logger,
+                log_prefix="market_channel: reconnect REST seed",
+            )
             if not pre_captured_books:
                 continue
             with world_mutex:
