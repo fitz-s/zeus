@@ -18,7 +18,7 @@ def test_post_trade_collateral_refresh_publishes_pusd_without_ctf_enumeration(
     class _Adapter:
         def get_pusd_collateral_payload(self, *, refresh_allowance=True):
             calls["pusd"] += 1
-            assert refresh_allowance is False
+            assert refresh_allowance is True
             return {
                 "pusd_balance_micro": 12_000_000,
                 "pusd_allowance_micro": 12_000_000,

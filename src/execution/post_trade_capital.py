@@ -70,9 +70,10 @@ logger = logging.getLogger("zeus.post_trade_capital")
 class _PusdOnlyCollateralAdapter:
     """Expose only pUSD collateral facts to the sidecar heartbeat.
 
-    The 30s sidecar heartbeat exists to keep entry bankroll proof fresh. CTF
-    inventory proof is action-specific sell collateral and can require many
-    conditional-token reads, so it must not be coupled to the pUSD heartbeat.
+    The 30s sidecar heartbeat exists to keep entry bankroll proof fresh,
+    including pUSD allowance. CTF inventory proof is action-specific sell
+    collateral and can require many conditional-token reads, so it must not be
+    coupled to the pUSD heartbeat.
     """
 
     def __init__(self, adapter) -> None:
@@ -82,7 +83,7 @@ class _PusdOnlyCollateralAdapter:
         pusd_payload = getattr(self._adapter, "get_pusd_collateral_payload", None)
         if callable(pusd_payload):
             try:
-                return dict(pusd_payload(refresh_allowance=False) or {})
+                return dict(pusd_payload(refresh_allowance=True) or {})
             except TypeError:
                 return dict(pusd_payload() or {})
         return dict(self._adapter.get_collateral_payload() or {})
