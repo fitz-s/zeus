@@ -764,10 +764,10 @@ class PolymarketV2Adapter:
             "pusd_allowance_source": allowance_source,
         }
 
-    def get_pusd_collateral_payload(self) -> dict[str, Any]:
+    def get_pusd_collateral_payload(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
         """Return pUSD balance/allowance facts without CTF position enumeration."""
 
-        raw = self._collateral_balance_allowance_raw()
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=refresh_allowance)
         return self._pusd_collateral_payload_from_raw(raw)
 
     def get_collateral_payload(self) -> dict[str, Any]:
@@ -777,7 +777,7 @@ class PolymarketV2Adapter:
         ledger receives plain dictionaries and never depends on SDK types.
         """
 
-        raw = self._collateral_balance_allowance_raw()
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
         payload = self._pusd_collateral_payload_from_raw(raw)
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
@@ -836,7 +836,7 @@ class PolymarketV2Adapter:
         payload["ctf_token_allowances_units"] = allowances
         return payload
 
-    def _collateral_balance_allowance_raw(self) -> dict[str, Any]:
+    def _collateral_balance_allowance_raw(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
         """Read the CLOB collateral balance/allowance surface once."""
 
         client = self._sdk_client()
@@ -858,7 +858,7 @@ class PolymarketV2Adapter:
         update_balance_allowance = getattr(client, "update_balance_allowance", None)
 
         def _read_once() -> Any:
-            if callable(update_balance_allowance):
+            if refresh_allowance and callable(update_balance_allowance):
                 update_balance_allowance(params)
             return get_balance_allowance(params)
 

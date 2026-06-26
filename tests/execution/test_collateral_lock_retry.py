@@ -68,7 +68,7 @@ def test_transient_lock_retries_then_succeeds(monkeypatch):
     assert out["allowed"] is True
 
 
-def test_fresh_snapshot_reused_without_adapter_fetch(monkeypatch):
+def test_entry_fresh_snapshot_reused_without_adapter_fetch(monkeypatch):
     from src.execution.collateral import refresh_collateral_snapshot_for_submit
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
 
@@ -100,11 +100,63 @@ def test_fresh_snapshot_reused_without_adapter_fetch(monkeypatch):
 
     out = refresh_collateral_snapshot_for_submit(
         conn,
-        action="exit_submit",
+        action="entry_submit",
         reuse_fresh_snapshot=True,
     )
     assert out["allowed"] is True
     assert out["details"]["reused_fresh_snapshot"] is True
+
+
+def test_exit_refresh_wrapper_does_not_reuse_entry_pusd_snapshot(monkeypatch):
+    from src.execution.executor import _refresh_exit_collateral_snapshot_for_submit
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=1_000_000,
+            pusd_allowance_micro=1_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc),
+            authority_tier="CHAIN",
+        )
+    )
+
+    calls = {"payload": 0}
+
+    class _ExitAdapter:
+        def get_collateral_payload(self):
+            calls["payload"] += 1
+            return {
+                "pusd_balance_micro": 1_000_000,
+                "pusd_allowance_micro": 1_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances_units": {"exit-token": _CTF_SCALE},
+                "ctf_token_allowances_units": {"exit-token": _CTF_SCALE},
+                "authority_tier": "CHAIN",
+            }
+
+    class _StubClient:
+        def _ensure_v2_adapter(self):
+            return _ExitAdapter()
+
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        lambda *a, **k: _StubClient(),
+    )
+
+    out = _refresh_exit_collateral_snapshot_for_submit(conn)
+
+    assert calls["payload"] == 1
+    assert out["allowed"] is True
+    assert out["details"]["action"] == "exit_submit"
+    assert "reused_fresh_snapshot" not in out["details"]
 
 
 def test_entry_refresh_wrapper_reuses_fresh_sidecar_snapshot(monkeypatch):

@@ -1282,7 +1282,7 @@ def _refresh_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> di
     return refresh_collateral_snapshot_for_submit(
         conn,
         action="exit_submit",
-        reuse_fresh_snapshot=True,
+        reuse_fresh_snapshot=False,
     )
 
 

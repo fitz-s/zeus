@@ -67,6 +67,27 @@ from src.config import get_mode
 logger = logging.getLogger("zeus.post_trade_capital")
 
 
+class _PusdOnlyCollateralAdapter:
+    """Expose only pUSD collateral facts to the sidecar heartbeat.
+
+    The 30s sidecar heartbeat exists to keep entry bankroll proof fresh. CTF
+    inventory proof is action-specific sell collateral and can require many
+    conditional-token reads, so it must not be coupled to the pUSD heartbeat.
+    """
+
+    def __init__(self, adapter) -> None:
+        self._adapter = adapter
+
+    def get_collateral_payload(self) -> dict:
+        pusd_payload = getattr(self._adapter, "get_pusd_collateral_payload", None)
+        if callable(pusd_payload):
+            try:
+                return dict(pusd_payload(refresh_allowance=False) or {})
+            except TypeError:
+                return dict(pusd_payload() or {})
+        return dict(self._adapter.get_collateral_payload() or {})
+
+
 def _post_trade_collateral_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS")
     if raw in (None, ""):
@@ -82,23 +103,63 @@ def _post_trade_collateral_timeout_seconds() -> float:
     return value
 
 
+def _post_trade_collateral_deadline_seconds() -> float:
+    raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS")
+    if raw in (None, ""):
+        return 25.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 25.0", raw)
+        return 25.0
+    if value <= 0:
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_DEADLINE_SECONDS=%r; using 25.0", raw)
+        return 25.0
+    return value
+
+
 def collateral_snapshot_refresh_cycle() -> None:
-    """Refresh pUSD/CTF collateral truth for live trading consumers.
+    """Refresh pUSD collateral truth for live trading consumers.
 
     Ownership: post-trade-capital is the wallet/capital sidecar. The live order
     daemon consumes the latest durable collateral_ledger_snapshots row and must
     not perform py-clob-client wallet reads inside the event reactor.
+
+    The periodic heartbeat is deliberately pUSD-only. Full CTF inventory reads
+    fan out across every held conditional token and live evidence showed one
+    slow token read can keep this scheduler job running past its next cadence,
+    aging out bankroll proof and blocking all entries. Sell/exit submission
+    still proves the target CTF token on its own submit path.
     """
 
     from src.data.polymarket_client import PolymarketClient
+    from src.runtime.timeout_guard import run_with_timeout
     from src.state.collateral_ledger import CollateralLedger
     from src.state.db import _zeus_trade_db_path
 
     ledger = CollateralLedger(db_path=_zeus_trade_db_path())
-    with PolymarketClient(public_http_timeout=_post_trade_collateral_timeout_seconds()) as clob:
-        snapshot = ledger.refresh(clob._ensure_v2_adapter())
+    deadline_seconds = _post_trade_collateral_deadline_seconds()
+
+    def _refresh():
+        with PolymarketClient(public_http_timeout=_post_trade_collateral_timeout_seconds()) as clob:
+            return ledger.refresh(_PusdOnlyCollateralAdapter(clob._ensure_v2_adapter()))
+
+    try:
+        snapshot = run_with_timeout(
+            _refresh,
+            seconds=deadline_seconds,
+            label="post_trade_collateral_pusd_refresh",
+        )
+    except TimeoutError as exc:
+        logger.error(
+            "collateral_snapshot_refresh: pUSD refresh exceeded %.1fs; exiting sidecar so launchd "
+            "kills the wedged worker and restarts fresh: %s",
+            deadline_seconds,
+            exc,
+        )
+        os._exit(75)
     logger.info(
-        "collateral_snapshot_refresh: authority=%s captured_at=%s pusd_available_micro=%s ctf_tokens=%d",
+        "collateral_snapshot_refresh: authority=%s captured_at=%s pusd_available_micro=%s ctf_tokens=%d mode=pusd_only",
         snapshot.authority_tier,
         snapshot.captured_at.isoformat(),
         snapshot.available_pusd_micro,
