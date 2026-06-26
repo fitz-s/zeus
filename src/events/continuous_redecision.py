@@ -1541,6 +1541,9 @@ def entry_substrate_refresh_scope(
     beliefs: list[CachedBelief],
     decision_time: str | datetime,
     max_families: int = 60,
+    min_edge: float = 0.01,
+    refresh_margin: float = 0.02,
+    max_conditions_per_family: int = 2,
 ) -> dict[tuple[str, str, str], set[str]]:
     """Families whose live beliefs cannot be screened because price substrate is stale.
 
@@ -1571,6 +1574,14 @@ def entry_substrate_refresh_scope(
             if str(c or "").strip()
         )
     price_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=all_cids)
+    try:
+        per_family_limit = max(1, int(max_conditions_per_family))
+    except (TypeError, ValueError):
+        per_family_limit = 2
+    try:
+        refresh_floor = float(min_edge) - max(0.0, float(refresh_margin))
+    except (TypeError, ValueError):
+        refresh_floor = -0.01
     out: dict[tuple[str, str, str], set[str]] = {}
     for belief in beliefs:
         metric = str(
@@ -1587,24 +1598,66 @@ def entry_substrate_refresh_scope(
         if not (family_key[0] and family_key[1] and family_key[2] in {"high", "low"}):
             continue
         condition_ids = [str(c or "").strip() for c in (belief.condition_ids or [])]
-        stale_or_missing: set[str] = set()
-        for condition_id in condition_ids:
+        ranked_refresh: list[tuple[float, str]] = []
+        for idx, condition_id in enumerate(condition_ids):
             if not condition_id:
                 continue
+            best_refresh_score: float | None = None
             for direction in ("buy_yes", "buy_no"):
                 quote = price_by_cid.get((condition_id, direction))
+                q_lcb = (
+                    _vec_float_at(belief.q_lcb_yes_vec, idx)
+                    if direction == "buy_yes"
+                    else _vec_float_at(belief.q_lcb_no_vec, idx)
+                )
+                if q_lcb is None:
+                    continue
+                try:
+                    posterior = (
+                        float(belief.p_posterior_vec[idx])
+                        if direction == "buy_yes"
+                        else one_minus(float(belief.p_posterior_vec[idx]))
+                    )
+                except (IndexError, TypeError, ValueError):
+                    posterior = float(q_lcb)
                 if quote is None:
-                    stale_or_missing.add(condition_id)
-                    break
+                    # No executable price exists in the local substrate. Rank by
+                    # conservative belief only; the family cap prevents missing
+                    # low-value bins from flooding the CLOB refresher.
+                    score = float(q_lcb) - 0.5
+                    best_refresh_score = (
+                        score
+                        if best_refresh_score is None
+                        else max(best_refresh_score, score)
+                    )
+                    continue
                 try:
                     if _parse(quote.freshness_deadline).astimezone(timezone.utc) <= dt:
-                        stale_or_missing.add(condition_id)
-                        break
+                        score = _entry_screen_robust_trade_score(
+                            q_posterior=posterior,
+                            q_lcb_5pct=float(q_lcb),
+                            price=float(quote.price),
+                            tick_size=quote.tick_size,
+                        )
+                        best_refresh_score = (
+                            score
+                            if best_refresh_score is None
+                            else max(best_refresh_score, score)
+                        )
                 except (TypeError, ValueError):
-                    stale_or_missing.add(condition_id)
-                    break
-        if stale_or_missing:
-            out[family_key] = stale_or_missing
+                    best_refresh_score = (
+                        float(q_lcb) - 0.5
+                        if best_refresh_score is None
+                        else max(best_refresh_score, float(q_lcb) - 0.5)
+                    )
+            if best_refresh_score is not None and best_refresh_score >= refresh_floor:
+                ranked_refresh.append((best_refresh_score, condition_id))
+        if ranked_refresh:
+            ranked_refresh.sort(reverse=True)
+            out[family_key] = {
+                condition_id
+                for _score, condition_id in ranked_refresh[:per_family_limit]
+            }
             if len(out) >= limit:
                 break
     return out

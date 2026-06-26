@@ -6285,6 +6285,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 beliefs=beliefs,
                 decision_time=received_at,
                 max_families=rd_cap,
+                min_edge=min_edge,
             )
             rest_pulls = screen_resting_orders(
                 world_ro,
