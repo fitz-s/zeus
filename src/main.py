@@ -3576,6 +3576,19 @@ def _refresh_pending_family_snapshots(
             metric_ev = str(ev.get("temperature_metric") or "")
             key = _refresh_family_key(city_name, td, metric_ev)
             gamma_by_family[key] = ev
+        if gamma_by_family:
+            for key in gamma_by_family:
+                _GAMMA_EMPTY_BACKOFF_UNTIL.pop(key, None)
+            try:
+                from src.data.market_absence_evidence import clear_gamma_empty_families
+
+                clear_gamma_empty_families(gamma_by_family.keys(), cleared_at=now_utc)
+            except Exception:
+                logger.debug(
+                    "refresh_pending_family_snapshots: failed to clear stale "
+                    "Gamma-empty absence evidence",
+                    exc_info=True,
+                )
 
         # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
         markets: list[dict] = []
@@ -7328,51 +7341,61 @@ def _edli_refresh_continuous_money_path_families(
     )
 
     try:
-        retry_delays = _edli_confirmation_refresh_lock_retry_delays()
-        for attempt in range(len(retry_delays) + 1):
-            world = get_world_connection()
-            forecasts_ro = get_forecasts_connection_read_only()
-            try:
+        from src.data.dual_run_lock import acquire_lock
+
+        with acquire_lock("market_substrate_refresh") as substrate_process_acquired:
+            if not substrate_process_acquired:
+                return {
+                    "status": "skipped_cross_process_lock_busy",
+                    "families_requested": len(clean_families),
+                    "lock": "market_substrate_refresh",
+                }
+
+            retry_delays = _edli_confirmation_refresh_lock_retry_delays()
+            for attempt in range(len(retry_delays) + 1):
+                world = get_world_connection()
+                forecasts_ro = get_forecasts_connection_read_only()
                 try:
-                    attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
-                    if "forecasts" not in attached:
-                        world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
-                        exc,
+                    try:
+                        attached = {row[1] for row in world.execute("PRAGMA database_list").fetchall()}
+                        if "forecasts" not in attached:
+                            world.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "edli_redecision_screen: confirm-refresh ATTACH forecasts failed (non-fatal): %r",
+                            exc,
+                        )
+                    summary = _refresh_pending_family_snapshots(
+                        world,
+                        forecasts_ro,
+                        consumer_name="edli_redecision_confirm",
+                        now_utc=now_utc,
+                        extra_priority_families=clean_families,
+                        include_pending_families=False,
+                        priority_condition_ids=priority_conditions,
                     )
-                summary = _refresh_pending_family_snapshots(
-                    world,
-                    forecasts_ro,
-                    consumer_name="edli_redecision_confirm",
-                    now_utc=now_utc,
-                    extra_priority_families=clean_families,
-                    include_pending_families=False,
-                    priority_condition_ids=priority_conditions,
+                finally:
+                    try:
+                        forecasts_ro.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        world.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if not _edli_refresh_summary_has_sqlite_lock_failures(summary) or attempt >= len(retry_delays):
+                    return summary
+                delay_s = retry_delays[attempt]
+                logger.warning(
+                    "edli_redecision_screen: confirm-refresh hit sqlite lock; "
+                    "retrying with fresh connections in %.1fs (attempt %d/%d) summary=%r",
+                    delay_s,
+                    attempt + 1,
+                    len(retry_delays) + 1,
+                    summary,
                 )
-            finally:
-                try:
-                    forecasts_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    world.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            if not _edli_refresh_summary_has_sqlite_lock_failures(summary) or attempt >= len(retry_delays):
-                return summary
-            delay_s = retry_delays[attempt]
-            logger.warning(
-                "edli_redecision_screen: confirm-refresh hit sqlite lock; "
-                "retrying with fresh connections in %.1fs (attempt %d/%d) summary=%r",
-                delay_s,
-                attempt + 1,
-                len(retry_delays) + 1,
-                summary,
-            )
-            time.sleep(delay_s)
-        return summary
+                time.sleep(delay_s)
+            return summary
     finally:
         try:
             _edli_redecision_confirm_refresh_lock.release()
@@ -9351,36 +9374,53 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 city, target_date, metric,
             )
             return False
-        write_conn = get_trade_connection(write_class="live")
+        from src.data.dual_run_lock import acquire_lock
+
+        process_lock_ctx = acquire_lock("market_substrate_refresh")
+        substrate_process_acquired = False
         try:
-            market = reconstruct_weather_market_from_static_topology(
-                write_conn,
-                topology_rows=topology_rows,
-                now_utc=datetime.now(timezone.utc),
-            )
-            if market is None:
-                # Static topology cannot reconstruct the full token map (a sibling
-                # lost executable identity). The warm-job Gamma slug path owns that
-                # recovery; the decision-time fast path does NOT do a Gamma fetch.
+            substrate_process_acquired = process_lock_ctx.__enter__()
+            if not substrate_process_acquired:
+                logger.info(
+                    "decision family refresh: cross-process substrate refresh lock busy "
+                    "for %s/%s/%s",
+                    city,
+                    target_date,
+                    metric,
+                )
                 return False
-            with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-                with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                    summary = refresh_executable_market_substrate_snapshots(
-                        write_conn,
-                        markets=[market],
-                        clob=clob,
-                        captured_at=datetime.now(timezone.utc),
-                        scan_authority="VERIFIED",
-                        refresh_reason="decision_triggered_targeted_refresh",
-                        # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
-                        # FDR full-family proof + capital-efficiency economics; refreshing
-                        # only the selected bin would leave stale sibling prices in q/FDR).
-                        max_outcomes=0,
-                        budget_seconds=call_budget_s,
-                        priority_condition_ids=priority_condition_ids,
-                    )
-                write_conn.commit()
-            return int(summary.get("inserted", 0) or 0) > 0
+            write_conn = get_trade_connection(write_class="live")
+            try:
+                market = reconstruct_weather_market_from_static_topology(
+                    write_conn,
+                    topology_rows=topology_rows,
+                    now_utc=datetime.now(timezone.utc),
+                )
+                if market is None:
+                    # Static topology cannot reconstruct the full token map (a sibling
+                    # lost executable identity). The warm-job Gamma slug path owns that
+                    # recovery; the decision-time fast path does NOT do a Gamma fetch.
+                    return False
+                with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
+                    with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                        summary = refresh_executable_market_substrate_snapshots(
+                            write_conn,
+                            markets=[market],
+                            clob=clob,
+                            captured_at=datetime.now(timezone.utc),
+                            scan_authority="VERIFIED",
+                            refresh_reason="decision_triggered_targeted_refresh",
+                            # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
+                            # FDR full-family proof + capital-efficiency economics; refreshing
+                            # only the selected bin would leave stale sibling prices in q/FDR).
+                            max_outcomes=0,
+                            budget_seconds=call_budget_s,
+                            priority_condition_ids=priority_condition_ids,
+                        )
+                    write_conn.commit()
+                return int(summary.get("inserted", 0) or 0) > 0
+            finally:
+                write_conn.close()
         except Exception as exc:  # noqa: BLE001 — fail-soft: never block the decision
             logger.warning(
                 "decision family refresh: capture failed for %s/%s/%s: %s",
@@ -9388,7 +9428,10 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             )
             return False
         finally:
-            write_conn.close()
+            try:
+                process_lock_ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 _market_substrate_refresh_lock.release()
             except RuntimeError:

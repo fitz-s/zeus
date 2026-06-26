@@ -513,7 +513,8 @@ def _k2_obs_tick():
             _sys.path.insert(0, str(_REPO_ROOT))
         from scripts.obs_live_tick import run_live_tick
         from src.config import STATE_DIR
-        # run_live_tick opens its own db_writer_lock connection to world.db.
+        # run_live_tick fetches upstream data lock-free and opens short
+        # per-city db_writer_lock connections only for insert_rows + commit.
         # Do NOT create a second get_world_connection here.
         results = run_live_tick(days_back=7, db_path=STATE_DIR / "zeus-world.db")
         written = sum(r.rows_written for r in results if not r.skipped_hko)
@@ -565,9 +566,10 @@ def _k2_obs_fast_tick():
     to ±15 min. The WU 40-min publication floor remains (this tick does NOT
     beat the WU floor; only Option B's METAR fast lane does that).
 
-    Connection discipline (three-phase law): run_live_tick opens its own
-    db_writer_lock connection and closes it before returning. This tick holds
-    no DB connection across the HTTP fetch loop.
+    Connection discipline (three-phase law): run_live_tick fetches upstream
+    data without a DB writer lock and opens short per-city db_writer_lock
+    connections only for insert_rows + commit. This tick holds no DB connection
+    across the HTTP fetch loop.
 
     Advisory lock "obs_fast": separate from "obs" (hourly tick) to avoid
     starving it. If the hourly tick is running when the fast tick fires the

@@ -319,20 +319,28 @@ def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
     """Live snapshot writers must serialize across daemon processes.
 
     `_market_substrate_refresh_lock` is process-local. The live daemon and the
-    substrate observer are separate processes, so every path that writes
-    executable_market_snapshots must also take the shared trade-DB LIVE writer
-    lock.
+    substrate observer are separate processes, so every producer path must take
+    the shared substrate refresh lock around the refresh and the trade-DB LIVE
+    writer lock around the write.
     """
 
-    main_pending_src = inspect.getsource(main_module._refresh_pending_family_snapshots)
     decision_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
-    observer_pending_src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
+    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    observer_warm_src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
     observer_discovery_src = inspect.getsource(substrate_observer._market_discovery_cycle)
 
     for src in (
-        main_pending_src,
         decision_src,
-        observer_pending_src,
+        confirm_src,
+        observer_warm_src,
+        observer_discovery_src,
+    ):
+        assert "acquire_lock(\"market_substrate_refresh\")" in src
+
+    for src in (
+        inspect.getsource(main_module._refresh_pending_family_snapshots),
+        decision_src,
+        inspect.getsource(substrate_observer._refresh_pending_family_snapshots),
         observer_discovery_src,
     ):
         assert "_zeus_trade_db_path" in src

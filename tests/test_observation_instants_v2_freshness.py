@@ -308,6 +308,68 @@ def test_obs_v2_live_tick_retries_sqlite_lock_per_city(monkeypatch) -> None:
     assert conn.commits == 1
 
 
+def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatch, tmp_path: Path) -> None:
+    """The rolling obs tick must not hold the world writer lock across upstream fetches."""
+    import contextlib
+    from types import SimpleNamespace
+
+    import scripts.obs_live_tick as obs_tick
+
+    lock_held = False
+    lock_entries = 0
+
+    @contextlib.contextmanager
+    def fake_db_writer_lock(_path, _write_class):
+        nonlocal lock_held, lock_entries
+        assert not lock_held
+        lock_entries += 1
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    class FakeConn:
+        def __init__(self):
+            self.committed = False
+            self.closed = False
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            raise AssertionError("rollback should not be needed")
+
+        def close(self):
+            self.closed = True
+
+    def fake_tick(city_name, conn, *, start_date, end_date, dry_run):
+        assert not lock_held, f"{city_name} fetch/build ran while writer lock was held"
+        written = obs_tick._write_rows(conn, [object()])
+        return obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_ready=1, rows_written=written)
+
+    monkeypatch.setattr(obs_tick, "cities_by_name", {
+        "Auckland": SimpleNamespace(timezone="UTC"),
+        "Tokyo": SimpleNamespace(timezone="UTC"),
+    })
+    monkeypatch.setattr(obs_tick, "tier_for_city", lambda _name: obs_tick.Tier.WU_ICAO)
+    monkeypatch.setattr(obs_tick, "db_writer_lock", fake_db_writer_lock)
+    monkeypatch.setattr(obs_tick, "_open_obs_tick_connection", lambda _path: FakeConn())
+    monkeypatch.setattr(obs_tick, "insert_rows", lambda _conn, _rows: len(_rows))
+    monkeypatch.setattr(obs_tick, "_tick_wu_city", fake_tick)
+    monkeypatch.setattr(obs_tick.time, "sleep", lambda _delay: None)
+
+    results = obs_tick.run_live_tick(
+        city_filter=["Auckland", "Tokyo"],
+        db_path=tmp_path / "world.db",
+        log_path=tmp_path / "obs_log.jsonl",
+    )
+
+    assert [r.rows_written for r in results] == [1, 1]
+    assert lock_entries == 2
+    assert not lock_held
+
+
 def test_obs_v2_live_tick_does_not_use_openmeteo_source() -> None:
     """The live-tick script must not use openmeteo_archive_hourly as a source.
 

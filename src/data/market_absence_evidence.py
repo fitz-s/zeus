@@ -60,6 +60,40 @@ def record_gamma_empty_families(
         return
 
 
+def clear_gamma_empty_families(
+    families: Iterable[tuple[object, object, object]],
+    *,
+    cleared_at: datetime | None = None,
+    path: Path | None = None,
+) -> int:
+    """Remove stale Gamma-empty evidence after a later live listing proof."""
+    now = (cleared_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    clean = {
+        _serialized_key(key)
+        for key in (family_key(city, target_date, metric) for city, target_date, metric in families)
+        if all(key)
+    }
+    if not clean:
+        return 0
+    target = path or state_path(ABSENCE_EVIDENCE_FILE)
+    try:
+        payload = _read_payload(target, now=now)
+        evidence = payload.setdefault("families", {})
+        removed = 0
+        for key in clean:
+            row = evidence.get(key)
+            if isinstance(row, dict) and str(row.get("source") or "") == "gamma_empty":
+                evidence.pop(key, None)
+                removed += 1
+        if removed:
+            payload["updated_at"] = now.isoformat()
+            payload["schema_version"] = 1
+            _atomic_write_json(target, payload)
+        return removed
+    except Exception:
+        return 0
+
+
 def has_recent_gamma_empty_evidence(
     *,
     city: object,

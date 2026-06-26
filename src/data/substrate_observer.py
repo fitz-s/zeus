@@ -1046,6 +1046,19 @@ def _refresh_pending_family_snapshots(
             metric_ev = str(ev.get("temperature_metric") or "")
             key = _refresh_family_key(city_name, td, metric_ev)
             gamma_by_family[key] = ev
+        if gamma_by_family:
+            for key in gamma_by_family:
+                _GAMMA_EMPTY_BACKOFF_UNTIL.pop(key, None)
+            try:
+                from src.data.market_absence_evidence import clear_gamma_empty_families
+
+                clear_gamma_empty_families(gamma_by_family.keys(), cleared_at=now_utc)
+            except Exception:
+                logger.debug(
+                    "refresh_pending_family_snapshots: failed to clear stale "
+                    "Gamma-empty absence evidence",
+                    exc_info=True,
+                )
 
         # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
         markets: list[dict] = []
@@ -1270,7 +1283,14 @@ def _market_discovery_cycle() -> None:
         _market_discovery_lock.release()
         logger.info("market_discovery deferred: executable substrate refresh already running")
         return
+    from src.data.dual_run_lock import acquire_lock
+
+    process_lock_ctx = acquire_lock("market_substrate_refresh")
     try:
+        substrate_process_acquired = process_lock_ctx.__enter__()
+        if not substrate_process_acquired:
+            logger.info("market_discovery deferred: cross-process executable substrate refresh already running")
+            return
         from src.data.market_scanner import (
             find_weather_markets_or_raise,
             refresh_executable_market_substrate_snapshots,
@@ -1310,6 +1330,10 @@ def _market_discovery_cycle() -> None:
         )
         _market_discovery_last_completed_monotonic = time.monotonic()
     finally:
+        try:
+            process_lock_ctx.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
         _market_substrate_refresh_lock.release()
         _market_discovery_lock.release()
 
@@ -1373,7 +1397,14 @@ def _edli_market_substrate_warm_cycle() -> None:
         except Exception:  # noqa: BLE001
             pass
         return
+    from src.data.dual_run_lock import acquire_lock
+
+    process_lock_ctx = acquire_lock("market_substrate_refresh")
     try:
+        substrate_process_acquired = process_lock_ctx.__enter__()
+        if not substrate_process_acquired:
+            logger.info("EDLI market-substrate warm skipped: cross-process executable substrate refresh already running")
+            return
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
@@ -1386,6 +1417,10 @@ def _edli_market_substrate_warm_cycle() -> None:
             exc,
         )
     finally:
+        try:
+            process_lock_ctx.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             _market_substrate_refresh_lock.release()
         except RuntimeError:
