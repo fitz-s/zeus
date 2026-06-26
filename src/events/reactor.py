@@ -65,6 +65,8 @@ DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
 DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
+DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
+DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -112,6 +114,32 @@ def _fetch_batch_limit() -> int:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
     return max(1, min(250, limit))
+
+
+def _lane_fairness_fetch_limit(process_limit: int) -> int:
+    """Overfetch enough rows for cross-lane fairness before applying work limit.
+
+    ``fetch_pending`` is tier ordered: live Day0 rows can legitimately sort ahead
+    of ordinary forecast rows.  The reactor's cross-lane interleave can only
+    protect the forecast/redecision lane if both lanes are present in the fetched
+    page.  Keep ``process_limit`` as the hard per-cycle work cap, but request a
+    slightly wider page so a small live limit (for cadence) does not truncate the
+    forecast lane before interleaving.
+    """
+
+    try:
+        limit = int(process_limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_REACTOR_FETCH_BATCH_LIMIT
+    limit = max(1, limit)
+    return min(
+        250,
+        max(
+            limit,
+            limit * DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER,
+            limit + DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA,
+        ),
+    )
 
 
 def _reactor_claim_busy_timeout_ms() -> int:
@@ -889,9 +917,14 @@ class OpportunityEventReactor:
                     "(stale-snapshot guard)"
                 )
             request_limit = batch_limit if remaining is None else min(batch_limit, remaining)
+            fetch_limit = (
+                request_limit
+                if remaining is None
+                else _lane_fairness_fetch_limit(request_limit)
+            )
             events = self._store.fetch_pending(
                 decision_time=decision_time.astimezone(UTC).isoformat(),
-                limit=request_limit,
+                limit=fetch_limit,
                 day0_is_tradeable=self._config.day0_is_tradeable,
             )
             if not events:

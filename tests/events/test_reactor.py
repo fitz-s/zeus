@@ -80,6 +80,35 @@ def _day0_event(key_suffix: str = "a"):
     )
 
 
+def _day0_event_for_target(key_suffix: str, target_date: str, available_at: str):
+    payload = Day0ExtremeUpdatedPayload(
+        city="Chicago",
+        target_date=target_date,
+        metric="high",
+        settlement_source="WU",
+        station_id="KMDW",
+        observation_time=available_at,
+        observation_available_at=available_at,
+        raw_value=74.2,
+        rounded_value=74,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
+    return make_day0_extreme_updated_event(
+        entity_key=f"Chicago|{target_date}|high|{key_suffix}",
+        source="day0_observation",
+        observed_at=payload.observation_time,
+        received_at=available_at,
+        payload=payload,
+    )
+
+
 def _forecast_event(key_suffix: str = "a", target_date: str = "2026-05-24"):
     payload = ForecastSnapshotReadyPayload(
         city="Chicago",
@@ -2740,6 +2769,50 @@ def test_market_channel_events_do_not_starve_fsr():
     assert fsr.event_id in fetched_ids, (
         f"COMPLETE FSR not in top-10 fetch despite tier-0 priority. "
         f"Fetched types: {[e.event_type for e in fetched][:10]}"
+    )
+
+
+def test_reactor_overfetches_before_lane_interleave_under_day0_flood():
+    """A small process limit must not truncate the forecast lane before interleave.
+
+    Live regression: ``reactor_process_limit`` was ~10 while fetch_pending returned
+    12+ tradeable Day0 rows before the first FORECAST/REDECISION row.  The reactor
+    interleave never saw the forecast lane, so ordinary entry/redecision work
+    starved even though the fairness helper was correct for a full page.
+    """
+
+    conn, store = _store()
+    available_at = "2026-05-25T06:00:00+00:00"
+    for i in range(12):
+        store.insert_or_ignore(
+            _day0_event_for_target(
+                key_suffix=f"day0-{i}",
+                target_date="2026-05-25",
+                available_at=available_at,
+            )
+        )
+    fsr = _forecast_event(key_suffix="fsr-behind-day0", target_date="2026-05-25")
+    store.insert_or_ignore(fsr)
+
+    requested_limits: list[int] = []
+    original_fetch = store.fetch_pending
+
+    def _recording_fetch(**kwargs):
+        requested_limits.append(int(kwargs["limit"]))
+        return original_fetch(**kwargs)
+
+    store.fetch_pending = _recording_fetch  # type: ignore[method-assign]
+    reactor, _rejected, submitted = _reactor(
+        store,
+        config=ReactorConfig(day0_is_tradeable=True),
+    )
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert requested_limits and requested_limits[0] > 1
+    assert submitted == [fsr.event_id], (
+        "forecast/redecision lane must receive the guaranteed first processed "
+        f"slot even when Day0 occupies the first small fetch page; submitted={submitted}"
     )
 
 
