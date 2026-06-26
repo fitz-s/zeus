@@ -50,6 +50,7 @@ INV-37: the producer WRITE is single-DB (trades.db only) via ``get_trade_connect
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -162,6 +163,7 @@ def _pending_family_rows_for_refresh(
             FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
             JOIN opportunity_events e ON e.event_id = p.event_id
             WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+              AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
               AND (
                     e.event_type NOT IN (
                         'FORECAST_SNAPSHOT_READY',
@@ -204,8 +206,73 @@ def _pending_family_rows_for_refresh(
             MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name, stale_target_floor, event_window_limit),
+        (consumer_name, decision_utc.isoformat(), stale_target_floor, event_window_limit),
     ).fetchall()
+
+
+def _claim_order_priority_family_limit() -> int:
+    raw = os.environ.get("ZEUS_SUBSTRATE_CLAIM_PRIORITY_FAMILY_LIMIT", "32")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 32
+    return max(1, min(500, value))
+
+
+def _claim_order_priority_families_for_refresh(
+    world_conn,
+    *,
+    consumer_name: str,
+    now_utc: datetime,
+    limit: int | None = None,
+) -> list[tuple[str, str, str]]:
+    """Families the reactor is actually eligible to claim next, in claim order.
+
+    The broad pending-family query is a backlog surface. It must not decide which
+    families get the first substrate budget when some rows are still under a live
+    processing lease. Use EventStore.fetch_pending as the single claim-order
+    authority and feed that lookahead into the warmer's existing explicit-priority
+    lane.
+    """
+
+    from src.events.event_store import EventStore
+
+    event_limit = _claim_order_priority_family_limit() if limit is None else max(1, int(limit))
+    try:
+        events = EventStore(world_conn, consumer_name=consumer_name).fetch_pending(
+            decision_time=now_utc.isoformat(),
+            limit=event_limit,
+            day0_is_tradeable=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EDLI market-substrate warm: claim-order priority read failed (non-fatal): %s",
+            exc,
+        )
+        return []
+
+    families: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for event in events:
+        try:
+            payload = json.loads(event.payload_json or "{}")
+        except Exception:  # noqa: BLE001
+            continue
+        city = str(payload.get("city") or "").strip()
+        target_date = str(payload.get("target_date") or "").strip()
+        metric = str(payload.get("metric") or "").strip()
+        if not city or not target_date or not metric:
+            continue
+        key = (
+            " ".join(city.replace("-", " ").replace("_", " ").lower().split()),
+            target_date,
+            " ".join(metric.replace("-", " ").replace("_", " ").lower().split()),
+        )
+        if key in seen:
+            continue
+        families.append((city, target_date, metric))
+        seen.add(key)
+    return families
 
 
 def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
@@ -1489,12 +1556,18 @@ def _edli_market_substrate_warm_cycle() -> None:
             return
         background_budget_s = _background_warm_refresh_budget_seconds()
         background_snapshot_reserve_s = _background_warm_snapshot_reserve_seconds(background_budget_s)
+        claim_priority_families = _claim_order_priority_families_for_refresh(
+            conn,
+            consumer_name="edli_reactor_v1",
+            now_utc=datetime.now(timezone.utc),
+        )
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
         summary = _refresh_pending_family_snapshots(
             conn,
             forecasts_conn,
+            extra_priority_families=claim_priority_families,
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
         )

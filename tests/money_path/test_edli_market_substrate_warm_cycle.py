@@ -892,10 +892,40 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     substrate_observer._edli_market_substrate_warm_cycle()
     assert calls == [1], "warm job must invoke the family-snapshot refresh exactly once"
+
+
+def test_market_substrate_warm_cycle_prioritizes_claim_order_families(monkeypatch):
+    """The substrate producer must warm the families the reactor can claim next."""
+
+    calls: list[dict] = []
+    claim_families = [("Tokyo", "2026-06-28", "high"), ("Shanghai", "2026-06-28", "low")]
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls and calls[0]["extra_priority_families"] == claim_families
 
 
 def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
@@ -913,6 +943,7 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     assert main_module._edli_reactor_active_lock.acquire(blocking=False)
@@ -1060,6 +1091,7 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         available_at: str,
         *,
         event_type: str = "FORECAST_SNAPSHOT_READY",
+        claimed_at: str | None = None,
     ) -> None:
         payload = {"city": city, "target_date": target_date, "metric": "high"}
         conn.execute(
@@ -1086,10 +1118,10 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         conn.execute(
             """
             INSERT INTO opportunity_event_processing (
-                consumer_name, event_id, processing_status, updated_at
-            ) VALUES ('edli_reactor_v1', ?, 'pending', ?)
+                consumer_name, event_id, processing_status, claimed_at, updated_at
+            ) VALUES ('edli_reactor_v1', ?, 'pending', ?, ?)
             """,
-            (event_id, available_at),
+            (event_id, claimed_at, available_at),
         )
 
     insert_event(
@@ -1102,6 +1134,13 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
     insert_event("old-b", "Milan", "2026-06-04", "2026-05-30T00:00:01+00:00")
     insert_event("fresh-a", "Seoul", "2026-06-06", "2026-06-05T00:00:00+00:00")
     insert_event("fresh-b", "Tokyo", "2026-06-06", "2026-06-05T00:00:01+00:00")
+    insert_event(
+        "still-leased",
+        "Toronto",
+        "2026-06-06",
+        "2026-06-05T00:00:02+00:00",
+        claimed_at="2026-06-05T12:05:00+00:00",
+    )
 
     decision_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
     for module in (main_module, substrate_observer):
@@ -1118,7 +1157,12 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         plan = _explain_plan(conn, capture.sql, capture.params)
         assert "USING INDEX idx_opportunity_event_processing_status" in plan
         assert "LIMIT ?" in capture.sql
-        assert capture.params == ("edli_reactor_v1", "2026-06-05", 2000)
+        assert capture.params == (
+            "edli_reactor_v1",
+            "2026-06-05T12:00:00+00:00",
+            "2026-06-05",
+            2000,
+        )
 
 
 def test_open_rest_priority_requires_live_command_and_remaining_rest():

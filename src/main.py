@@ -2469,6 +2469,7 @@ def _pending_family_rows_for_refresh(
             FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
             JOIN opportunity_events e ON e.event_id = p.event_id
             WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+              AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
               AND (
                     e.event_type NOT IN (
                         'FORECAST_SNAPSHOT_READY',
@@ -2511,7 +2512,7 @@ def _pending_family_rows_for_refresh(
             MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name, stale_target_floor, event_window_limit),
+        (consumer_name, decision_utc.isoformat(), stale_target_floor, event_window_limit),
     ).fetchall()
 
 
