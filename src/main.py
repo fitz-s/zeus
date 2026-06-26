@@ -7357,14 +7357,39 @@ def _edli_refresh_continuous_money_path_families(
     try:
         from src.data.dual_run_lock import acquire_lock
 
-        with acquire_lock("market_substrate_refresh") as substrate_process_acquired:
-            if not substrate_process_acquired:
+        process_lock_ctx = None
+        substrate_process_acquired = False
+        process_lock_delays = _edli_confirmation_refresh_process_lock_retry_delays()
+        process_lock_waited_s = 0.0
+        for process_lock_attempt in range(len(process_lock_delays) + 1):
+            process_lock_ctx = acquire_lock("market_substrate_refresh")
+            substrate_process_acquired = bool(process_lock_ctx.__enter__())
+            if substrate_process_acquired:
+                break
+            try:
+                process_lock_ctx.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            process_lock_ctx = None
+            if process_lock_attempt >= len(process_lock_delays):
                 return {
                     "status": "skipped_cross_process_lock_busy",
                     "families_requested": len(clean_families),
                     "lock": "market_substrate_refresh",
+                    "lock_retry_attempts": process_lock_attempt,
+                    "lock_retry_wait_seconds": process_lock_waited_s,
                 }
-
+            delay_s = process_lock_delays[process_lock_attempt]
+            logger.warning(
+                "edli_redecision_screen: market_substrate_refresh held by sidecar; "
+                "waiting %.1fs for money-path confirmation refresh (attempt %d/%d)",
+                delay_s,
+                process_lock_attempt + 1,
+                len(process_lock_delays) + 1,
+            )
+            time.sleep(delay_s)
+            process_lock_waited_s += delay_s
+        try:
             retry_delays = _edli_confirmation_refresh_lock_retry_delays()
             for attempt in range(len(retry_delays) + 1):
                 world = get_world_connection()
@@ -7410,6 +7435,12 @@ def _edli_refresh_continuous_money_path_families(
                 )
                 time.sleep(delay_s)
             return summary
+        finally:
+            if process_lock_ctx is not None:
+                try:
+                    process_lock_ctx.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
     finally:
         try:
             _edli_redecision_confirm_refresh_lock.release()
@@ -7419,6 +7450,18 @@ def _edli_refresh_continuous_money_path_families(
 
 def _edli_confirmation_refresh_lock_retry_delays() -> tuple[float, ...]:
     raw = os.environ.get("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "2.0,5.0")
+    return _parse_positive_delay_seconds(raw)
+
+
+def _edli_confirmation_refresh_process_lock_retry_delays() -> tuple[float, ...]:
+    raw = os.environ.get(
+        "ZEUS_REDECISION_CONFIRM_REFRESH_PROCESS_LOCK_RETRY_SECONDS",
+        "2.0,5.0,10.0",
+    )
+    return _parse_positive_delay_seconds(raw)
+
+
+def _parse_positive_delay_seconds(raw: str) -> tuple[float, ...]:
     delays: list[float] = []
     for piece in raw.split(","):
         text = piece.strip()

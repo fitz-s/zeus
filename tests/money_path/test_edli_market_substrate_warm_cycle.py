@@ -422,6 +422,7 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
     """A transient trade-DB lock in confirmation refresh must not become a false
     no-evidence tick when a fresh connection retry can still capture prices."""
 
+    import src.data.dual_run_lock as dual_run_lock
     import src.state.db as state_db
 
     class _TrackedConn(_FakeConn):
@@ -466,6 +467,18 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
         calls.append(kwargs)
         return summaries.pop(0)
 
+    class _AlwaysAcquiredLock:
+        def __enter__(self):
+            return True
+
+        def __exit__(self, *_args):
+            pass
+
+    monkeypatch.setattr(
+        dual_run_lock,
+        "acquire_lock",
+        lambda name: _AlwaysAcquiredLock(),
+    )
     monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
     monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _forecast_conn)
     monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _refresh)
@@ -482,6 +495,65 @@ def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatc
     assert sleeps == [0.01]
     assert len(worlds) == 2 and all(conn.closed for conn in worlds)
     assert len(forecasts) == 2 and all(conn.closed for conn in forecasts)
+
+
+def test_continuous_redecision_confirm_refresh_waits_for_cross_process_substrate_lock(monkeypatch):
+    """A sidecar-held substrate lock must not erase this live money-path tick.
+
+    The live failure on 2026-06-26 was not a math/admission no-trade: the
+    confirmation refresh marked priority, then immediately returned
+    skipped_cross_process_lock_busy because the sidecar had started seconds
+    earlier. Live targeted refresh should wait briefly, acquire the lock, and
+    produce fresh substrate for the normal decision gates.
+    """
+
+    import src.data.dual_run_lock as dual_run_lock
+    import src.state.db as state_db
+
+    class _ProcessLock:
+        def __init__(self, acquired: bool):
+            self.acquired = acquired
+            self.closed = False
+
+        def __enter__(self):
+            return self.acquired
+
+        def __exit__(self, *_args):
+            self.closed = True
+
+    locks = [_ProcessLock(False), _ProcessLock(True)]
+    sleeps: list[float] = []
+    refresh_calls: list[dict] = []
+
+    def _acquire_lock(name: str):
+        assert name == "market_substrate_refresh"
+        return locks.pop(0)
+
+    def _refresh(*_args, **kwargs):
+        refresh_calls.append(kwargs)
+        return {
+            "status": "refreshed",
+            "executable_substrate_coverage_status": "FULL",
+            "inserted": 1,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(dual_run_lock, "acquire_lock", _acquire_lock)
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _FakeConn())
+    monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _refresh)
+    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_REFRESH_PROCESS_LOCK_RETRY_SECONDS", "0.01")
+
+    result = main_module._edli_refresh_continuous_money_path_families(
+        {("Paris", "2026-06-20", "low")},
+        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["executable_substrate_coverage_status"] == "FULL"
+    assert sleeps == [0.01]
+    assert len(refresh_calls) == 1
+    assert locks == []
 
 
 def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
