@@ -2120,12 +2120,60 @@ import time as _time
 
 _edli_redecision_boot_token: str = f"{int(_time.time())}{os.getpid()}"
 _edli_redecision_cycle_index: int = 0
+_edli_redecision_screen_belief_cursor: int = 0
 # Wave-1 2026-06-12: fixed per-cycle re-decision/screen batch fed to the WRAPPING fair
 # cursor (CoverageFairnessRequest.select_rows). Replaces the deleted redecision_max_per_cycle
 # settings cap. The cursor wraps modulo the family count, so this batch reaches EVERY family
 # within ceil(N/batch) cycles and never silently drops the tail. Sized to sweep the full live
 # family universe (~108 city×metric families) within ~2 cycles at the ~60-90s reactor cadence.
 _EDLI_REDECISION_FAIR_BATCH: int = 60
+
+
+def _edli_belief_family_key(belief) -> tuple[str, str, str, str]:
+    return (
+        str(getattr(belief, "city", "") or "").strip(),
+        str(getattr(belief, "target_date", "") or "").strip(),
+        str(getattr(belief, "metric", "") or "").strip(),
+        str(getattr(belief, "family_id", "") or "").strip(),
+    )
+
+
+def _edli_redecision_screen_belief_batch(
+    beliefs: list,
+    *,
+    max_families: int,
+) -> tuple[list, set[tuple[str, str, str, str]], int]:
+    """Return the fair-cursor entry-screen belief slice for this tick.
+
+    The redecision screen used to feed every cached belief into the price reader,
+    which meant a live table with millions of executable snapshots could keep one
+    scheduler worker busy for minutes before the reactor reached any event. This
+    is a fairness cursor, not an edge cap: it wraps through the complete belief
+    universe over successive ticks and bounds the per-tick DB read surface.
+    """
+    global _edli_redecision_screen_belief_cursor
+    if not beliefs:
+        return [], set(), 0
+    ordered = sorted(beliefs, key=_edli_belief_family_key)
+    total = len(ordered)
+    if max_families <= 0 or max_families >= total:
+        keys = {_edli_belief_family_key(b) for b in ordered}
+        _edli_redecision_screen_belief_cursor = 0
+        return ordered, keys, total
+    start = _edli_redecision_screen_belief_cursor % total
+    selected = [ordered[(start + i) % total] for i in range(max_families)]
+    _edli_redecision_screen_belief_cursor = (start + max_families) % total
+    keys = {_edli_belief_family_key(b) for b in selected}
+    return selected, keys, total
+
+
+def _edli_filter_beliefs_to_family_keys(
+    beliefs: list,
+    family_keys: set[tuple[str, str, str, str]],
+) -> list:
+    if not family_keys:
+        return []
+    return [belief for belief in beliefs if _edli_belief_family_key(belief) in family_keys]
 
 
 def _edli_next_redecision_source() -> str:
@@ -6216,7 +6264,18 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_read_only()
         try:
-            beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
+            all_beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
+            beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
+                all_beliefs,
+                max_families=rd_cap,
+            )
+            if total_beliefs and len(beliefs) < total_beliefs:
+                logger.info(
+                    "edli_redecision_screen: entry belief fair batch size=%d total=%d cursor=%d",
+                    len(beliefs),
+                    total_beliefs,
+                    _edli_redecision_screen_belief_cursor,
+                )
             probe_acted_state = dict(_edli_redecision_acted_state)
             redecisions = screen_entry_redecisions(
                 world_ro,
@@ -6408,7 +6467,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             world_ro = get_world_connection_read_only()
             trade_ro = get_trade_connection_read_only()
             try:
-                beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
+                all_beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
+                beliefs = _edli_filter_beliefs_to_family_keys(
+                    all_beliefs,
+                    screened_belief_keys,
+                )
                 redecisions = screen_entry_redecisions(
                     world_ro,
                     trade_ro,
