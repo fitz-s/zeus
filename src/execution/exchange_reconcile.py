@@ -108,7 +108,12 @@ _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
 _CHAIN_CONFIRMED_HELD_PHASES = frozenset({"active", "day0_window"})
-_EXIT_FILL_PROJECTION_PHASES = frozenset({"active", "day0_window", "pending_exit", "economically_closed"})
+# A quarantined local row is not tradable exposure, but a confirmed EXIT sell for
+# the same position is stronger venue truth and must be allowed to economically
+# close the stale projection instead of leaving close-before-open leases blocked.
+_EXIT_FILL_PROJECTION_PHASES = frozenset(
+    {"active", "day0_window", "pending_exit", "economically_closed", "quarantined"}
+)
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 _PENDING_EXIT_NON_CURRENT_ORDER_STATUSES = frozenset({"filled", "sell_filled"})
 _REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
@@ -2056,7 +2061,7 @@ def _reconcile_recorded_exit_fill_projections(
          WHERE tf.state = 'CONFIRMED'
            AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
-           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed', 'quarantined')
          ORDER BY tf.observed_at, tf.trade_fact_id
         """
     ).fetchall()

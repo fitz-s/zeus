@@ -2001,6 +2001,83 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     }
 
 
+def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projection(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+    token = "exit-quarantined-confirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-quarantined-confirmed", order_id="ord-entry-quarantine")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'size_mismatch_unresolved',
+               token_id = ?,
+               order_id = 'ord-entry-quarantine',
+               order_status = 'filled',
+               shares = 11.09,
+               chain_shares = 11.09,
+               cost_basis_usd = 6.10,
+               chain_cost_basis_usd = 6.10,
+               entry_price = 0.55,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-quarantined-confirmed'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-quarantined-exit-confirmed",
+        venue_order_id="ord-quarantined-exit-confirmed",
+        position_id="pos-exit-quarantined-confirmed",
+        token_id=token,
+        side="SELL",
+        size=11.09,
+        price=0.53,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-quarantined-exit-confirmed",
+        venue_order_id="ord-quarantined-exit-confirmed",
+        token_id=token,
+        trade_id="trade-quarantined-exit-confirmed",
+        size="11.09",
+        fill_price="0.54",
+        state="CONFIRMED",
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW)
+
+    assert summary["exit_projected"] == 1
+    projection = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason
+          FROM position_current
+         WHERE position_id = 'pos-exit-quarantined-confirmed'
+        """
+    ).fetchone()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "order_status": "filled",
+        "exit_reason": "M5_EXCHANGE_RECONCILE",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, order_id, command_id
+          FROM position_events
+         WHERE position_id = 'pos-exit-quarantined-confirmed'
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """
+    ).fetchone()
+    assert dict(event) == {
+        "event_type": "EXIT_ORDER_FILLED",
+        "phase_before": "pending_exit",
+        "phase_after": "economically_closed",
+        "order_id": "ord-quarantined-exit-confirmed",
+        "command_id": "cmd-quarantined-exit-confirmed",
+    }
+
+
 def test_recorded_nonfinal_full_exit_trade_terminalizes_command_without_economic_close(conn):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_order_fact
