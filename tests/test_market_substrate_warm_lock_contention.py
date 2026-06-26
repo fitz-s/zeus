@@ -339,6 +339,29 @@ def test_small_priority_capture_busy_timeout_splits_candidate_budget(monkeypatch
     assert priority == 6000
 
 
+def test_late_small_priority_capture_keeps_durable_floor(monkeypatch):
+    """Late-cycle money-path recapture must not collapse to the progress floor."""
+
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PROGRESS_TIMEOUT_FLOOR_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", raising=False)
+
+    priority = _snapshot_capture_busy_timeout_ms(
+        0.02,
+        remaining_candidates=2,
+        priority_candidate=True,
+    )
+    broad = _snapshot_capture_busy_timeout_ms(
+        0.02,
+        remaining_candidates=2,
+        priority_candidate=False,
+    )
+
+    assert priority >= 4000
+    assert broad < priority
+
+
 def test_family_priority_capture_busy_timeout_keeps_durable_floor(monkeypatch):
     """Family-sized money-path recaptures must wait out normal WAL contention."""
 

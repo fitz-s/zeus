@@ -134,17 +134,28 @@ def _snapshot_capture_busy_timeout_ms(
     # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
     if remaining_candidates is not None and remaining_candidates > 1:
+        priority_floor_scope = bool(
+            priority_candidate
+            and remaining_candidates <= max(1, priority_floor_candidate_cap)
+        )
         split_priority_scope = bool(
             priority_candidate
-            and remaining_candidates <= max(1, priority_share_candidate_cap)
+            and remaining_candidates > max(1, priority_floor_candidate_cap)
         )
         split_batch_scope = bool(
             not priority_candidate
             or remaining_candidates > max(1, priority_floor_candidate_cap)
         )
     else:
+        priority_floor_scope = False
         split_priority_scope = False
         split_batch_scope = False
+    if priority_floor_scope:
+        # Live money-path scoped refreshes must wait out normal WAL contention even
+        # late in the cycle. Splitting a 2-row priority refresh down to 150ms after
+        # Gamma/CLOB prefetch consumed the reserve reproduced coverage=NONE.
+        share_ms = max(floor_ms, remaining_ms // max(1, remaining_candidates or 1))
+        return max(1, min(configured, share_ms))
     if split_priority_scope or split_batch_scope:
         # Live 2026-06-25: the batch warmer had 46 selected candidates and one
         # locked insert consumed the 8s per-row ceiling, producing
