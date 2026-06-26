@@ -1498,6 +1498,40 @@ def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
     assert world.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
+def test_sqlite_deadline_interrupts_and_clears():
+    """Reactor maintenance budgets must interrupt SQLite itself, not only Python between steps."""
+
+    conn = sqlite3.connect(":memory:")
+    deadline = time.monotonic() - 0.001
+    main._edli_install_sqlite_deadline(conn, deadline_monotonic=deadline)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute(
+                """
+                WITH RECURSIVE x(n) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT n + 1 FROM x WHERE n < 1000000
+                )
+                SELECT sum(n) FROM x
+                """
+            ).fetchone()
+    finally:
+        main._edli_clear_sqlite_progress_handler(conn)
+
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_forecast_snapshot_build_is_reactor_budgeted():
+    """FSR event build is before process_pending; it must not be an unbounded reactor stage."""
+
+    src = inspect.getsource(main._edli_event_reactor_cycle)
+    assert "reactor_forecast_snapshot_build_budget_seconds" in inspect.getsource(
+        main._edli_forecast_snapshot_build_budget_seconds
+    )
+    assert "budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg)" in src
+
+
 def test_decision_triggered_refresh_is_cycle_bounded():
     """Inline recapture is live value, but must not monopolize the reactor cycle."""
 

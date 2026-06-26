@@ -5136,6 +5136,7 @@ def _edli_event_reactor_cycle() -> None:
                     source=_fair_source,
                     already_pending_keys=_fsr_pending,
                     suppress_recent_no_value_refutations=True,
+                    budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg),
                 )
                 _log_stage("forecast_snapshot_build")
             except sqlite3.OperationalError as _emit_lock_exc:
@@ -6866,6 +6867,7 @@ def _edli_build_forecast_snapshot_events(
     source: str | None = None,
     already_pending_keys: set[str] | None = None,
     suppress_recent_no_value_refutations: bool = False,
+    budget_seconds: float | None = None,
 ) -> list[Any]:
     """Build FSR events without mutating world DB.
 
@@ -6881,7 +6883,14 @@ def _edli_build_forecast_snapshot_events(
     )
     from src.state.db import get_forecasts_connection_read_only
 
+    deadline_monotonic = (
+        time.monotonic() + float(budget_seconds)
+        if budget_seconds is not None and float(budget_seconds) > 0
+        else None
+    )
+    _edli_install_sqlite_deadline(world_conn, deadline_monotonic=deadline_monotonic)
     forecasts_conn = get_forecasts_connection_read_only()
+    _edli_install_sqlite_deadline(forecasts_conn, deadline_monotonic=deadline_monotonic)
     try:
         trigger = ForecastSnapshotReadyTrigger(
             EventWriter(world_conn),
@@ -6896,7 +6905,18 @@ def _edli_build_forecast_snapshot_events(
             already_pending_keys=already_pending_keys,
             suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
         )
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
+            logger.warning(
+                "EDLI forecast-snapshot build budget exhausted after %.3fs; "
+                "skipping emit this cycle and draining already-queued candidates.",
+                float(budget_seconds or 0.0),
+            )
+            return []
+        raise
     finally:
+        _edli_clear_sqlite_progress_handler(forecasts_conn)
+        _edli_clear_sqlite_progress_handler(world_conn)
         forecasts_conn.close()
 
 
@@ -7936,6 +7956,34 @@ def _edli_prune_budget_seconds(config: dict) -> float:
     return max(0.0, min(value, 20.0))
 
 
+def _edli_forecast_snapshot_build_budget_seconds(config: dict) -> float:
+    raw = config.get("reactor_forecast_snapshot_build_budget_seconds", 8.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 8.0
+    return max(0.0, min(value, 20.0))
+
+
+def _edli_install_sqlite_deadline(conn, *, deadline_monotonic: float | None) -> None:
+    """Interrupt long SQLite reads/writes once the caller's wall-clock budget is spent."""
+
+    if deadline_monotonic is None:
+        return
+
+    def _deadline_progress() -> int:
+        return 1 if time.monotonic() >= deadline_monotonic else 0
+
+    conn.set_progress_handler(_deadline_progress, 1_000)
+
+
+def _edli_clear_sqlite_progress_handler(conn) -> None:
+    try:
+        conn.set_progress_handler(None, 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _edli_prune_lock_timeout_seconds(config: dict) -> float:
     raw = config.get("reactor_prune_lock_timeout_seconds", 0.5)
     try:
@@ -8051,6 +8099,9 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         except Exception:  # noqa: BLE001
             pass
         saved_busy_timeout_ms = None
+
+    prune_deadline = (prune_started + budget_s) if budget_s > 0 else None
+    _edli_install_sqlite_deadline(store.conn, deadline_monotonic=prune_deadline)
 
     def _budget_exhausted(next_step: str) -> bool:
         if budget_s <= 0:
@@ -8311,6 +8362,7 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             _fsr_sweep_exc,
         )
     finally:
+        _edli_clear_sqlite_progress_handler(store.conn)
         _restore_busy_timeout()
 
 
