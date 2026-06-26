@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-26
 # Authority basis: Operator-gated funnel #1 unlock (2026-06-10) — first-class calibration
 #   authority for replacement-chain candidates (FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE). Tears
 #   down the Platt-cohort wall: replacement candidates' q never passes through Platt, so the
@@ -34,7 +34,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import runtime_cities_by_name, settings
-from src.decision_kernel.verifier import APPROVED_CALIBRATION_AUTHORITIES
+from src.decision_kernel.verifier import (
+    APPROVED_CALIBRATION_AUTHORITIES,
+    DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+)
 from src.engine import event_reactor_adapter as adapter
 from src.engine.event_reactor_adapter import (
     FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
@@ -178,6 +181,59 @@ def test_q1_insufficient_data_is_admitted_by_default():
     assert cal_payload["n_samples"] == 0
     cert = SimpleNamespace(payload=cal_payload)
     _assert_event_bound_calibration_live_admitted(cert)  # must NOT raise (admitted-by-default)
+
+
+def test_day0_live_observation_hard_fact_calibration_authority_admits():
+    """Day0 hard facts do not need a legacy Platt bucket.
+
+    A DAY0_EXTREME_UPDATED payload has already passed live source/station/date/rounding
+    authority. The certificate must carry that Day0 observation authority directly instead
+    of falling through to IDENTITY_FALLBACK_NO_PLATT_BUCKET.
+    """
+
+    payload = {
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "raw_value": 72.0,
+        "rounded_value": 72,
+        "station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "horizon_profile": "full",
+    }
+    cal_payload, _clock = _calibration_authority_payload_and_clock(
+        sqlite3.connect(":memory:"),
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        family=SimpleNamespace(city=_CITY, metric=_METRIC, target_date=_TARGET_DATE),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+
+    assert cal_payload["authority"] == DAY0_OBSERVATION_CALIBRATION_AUTHORITY
+    assert cal_payload["input_space"] == "day0_live_observation_hard_fact"
+    assert cal_payload["n_samples"] == 0
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    assert DAY0_OBSERVATION_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
+
+    from src.decision_kernel.compiler import _validate_calibration_payload  # type: ignore[attr-defined]
+
+    _validate_calibration_payload(
+        cal_payload,
+        {"calibration_input_space": "day0_live_observation_hard_fact"},
+        {"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
 
 
 def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):

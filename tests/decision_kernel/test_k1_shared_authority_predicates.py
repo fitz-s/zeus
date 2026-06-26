@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-26
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K1.3
 # (twin-authority elimination: maturity ALT tuple verifier L945 + compiler L582 must be
 # ONE shared constant + ONE shared predicate; divergent carve-out tuples caused 53/h
@@ -37,6 +37,7 @@ def test_alt_credential_constant_is_shared_single_source():
         {
             verifier_module.IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
             verifier_module.FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+            verifier_module.DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
         }
     )
     # Compiler must reference the same object (imported, not redefined).
@@ -158,6 +159,7 @@ def test_settlement_preimage_single_source():
         # ALT credentials use maturity_level=4 as placeholder; guard must not apply.
         (4, "IDENTITY_FALLBACK_NO_PLATT_BUCKET", False),
         (4, "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE", False),
+        (4, "DAY0_LIVE_OBSERVATION_HARD_FACT", False),
         # Unapproved/unknown authority with placeholder maturity stays too-low here
         # (the authority gate rejects it earlier anyway; this predicate stays strict).
         (4, "FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED", True),

@@ -62,6 +62,7 @@ IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
 # it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
 # certificate, so it is not in the approved set.
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+DAY0_OBSERVATION_CALIBRATION_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 # K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
 # ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
 # existed as two independent tuples (verifier + compiler); when FUSED_BOOTSTRAP was added
@@ -72,6 +73,7 @@ ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
     {
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     }
 )
 
@@ -94,6 +96,7 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
         "APPROVED",
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     }
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})

@@ -192,6 +192,7 @@ from src.decision_kernel.compiler import (
     NoSubmitProofBundle,
     normalize_forecast_reader_status,
 )
+from src.decision_kernel.verifier import DAY0_OBSERVATION_CALIBRATION_AUTHORITY
 from src.engine.event_bound_final_intent import (
     EventBoundExecutorSubmitResult,
     EventBoundFinalIntent,
@@ -1793,6 +1794,8 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
     # settled coverage count (>0 by the licensing rule).
     coverage_status = str(payload.get("coverage_status") or "").strip()
     if coverage_status == "INSUFFICIENT_DATA":
+        return
+    if authority == DAY0_OBSERVATION_CALIBRATION_AUTHORITY:
         return
     if n_samples is not None and n_samples <= 0:
         raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
@@ -9350,6 +9353,14 @@ def _calibration_authority_payload_and_clock(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:city")
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        return _day0_calibration_authority_payload_and_clock(
+            city=city,
+            family=family,
+            payload=payload,
+            forecast_payload=forecast_payload,
+            decision_time=decision_time,
+        )
     # CERT BRIDGE (2026-06-10, funnel #1 unlock) — replacement-chain candidates carry their
     # OWN calibration credential (fused-center bootstrap bounds + settlement-backward
     # coverage), stamped onto `payload` by the live replacement builder. When present, mint
@@ -9481,6 +9492,97 @@ def _calibration_authority_payload_and_clock(
         training_cutoff_time,
         training_cutoff_time,
     )
+
+
+def _day0_calibration_authority_payload_and_clock(
+    *,
+    city,
+    family,
+    payload: Mapping[str, Any],
+    forecast_payload: Mapping[str, Any],
+    decision_time: datetime,
+) -> tuple[dict[str, Any], EvidenceClock]:
+    """Certificate calibration authority for live Day0 hard facts."""
+
+    from src.events.day0_authority import (
+        Day0AuthorityEvidence,
+        assert_live_day0_authority,
+        normalize_day0_live_authority_status,
+    )
+
+    try:
+        raw_value = float(payload.get("raw_value"))
+        rounded_value = int(payload.get("rounded_value"))
+    except (TypeError, ValueError):
+        raise ValueError("DAY0_CALIBRATION_AUTHORITY_MISSING:observation_value") from None
+    semantics = SettlementSemantics.for_city(city)
+    evidence = Day0AuthorityEvidence(
+        city=str(payload.get("city") or family.city),
+        target_date=str(payload.get("target_date") or family.target_date),
+        metric=str(payload.get("metric") or family.metric),
+        source_match_status=str(payload.get("source_match_status") or "UNKNOWN"),
+        station_match_status=str(payload.get("station_match_status") or "UNKNOWN"),
+        local_date_status=str(payload.get("local_date_status") or "UNKNOWN"),
+        dst_status=str(payload.get("dst_status") or "UNKNOWN"),
+        metric_match_status=str(payload.get("metric_match_status") or "UNKNOWN"),
+        rounding_status=str(payload.get("rounding_status") or "UNKNOWN"),
+        source_authorized_status=str(payload.get("source_authorized_status") or "UNKNOWN"),
+        live_authority_status=normalize_day0_live_authority_status(
+            payload.get("live_authority_status")
+        ),
+        observation_available_at=str(payload.get("observation_available_at") or ""),
+        observation_time=str(payload.get("observation_time") or ""),
+        raw_value=raw_value,
+        rounded_value=rounded_value,
+        settlement_semantics=semantics,
+    )
+    try:
+        assert_live_day0_authority(evidence)
+    except Exception as exc:
+        raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
+    source_time = _parse_utc(evidence.observation_time)
+    available_time = _parse_utc(evidence.observation_available_at)
+    if source_time is None or available_time is None:
+        raise ValueError("DAY0_CALIBRATION_AUTHORITY_MISSING:clock")
+    horizon_profile = _nonnull(
+        payload.get("horizon_profile") or forecast_payload.get("horizon_profile")
+    )
+    model_key = (
+        "day0_live_observation_hard_fact_v1:"
+        f"{evidence.city}:{evidence.target_date}:{evidence.metric}:"
+        f"{evidence.rounded_value}:{evidence.observation_time}"
+    )
+    payload_out = {
+        "identity": model_key,
+        "calibrator_model_key": model_key,
+        "calibrator_version": model_key,
+        "calibration_method": "day0_live_observation_hard_fact",
+        "model_hash": _hash_jsonish(
+            {
+                "model_key": model_key,
+                "city": evidence.city,
+                "target_date": evidence.target_date,
+                "metric": evidence.metric,
+                "station_id": payload.get("station_id"),
+                "source": payload.get("source") or payload.get("settlement_source"),
+                "rounding_rule": semantics.rounding_rule,
+                "rounded_value": evidence.rounded_value,
+            }
+        ),
+        "horizon_profile": horizon_profile,
+        "training_cutoff": evidence.observation_time,
+        "model_available_at": evidence.observation_available_at,
+        "model_materialized_at": decision_time.astimezone(UTC).isoformat(),
+        "observation_time": evidence.observation_time,
+        "observation_available_at": evidence.observation_available_at,
+        "source_authorized_status": evidence.source_authorized_status,
+        "live_authority_status": evidence.live_authority_status,
+        "input_space": "day0_live_observation_hard_fact",
+        "maturity_level": 4,
+        "n_samples": 0,
+        "authority": DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
+    }
+    return payload_out, EvidenceClock(source_time, available_time, decision_time)
 
 
 def _persisted_calibration_model_row_for_receipt(
