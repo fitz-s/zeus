@@ -130,13 +130,19 @@ class RejectionReason(str, Enum):
         RejectionCategory.HONEST_DATA,
         "Selected executable snapshot expired between decision and use.",
     )
+    MONEY_PATH_HORIZON_EXPIRED = (
+        "MONEY_PATH_HORIZON_EXPIRED",
+        RejectionCategory.HONEST_MARKET,
+        "A horizon-bounded money-path transient reached a real event or execution "
+        "window boundary (operator disarm, venue closed/not listed, selection "
+        "deadline past, or local timeliness floor past). This is not an attempt "
+        "cap; recurring volume is an operations/cadence signal.",
+    )
     MONEY_PATH_TRANSIENT_EXHAUSTED = (
         "MONEY_PATH_TRANSIENT_EXHAUSTED",
         RejectionCategory.ARTIFICIAL_SUSPECT,
-        "A money-path transient (price race / mode flip / stale snapshot) was still "
-        "unresolved after the bounded requeue cap; the terminal label carries the "
-        "last transient reason. Recurring volume here = a structural cadence or "
-        "race defect, never an honest market verdict.",
+        "Legacy durable rows only. The live reactor no longer emits attempt-count "
+        "exhaustion; current terminal transients use MONEY_PATH_HORIZON_EXPIRED.",
     )
     EXECUTOR_PRE_VENUE_REJECTED = (
         "EXECUTOR_PRE_VENUE_REJECTED",

@@ -1137,6 +1137,9 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
+          (d) SELECTION_DEADLINE_PAST — an event-bound executable snapshot
+              selected a concrete deadline, and that deadline has passed. This is
+              not a retry cap: the stale proof's own executable window is over.
           (b) MARKET_VENUE_CLOSED — only explicit venue evidence says
               ``closed=true`` and ``accepting_orders=false``. Static Gamma endDate
               / F1 timing cannot terminalize a money-path event.
@@ -1155,6 +1158,16 @@ class OpportunityEventReactor:
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
             return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
+
+        selection_deadline = _selection_deadline_horizon_utc(
+            event,
+            self._transient_requeue_reasons.get(event.event_id),
+        )
+        if selection_deadline is not None and decision_time.astimezone(UTC) >= selection_deadline:
+            return (
+                "SELECTION_DEADLINE_PAST",
+                f"selection_deadline={selection_deadline.isoformat()}",
+            )
 
         # (b) Venue-close floor. This is evidence-based, not time-derived.
         venue_closed = self._venue_market_closed_horizon(event, decision_time=decision_time)
@@ -2408,6 +2421,61 @@ def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_utc_instant(value: object) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _selection_deadline_from_reason(reason: str | None) -> datetime | None:
+    """Extract the event-bound selection deadline from a transient reason string."""
+    if not reason:
+        return None
+    marker = "selection_deadline="
+    start = reason.find(marker)
+    if start < 0:
+        return None
+    value_start = start + len(marker)
+    tail = reason[value_start:]
+    end = len(tail)
+    for delimiter in (
+        ":decision_time=",
+        ":freshness_deadline=",
+        ":event_id=",
+        ":snapshot_id=",
+        ":condition_id=",
+        ":token_id=",
+        ":reason=",
+    ):
+        idx = tail.find(delimiter)
+        if idx >= 0:
+            end = min(end, idx)
+    return _parse_utc_instant(tail[:end])
+
+
+def _selection_deadline_horizon_utc(
+    event: OpportunityEvent,
+    last_transient_reason: str | None,
+) -> datetime | None:
+    payload = _payload_dict(event)
+    for key in ("selection_deadline", "selectionDeadline"):
+        deadline = _parse_utc_instant(payload.get(key))
+        if deadline is not None:
+            return deadline
+    return _selection_deadline_from_reason(last_transient_reason)
 
 
 def _receipt_or_payload(

@@ -64,6 +64,11 @@ _SNAPSHOT_STALE_REASON = (
     "decision_time=2026-06-13T14:00:00+00:00"
 )
 
+_SELECTION_DEADLINE_STALE_REASON = (
+    "EXECUTABLE_SNAPSHOT_STALE:selection_deadline=2026-06-26T01:10:00.180078+00:00:"
+    "decision_time=2026-06-26T14:49:42.119056+00:00"
+)
+
 # Day0/venue horizon regression (corrected 2026-06-26). Gamma endDate/F1 12:00Z
 # is resolution timing, not proof the CLOB is closed. Manila (Asia/Manila, UTC+8)
 # target 2026-06-13 remains local-day active until 2026-06-13T16:00:00Z.
@@ -304,6 +309,44 @@ def test_horizon_terminalizes_with_horizon_label():
     assert regret is not None
     assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:TIMELINESS_FLOOR_PAST:")
     assert "attempt" not in regret[0].lower()
+
+
+def test_selection_deadline_past_terminalizes_stale_snapshot_retry():
+    """A selected executable snapshot carries its own execution window. Once that
+    deadline is past, the stale proof cannot become executable again; requeueing
+    it would only consume reactor budget ahead of fresh redecision events."""
+    conn, store = _store()
+    event = _day0_event(city="New York", target_date="2026-06-26", suffix="stale-deadline")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(conn, store, _SELECTION_DEADLINE_STALE_REASON)
+
+    reactor._transient_requeue_reasons[event.event_id] = _SELECTION_DEADLINE_STALE_REASON
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=datetime(2026, 6, 26, 14, 49, 42, tzinfo=timezone.utc),
+        result=res,
+    )
+
+    assert res.dead_lettered == 1
+    assert res.retried == 0
+    assert _status(conn, event.event_id) == "dead_letter"
+    row = conn.execute(
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
+    assert "SELECTION_DEADLINE_PAST" in (row[1] or "")
+    assert "EXECUTABLE_SNAPSHOT_STALE" in (row[1] or "")
+    regret = conn.execute(
+        "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert regret is not None
+    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:SELECTION_DEADLINE_PAST:")
 
 
 def test_timeliness_floor_is_backstop_when_venue_phase_unresolvable(monkeypatch):
