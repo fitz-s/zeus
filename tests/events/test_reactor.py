@@ -440,6 +440,11 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
     assert result.processed == 0
     assert result.rejected == 0
     assert result.retried == 1
+    assert result.rejection_reasons == [
+        "EXECUTABLE_SNAPSHOT_STALE:"
+        "freshness_deadline=2026-05-24T06:09:59+00:00:"
+        "decision_time=2026-05-24T06:10:00+00:00"
+    ]
     assert _terminal_surfaces(conn, event.event_id) == {
         "verified_no_submit": 0,
         "execution_receipt": 0,

@@ -1650,6 +1650,7 @@ class OpportunityEventReactor:
                     last_error=last_reason,
                 )
                 result.retried += 1
+                result.rejection_reasons.append(last_reason or "EXECUTABLE_SNAPSHOT_PENDING")
             return
         # disposition is None: a pre-submit gate rejected the event (its reject
         # ledgers were written in _process_one_pre_submit). The legacy single-pass
