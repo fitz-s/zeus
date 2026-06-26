@@ -20,12 +20,14 @@ Settlement truth = Polymarket settlement result (spec §1.3).
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -402,6 +404,45 @@ class WorldMutexIOViolation(RuntimeError):
     """
 
 
+def _world_live_writer_lock_path() -> Path:
+    """Return the cross-process LIVE writer lock file for zeus-world.db."""
+
+    return ZEUS_WORLD_DB_PATH.with_name(ZEUS_WORLD_DB_PATH.name + ".writer-lock.live")
+
+
+def _lock_acquire_kwargs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[bool, float]:
+    blocking = bool(kwargs.get("blocking", True))
+    timeout = float(kwargs.get("timeout", -1.0))
+    if args:
+        blocking = bool(args[0])
+    if len(args) >= 2:
+        timeout = float(args[1])
+    return blocking, timeout
+
+
+def _acquire_flock_fd(lock_path: Path, *, blocking: bool, timeout: float) -> int | None:
+    """Acquire a fcntl flock and return the open fd, or None for non-blocking miss."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    flags = fcntl.LOCK_EX
+    if not blocking or timeout >= 0.0:
+        flags |= fcntl.LOCK_NB
+    deadline = time.monotonic() + timeout if timeout >= 0.0 else None
+    while True:
+        try:
+            fcntl.flock(fd, flags)
+            return fd
+        except BlockingIOError:
+            if not blocking or (deadline is not None and time.monotonic() >= deadline):
+                os.close(fd)
+                return None
+            time.sleep(0.01)
+        except OSError:
+            os.close(fd)
+            raise
+
+
 class _GuardedWorldMutex:
     """A ``threading.Lock`` facade that tracks THREAD-LOCAL held depth.
 
@@ -421,21 +462,44 @@ class _GuardedWorldMutex:
     thread's acquisition, generating spurious advisories and (when fatal) daemon
     instability.
 
-    The held counter is a depth (not bool) so a future reentrant variant cannot
-    silently corrupt the flag; in practice it is 0 or 1 (non-reentrant lock).
+    The lock now has two layers:
+
+    * the original process-local ``threading.Lock`` for in-process scheduler
+      threads, and
+    * the zeus-world LIVE writer flock for launchd sidecars in other processes.
+
+    Without the flock, ``src.main`` and ``price_channel_daemon`` each held their
+    own independent process-local mutex and still collided on SQLite's WAL writer
+    lock, starving Day0/redecision/reactor claims under live load.
     """
 
-    __slots__ = ("_lock",)
+    __slots__ = ("_lock", "_flock_fd")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._flock_fd: int | None = None
 
     def acquire(self, *args: Any, **kwargs: Any) -> bool:
         acquired = self._lock.acquire(*args, **kwargs)
-        if acquired:
+        if not acquired:
+            return False
+        try:
+            blocking, timeout = _lock_acquire_kwargs(args, kwargs)
+            fd = _acquire_flock_fd(
+                _world_live_writer_lock_path(),
+                blocking=blocking,
+                timeout=timeout,
+            )
+            if fd is None:
+                self._lock.release()
+                return False
+            self._flock_fd = fd
             _tls = _world_mutex_tls()
             _tls.held_depth = getattr(_tls, "held_depth", 0) + 1
-        return acquired
+            return True
+        except BaseException:
+            self._lock.release()
+            raise
 
     def release(self) -> None:
         # Decrement the thread-local depth BEFORE releasing the OS lock so the
@@ -444,6 +508,13 @@ class _GuardedWorldMutex:
         d = getattr(_tls, "held_depth", 0)
         if d > 0:
             _tls.held_depth = d - 1
+        fd = self._flock_fd
+        self._flock_fd = None
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
         self._lock.release()
 
     def locked(self) -> bool:
