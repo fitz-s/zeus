@@ -253,6 +253,16 @@ def test_full_family_capture_default_batch_is_small_enough_for_direct_clob():
     )
 
 
+def test_priority_direct_clob_uses_selected_priority_subset():
+    """A broad priority universe must not disable a small selected recapture batch."""
+
+    src = inspect.getsource(market_scanner.refresh_executable_market_substrate_snapshots)
+
+    assert "selected_priority_conditions = {" in src
+    assert "len(selected_priority_conditions) <= priority_direct_clob_condition_limit" in src
+    assert "len(priority_conditions) <= priority_direct_clob_condition_limit" not in src
+
+
 def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
     """Open rests and held positions are live money-risk, not ordinary backlog.
 

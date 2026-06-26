@@ -217,11 +217,11 @@ def _priority_direct_clob_prefetch_condition_limit() -> int:
         configured = int(
             os.environ.get(
                 "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
-                "12",
+                "24",
             )
         )
     except ValueError:
-        configured = 12
+        configured = 24
     return max(0, configured)
 
 
@@ -4647,15 +4647,20 @@ def refresh_executable_market_substrate_snapshots(
         if full_family_capture
         else 0
     )
+    selected_priority_conditions = {
+        str(condition_id or "").strip()
+        for _recency, _priority, _ordinal, _market, _outcome, condition_id, _direction in selected_candidates
+        if str(condition_id or "").strip() in priority_conditions
+    }
     priority_direct_clob_condition_limit = (
         _priority_direct_clob_prefetch_condition_limit()
         if full_family_capture and priority_conditions
         else 0
     )
     priority_direct_clob_scope_allowed = bool(
-        priority_conditions
+        selected_priority_conditions
         and priority_direct_clob_condition_limit > 0
-        and len(priority_conditions) <= priority_direct_clob_condition_limit
+        and len(selected_priority_conditions) <= priority_direct_clob_condition_limit
     )
     if batch_orderbook_supported:
         # Money-path redecision confirm refresh already has a live price-channel
@@ -4921,6 +4926,7 @@ def refresh_executable_market_substrate_snapshots(
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
         "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
         "direct_clob_prefetch_priority_condition_limit": priority_direct_clob_condition_limit,
+        "direct_clob_prefetch_selected_priority_condition_count": len(selected_priority_conditions),
         "direct_clob_prefetch_priority_scope_allowed": int(priority_direct_clob_scope_allowed),
         "direct_clob_prefetch_small_family_enabled": int(small_full_family_direct_clob_prefetch),
         "direct_clob_prefetch_priority_enabled": int(priority_full_family_direct_clob_prefetch),
