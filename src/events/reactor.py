@@ -64,6 +64,7 @@ DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
+DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -111,6 +112,41 @@ def _fetch_batch_limit() -> int:
     except (TypeError, ValueError):
         return DEFAULT_REACTOR_FETCH_BATCH_LIMIT
     return max(1, min(250, limit))
+
+
+def _reactor_claim_busy_timeout_ms() -> int:
+    """SQLite busy timeout for the pre-submit claim window.
+
+    The live reactor must not spend a whole cycle waiting for another writer
+    before it has emitted any order. A claim lock miss is retryable because the
+    event remains pending; keep the wait long enough to absorb ordinary
+    millisecond-scale WAL overlap, but short enough that redecision/day0 cadence
+    survives a stuck writer.
+    """
+
+    raw = os.environ.get("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS")
+    if raw is None:
+        return DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS
+    return max(1, min(30_000, value))
+
+
+def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int:
+    row = conn.execute("PRAGMA busy_timeout").fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+@contextlib.contextmanager
+def _scoped_sqlite_busy_timeout(conn: sqlite3.Connection, timeout_ms: int):
+    previous = _sqlite_busy_timeout_ms(conn)
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout_ms)}")
+    try:
+        yield
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {previous}")
 
 
 def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
@@ -906,43 +942,51 @@ class OpportunityEventReactor:
         pre_disposition: str | None
         should_submit = False
         try:
-            try:
-                # CLAIM-STORM FIX (2026-06-11 17:51Z): acquire the WAL write lock
-                # DETERMINISTICALLY with BEGIN IMMEDIATE (full busy_timeout engaged
-                # at BEGIN) instead of letting claim()'s UPDATE upgrade lazily.
-                # A lazily-upgraded txn whose snapshot predates another writer's
-                # commit fails SQLITE_BUSY_SNAPSHOT IMMEDIATELY — the busy handler
-                # never engages for snapshot-upgrade conflicts — which is how one
-                # bounced claim poisoned every later claim in the cycle. Mirrors
-                # Window B's BEGIN IMMEDIATE discipline (line ~497).
-                if not self._store.conn.in_transaction:
-                    self._store.conn.execute("BEGIN IMMEDIATE")
-                claimed = self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat())
-            except Exception as exc:
-                if _is_sqlite_lock_error(exc):
-                    # CLAIM-STORM FIX (storm amplifier): ALWAYS roll back. The old
-                    # path returned with the implicit txn left OPEN on the store
-                    # conn; the next fetch_pending then read INSIDE that dangling
-                    # txn, pinning a stale snapshot, and every subsequent claim
-                    # failed BUSY_SNAPSHOT instantly => the whole-cycle 0/250
-                    # bounce storm. Rollback resets the conn so the next event
-                    # starts a fresh txn under the full busy handler.
-                    _was_in_txn = bool(getattr(self._store.conn, "in_transaction", False))
-                    with contextlib.suppress(Exception):
-                        self._store.conn.rollback()
-                    result.claim_lock_bounces += 1
-                    result.retried += 1
-                    import logging as _logging
-
-                    _logging.getLogger("zeus.events.reactor").warning(
-                        "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s exc=%s "
-                        "(rolled back; event stays pending; counted in claim_lock_bounces)",
+            with _scoped_sqlite_busy_timeout(
+                self._store.conn, _reactor_claim_busy_timeout_ms()
+            ):
+                try:
+                    # CLAIM-STORM FIX (2026-06-11 17:51Z): acquire the WAL write lock
+                    # DETERMINISTICALLY with BEGIN IMMEDIATE instead of letting
+                    # claim()'s UPDATE upgrade lazily. Live cadence fix
+                    # (2026-06-26): this pre-submit claim uses a scoped short busy
+                    # timeout, not the connection's default 30 s timeout. A claim
+                    # miss has emitted no order and leaves the event pending, so it
+                    # must be a fast retryable bounce rather than spending a whole
+                    # redecision/day0 scheduler interval behind another writer.
+                    if not self._store.conn.in_transaction:
+                        self._store.conn.execute("BEGIN IMMEDIATE")
+                    claimed = self._store.claim(
                         event.event_id,
-                        _was_in_txn,
-                        exc,
+                        claimed_at=decision_time.astimezone(UTC).isoformat(),
                     )
-                    return
-                raise
+                except Exception as exc:
+                    if _is_sqlite_lock_error(exc):
+                        # CLAIM-STORM FIX (storm amplifier): ALWAYS roll back. The old
+                        # path returned with the implicit txn left OPEN on the store
+                        # conn; the next fetch_pending then read INSIDE that dangling
+                        # txn, pinning a stale snapshot, and every subsequent claim
+                        # failed BUSY_SNAPSHOT instantly => the whole-cycle 0/250
+                        # bounce storm. Rollback resets the conn so the next event
+                        # starts a fresh txn under the scoped busy handler.
+                        _was_in_txn = bool(getattr(self._store.conn, "in_transaction", False))
+                        with contextlib.suppress(Exception):
+                            self._store.conn.rollback()
+                        result.claim_lock_bounces += 1
+                        result.retried += 1
+                        import logging as _logging
+
+                        _logging.getLogger("zeus.events.reactor").warning(
+                            "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s "
+                            "claim_busy_timeout_ms=%s exc=%s "
+                            "(rolled back; event stays pending; counted in claim_lock_bounces)",
+                            event.event_id,
+                            _was_in_txn,
+                            _reactor_claim_busy_timeout_ms(),
+                            exc,
+                        )
+                        return
+                    raise
             if not claimed:
                 # Claim lost (another worker / lease not yet stale): release any
                 # open txn and the mutex; nothing to process this cycle.
