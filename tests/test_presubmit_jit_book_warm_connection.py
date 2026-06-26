@@ -22,6 +22,21 @@
 from __future__ import annotations
 
 
+def test_default_pre_submit_outer_guard_clears_live_clob_tail(monkeypatch):
+    """The unset live default must leave enough budget for a warm /book tail read.
+
+    A 3s default gave the JIT provider only ~2.55s and reproduced
+    PRE_SUBMIT_BOOK_AUTHORITY_STALE globally under live CLOB latency. Operators may
+    still lower the value explicitly via env, but the no-env production default must
+    match the 6s guard assumed by the warm-connection design.
+    """
+    import src.main as main
+
+    monkeypatch.delenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", raising=False)
+    assert main._edli_pre_submit_clob_timeout_seconds() >= 6.0
+    assert main._edli_pre_submit_jit_outer_timeout_seconds() >= 4.5
+
+
 def test_jit_book_strict_timeout_fails_closed_before_outer_guard_with_double_applied_connect():
     """httpcore applies the connect timeout to connect_tcp AND start_tls separately,
     so the worst-case connect cost is 2*connect. 2*connect + read + write + pool must
@@ -32,7 +47,9 @@ def test_jit_book_strict_timeout_fails_closed_before_outer_guard_with_double_app
     outer = main._edli_pre_submit_clob_timeout_seconds()
 
     assert t.connect and t.connect > 0
-    assert t.read and t.read > 0
+    assert t.read and t.read >= 1.5, (
+        f"JIT /book read budget {t.read}s is below observed live CLOB tail latency"
+    )
     worst_case = 2 * t.connect + t.read + t.write + t.pool
     assert worst_case < outer, (
         f"worst-case inner budget {worst_case:.2f}s (2*connect+read+write+pool) must stay "

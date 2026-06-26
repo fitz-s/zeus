@@ -972,6 +972,30 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
     assert calls == []
 
 
+def test_market_discovery_cycle_yields_to_money_path_priority(monkeypatch):
+    """Universe discovery must not hold substrate lock while live money-path recapture waits."""
+
+    calls: list[int] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_market_discovery_staleness_window_seconds",
+        lambda: 0.0,
+    )
+    import src.data.market_scanner as market_scanner
+
+    monkeypatch.setattr(
+        market_scanner,
+        "find_weather_markets_or_raise",
+        lambda *a, **k: calls.append(1) or [],
+    )
+
+    substrate_observer._market_discovery_cycle()
+
+    assert calls == []
+    assert not substrate_observer._market_discovery_lock.locked()
+
+
 def test_money_path_targeted_refresh_marks_substrate_priority():
     cycle_src = inspect.getsource(main_module._edli_event_reactor_cycle)
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)

@@ -1421,6 +1421,12 @@ def _market_discovery_cycle() -> None:
             staleness_window_s,
         )
         return
+    if money_path_substrate_priority_active():
+        _market_discovery_lock.release()
+        logger.info(
+            "market_discovery skipped: live-money targeted substrate refresh has priority"
+        )
+        return
     substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
     if not substrate_acquired:
         _market_discovery_lock.release()

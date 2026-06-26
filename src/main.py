@@ -9077,15 +9077,15 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
 def _edli_pre_submit_clob_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
     if raw in (None, ""):
-        return 3.0
+        return 6.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
-        return 3.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
-        return 3.0
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     return value
 
 
@@ -9147,11 +9147,12 @@ def _edli_pre_submit_jit_book_timeout():
     import httpx
 
     outer = _edli_pre_submit_clob_timeout_seconds()
-    read, write, pool = 0.55, 0.20, 0.08
-    # Submit-time JIT is a freshness witness, not a producer catch-up lane. It
-    # must fail closed quickly and let the event requeue instead of spending a
-    # reactor cadence on one stale candidate.
-    connect = max(0.25, min(0.85, (outer - read - write - pool - 0.25) / 2.0))
+    # A 0.55s read cap was below observed live /book tail latency and caused the
+    # armed submit path to fall back to stale DB feasibility rows. Keep the full
+    # worst-case httpcore budget inside the outer guard, but give the warm read
+    # enough room to complete on real CLOB tails.
+    read, write, pool = 1.75, 0.20, 0.08
+    connect = max(0.25, min(1.80, (outer - read - write - pool - 0.25) / 2.0))
     return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
 
 
@@ -9168,7 +9169,13 @@ def _edli_pre_submit_jit_outer_timeout_seconds() -> float:
         else:
             if value > 0:
                 return min(value, _edli_pre_submit_clob_timeout_seconds())
-    return min(1.6, _edli_pre_submit_clob_timeout_seconds())
+    # The submit-time JIT /book read is the primary pre-submit book authority.
+    # The former 1.6s cap was below observed live CLOB tail latency and caused
+    # armed live cycles to fall back to stale DB rows, globally blocking orders.
+    # Keep a small reserve for the post-book provenance/balance checks while
+    # still letting a warm public /book request complete under the outer guard.
+    outer = _edli_pre_submit_clob_timeout_seconds()
+    return max(0.25, min(4.5, outer * 0.85))
 
 
 def _edli_pre_submit_jit_warmup_timeout():
@@ -9701,9 +9708,11 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
     candidate we pull its live book ``now`` and anchor freshness to OUR
     observation time — the FOK crosses against exactly this book.
 
-    Returns ``(best_bid, best_ask, book_hash)`` on a usable two-sided book, or
-    ``None`` when the fetch fails or the book is empty/crossed (fail-closed —
-    the caller then falls back to a genuinely-fresh DB row or raises).
+    Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable two-sided
+    book, or ``None`` when the fetch fails or the book is empty/crossed
+    (fail-closed — the caller then falls back to a genuinely-fresh DB row or
+    raises). ``observed_at`` is OUR actual fetch completion instant, not the
+    venue's coarse book timestamp or the cycle-start decision time.
     """
 
     if book_quote_provider is None:
@@ -9721,7 +9730,7 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
     if best_bid >= best_ask:
         # Crossed/locked book is not a usable pre-submit authority.
         return None
-    return best_bid, best_ask, book_hash
+    return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
 
 
 def _edli_book_best_price(levels, *, best: str):
@@ -9816,7 +9825,8 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         # exactly this book — so quote_age_ms is the observation-to-submit latency.
         jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id)
         if jit is not None:
-            best_bid, best_ask, book_hash = jit
+            best_bid, best_ask, book_hash, book_observed_at = jit
+            checked_at = book_observed_at.astimezone(timezone.utc)
             quote_seen_at = checked_at.isoformat()
             book_authority_id = "clob_jit_book"
         else:

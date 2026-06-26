@@ -3631,12 +3631,80 @@ def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monk
     assert jit_calls == ["yes-1"]
     # Freshness anchored to observation time -> age within bound.
     quote_seen = datetime.fromisoformat(witness.quote_seen_at)
-    age_ms = (decision_time - quote_seen).total_seconds() * 1000.0
+    checked_at = datetime.fromisoformat(witness.checked_at)
+    age_ms = (checked_at - quote_seen).total_seconds() * 1000.0
     assert 0.0 <= age_ms <= witness.max_quote_age_ms, f"age_ms={age_ms} must be <= {witness.max_quote_age_ms}"
     # Fresh book content carried (the JIT book, not the stale DB best bid/ask).
     assert witness.current_best_bid == 0.40
     assert witness.current_best_ask == 0.42
     assert witness.book_hash == "fresh-jit-book-hash"
+    assert quote_seen > decision_time
+
+
+def test_gate84_jit_book_uses_fetch_time_when_reactor_decision_time_is_old(monkeypatch):
+    """A slow reactor cycle must not make a successful JIT book look stale.
+
+    Live stalls were caused by evaluating a fresh /book fetch against the
+    process_pending decision_time captured many seconds earlier. The witness
+    must carry the fetch completion time so downstream quote_age_ms is computed
+    against the actual observation instant, not the old cycle timestamp.
+    """
+    import src.main as main
+    from src.engine.event_reactor_adapter import _pre_submit_revalidation_payload_from_final_intent
+
+    decision_time = datetime.now(timezone.utc) - timedelta(seconds=25)
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(seconds=71)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "market": "cond-1",
+            "hash": "fresh-jit-book-hash-delayed",
+            "bids": [{"price": "0.40", "size": "50"}],
+            "asks": [{"price": "0.42", "size": "50"}],
+            "timestamp": str(int(decision_time.timestamp() * 1000)),
+        },
+    )
+
+    witness = provider(_gate84_final_intent(), object(), decision_time)
+    final_intent = SimpleNamespace(
+        certificate_hash="final-cert",
+        payload={
+            "event_id": "event-1",
+            "event_type": "ForecastSnapshotReady",
+            "final_intent_id": "intent-1",
+            "strategy_key": "strategy-1",
+            "condition_id": "cond-1",
+            "token_id": "yes-1",
+            "side": "BUY",
+            "direction": "buy_yes",
+            "city": "City",
+            "target_date": "2026-06-01",
+            "metric": "high",
+            "actionable_certificate_hash": "actionable-cert",
+            "cost_basis_hash": "cost-cert",
+            "limit_price": 0.42,
+            "order_type": "FOK",
+            "time_in_force": "FOK",
+            "post_only": False,
+            "size": 5.0,
+        },
+    )
+    payload = _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent,
+        executable_snapshot=object(),
+        decision_time=decision_time,
+        authority_witness=witness,
+    )
+
+    assert witness.book_hash == "fresh-jit-book-hash-delayed"
+    assert datetime.fromisoformat(witness.quote_seen_at) > decision_time
+    assert payload["quote_age_ms"] <= witness.max_quote_age_ms
 
 
 def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):

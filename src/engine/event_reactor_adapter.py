@@ -494,7 +494,12 @@ def build_presubmit_snapshot_row(
 
     import hashlib
 
-    captured_at = decision_time.astimezone(timezone.utc)
+    witness_captured_at = _parse_utc(getattr(witness, "book_captured_at", None))
+    captured_at = (
+        witness_captured_at.astimezone(timezone.utc)
+        if witness_captured_at is not None
+        else decision_time.astimezone(timezone.utc)
+    )
     window = (
         float(freshness_window_seconds)
         if freshness_window_seconds is not None
@@ -7408,7 +7413,8 @@ def _pre_submit_revalidation_payload_from_final_intent(
     quote_seen_at = _parse_utc(authority_witness.quote_seen_at)
     if quote_seen_at is None:
         raise ValueError("PRE_SUBMIT_QUOTE_SEEN_AT_REQUIRED")
-    quote_age_ms = int(max(0.0, (decision_time.astimezone(UTC) - quote_seen_at).total_seconds() * 1000.0))
+    checked_at = _parse_utc(authority_witness.checked_at) or decision_time.astimezone(UTC)
+    quote_age_ms = int(max(0.0, (checked_at.astimezone(UTC) - quote_seen_at).total_seconds() * 1000.0))
     current_best_bid = float(authority_witness.current_best_bid)
     current_best_ask = float(authority_witness.current_best_ask)
     tick_size = float(authority_witness.tick_size)
