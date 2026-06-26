@@ -97,6 +97,21 @@ def test_family_recovery_skips_unresolvable_entry_without_crashing():
     assert families == {("Moscow", "2026-06-17", "high")}
 
 
+def test_family_recovery_uses_direct_condition_id_without_snapshot_lookup():
+    import src.main as m
+
+    trade = _trade_conn_with_snapshot({})
+    forecasts = _forecasts_conn_with_market_events(
+        {"condDirect": ("Singapore", "2026-06-27", "high")}
+    )
+    families = m._escalation_families_from_cancelled(
+        [{"command_id": "c1", "condition_id": "condDirect", "token_id": ""}],
+        trade,
+        forecasts,
+    )
+    assert families == {("Singapore", "2026-06-27", "high")}
+
+
 def test_family_recovery_empty_when_no_tokens():
     import src.main as m
 

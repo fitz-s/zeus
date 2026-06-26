@@ -5646,6 +5646,49 @@ def _edli_command_recovery_cycle() -> None:
             "edli_command_recovery: refreshed allocator after recovery mutation: %s",
             allocator_refresh,
         )
+    if edli_cfg.get("event_writer_enabled") and isinstance(summary, dict):
+        try:
+            from datetime import datetime, timezone
+            from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+            trade_ro = get_trade_connection_read_only()
+            forecasts_ro = get_forecasts_connection_read_only()
+            try:
+                families = _terminal_no_fill_continuation_families(
+                    summary,
+                    trade_ro,
+                    forecasts_ro,
+                )
+            finally:
+                try:
+                    trade_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    forecasts_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if families:
+                cleared = _clear_redecision_acted_state_for_families(families)
+                now = datetime.now(timezone.utc)
+                emitted = _emit_terminal_no_fill_redecision_continuations(
+                    families,
+                    decision_time=now,
+                    received_at=now.isoformat(),
+                )
+                logger.info(
+                    "edli_command_recovery: terminal no-fill continuation "
+                    "families=%d acted_state_cleared=%d events_emitted=%d",
+                    len(families),
+                    cleared,
+                    emitted,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "edli_command_recovery: terminal no-fill continuation emit failed "
+                "(non-fatal; family remains eligible for normal redecision): %r",
+                exc,
+            )
 
 
 def _escalation_families_from_cancelled(
@@ -5670,27 +5713,31 @@ def _escalation_families_from_cancelled(
     resolved (no snapshot, no market_events) is SKIPPED (the standard round-robin
     still reaches it eventually) rather than crashing the cancel job.
     """
+    direct_condition_ids = {
+        str(e.get("condition_id") or "").strip()
+        for e in cancelled
+        if str(e.get("condition_id") or "").strip()
+    }
     token_ids = {str(e.get("token_id") or "") for e in cancelled if e.get("token_id")}
-    if not token_ids:
-        return set()
     cond_by_token: dict[str, str] = {}
-    try:
-        tph = ",".join("?" for _ in token_ids)
-        for cr in trade_conn.execute(
-            f"""
-            SELECT selected_outcome_token_id, condition_id,
-                   ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
-                                      ORDER BY captured_at DESC) AS rn
-            FROM executable_market_snapshots
-            WHERE selected_outcome_token_id IN ({tph})
-            """,
-            tuple(token_ids),
-        ).fetchall():
-            if cr[2] == 1 and cr[0] and cr[1]:
-                cond_by_token[str(cr[0])] = str(cr[1])
-    except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
-        cond_by_token = {}
-    cond_ids = {c for c in cond_by_token.values() if c}
+    if token_ids:
+        try:
+            tph = ",".join("?" for _ in token_ids)
+            for cr in trade_conn.execute(
+                f"""
+                SELECT selected_outcome_token_id, condition_id,
+                       ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
+                                          ORDER BY captured_at DESC) AS rn
+                FROM executable_market_snapshots
+                WHERE selected_outcome_token_id IN ({tph})
+                """,
+                tuple(token_ids),
+            ).fetchall():
+                if cr[2] == 1 and cr[0] and cr[1]:
+                    cond_by_token[str(cr[0])] = str(cr[1])
+        except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
+            cond_by_token = {}
+    cond_ids = {c for c in cond_by_token.values() if c} | direct_condition_ids
     if not cond_ids:
         return set()
     families: set[tuple[str, str, str]] = set()
@@ -5712,6 +5759,101 @@ def _escalation_families_from_cancelled(
     except Exception:  # noqa: BLE001 — condition->family map is best-effort
         return set()
     return families
+
+
+def _clear_redecision_acted_state_for_families(
+    families: set[tuple[str, str, str]],
+) -> int:
+    """Release anti-noise latches after terminal no-fill proves the prior rest ended."""
+
+    if not families:
+        return 0
+    removed = 0
+    for key in list(_edli_redecision_acted_state.keys()):
+        if not isinstance(key, tuple):
+            continue
+        family: tuple[str, str, str] | None = None
+        if len(key) == 4 and key[0] == "family":
+            family = (str(key[1]), str(key[2]), str(key[3]))
+        elif len(key) == 5:
+            family = (str(key[0]), str(key[1]), str(key[2]))
+        if family in families:
+            _edli_redecision_acted_state.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _emit_terminal_no_fill_redecision_continuations(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    received_at: str,
+) -> int:
+    """Emit standard continuous redecision rows after no-fill terminal recovery."""
+
+    if not families:
+        return 0
+    from src.events.continuous_redecision import REDECISION_EVENT_TYPE
+    from src.events.event_writer import EventWriter
+    from src.events.triggers.forecast_snapshot_ready import (
+        ForecastSnapshotReadyTrigger,
+        executable_forecast_live_eligible_reader,
+    )
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection,
+        world_write_mutex as _world_write_mutex,
+    )
+
+    world = get_world_connection()
+    forecasts_ro = get_forecasts_connection_read_only()
+    emit_mutex = _world_write_mutex()
+    emit_mutex.acquire()
+    try:
+        trig = ForecastSnapshotReadyTrigger(
+            EventWriter(world),
+            live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
+        )
+        events = trig.build_committed_snapshot_events(
+            forecasts_conn=forecasts_ro,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=None,
+            source=_edli_next_redecision_source(),
+            event_type=REDECISION_EVENT_TYPE,
+            restrict_to_families=families,
+        )
+        emitted = EventWriter(world).write_many(
+            [_redecision_event_with_origin(event, "terminal_no_fill") for event in events]
+        )
+        world.commit()
+        return int(emitted)
+    finally:
+        emit_mutex.release()
+        try:
+            forecasts_ro.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            world.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _terminal_no_fill_continuation_families(
+    summary: object,
+    trade_conn,
+    forecasts_conn,
+) -> set[tuple[str, str, str]]:
+    if not isinstance(summary, dict):
+        return set()
+    continuations = summary.get("terminal_no_fill_continuations")
+    if not isinstance(continuations, list):
+        return set()
+    entries = [entry for entry in continuations if isinstance(entry, dict)]
+    if not entries:
+        return set()
+    return _escalation_families_from_cancelled(entries, trade_conn, forecasts_conn)
 
 
 def _emit_escalation_cross_redecisions(

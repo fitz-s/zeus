@@ -829,3 +829,88 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     main_module._edli_command_recovery_cycle()
 
     assert calls == ["live_tick"]
+
+
+def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) -> None:
+    """A no-fill terminal order recovery must continue the redecision chain."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    trade_refresh_conn = FakeConn()
+    trade_ro = FakeConn()
+    forecasts_ro = FakeConn()
+    summary = {
+        "scanned": 1,
+        "advanced": 1,
+        "terminal_no_fill_continuations": [
+            {"condition_id": "cond-1", "token_id": "tok-1", "command_id": "cmd-1"}
+        ],
+    }
+    families = {("Singapore", "2026-06-27", "high")}
+    emitted_calls: list[tuple[set[tuple[str, str, str]], str]] = []
+    clear_calls: list[set[tuple[str, str, str]]] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_settings_section",
+        lambda name, default=None: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: summary,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda write_class=None: trade_refresh_conn,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda: trade_ro,
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        lambda: forecasts_ro,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_refresh_global_allocator_for_live_bridge",
+        lambda conn: {"configured": True},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_terminal_no_fill_continuation_families",
+        lambda observed_summary, trade_conn, forecasts_conn: families,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_clear_redecision_acted_state_for_families",
+        lambda observed_families: clear_calls.append(set(observed_families)) or 2,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_emit_terminal_no_fill_redecision_continuations",
+        lambda observed_families, decision_time, received_at: (
+            emitted_calls.append((set(observed_families), str(received_at))) or 1
+        ),
+    )
+
+    main_module._edli_command_recovery_cycle()
+
+    assert trade_refresh_conn.closed is True
+    assert trade_ro.closed is True
+    assert forecasts_ro.closed is True
+    assert clear_calls == [families]
+    assert emitted_calls and emitted_calls[0][0] == families

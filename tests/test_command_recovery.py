@@ -2598,6 +2598,37 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
 
+    def test_terminal_no_fill_order_fact_can_collect_redecision_continuation(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        summary = reconcile_terminal_order_facts(conn, collect_continuations=True)
+
+        assert summary["advanced"] == 1
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-001",
+                "condition_id": "condition-test",
+                "token_id": "tok-001-no",
+                "reason": "venue_terminal_no_fill",
+            }
+        ]
+
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
         conn,

@@ -4881,6 +4881,33 @@ def _append_entry_order_voided_projection(
     append_many_and_project(conn, [event], projection)
 
 
+def _terminal_no_fill_continuation_from_row(row: dict) -> dict:
+    condition_id = str(
+        row.get("env_condition_id")
+        or row.get("snapshot_condition_id")
+        or row.get("condition_id")
+        or ""
+    ).strip()
+    token_id = str(
+        row.get("token_id")
+        or row.get("env_selected_outcome_token_id")
+        or row.get("snapshot_selected_outcome_token_id")
+        or ""
+    ).strip()
+    return {
+        "command_id": str(row.get("command_id") or ""),
+        "position_id": str(row.get("position_id") or ""),
+        "venue_order_id": str(
+            row.get("order_fact_venue_order_id")
+            or row.get("venue_order_id")
+            or ""
+        ),
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "reason": "venue_terminal_no_fill",
+    }
+
+
 def _ensure_entry_projection_is_pending_zero_exposure(
     conn: sqlite3.Connection,
     *,
@@ -4920,10 +4947,15 @@ def _ensure_entry_projection_is_pending_zero_exposure(
     )
 
 
-def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
+def reconcile_terminal_order_facts(
+    conn: sqlite3.Connection,
+    *,
+    collect_continuations: bool = False,
+) -> dict:
     """Close ACKED entry commands whose latest venue order fact is terminal no-fill."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    continuations: list[dict] = []
     for row in _latest_terminal_order_fact_candidates(conn):
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
@@ -5013,6 +5045,8 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 raise
             summary["advanced"] += 1
+            if collect_continuations:
+                continuations.append(_terminal_no_fill_continuation_from_row(row))
             logger.info(
                 "recovery: command %s ACKED terminal order fact %s -> EXPIRED and ENTRY_ORDER_VOIDED",
                 command_id,
@@ -5025,6 +5059,8 @@ def reconcile_terminal_order_facts(conn: sqlite3.Connection) -> dict:
                 exc,
             )
             summary["errors"] += 1
+    if collect_continuations:
+        summary["continuations"] = continuations
     return summary
 
 
@@ -11259,7 +11295,17 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("cancel_ack_terminal_no_fill_facts",
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")
-        _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
+        _db_pass(
+            "terminal_order_facts",
+            reconcile_terminal_order_facts,
+            "terminal_order_facts",
+            collect_continuations=True,
+        )
+        terminal_order_facts = summary.get("terminal_order_facts")
+        if isinstance(terminal_order_facts, dict):
+            summary["terminal_no_fill_continuations"] = list(
+                terminal_order_facts.get("continuations") or []
+            )
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,
                  "edli_acknowledged_venue_command_sync")
