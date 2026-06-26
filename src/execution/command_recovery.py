@@ -10840,6 +10840,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,
                  "edli_acknowledged_venue_command_sync")
+        from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+        _db_pass(
+            "recorded_maker_fill_economics",
+            reconcile_recorded_maker_fill_economics,
+            "recorded_maker_fill_economics",
+            advanced_key="corrected",
+            fold_stayed=False,
+            observed_at=started_at,
+        )
         summary["scope"] = "live_tick"
         summary["deferred_full_sweep"] = True
         return

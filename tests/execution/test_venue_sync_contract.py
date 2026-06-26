@@ -216,7 +216,93 @@ def test_live_tick_scope_defers_heavy_recovery_passes(monkeypatch, tmp_path):
     assert summary["deferred_full_sweep"] is True
     assert summary["scanned"] == 1
     assert "partial_remainders" not in summary
-    assert "recorded_maker_fill_economics" not in summary
+    assert "recorded_maker_fill_economics" in summary
+
+
+def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
+    """Live cadence must consume confirmed exit facts; otherwise closed old legs
+    stay quarantined and close-before-open redecision never progresses."""
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick-exit-fill.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    token = "live-tick-exit-fill-token"
+    h.seed_position_baseline(
+        seed_conn,
+        position_id="pos-live-tick-exit-fill",
+        order_id="ord-live-tick-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'size_mismatch_unresolved',
+               token_id = ?,
+               shares = 11.09,
+               chain_shares = 11.09,
+               cost_basis_usd = 6.10,
+               chain_cost_basis_usd = 6.10,
+               entry_price = 0.55,
+               order_status = 'filled',
+               updated_at = ?
+         WHERE position_id = 'pos-live-tick-exit-fill'
+        """,
+        (token, h.NOW.isoformat()),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id="cmd-live-tick-exit-fill",
+        venue_order_id="ord-live-tick-exit-fill",
+        position_id="pos-live-tick-exit-fill",
+        token_id=token,
+        side="SELL",
+        size=11.09,
+        price=0.53,
+        state="FILLED",
+    )
+    h.append_trade_fact(
+        seed_conn,
+        command_id="cmd-live-tick-exit-fill",
+        venue_order_id="ord-live-tick-exit-fill",
+        token_id=token,
+        trade_id="trade-live-tick-exit-fill",
+        size="11.09",
+        fill_price="0.54",
+        state="CONFIRMED",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(recorder)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["recorded_maker_fill_economics"]["exit_projected"] == 1
+    check_conn = sqlite3.connect(str(db_path))
+    check_conn.row_factory = sqlite3.Row
+    projection = check_conn.execute(
+        """
+        SELECT phase, exit_reason
+          FROM position_current
+         WHERE position_id = 'pos-live-tick-exit-fill'
+        """
+    ).fetchone()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "exit_reason": "M5_EXCHANGE_RECONCILE",
+    }
+    check_conn.close()
 
 
 def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monkeypatch, tmp_path):
