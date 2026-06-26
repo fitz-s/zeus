@@ -2891,7 +2891,9 @@ def _refresh_pending_family_snapshots(
       - Cache: skip entire families whose ALL bins are still fresh.
       - Discovery: Gamma slug lookup scoped to pending target_dates — discovers
         EVERY bin (incl. never-seen illiquid MECE tail bins) via full token payload.
-      - CLOB: max_outcomes=None so all family bins are captured (no city cap).
+      - CLOB: max_outcomes=0 requests pending-family capture semantics: urgent
+        live-money families get breadth-first YES/NO price coverage before the
+        remaining budget completes full family proofs.
         tolerate_missing_book=True (inside refresh) lets illiquid bins snapshot
         as top_ask=None / executable_allowed=False.
       - No universe sweep, no market_discovery, no find_weather_markets.
@@ -3611,6 +3613,17 @@ def _refresh_pending_family_snapshots(
                     )
                 continue
             markets.append(ev)
+
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            family_key = _refresh_family_key(
+                market.get("city"),
+                market.get("target_date"),
+                market.get("temperature_metric") or market.get("metric"),
+            )
+            if family_key in priority_keys:
+                market["_zeus_refresh_urgency"] = 4
 
         if not markets:
             logger.warning(

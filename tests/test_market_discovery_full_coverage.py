@@ -140,6 +140,38 @@ def _make_clob_mock() -> MagicMock:
     return clob
 
 
+def _make_multi_outcome_refresh_market(city_name: str, *, outcomes: int = 5) -> dict:
+    city_slug = city_name.lower().replace(" ", "-")
+    rows = []
+    for idx in range(outcomes):
+        cid = f"0x{city_slug[:2]:0<2}{idx:02x}" + "c" * 60
+        cid = cid[:66]
+        rows.append(
+            {
+                "condition_id": cid,
+                "market_id": cid,
+                "token_id": f"{cid[:-1]}a",
+                "no_token_id": f"{cid[:-1]}b",
+                "executable": True,
+                "accepting_orders": True,
+                "closed": False,
+                "enable_orderbook": True,
+            }
+        )
+    return {
+        "event_id": f"evt-{city_slug}",
+        "slug": f"highest-temperature-in-{city_slug}-on-2026-06-26",
+        "city": city_name,
+        "target_date": "2026-06-26",
+        "temperature_metric": "high",
+        "hours_to_resolution": 12.0,
+        "hours_since_open": 3.0,
+        "_zeus_refresh_urgency": 4,
+        "outcomes": rows,
+        "condition_ids": [str(row["condition_id"]) for row in rows],
+    }
+
+
 def _make_in_memory_trade_db() -> sqlite3.Connection:
     """Minimal in-memory trade DB with executable_market_snapshots table."""
     conn = sqlite3.connect(":memory:")
@@ -2277,6 +2309,47 @@ def test_priority_refresh_fills_partial_batch_misses_with_singular_fallback(monk
     assert summary["inserted"] == 2
     assert summary["prefetch_missing_skipped"] == 0
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
+
+
+def test_urgent_full_family_capture_breadth_covers_price_pairs(monkeypatch):
+    """Urgent Day0/redecision families need fresh price pairs across many cities."""
+
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "8")
+    conn = _make_in_memory_trade_db()
+    captured: list[tuple[str, str, str]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, **kwargs):
+        captured.append(
+            (
+                str(market["city"]),
+                str(decision.tokens["market_id"]),
+                str(decision.edge.direction),
+            )
+        )
+
+    with (
+        patch.object(ms, "_snapshot_condition_refresh_state", return_value=((1, 0.0), set())),
+        patch.object(ms, "_candidates_missing_prefetched_orderbooks", return_value=[]),
+        patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture),
+    ):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[
+                _make_multi_outcome_refresh_market(city)
+                for city in ("Austin", "Boston", "Chicago", "Denver")
+            ],
+            clob=object(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+        )
+
+    assert summary["selected_executable_snapshot_count"] == 8
+    assert summary["selected_executable_city_count"] == 4
+    assert summary["urgent_refresh_family_count"] == 4
+    assert summary["selected_urgent_refresh_city_count"] == 4
+    assert {row[0] for row in captured} == {"Austin", "Boston", "Chicago", "Denver"}
+    assert all(direction in {"buy_yes", "buy_no"} for *_rest, direction in captured)
 
 
 def test_full_family_nonpriority_batch_failure_defers_without_singular_storm(monkeypatch):

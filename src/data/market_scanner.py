@@ -180,6 +180,25 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
     return configured if configured > 0 else None
 
 
+def _snapshot_market_refresh_urgency(market: dict[str, Any]) -> int:
+    try:
+        return int(market.get("_zeus_refresh_urgency") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _snapshot_group_refresh_urgency(group_list: list[tuple]) -> int:
+    if not group_list:
+        return 0
+    try:
+        market = group_list[0][3]
+    except (IndexError, TypeError):
+        return 0
+    if not isinstance(market, dict):
+        return 0
+    return _snapshot_market_refresh_urgency(market)
+
+
 def _full_family_direct_clob_prefetch_candidate_threshold() -> int:
     """Bound direct CLOB fill for targeted full-family refreshes.
 
@@ -4456,10 +4475,10 @@ def refresh_executable_market_substrate_snapshots(
 
     # Group candidates by city for breadth-first interleaving, except the
     # max_outcomes=0 pending-family path, where the group key is one market
-    # family.  The family-completion path is budget-driven, not count-capped:
-    # it spends the live tick completing as many full family proofs as possible
-    # instead of spraying one condition across every city and leaving all FDR
-    # proofs blocked.
+    # family. The family-completion path first breadth-covers urgent live-money
+    # families (Day0/redecision/open-rest/held exposure) with a YES/NO pair so
+    # their executable price evidence becomes fresh, then spends remaining budget
+    # completing full family proofs for FDR/admission.
     # candidate_groups:
     #   group_key -> sorted list of
     #   (recency_key, priority, ordinal, market, outcome, cid, dir)
@@ -4584,22 +4603,61 @@ def refresh_executable_market_substrate_snapshots(
         max_candidates = _snapshot_capture_max_candidates_per_tick(
             per_city_limit=per_city_limit,
         )
-        for group_index, group_list in enumerate(per_group_sorted):
-            if (
-                max_candidates is not None
-                and selected_candidates
-                and len(selected_candidates) + len(group_list) > max_candidates
-            ):
-                remaining = sum(len(group) for group in per_group_sorted[group_index:])
-                candidate_cap_truncated_cities.update(
-                    _snapshot_refresh_city_key(item[3])
-                    for group in per_group_sorted[group_index:]
-                    for item in group
-                )
-                cap_truncated += remaining
-                skipped += remaining
-                break
-            selected_candidates.extend(group_list)
+        selected_candidate_keys: set[tuple[int, str, str]] = set()
+
+        def _candidate_key(item: tuple) -> tuple[int, str, str]:
+            return (int(item[2]), str(item[5] or ""), str(item[6] or ""))
+
+        def _mark_truncated(groups: list[list[tuple]]) -> None:
+            nonlocal cap_truncated, skipped
+            remaining = 0
+            for group in groups:
+                for item in group:
+                    key = _candidate_key(item)
+                    if key in selected_candidate_keys:
+                        continue
+                    remaining += 1
+                    candidate_cap_truncated_cities.add(_snapshot_refresh_city_key(item[3]))
+            cap_truncated += remaining
+            skipped += remaining
+
+        urgent_groups = [
+            group for group in per_group_sorted if _snapshot_group_refresh_urgency(group) >= 3
+        ]
+        ordinary_groups = [
+            group for group in per_group_sorted if _snapshot_group_refresh_urgency(group) < 3
+        ]
+        ordered_groups = urgent_groups + ordinary_groups
+        selection_budget_exhausted = False
+        if max_candidates is not None and len(urgent_groups) > 1:
+            for group_index, group_list in enumerate(urgent_groups):
+                initial_pair = group_list[:2]
+                if not initial_pair:
+                    continue
+                if len(selected_candidates) + len(initial_pair) > max_candidates:
+                    _mark_truncated(urgent_groups[group_index:] + ordinary_groups)
+                    selection_budget_exhausted = True
+                    break
+                for item in initial_pair:
+                    selected_candidates.append(item)
+                    selected_candidate_keys.add(_candidate_key(item))
+        if not selection_budget_exhausted:
+            for group_index, group_list in enumerate(ordered_groups):
+                remaining_group = [
+                    item for item in group_list if _candidate_key(item) not in selected_candidate_keys
+                ]
+                if not remaining_group:
+                    continue
+                if (
+                    max_candidates is not None
+                    and selected_candidates
+                    and len(selected_candidates) + len(remaining_group) > max_candidates
+                ):
+                    _mark_truncated(ordered_groups[group_index:])
+                    break
+                for item in remaining_group:
+                    selected_candidates.append(item)
+                    selected_candidate_keys.add(_candidate_key(item))
     else:
         max_slots = max((len(c) for c in per_group_sorted), default=0)
         for slot in range(0, max_slots, 2):
@@ -4612,6 +4670,14 @@ def refresh_executable_market_substrate_snapshots(
     selected_cities = {
         _snapshot_refresh_city_key(market)
         for _recency, _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
+    }
+    urgent_refresh_family_count = sum(
+        1 for group in per_group_sorted if _snapshot_group_refresh_urgency(group) >= 3
+    )
+    selected_urgent_cities = {
+        _snapshot_refresh_city_key(market)
+        for _recency, _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
+        if _snapshot_market_refresh_urgency(market) >= 3
     }
     inserted_cities: set[str] = set()
     budget_truncated_cities: set[str] = set(candidate_cap_truncated_cities)
@@ -4908,6 +4974,8 @@ def refresh_executable_market_substrate_snapshots(
         "selected_executable_snapshot_count": len(selected_candidates),
         "executable_candidate_city_count": len(candidate_cities),
         "selected_executable_city_count": len(selected_cities),
+        "urgent_refresh_family_count": urgent_refresh_family_count,
+        "selected_urgent_refresh_city_count": len(selected_urgent_cities),
         "fresh_executable_city_count": len(inserted_cities),
         "budget_truncated_city_count": len(budget_truncated_cities),
         "uncaptured_candidate_city_count": max(0, len(candidate_cities) - len(inserted_cities)),
