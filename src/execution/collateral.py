@@ -88,10 +88,18 @@ def refresh_collateral_snapshot_for_submit(
     age_seconds = (
         datetime.now(timezone.utc) - captured_at.astimezone(timezone.utc)
     ).total_seconds()
-    if reuse_fresh_snapshot and (
+    reusable_fresh_snapshot = (
         current_snapshot.authority_tier != "DEGRADED"
         and 0 <= age_seconds < COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+    )
+    if (
+        reusable_fresh_snapshot
+        and action == "entry_submit"
+        and current_snapshot.available_pusd_allowance_micro <= 0
     ):
+        reusable_fresh_snapshot = False
+
+    if reuse_fresh_snapshot and reusable_fresh_snapshot:
         return _capability_component(
             "collateral_snapshot_refresh",
             authority_tier=current_snapshot.authority_tier,
