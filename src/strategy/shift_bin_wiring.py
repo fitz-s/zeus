@@ -47,8 +47,10 @@ connection — no independent connection.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from src.strategy.family_rebalance import (
@@ -69,6 +71,9 @@ from src.strategy.fill_up_wiring import (
     _row_get,
     _table_exists,
 )
+
+
+_CHAIN_COLLATERAL_RESIDUAL_MAX_AGE_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -234,6 +239,58 @@ def read_held_sibling_exposure(
     return None
 
 
+def _chain_collateral_available_shares(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+) -> float | None:
+    """Return fresh CHAIN collateral token shares, or None when unavailable/stale."""
+
+    token = str(token_id or "").strip()
+    if not token:
+        return None
+    try:
+        if not _table_exists(conn, "collateral_ledger_snapshots"):
+            return None
+        row = conn.execute(
+            """
+            SELECT ctf_token_balances_json, captured_at
+              FROM collateral_ledger_snapshots
+             WHERE authority_tier = 'CHAIN'
+             ORDER BY captured_at DESC, id DESC
+             LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+
+    balances_raw = _row_get(row, ("ctf_token_balances_json", "captured_at"), "ctf_token_balances_json")
+    captured_raw = _row_get(row, ("ctf_token_balances_json", "captured_at"), "captured_at")
+    try:
+        captured_at = datetime.fromisoformat(str(captured_raw).replace("Z", "+00:00"))
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - captured_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age_seconds < 0.0 or age_seconds > _CHAIN_COLLATERAL_RESIDUAL_MAX_AGE_SECONDS:
+        return None
+
+    try:
+        balances = json.loads(str(balances_raw or "{}"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(balances, dict):
+        return None
+    try:
+        micro_shares = float(balances.get(token, 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, micro_shares / 1_000_000.0)
+
+
 def read_old_leg_residual_usd(
     conn: Optional[sqlite3.Connection],
     *,
@@ -288,6 +345,10 @@ def read_old_leg_residual_usd(
         return float("inf")
     if row is None:
         return 0.0  # no live row for the old token → proven closed
+
+    chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
+    if chain_available_shares == 0.0:
+        return 0.0
 
     def _g(name: str):
         return _row_get(row, selected_names, name)

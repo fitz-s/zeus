@@ -23,7 +23,9 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -41,6 +43,22 @@ CREATE TABLE position_current (
 )
 """
 
+_COLLATERAL_LEDGER_DDL = """
+CREATE TABLE collateral_ledger_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pusd_balance_micro INTEGER NOT NULL,
+  pusd_allowance_micro INTEGER NOT NULL,
+  usdc_e_legacy_balance_micro INTEGER NOT NULL,
+  ctf_token_balances_json TEXT NOT NULL,
+  ctf_token_allowances_json TEXT NOT NULL,
+  reserved_pusd_for_buys_micro INTEGER NOT NULL DEFAULT 0,
+  reserved_tokens_for_sells_json TEXT NOT NULL DEFAULT '{}',
+  captured_at TEXT NOT NULL,
+  authority_tier TEXT NOT NULL,
+  raw_balance_payload_hash TEXT
+)
+"""
+
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
@@ -48,6 +66,21 @@ def _conn() -> sqlite3.Connection:
     conn.execute(_POSITION_CURRENT_DDL)
     ensure_table(conn)
     return conn
+
+
+def _insert_chain_collateral(conn, balances: dict[str, int]) -> None:
+    conn.execute(_COLLATERAL_LEDGER_DDL)
+    conn.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro, pusd_allowance_micro, usdc_e_legacy_balance_micro,
+            ctf_token_balances_json, ctf_token_allowances_json,
+            reserved_pusd_for_buys_micro, reserved_tokens_for_sells_json,
+            captured_at, authority_tier, raw_balance_payload_hash
+        ) VALUES (0, 0, 0, ?, '{}', 0, '{}', ?, 'CHAIN', 'hash')
+        """,
+        (json.dumps(balances), datetime.now(timezone.utc).isoformat()),
+    )
 
 
 def _insert_held(
@@ -246,6 +279,22 @@ def test_old_leg_residual_zero_when_not_held():
     closed)."""
     conn = _conn()
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-GONE") == pytest.approx(0.0)
+
+
+def test_old_leg_residual_zero_when_chain_collateral_has_no_token():
+    conn = _conn()
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0, chain_cost_basis_usd=7.0)
+    _insert_chain_collateral(conn, {})
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+
+
+def test_old_leg_residual_keeps_local_value_when_chain_collateral_has_token():
+    conn = _conn()
+    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0, chain_cost_basis_usd=7.0)
+    _insert_chain_collateral(conn, {"tok-A": 10_000_000})
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
 
 
 # ---------------------------------------------------------------------------
