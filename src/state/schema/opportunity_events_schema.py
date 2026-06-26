@@ -84,6 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_events_day0_family_extreme
         ) AS REAL),
         available_at
     )
+    WHERE event_type = 'DAY0_EXTREME_UPDATED'
 """
 
 CREATE_NO_UPDATE_TRIGGER_SQL = """
