@@ -3468,16 +3468,19 @@ def _build_event_bound_no_submit_receipt_core(
     # committed rows (a held read snapshot would not). Fail-soft: any refresher exception
     # logs and falls through to the unchanged stale rejection.
     #
-    # SCOPE (selected-row-vs-family): we refresh the WHOLE family (one CLOB recapture of
-    # all bins), not just the selected bin. The downstream proof consumes SIBLING prices
-    # (FDR full-family + capital-efficiency over the MECE family in _generate_candidate_
-    # proofs, which receives snapshot_rows=family_rows), so refreshing only the selected
-    # row would feed stale sibling prices into the economics — dishonest. The warm-job
-    # capture path already captures the full family in one scoped call, so full-family is
-    # both the honest and the cheaper-to-wire choice.
+    # SCOPE (selected-row-vs-family): the stale datum is the elected row's executable
+    # price, so the synchronous decision-time refresh scopes its network work to that
+    # condition's YES/NO sides. Full-family identity/proof still comes from
+    # family_condition_ids and is re-read after refresh; sibling catch-up belongs to
+    # the warm/confirmation producer lanes so one stale selected row cannot make the
+    # live reactor wait on every sibling's CLOB request.
     if selected_stale_reason is not None and family_snapshot_refresher is not None:
         refreshed = False
         try:
+            selected_condition_id = str(row.get("condition_id") or "")
+            refresh_condition_ids = (
+                (selected_condition_id,) if selected_condition_id else family_condition_ids
+            )
             # Drop the read snapshot so the NET fetch holds no trade-DB txn and the
             # re-read observes the refresher's committed rows (WAL visibility).
             try:
@@ -3489,7 +3492,7 @@ def _build_event_bound_no_submit_receipt_core(
                     city=str(payload.get("city") or ""),
                     target_date=str(payload.get("target_date") or ""),
                     metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
-                    condition_ids=family_condition_ids,
+                    condition_ids=refresh_condition_ids,
                     selected_token_id=str(payload.get("token_id") or "") or None,
                 )
             )
