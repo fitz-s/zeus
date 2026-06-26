@@ -13,7 +13,6 @@
 #   PR330 → execution_cycle_runtime + FC-03 + test_exec_freshness_recapture.py
 #   PR335 → ingest_scheduler + FC-04 + test_writer_jobs_registry_guard.py
 #   PR312 → executable_forecast_reader + FC-01 + test_executable_forecast_bundle_selection.py
-#   PR306 → topology_v_next + FC-09 (stdlib name-collision structural blocker fires)
 """Phase B Context Pack integration tests (historical PR fixtures)."""
 from __future__ import annotations
 
@@ -58,12 +57,6 @@ PR312_FILES = [
     "src/data/forecast_extrema_authority.py",
     "src/engine/evaluator.py",
 ]
-
-PR306_FILES = [
-    "scripts/topology_v_next/dataclasses.py",   # the (hypothetical) stdlib name collision
-    "scripts/topology_v_next/admission_engine.py",
-]
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -154,20 +147,6 @@ def test_pr312_forecast_bundle_extrema():
     assert "FC-01" in _fc_ids(bundle)
     assert "tests/test_executable_forecast_bundle_selection.py" in _blocking_tests(bundle)
     assert "tests/test_executable_forecast_reader.py" in _blocking_tests(bundle)
-
-
-def test_pr306_stdlib_shadow_topology_v_next():
-    bundle = assemble_context_packs(PR306_FILES, task_label="topology_v_next stdlib name collision")
-    assert "topology_v_next" in _surface_ids(bundle)
-    # FC-09 covers topology sprawl + stdlib name collision
-    assert "FC-09" in _fc_ids(bundle)
-    # The stdlib_name_collision_gate must appear in static gates
-    static_gate_ids = {
-        g["id"]
-        for pack in bundle["packs"]
-        for g in pack["required_static_gates"]
-    }
-    assert "stdlib_name_collision_gate" in static_gate_ids
 
 
 # ---------------------------------------------------------------------------

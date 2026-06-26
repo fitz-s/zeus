@@ -17,8 +17,9 @@ Design rules:
 - Deterministic path → surface → failure chain mapping. No phrase-based
   routing. Multi-file inputs UNION across surfaces (operator caveat
   2026-05-26: existing doctor degrades on multi-file PRs).
-- No new admission engine. No new profile matcher. Existing
-  topology_doctor + topology_v_next admission remain authoritative.
+- No new admission engine. No new profile matcher. Existing topology_doctor
+  routing remains authoritative; Context Pack assembly is a deterministic
+  surface/failure-chain projection.
 - Standalone module: importable as `from scripts.topology_doctor_context_pack
   import assemble_context_packs`. No coupling to doctor internals.
 - Pure read-only over architecture manifests. No DB access. No network.

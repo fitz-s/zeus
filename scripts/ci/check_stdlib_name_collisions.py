@@ -4,13 +4,8 @@
 # Authority basis: architecture/topology_enforcement.yaml#blocking_structural:stdlib_name_collision_gate
 #                  docs/operations/current/plans/ci_topology_refactor_refined.md Phase D
 """
-Prevent PR #306 recurrence: Python files inside imported packages must not
-collide with stdlib module names.
-
-PR #306 anchor: scripts/topology_v_next/dataclasses.py collided
-`dataclasses` (stdlib). `from dataclasses import dataclass` inside that
-package resolved to the local file → ImportError on every import path
-that touched the package. The fix was renaming to topology_models.py.
+Prevent Python files inside imported packages from colliding with stdlib
+module names.
 
 This gate prevents the regression by walking each `scripts/` subpackage
 that contains an `__init__.py` and rejecting any file whose stem matches

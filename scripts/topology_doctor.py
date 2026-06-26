@@ -18,8 +18,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-# Self-bootstrap: ensure project root is on sys.path so that
-# `scripts.topology_v_next.*` imports resolve when invoked directly
+# Self-bootstrap: ensure project root is on sys.path when invoked directly
 # (e.g. `python scripts/topology_doctor.py`) without needing PYTHONPATH=.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -957,12 +956,12 @@ def _docs_checks():
 
 
 def _file_arrangement():
-    """Lazy-import wrapper for scripts/topology_v_next/file_arrangement.py (PR-T0 kernel)."""
+    """Lazy-import wrapper for the advisory file-arrangement utility."""
     try:
-        from scripts.topology_v_next import file_arrangement
+        from scripts import topology_file_arrangement
     except ModuleNotFoundError:  # direct script execution from scripts/
-        import topology_v_next.file_arrangement as file_arrangement  # type: ignore[no-redef]
-    return file_arrangement
+        import topology_file_arrangement  # type: ignore[no-redef]
+    return topology_file_arrangement
 
 
 def run_arrange(artifact_kind: str, slug: str, filename: str = "") -> dict[str, Any]:

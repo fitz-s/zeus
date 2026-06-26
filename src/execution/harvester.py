@@ -2151,17 +2151,7 @@ def harvest_settlement(
         _emit_learning_write_blocked("missing_forecast_issue_time")
         return 0
     if bias_corrected is None:
-        try:
-            from src.config import settings
-            # T0-3: renamed from settings.bias_correction_enabled (legacy baseline
-            # chain) to disambiguate from edli.edli_bias_correction_enabled. Pure
-            # rename — semantics UNCHANGED. OPEN QUESTION (report T0-3 residual, low
-            # urgency): this settlement-attribution harvest may belong on the EDLI
-            # flag (the live chain) rather than the baseline flag; needs a semantic
-            # trace before changing. Not changed here.
-            bias_corrected = settings.baseline_bias_correction_enabled
-        except Exception:
-            bias_corrected = False
+        bias_corrected = False
     if p_raw_vector and not forecast_model_id:
         raise ValueError(
             "forecast_model_id is required when harvesting calibration pairs"

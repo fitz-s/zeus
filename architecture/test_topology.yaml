@@ -1606,7 +1606,6 @@ high_sensitivity_skips:
     reason: Bias/calibration cross-module invariants are skipped only when runtime data/config makes them inapplicable.
     skip_count: 6
     reason_patterns:
-      - "baseline_bias_correction_enabled = false"
       - "No calibration pairs in database"
     sunset: Replace DB-dependent skips with fixtures or explicit advisory status.
   tests/test_instrument_invariants.py:

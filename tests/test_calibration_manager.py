@@ -280,13 +280,11 @@ class TestStoreRoundTrip:
 
         conn.close()
 
-    def test_bias_corrected_fallback_reads_settings(self, tmp_path, monkeypatch):
-        """ZDM-01: when bias_corrected=None, harvest reads settings.baseline_bias_correction_enabled."""
+    def test_bias_corrected_fallback_is_false(self, tmp_path):
+        """When bias_corrected=None, harvest no longer reads a legacy config flag."""
         conn = self._get_test_conn(tmp_path)
 
         from src.execution.harvester import harvest_settlement
-        from src.config import Settings
-        monkeypatch.setattr(Settings, "baseline_bias_correction_enabled", True, raising=True)
 
         city = NYC
         n = harvest_settlement(
@@ -298,7 +296,7 @@ class TestStoreRoundTrip:
             forecast_available_at="2026-01-31T00:00:00Z",
             forecast_model_id="fallback_test_v1",
             forecast_issue_time="2026-01-30T12:00:00Z",
-            bias_corrected=None,  # should fall back to settings
+            bias_corrected=None,
         )
         conn.commit()
 
@@ -306,8 +304,7 @@ class TestStoreRoundTrip:
             "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-02-01'"
         ).fetchall()
         assert len(rows) == 3
-        assert all(row["bias_corrected"] == 1 for row in rows), \
-            "Fallback path should read baseline_bias_correction_enabled=True from settings"
+        assert all(row["bias_corrected"] == 0 for row in rows)
         conn.close()
 
 

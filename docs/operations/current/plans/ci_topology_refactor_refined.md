@@ -1,7 +1,7 @@
 # CI Topology Refactor — Refined Plan (post live-run)
 
 > Created: 2026-05-26
-> Authority basis: external CI topology refactor spec supplied by operator on 2026-05-26 (out-of-repo authoring artifact) + live-run reconciliation against `scripts/topology_doctor.py` (active authority) and `scripts/topology_v_next/` (P3 shadow mode).
+> Authority basis: external CI topology refactor spec supplied by operator on 2026-05-26 (out-of-repo authoring artifact) + live-run reconciliation against `scripts/topology_doctor.py` (active authority).
 > Status: PROPOSED, awaiting operator sign-off.
 
 ## 1. Why this is a refinement, not a rewrite
@@ -10,9 +10,8 @@ External spec proposed ~50 new files + 4 new workflows + new `scripts/topology/`
 
 1. **Doctor already emits a "route card / context pack"** (`scripts/topology_doctor.py digest --json` → full route_card with `admission_status`, `risk_tier`, `gate_budget`, `hard_stops`, `expansion_hints`, `operation_vector`, `route_candidates`). The Context Pack abstraction is already there.
 2. **Doctor falls back to `generic` profile on path-only input** — exactly the failure mode spec §1 names ("agent 仍依赖用户 prompt 写得足够准"). For PR330-like files (`src/engine/cycle_runtime.py` + `src/execution/**` + `src/venue/**`), doctor returns `selected_by: high_fanout_file_only`, ties 10 candidates at 0.75, `admission_status: advisory_only`. Path-only routing is exactly what spec §2.2 Surface Registry would fix.
-3. **`topology_v_next/`** (P3 shadow mode, 14 profiles, hard_stop_paths) already runs alongside doctor via `--v-next-shadow`. It's the in-flight successor admission engine; spec's proposed admission would be a third parallel system.
-4. **`architecture/context_pack_profiles.yaml`** exists (2026-04-15, "Topology Context Efficiency" packet) and would name-collide with spec's `architecture/topology_context_packs.yaml`.
-5. **`architecture/invariants.yaml`** referenced by spec §4 — DOES exist (INV-NN structural-law invariants, 44KB). Money-path invariants (MP-ECO-001, MP-SIDE-001, etc.) are separately defined in `architecture/money_path_ci.yaml#invariants:`. The refined `active_invariants.source` enum permits all three (`money_path_ci.yaml`, `money_path_objects.yaml`, `invariants.yaml`) plus `custom`. (Corrected per Copilot finding on PR #343 — earlier draft incorrectly claimed the file did not exist.)
+3. **`architecture/context_pack_profiles.yaml`** exists (2026-04-15, "Topology Context Efficiency" packet) and would name-collide with spec's `architecture/topology_context_packs.yaml`.
+4. **`architecture/invariants.yaml`** referenced by spec §4 — DOES exist (INV-NN structural-law invariants, 44KB). Money-path invariants (MP-ECO-001, MP-SIDE-001, etc.) are separately defined in `architecture/money_path_ci.yaml#invariants:`. The refined `active_invariants.source` enum permits all three (`money_path_ci.yaml`, `money_path_objects.yaml`, `invariants.yaml`) plus `custom`. (Corrected per Copilot finding on PR #343 — earlier draft incorrectly claimed the file did not exist.)
 
 ## 2. Delta (what is genuinely missing)
 
@@ -28,9 +27,9 @@ External spec proposed ~50 new files + 4 new workflows + new `scripts/topology/`
 | **CI gate router consuming Context Pack JSON** | absent | high — selects relationship tests per pack |
 
 What spec proposes that's already in doctor and should NOT be rebuilt:
-- admission engine (doctor has it + v_next has it)
+- admission engine (doctor has it)
 - route card rendering (doctor emits it)
-- profile matching (doctor has it + v_next has 14 profiles)
+- profile matching (doctor has it)
 - risk tier classification (doctor emits T0..T4)
 - hard stops (doctor emits)
 - operation_vector typed routing (doctor has)
@@ -240,8 +239,7 @@ precision via instruction file shards + tier classification + tests.
 All instruction files verified ≤ 3600 chars (budget script CHAR_BUDGET).
 
 **Phase F — Operator review + cutover decision (no PR).**
-- Compare topology_doctor.py + topology_v_next + new Context Pack output on 5+ live PRs.
-- Operator decides: keep three-system shadow, retire topology_doctor's profile matching, or retire topology_v_next.
+- Compare topology_doctor.py + new Context Pack output on 5+ live PRs.
 - Cutover or further consolidation in a future spec.
 
 Total: **5 PRs, ~2300 LOC**, ~25 files. Down from spec's ~50 files / 7 phases.
@@ -256,15 +254,14 @@ For each historical PR fixture, `python scripts/topology_doctor.py digest --task
 | PR330 (exec fresh-submit) | `execution_cycle_runtime` | FC-03 | ≥1 stale-snapshot misread | `tests/test_exec_freshness_recapture.py` |
 | PR335 (scheduler registry) | `ingest_scheduler` | FC-04 + FC-05 | ≥1 | `tests/test_writer_jobs_registry_guard.py` |
 | PR312 (forecast bundle) | `executable_forecast_reader` | FC-01 | ≥1 | `tests/test_executable_forecast_bundle_selection.py` |
-| PR306 (stdlib name collision) | `topology_v_next` | FC-09 | n/a | structural_blockers must fire |
+| PR306 (stdlib name collision) | n/a | FC-09 | n/a | structural_blockers must fire |
 
 And: no_override hazard list ≤6 entries, each with enforcer script + proving test.
 
 ## 6. Operator decisions still needed
 
 1. **Phase A yaml naming** — keep `context_pack_profiles.yaml` (existing) untouched OR migrate it into the new schema? **Recommend: leave untouched, new yamls additive.**
-2. **topology_v_next cutover schedule** — out of scope for this refactor, but the new Context Pack system could either consume v_next admission output as input (clean) or compete (messy). **Recommend: input-only consumer of v_next.**
-3. **Phase F shape** — single follow-up spec consolidating into one system, or accept three-system steady-state? **Defer.**
+2. **Phase F shape** — single follow-up spec consolidating into one system, or accept the current topology_doctor + Context Pack shape? **Defer.**
 
 ## 7. Concrete next step
 

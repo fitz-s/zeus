@@ -485,29 +485,7 @@ class EnsembleSignal:
             temperature_metric=temperature_metric,
         )
         
-        # Bias correction: subtract per-city×season systematic ECMWF bias
-        # GATED by config flag. Activation requires simultaneous Platt recompute
-        # to avoid out-of-domain inference (see cross-module invariant test).
         self.bias_corrected = False
-        # B059: typed error taxonomy (SD-B). Only the legitimate
-        # "settings symbol missing" path is silent; any other exception
-        # (including RuntimeError from _apply_bias_correction signalling a
-        # DB fault) must propagate so the operator sees a real fault
-        # instead of a ghost degraded signal.
-        try:
-            from src.config import settings
-            # T0-3: renamed from settings.bias_correction_enabled to disambiguate
-            # the legacy baseline chain from edli.edli_bias_correction_enabled.
-            # Semantics unchanged.
-            bias_enabled = settings.baseline_bias_correction_enabled
-        except (ImportError, AttributeError):
-            bias_enabled = False  # config surface genuinely unavailable
-        if bias_enabled:
-            corrected, applied = self._apply_bias_correction(
-                self.member_extrema, city, target_date
-            )
-            self.member_extrema = corrected
-            self.bias_corrected = applied
         
         self.city = city
         self.target_date = target_date
@@ -525,59 +503,6 @@ class EnsembleSignal:
         if dt.tzinfo is None:
             return dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
-
-    @staticmethod
-    def _apply_bias_correction(
-        maxes: np.ndarray, city: City, target_date: date
-    ) -> tuple[np.ndarray, bool]:
-        """Apply per-city×season ECMWF bias correction to member maxes.
-
-        model_bias.bias = mean(forecast - actual). Positive = model too warm.
-        Subtract bias × discount_factor from member maxes.
-
-        Returns (corrected_maxes, applied) where applied=False if correction failed.
-
-        INVARIANT: If this runs for live signals, ALL calibration_pairs must
-        also have been computed with bias correction. The cross-module test
-        test_calibration_pairs_use_same_bias_correction_as_live enforces this.
-        """
-        # B061: wrap the world-DB connection in contextlib.closing so any
-        # inner failure (season_from_date, execute, fetchone) still closes
-        # the handle. Long-running daemons would otherwise exhaust the
-        # SQLite connection pool on repeated bias-correction faults.
-        import contextlib
-        from src.state.db import get_world_connection
-        from src.calibration.manager import season_from_date
-
-        try:
-            with contextlib.closing(get_world_connection()) as conn:
-                season = season_from_date(target_date.isoformat(), lat=city.lat)
-                row = conn.execute(
-                    "SELECT bias, discount_factor, n_samples FROM model_bias "
-                    "WHERE city = ? AND season = ? AND source = 'ecmwf'",
-                    (city.name, season),
-                ).fetchone()
-
-                if row and row["n_samples"] >= 20:
-                    discount = row["discount_factor"] if row["discount_factor"] is not None else 0.7
-                    correction = row["bias"] * discount
-                    import logging
-                    logging.getLogger(__name__).info(
-                        "Bias correction %s/%s: %.2f° × %.1f = %.2f° (n=%d)",
-                        city.name, season, row["bias"], discount,
-                        correction, row["n_samples"],
-                    )
-                    return maxes - correction, True
-
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Bias correction failed for %s: %s", city.name, e
-            )
-            # Re-raise explicit database infrastructure fault rather than masking it
-            raise RuntimeError(f"Bias correction database fault for {city.name}: {e}") from e
-
-        return maxes, False
 
     @staticmethod
     def _select_hours_for_date(

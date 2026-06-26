@@ -83,7 +83,7 @@ ARCHIVE_THRESHOLD_DAYS = 60
 
 @dataclass
 class SignalBundle:
-    slug: str                          # e.g. "task_2026-05-15_p1_topology_v_next_additive"
+    slug: str                          # e.g. "task_2026-05-15_runtime_improvement"
     last_modified_date: Optional[datetime.date]
     days_since_modified: Optional[int]
     inbound_ref_count: int             # files referencing this slug in INBOUND_REF_ROOTS

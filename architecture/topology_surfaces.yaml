@@ -372,35 +372,6 @@ surfaces:
     advisory_signals: [schema_manifest_churn]
     owners: [state-schema-owner]
 
-  # ---- FC-09 topology sprawl boundary ----------------------------------
-  topology_v_next:
-    type: path
-    description: "topology_v_next package — stdlib name-collision prevention (PR #306 dataclasses.py crash)"
-    patterns:
-      path_globs:
-        - scripts/topology_v_next/**
-      manifest_keys:
-        - architecture/topology_v_next_binding.yaml
-        - architecture/topology.yaml
-    money_path_segments: []
-    risk_tier: T2
-    scoped_agents: []
-    context_packs: [topology_structural]
-    manifests_required:
-      workflow_refs: true
-    relationship_tests:
-      - path: tests/topology_v_next/test_admission_engine.py
-        required_when_changed: true
-    static_gates:
-      - id: stdlib_name_collision_gate
-        script: scripts/ci/check_stdlib_name_collisions.py
-        blocking: true
-      - id: workflow_refs_exist
-        script: scripts/ci/check_workflow_repo_refs.py
-        blocking: true
-    advisory_signals: [topology_sprawl_churn]
-    owners: [topology-owner]
-
   operations_docs:
     type: path
     description: "Operations / docs / archive arrangement (FC-09 advisory unless registry breaks)"

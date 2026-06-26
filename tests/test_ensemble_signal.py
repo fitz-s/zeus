@@ -324,68 +324,6 @@ class TestEnsembleBoundaryErrors:
             with pytest.raises(TypeError):
                 ens.is_bimodal()
 
-    def test_b061_bias_correction_closes_connection_on_query_failure(self):
-        """If season_from_date raises inside _apply_bias_correction's try
-        block (AFTER get_world_connection but BEFORE conn.close()), the
-        connection must still be closed — not leaked. The current code
-        re-raises RuntimeError but leaves conn un-closed if the failure
-        point is past get_world_connection."""
-        from unittest.mock import MagicMock, patch
-        import numpy as np
-
-        fake_conn = MagicMock()
-        # Simulate a failure inside season_from_date (the call right after
-        # get_world_connection but before fetchone). The conn must still
-        # be closed.
-        with patch("src.signal.ensemble_signal.EnsembleSignal._apply_bias_correction") as _bypass:
-            pass  # placeholder — we exercise the real path below
-
-        with patch("src.state.db.get_world_connection", return_value=fake_conn), \
-             patch("src.calibration.manager.season_from_date",
-                   side_effect=ValueError("bad lat")):
-            maxes = np.full(51, 40.0)
-            with pytest.raises(RuntimeError, match="Bias correction database fault"):
-                EnsembleSignal._apply_bias_correction(maxes, NYC, TARGET_DATE)
-        # After re-raise, the connection must have been closed to avoid
-        # leaking file handles on long-running daemons.
-        assert fake_conn.close.called, (
-            "B061: _apply_bias_correction must close the world-DB "
-            "connection even when an inner call raises"
-        )
-
-    def test_b059_bias_correction_config_failure_is_not_silent(self):
-        """Constructor's bias-correction block previously caught ALL
-        exceptions with `except Exception: pass`. This means an
-        ImportError from a missing dependency, or a RuntimeError raised by
-        _apply_bias_correction itself (signaling DB fault), would be
-        silently swallowed and bias_corrected would remain False — visibly
-        identical to 'bias correction disabled by config'.
-
-        Invariant: an UnknownError path (not the legitimate 'settings
-        attribute missing' path) must propagate. We simulate by making
-        settings.baseline_bias_correction_enabled True and having
-        _apply_bias_correction raise RuntimeError; the EnsembleSignal
-        constructor must NOT silently continue with bias_corrected=False."""
-        from unittest.mock import patch
-        import numpy as np
-
-        members = _make_constant_members(40.0)
-        times = _make_local_day_times(TARGET_DATE, NYC.timezone)
-
-        # Force the bias-correction code path on, and have
-        # _apply_bias_correction raise a RuntimeError (simulating the
-        # "Bias correction database fault" path). The constructor must
-        # surface that, not swallow it.
-        with patch("src.config.settings") as fake_settings, \
-             patch.object(
-                 EnsembleSignal, "_apply_bias_correction",
-                 side_effect=RuntimeError("Bias correction database fault"),
-             ):
-            fake_settings.baseline_bias_correction_enabled = True
-            with pytest.raises(RuntimeError, match="Bias correction database fault"):
-                EnsembleSignal(members, times, NYC, TARGET_DATE, NYC_SEMANTICS)
-
-
 # ---------------------------------------------------------------------------
 # P1-3 antibody: deterministic MC seed (review5.23)
 # ---------------------------------------------------------------------------

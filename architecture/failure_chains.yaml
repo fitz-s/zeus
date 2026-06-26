@@ -411,7 +411,6 @@ chains:
       commits: []
       notes: "PR #306 stdlib name collision demonstrates structural blocker; operations sprawl is advisory unless reader broken."
     touched_surfaces:
-      - topology_v_next
       - operations_docs
     money_path_segments: []
     missed_guard_type:
@@ -419,7 +418,6 @@ chains:
       - MANIFEST_DRIFT
     required_context_packs:
       - operations_docs_topology
-      - topology_structural
     required_tests:
       - tests/topology/test_file_arrangement.py
     required_static_gates:

@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-22
 # Authority basis: architecture/file_arrangement.yaml; PR-T0 advisory file-arrangement kernel brief
 """
-Advisory file-arrangement kernel for the topology v_next system.
+Advisory file-arrangement utility for topology routing.
 
 Tells agents WHERE a file belongs and WHAT to read.
 NEVER blocks. Every finding has blocking=False (structurally enforced in __post_init__).
@@ -86,10 +86,7 @@ def load_file_arrangement_manifest(root: Path) -> dict[str, Any]:
     try:
         import yaml  # PyYAML
     except ImportError:
-        try:
-            import scripts.topology_v_next._yaml_shim as yaml  # type: ignore[no-redef]
-        except ImportError:
-            return {}
+        return {}
     with manifest_path.open() as fh:
         return yaml.safe_load(fh) or {}
 

@@ -48,26 +48,6 @@ metadata:
 entries:
   # ── 5 SCAFFOLD docs from PR #119 (runtime improvement engineering package) ──
 
-  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/UNIVERSAL_TOPOLOGY_DESIGN.md
-    status: CURRENT_LOAD_BEARING
-    last_confirmed: "2026-05-16"
-    confirmation_ttl_days: 30
-    owner: fitz
-    archival_ok: false
-    reason: >
-      Design authority for topology_v_next shadow system. Governs admission_engine.py
-      logic, profile loading, and binding layer contract.
-
-  - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/01_topology_v_next/ZEUS_BINDING_LAYER.md
-    status: CURRENT_LOAD_BEARING
-    last_confirmed: "2026-05-16"
-    confirmation_ttl_days: 30
-    owner: fitz
-    archival_ok: false
-    reason: >
-      Zeus-specific binding for topology_v_next. Defines safety_overrides.yaml schema,
-      artifact_authority_status registry (§8), and cohort definitions.
-
   - path: docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/DESIGN.md
     status: CURRENT_LOAD_BEARING
     last_confirmed: "2026-05-16"

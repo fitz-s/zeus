@@ -4564,43 +4564,17 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
 def _startup_data_health_check(conn):
     """Warn about deferred data actions on every startup.
 
-    This exists because bias correction activation and Platt recompute
-    are easy to forget. The warnings persist until the actions are taken.
+    The warnings persist until the actions are taken.
     """
     try:
-        # 1. Bias correction reminder (legacy baseline/diagnostics chain flag,
-        # renamed from bias_correction_enabled → baseline_bias_correction_enabled
-        # in T0-3 to disambiguate from edli.edli_bias_correction_enabled).
-        bias_enabled = settings.baseline_bias_correction_enabled
-        bias_data = conn.execute(
-            "SELECT COUNT(*) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
-        ).fetchone()[0]
-
-        if not bias_enabled and bias_data > 0:
-            logger.warning(
-                "⚠ DEFERRED ACTION: baseline_bias_correction_enabled=false but %d ECMWF bias "
-                "entries ready for the legacy baseline diagnostics chain. This is not the live "
-                "EDLI replacement probability authority. To activate that legacy baseline path: "
-                "1) Recompute calibration_pairs with bias correction 2) Refit legacy Platt models "
-                "3) Set baseline_bias_correction_enabled=true 4) Run test_cross_module_invariants.py",
-                bias_data,
-            )
-
         forecast_city_count = conn.execute(
             "SELECT COUNT(DISTINCT city) FROM forecast_skill"
         ).fetchone()[0]
-        bias_city_count = conn.execute(
-            "SELECT COUNT(DISTINCT city) FROM model_bias WHERE source='ecmwf' AND n_samples >= 20"
-        ).fetchone()[0]
         configured_city_count = len(cities_by_name)
-        if forecast_city_count < configured_city_count or bias_city_count < configured_city_count:
+        if forecast_city_count < configured_city_count:
             logger.warning(
-                "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities; "
-                "mature ECMWF model_bias covers %d/%d. Missing bias data falls back "
-                "to raw ensemble member maxes, archive quality is incomplete (raw ensemble member maxes only).",
+                "⚠ DATA QUALITY GAP: forecast_skill covers %d/%d configured cities.",
                 forecast_city_count,
-                configured_city_count,
-                bias_city_count,
                 configured_city_count,
             )
 
