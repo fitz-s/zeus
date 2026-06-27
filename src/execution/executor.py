@@ -49,6 +49,9 @@ from src.state.db import (
 
 logger = logging.getLogger(__name__)
 
+_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
+_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
+
 
 # Mode-based fill timeout (seconds). Spec §6.4.
 MODE_TIMEOUTS = {
@@ -652,15 +655,27 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     submit_edge = q_lcb - limit_price
     expected_profit = submit_edge * submitted_shares
     edge_density = submit_edge / limit_price
-    if expected_edge <= 0.0:
+    effective_min_expected_profit = max(
+        min_expected_profit,
+        _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+    )
+    effective_min_edge_density = max(
+        min_edge_density,
+        _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+    )
+    if min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
+        reason = "min_expected_profit_below_live_floor"
+    elif min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY:
+        reason = "min_submit_edge_density_below_live_floor"
+    elif expected_edge <= 0.0:
         reason = "expected_edge_non_positive"
     elif submit_edge <= 0.0:
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
-    elif expected_profit + 1e-9 < min_expected_profit:
+    elif expected_profit + 1e-9 < effective_min_expected_profit:
         reason = "expected_profit_below_floor"
-    elif edge_density + 1e-9 < min_edge_density:
+    elif edge_density + 1e-9 < effective_min_edge_density:
         reason = "submit_edge_density_below_floor"
     else:
         reason = ""
@@ -676,19 +691,48 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             submit_edge=submit_edge,
             expected_profit_usd=expected_profit,
             min_expected_profit_usd=min_expected_profit,
+            live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
             min_submit_edge_density=min_edge_density,
+            live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
             shares=submitted_shares,
         )
     direction = str(getattr(intent, "direction", "") or "")
     expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
     econ_side = str(economics.get("side") or "").upper()
+    econ_source = str(economics.get("source") or "").strip()
+    econ_cost = _float_field(economics.get("cost"))
+    econ_edge_lcb = _float_field(economics.get("edge_lcb"))
+    econ_optimal_delta_u = _float_field(economics.get("optimal_delta_u"))
+    econ_false_edge_rate = _float_field(economics.get("false_edge_rate"))
     payoff_q_point = _float_field(economics.get("payoff_q_point"))
     payoff_q_lcb = _float_field(economics.get("payoff_q_lcb"))
-    if expected_side and econ_side != expected_side:
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        max_false_edge_rate = 0.05
+    if econ_source != "qkernel_spine":
+        reason = "qkernel_source_missing"
+    elif expected_side and econ_side != expected_side:
         reason = "qkernel_side_mismatch"
+    elif econ_cost is None or abs(econ_cost - limit_price) > 1e-6:
+        reason = "qkernel_cost_limit_mismatch"
+    elif econ_edge_lcb is None or econ_edge_lcb <= 0.0:
+        reason = "qkernel_edge_lcb_non_positive"
+    elif econ_edge_lcb > submit_edge + 1e-6:
+        reason = "qkernel_edge_lcb_exceeds_submit_edge"
+    elif expected_edge > econ_edge_lcb + 1e-6:
+        reason = "expected_edge_exceeds_qkernel_edge_lcb"
+    elif econ_optimal_delta_u is None or econ_optimal_delta_u <= 0.0:
+        reason = "qkernel_optimal_delta_u_non_positive"
+    elif econ_false_edge_rate is None or not (0.0 < econ_false_edge_rate <= max_false_edge_rate):
+        reason = "qkernel_false_edge_rate_blocks"
     elif payoff_q_point is None or payoff_q_lcb is None:
         reason = "qkernel_payoff_probability_missing"
+    elif abs((payoff_q_lcb - econ_cost) - econ_edge_lcb) > 1e-6:
+        reason = "qkernel_payoff_edge_inconsistent"
     elif payoff_q_point > q_live + 1e-6:
         reason = "qkernel_payoff_q_point_exceeds_q_live"
     elif payoff_q_lcb > q_lcb + 1e-6:
@@ -706,8 +750,20 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             reason=reason,
             q_live=q_live,
             q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            submit_edge=submit_edge,
             qkernel_side=econ_side,
             expected_side=expected_side,
+            qkernel_source=econ_source,
+            qkernel_cost=econ_cost if econ_cost is not None else "",
+            qkernel_edge_lcb=econ_edge_lcb if econ_edge_lcb is not None else "",
+            qkernel_optimal_delta_u=(
+                econ_optimal_delta_u if econ_optimal_delta_u is not None else ""
+            ),
+            qkernel_false_edge_rate=(
+                econ_false_edge_rate if econ_false_edge_rate is not None else ""
+            ),
+            max_false_edge_rate=max_false_edge_rate,
             qkernel_payoff_q_point=payoff_q_point if payoff_q_point is not None else "",
             qkernel_payoff_q_lcb=payoff_q_lcb if payoff_q_lcb is not None else "",
         )
@@ -720,10 +776,15 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         submit_edge=submit_edge,
         expected_profit_usd=expected_profit,
         min_expected_profit_usd=min_expected_profit,
+        live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         submit_edge_density=edge_density,
         min_submit_edge_density=min_edge_density,
+        live_min_submit_edge_density=_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
         shares=submitted_shares,
+        qkernel_source=econ_source,
         qkernel_side=econ_side,
+        qkernel_edge_lcb=econ_edge_lcb,
+        qkernel_false_edge_rate=econ_false_edge_rate,
     )
 
 
