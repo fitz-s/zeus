@@ -2756,15 +2756,28 @@ def _weather_family_from_market_slug(slug: str) -> tuple[str, str, str] | None:
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
-    rows = write_conn.execute(
-        """
-        SELECT yes_token_id, no_token_id, selected_outcome_token_id
-        FROM executable_market_snapshots
-        WHERE condition_id = ? AND freshness_deadline >= ?
-        ORDER BY captured_at DESC, snapshot_id DESC
-        """,
-        (condition_id, fresh_at_iso),
-    ).fetchall()
+    try:
+        rows = write_conn.execute(
+            """
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id
+            FROM executable_market_snapshot_latest
+            WHERE condition_id = ? AND freshness_deadline >= ?
+            ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            (condition_id, fresh_at_iso),
+        ).fetchall()
+    except Exception:
+        rows = []
+    if not rows:
+        rows = write_conn.execute(
+            """
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id
+            FROM executable_market_snapshots
+            WHERE condition_id = ? AND freshness_deadline >= ?
+            ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            (condition_id, fresh_at_iso),
+        ).fetchall()
     if not rows:
         return False
 
@@ -5883,18 +5896,34 @@ def _escalation_families_from_cancelled(
             tph = ",".join("?" for _ in token_ids)
             for cr in trade_conn.execute(
                 f"""
-                SELECT selected_outcome_token_id, condition_id,
-                       ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
-                                          ORDER BY captured_at DESC) AS rn
-                FROM executable_market_snapshots
+                SELECT selected_outcome_token_id, condition_id
+                FROM executable_market_snapshot_latest
                 WHERE selected_outcome_token_id IN ({tph})
+                ORDER BY captured_at DESC
                 """,
                 tuple(token_ids),
             ).fetchall():
-                if cr[2] == 1 and cr[0] and cr[1]:
+                if cr[0] and cr[1] and str(cr[0]) not in cond_by_token:
                     cond_by_token[str(cr[0])] = str(cr[1])
         except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
             cond_by_token = {}
+        if not cond_by_token:
+            try:
+                tph = ",".join("?" for _ in token_ids)
+                for cr in trade_conn.execute(
+                    f"""
+                    SELECT selected_outcome_token_id, condition_id,
+                           ROW_NUMBER() OVER (PARTITION BY selected_outcome_token_id
+                                              ORDER BY captured_at DESC) AS rn
+                    FROM executable_market_snapshots
+                    WHERE selected_outcome_token_id IN ({tph})
+                    """,
+                    tuple(token_ids),
+                ).fetchall():
+                    if cr[2] == 1 and cr[0] and cr[1]:
+                        cond_by_token[str(cr[0])] = str(cr[1])
+            except Exception:  # noqa: BLE001 — token->condition resolution is best-effort
+                cond_by_token = {}
     cond_ids = {c for c in cond_by_token.values() if c} | direct_condition_ids
     if not cond_ids:
         return set()
@@ -6258,7 +6287,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 f"""
                 SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
                        captured_at
-                FROM executable_market_snapshots
+                FROM executable_market_snapshot_latest
                 WHERE selected_outcome_token_id IN ({tph})
                    OR yes_token_id IN ({tph})
                    OR no_token_id IN ({tph})
@@ -6281,6 +6310,36 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
             cond_by_token = {}
             side_by_token = {}
+        if not cond_by_token:
+            try:
+                tph = ",".join("?" for _ in token_ids)
+                for cr in trade_conn.execute(
+                    f"""
+                    SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
+                           captured_at
+                    FROM executable_market_snapshots
+                    WHERE selected_outcome_token_id IN ({tph})
+                       OR yes_token_id IN ({tph})
+                       OR no_token_id IN ({tph})
+                    ORDER BY captured_at DESC
+                    """,
+                    (*tuple(token_ids), *tuple(token_ids), *tuple(token_ids)),
+                ).fetchall():
+                    selected = str(cr[0] or "")
+                    cond = str(cr[1] or "")
+                    yes_token = str(cr[2] or "")
+                    no_token = str(cr[3] or "")
+                    for token, side in (
+                        (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
+                        (yes_token, "buy_yes"),
+                        (no_token, "buy_no"),
+                    ):
+                        if token and token in token_ids and token not in cond_by_token:
+                            cond_by_token[token] = cond
+                            side_by_token[token] = side
+            except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
+                cond_by_token = {}
+                side_by_token = {}
     if beliefs is None:
         beliefs = _all_latest_beliefs(world_conn)
     # Index belief bins by condition_id → (belief, bin_label, posterior).

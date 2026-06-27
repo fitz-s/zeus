@@ -37,6 +37,8 @@ modules:
     authority_role: canonical_runtime_truth
     high_risk_files:
       - src/state/db.py
+      - src/state/write_coordinator.py
+      - src/state/schema/execution_feasibility_evidence_schema.py
       - src/state/portfolio.py
       - src/state/lifecycle_manager.py
       - src/state/chain_reconciliation.py
@@ -51,6 +53,8 @@ modules:
       - src/state/market_topology_repo.py
     public_entry_files:
       - src/state/db.py
+      - src/state/write_coordinator.py
+      - src/state/schema/execution_feasibility_evidence_schema.py
       - src/state/portfolio.py
       - src/state/lifecycle_manager.py
       - src/state/collateral_ledger.py
@@ -86,6 +90,7 @@ modules:
       - tests/test_source_run_schema.py
       - tests/test_readiness_state_schema.py
       - tests/test_market_topology_state_schema.py
+      - tests/state/test_write_coordinator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   engine:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 import time
@@ -1481,7 +1482,7 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
         def close(self):
             calls.append(("close", None))
 
-    def fake_refresh(conn, *, markets, clob, captured_at, scan_authority):
+    def fake_refresh(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
         calls.append(("refresh", (conn, markets, isinstance(clob, FakePolymarketClient), scan_authority)))
         return {"attempted": 1, "inserted": 1, "skipped": 0, "failed": 0, "truncated": 0}
 
@@ -1502,6 +1503,11 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
     # P2: force STALE substrate so the producer-local staleness gate falls through to capture
     # (a prior test's successful cycle may leave a fresh time.monotonic() in this global).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
 
     substrate_observer._market_discovery_cycle()
 
@@ -1509,7 +1515,7 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
     refresh_calls = [call for call in calls if call[0] == "refresh"]
     assert len(refresh_calls) == 1
     assert refresh_calls[0][1][2] is True
-    assert ("commit", None) in calls
+    assert ("commit", None) not in calls
     assert ("close", None) in calls
 
 
@@ -1571,7 +1577,6 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
 
 
 def test_market_discovery_scheduler_defers_only_when_previous_refresh_runs(monkeypatch):
-    from src import main
     import src.data.market_scanner as market_scanner
 
     monkeypatch.setattr(

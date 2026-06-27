@@ -43,6 +43,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -121,6 +122,90 @@ def _make_clob_mock() -> MagicMock:
         "feeSchedule": {"makerFeeRate": "0.0", "takerFeeRate": "0.02"}
     }
     return clob
+
+
+def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
+    """The coordinator lease must cover the durable snapshot write unit only.
+
+    The refresh loop may spend seconds on CLOB/network prefetch, but the
+    per-row persist context must wrap the append, transition write, and commit
+    together so the unified writer lease is held for milliseconds, not for the
+    whole substrate refresh.
+    """
+
+    events: list[object] = []
+    commit_records: list[dict[str, object]] = []
+
+    class _FakeConn:
+        total_changes = 0
+
+        def commit(self) -> None:
+            events.append("commit")
+
+        def rollback(self) -> None:
+            events.append("rollback")
+
+    class _FakeLease:
+        def record_commit(self, **kwargs) -> None:
+            commit_records.append(kwargs)
+
+    class _PersistContext:
+        def __enter__(self):
+            events.append("enter")
+            return _FakeLease()
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            events.append("exit")
+            return False
+
+    def _fake_insert(conn, snapshot) -> None:
+        events.append(("insert", snapshot.condition_id))
+        conn.total_changes += 1
+
+    monkeypatch.setattr(ms, "insert_snapshot", _fake_insert)
+    monkeypatch.setattr(ms, "_write_book_hash_transition", lambda **_kwargs: None)
+    monkeypatch.setattr(ms, "_prev_orderbook_hash_by_market", {})
+
+    conn = _FakeConn()
+    market = _make_market(1)
+    outcome = market["outcomes"][0]
+    outcome["question_id"] = "question-1"
+    outcome["active"] = True
+    prefetched_book = {
+        "asset_id": outcome["token_id"],
+        "market": outcome["token_id"],
+        "bids": [{"price": "0.55", "size": "100"}],
+        "asks": [{"price": "0.60", "size": "100"}],
+        "tick_size": "0.01",
+        "min_order_size": "1",
+        "neg_risk": False,
+    }
+    decision = SimpleNamespace(
+        edge=SimpleNamespace(direction="buy_yes"),
+        tokens={
+            "token_id": outcome["token_id"],
+            "no_token_id": outcome["no_token_id"],
+            "market_id": outcome["condition_id"],
+        },
+    )
+
+    ms.capture_executable_market_snapshot(
+        conn,
+        market=market,
+        decision=decision,
+        clob=object(),
+        captured_at=_NOW,
+        scan_authority="VERIFIED",
+        prefetched_orderbook=prefetched_book,
+        tolerate_missing_book=True,
+        persist_context_factory=_PersistContext,
+        commit_after_persist=True,
+    )
+
+    assert events == ["enter", ("insert", outcome["condition_id"]), "commit", "exit"]
+    assert commit_records
+    assert commit_records[0]["rows_changed"] == 1
+    assert commit_records[0]["commit_ms"] >= 0
 
 
 # ---------------------------------------------------------------------------

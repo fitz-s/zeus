@@ -49,9 +49,10 @@ INV-37: the producer WRITE is single-DB (trades.db only) via ``get_trade_connect
 """
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Iterable
@@ -65,8 +66,6 @@ logger = logging.getLogger("zeus.substrate_observer")
 # both writers serialize through ``_market_substrate_refresh_lock`` so they cannot
 # race-write ``executable_market_snapshots``. ``_market_discovery_lock`` prevents a
 # universe sweep from overlapping itself.
-import threading
-
 _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
 # Producer-local staleness clock — the SOLE trigger for the universe sweep after the
@@ -76,6 +75,23 @@ _SUBSTRATE_REFRESH_CURSOR = 0
 _SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
+SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 5000
+SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 1000
+
+
+def _substrate_snapshot_trade_write_context_factory(owner: str):
+    def _factory():
+        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+        )
+
+    return _factory
 
 
 def _substrate_clob_timeout_seconds() -> float:
@@ -404,15 +420,28 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
-    rows = write_conn.execute(
-        """
-        SELECT yes_token_id, no_token_id, selected_outcome_token_id
-        FROM executable_market_snapshots
-        WHERE condition_id = ? AND freshness_deadline >= ?
-        ORDER BY captured_at DESC, snapshot_id DESC
-        """,
-        (condition_id, fresh_at_iso),
-    ).fetchall()
+    try:
+        rows = write_conn.execute(
+            """
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id
+            FROM executable_market_snapshot_latest
+            WHERE condition_id = ? AND freshness_deadline >= ?
+            ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            (condition_id, fresh_at_iso),
+        ).fetchall()
+    except Exception:
+        rows = []
+    if not rows:
+        rows = write_conn.execute(
+            """
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id
+            FROM executable_market_snapshots
+            WHERE condition_id = ? AND freshness_deadline >= ?
+            ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            (condition_id, fresh_at_iso),
+        ).fetchall()
     if not rows:
         return False
 
@@ -479,8 +508,14 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     snapshot_reserve_s: float,
     cached_topology_count: int,
 ) -> float:
-    del refresh_budget_s, cached_topology_count
-    return refresh_deadline - snapshot_reserve_s
+    pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    if cached_topology_count > 0:
+        cached_gamma_s = max(
+            0.0,
+            float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "1.0")),
+        )
+        return min(pre_capture_deadline, refresh_deadline - refresh_budget_s + cached_gamma_s)
+    return pre_capture_deadline
 def _topology_lookup_deadline_for_snapshot_refresh(
     *,
     refresh_deadline: float,
@@ -573,11 +608,9 @@ def _refresh_pending_family_snapshots(
     from src.data.market_topology_rows import _event_family_market_topology_rows
     from src.data.polymarket_client import PolymarketClient
     from src.state.db import (
-        _zeus_trade_db_path,
         get_trade_connection,
         get_trade_connection_read_only,
     )
-    from src.state.db_writer_lock import WriteClass, db_writer_lock
 
     now_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
@@ -1326,24 +1359,25 @@ def _refresh_pending_family_snapshots(
             snapshot_reserve_s=snapshot_reserve_s,
         )
         snapshot_read_conn.close()
-        with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-            write_conn = get_trade_connection(write_class="live")
-            try:
-                with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
-                    summary = refresh_executable_market_substrate_snapshots(
-                        write_conn,
-                        markets=markets_for_refresh,
-                        clob=clob,
-                        captured_at=datetime.now(timezone.utc),
-                        scan_authority="VERIFIED",
-                        max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
-                        budget_seconds=snapshot_budget_s,
-                        capture_reserve_seconds=snapshot_reserve_s,
-                        priority_condition_ids=priority_conditions,
-                    )
-                write_conn.commit()
-            finally:
-                write_conn.close()
+        write_conn = get_trade_connection(write_class="live")
+        try:
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    write_conn,
+                    markets=markets_for_refresh,
+                    clob=clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                    max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                    budget_seconds=snapshot_budget_s,
+                    capture_reserve_seconds=snapshot_reserve_s,
+                    priority_condition_ids=priority_conditions,
+                    snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
+                        "substrate_pending_family_snapshot_refresh"
+                    ),
+                )
+        finally:
+            write_conn.close()
 
     except Exception as exc:
         logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
@@ -1454,30 +1488,30 @@ def _market_discovery_cycle() -> None:
             logger.info("market_discovery deferred: cross-process executable substrate refresh already running")
             return
         from src.data.market_scanner import (
-            find_weather_markets_or_raise,
+            find_weather_markets,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
-        from src.state.db import _zeus_trade_db_path, get_trade_connection
-        from src.state.db_writer_lock import WriteClass, db_writer_lock
+        from src.state.db import get_trade_connection
 
-        events = find_weather_markets_or_raise(
+        events = find_weather_markets(
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
         conn = get_trade_connection(write_class="live")
         try:
             _discovery_clob_timeout = _substrate_clob_timeout_seconds()
-            with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-                with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
-                    snapshot_summary = refresh_executable_market_substrate_snapshots(
-                        conn,
-                        markets=events,
-                        clob=snapshot_clob,
-                        captured_at=datetime.now(timezone.utc),
-                        scan_authority="VERIFIED",
-                    )
-                conn.commit()
+            with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
+                snapshot_summary = refresh_executable_market_substrate_snapshots(
+                    conn,
+                    markets=events,
+                    clob=snapshot_clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                    snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
+                        "substrate_market_discovery_snapshot_refresh"
+                    ),
+                )
         finally:
             conn.close()
         if snapshot_summary.get("attempted", 0) > 0 and snapshot_summary.get("inserted", 0) == 0:

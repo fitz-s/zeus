@@ -64,6 +64,11 @@ def test_execution_feasibility_schema_indexes_token_created_at():
         for row in conn.execute("PRAGMA index_list('execution_feasibility_evidence')").fetchall()
     }
     assert "idx_execution_feasibility_evidence_token_created" in indexes
+    latest_indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list('execution_feasibility_latest')").fetchall()
+    }
+    assert "idx_execution_feasibility_latest_token_created" in latest_indexes
     columns = [
         row[2]
         for row in conn.execute(
@@ -184,6 +189,13 @@ def test_insert_execution_feasibility_evidence():
         },
     )
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 1
+    latest = conn.execute(
+        """
+        SELECT token_id, direction, event_id, book_hash_before
+          FROM execution_feasibility_latest
+        """
+    ).fetchone()
+    assert latest == ("token-1", "buy_yes", "event-1", "hash-1")
 
 
 def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
@@ -238,6 +250,17 @@ def test_execution_feasibility_duplicate_quote_refreshes_observation_time():
     assert rows[0][2] == "hash-2"
     assert rows[0][3] == pytest.approx(0.73)
     assert rows[0][4] == pytest.approx(0.76)
+    latest = conn.execute(
+        """
+        SELECT created_at, book_hash_before, best_bid_before, best_ask_before
+          FROM execution_feasibility_latest
+         WHERE token_id = 'token-1' AND direction = 'buy_no'
+        """
+    ).fetchone()
+    assert latest[0] == "2026-05-24T10:02:01+00:00"
+    assert latest[1] == "hash-2"
+    assert latest[2] == pytest.approx(0.73)
+    assert latest[3] == pytest.approx(0.76)
 
 
 def test_quote_cache_seeded_from_rest_on_connect():
@@ -1381,8 +1404,6 @@ def test_on_connect_pre_capture_failure_skips_seed_gracefully():
     contains no entry), seed_from_rest falls back to fetch_orderbook for that token.
     If that also fails, the token is skipped gracefully — no crash, no exception
     propagation, no WorldMutexIOViolation."""
-    from src.state.db import WorldMutexIOViolation
-
     conn, writer = _conn_writer()
     cache = QuoteCache()
     ingestor = MarketChannelIngestor(
@@ -1455,9 +1476,7 @@ def test_seed_from_rest_empty_pre_cached_under_world_mutex_raises_not_fetches():
     2. WorldMutexIOViolation is raised (not silently skipped).
     3. The token is caught by the except block → WARNING logged, results=[].
     """
-    import logging
-
-    from src.state.db import WorldMutexIOViolation, world_write_mutex
+    from src.state.db import world_write_mutex
 
     conn, writer = _conn_writer()
     cache = QuoteCache()

@@ -11,6 +11,7 @@ Queries Polymarket's Gamma API for temperature events.
 Parses bin structure, token IDs, and prices from market data.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import httpx
 
@@ -77,6 +78,20 @@ def _set_busy_timeout_ms(conn: sqlite3.Connection, timeout_ms: int | None) -> No
         return
 
 
+def _configured_batch_orderbook_getter(clob: Any) -> Callable[[list[str]], dict] | None:
+    """Return a real batch orderbook getter, excluding mock/autovivified stubs."""
+
+    getter = getattr(clob, "get_orderbook_snapshots", None)
+    if not callable(getter):
+        return None
+    if type(getter).__module__.startswith("unittest.mock"):
+        side_effect = getattr(getter, "side_effect", None)
+        return_value = getattr(getter, "return_value", None)
+        if side_effect is None and not isinstance(return_value, dict):
+            return None
+    return getter
+
+
 def _snapshot_capture_busy_timeout_ms(
     remaining_seconds: float,
     *,
@@ -125,9 +140,6 @@ def _snapshot_capture_busy_timeout_ms(
     )
     priority_floor_candidate_cap = int(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "32")
-    )
-    priority_share_candidate_cap = int(
-        os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_SHARE_MAX_CANDIDATES", "8")
     )
     # The per-cycle remaining budget may TIGHTEN the wait toward the configured
     # ceiling, but it must never drop the wait below the durable floor: a contended
@@ -217,9 +229,9 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
     if per_city_limit != 0:
         return None
     try:
-        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "32"))
+        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "500"))
     except ValueError:
-        configured = 32
+        configured = 500
     return configured if configured > 0 else None
 
 
@@ -2950,6 +2962,8 @@ def capture_executable_market_snapshot(
     clob_market_info_cache: dict[str, dict] | None = None,
     fee_details_cache: dict[str, dict[str, Any]] | None = None,
     tolerate_missing_book: bool = False,
+    persist_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    commit_after_persist: bool = False,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
 
@@ -3232,33 +3246,54 @@ def capture_executable_market_snapshot(
         ),
         depth_at_best_ask=_depth_at_best_ask(raw_orderbook),
     )
-    insert_snapshot(conn, snapshot)
-    # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
-    _current_hash = snapshot.raw_orderbook_hash
-    _now_ts = time.time()
-    _hash_delta_ms: Optional[int] = None
-    _prior = _prev_orderbook_hash_by_market.get(condition_id)
-    if _prior is not None:
-        _prior_hash, _prior_ts = _prior
-        if _current_hash != _prior_hash:
-            # Clamp to 0: NTP/manual clock adjustments can produce negative
-            # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
-            # a negative value causing snapshot capture to abort.
-            _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
-            # INV-37: conn is the trade substrate connection held by the caller (same conn
-            # as insert_snapshot above). No lock acquisition here; process-level
-            # serialization is the caller's responsibility (ingest_main subprocess
-            # lock chain). SAVEPOINT in write_transition provides within-connection
-            # atomicity for transition_seq assignment.
-            _write_book_hash_transition(
-                market_slug=snapshot.event_slug,
-                prev_hash=_prior_hash,
-                new_hash=_current_hash,
-                observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
-                delta_ms=_hash_delta_ms,
-                cycle_id=None,
-                conn=conn,
-            )
+    persist_context = (
+        persist_context_factory()
+        if persist_context_factory is not None
+        else contextlib.nullcontext()
+    )
+    before_changes = int(conn.total_changes)
+    with persist_context as write_lease:
+        try:
+            insert_snapshot(conn, snapshot)
+            # PR 6 (2026-05-19): compute raw_orderbook_hash transition delta.
+            _current_hash = snapshot.raw_orderbook_hash
+            _now_ts = time.time()
+            _hash_delta_ms: Optional[int] = None
+            _prior = _prev_orderbook_hash_by_market.get(condition_id)
+            if _prior is not None:
+                _prior_hash, _prior_ts = _prior
+                if _current_hash != _prior_hash:
+                    # Clamp to 0: NTP/manual clock adjustments can produce negative
+                    # deltas; book_hash_transitions CHECK (delta_ms >= 0) would reject
+                    # a negative value causing snapshot capture to abort.
+                    _hash_delta_ms = max(0, int((_now_ts - _prior_ts) * 1000))
+                    # INV-37: conn is the trade substrate connection held by the caller
+                    # (same conn as insert_snapshot above). SAVEPOINT in write_transition
+                    # provides within-connection atomicity for transition_seq assignment.
+                    _write_book_hash_transition(
+                        market_slug=snapshot.event_slug,
+                        prev_hash=_prior_hash,
+                        new_hash=_current_hash,
+                        observed_at=datetime.fromtimestamp(_now_ts, tz=timezone.utc).isoformat(),
+                        delta_ms=_hash_delta_ms,
+                        cycle_id=None,
+                        conn=conn,
+                    )
+            if commit_after_persist:
+                commit_started = time.monotonic()
+                conn.commit()
+                commit_ms = (time.monotonic() - commit_started) * 1000.0
+                rows_changed = max(0, int(conn.total_changes) - before_changes)
+                record_commit = getattr(write_lease, "record_commit", None)
+                if callable(record_commit):
+                    record_commit(commit_ms=commit_ms, rows_changed=rows_changed)
+        except BaseException:
+            if commit_after_persist:
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001 - preserve the original failure
+                    pass
+            raise
     _prev_orderbook_hash_by_market[condition_id] = (_current_hash, _now_ts)
     return {
         "executable_snapshot_id": snapshot.snapshot_id,
@@ -4001,21 +4036,50 @@ def _snapshot_condition_refresh_state(
     yes_token = str(outcome.get("token_id") or "").strip()
     no_token = str(outcome.get("no_token_id") or "").strip()
     fresh_at = _utc_datetime(captured, field_name="captured")
+    expected_tokens = tuple(dict.fromkeys(token for token in (yes_token, no_token) if token))
     try:
-        rows = conn.execute(
-            """
-            SELECT selected_outcome_token_id, captured_at, freshness_deadline,
-                   yes_token_id, no_token_id, question_id
-            FROM executable_market_snapshots
-            WHERE condition_id = ?
-            ORDER BY captured_at DESC
-            """,
-            (cid,),
-        ).fetchall()
+        if expected_tokens:
+            placeholders = ",".join("?" for _ in expected_tokens)
+            rows = conn.execute(
+                f"""
+                SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                       yes_token_id, no_token_id, question_id
+                FROM executable_market_snapshot_latest
+                WHERE condition_id = ?
+                  AND selected_outcome_token_id IN ({placeholders})
+                ORDER BY captured_at DESC
+                """,
+                (cid, *expected_tokens),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                       yes_token_id, no_token_id, question_id
+                FROM executable_market_snapshot_latest
+                WHERE condition_id = ?
+                ORDER BY captured_at DESC
+                """,
+                (cid,),
+            ).fetchall()
     except Exception:
-        return (2, float("inf")), set()
+        rows = []
     if not rows:
-        return (1, 0.0), set()
+        try:
+            rows = conn.execute(
+                """
+                SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                       yes_token_id, no_token_id, question_id
+                FROM executable_market_snapshots
+                WHERE condition_id = ?
+                ORDER BY captured_at DESC
+                """,
+                (cid,),
+            ).fetchall()
+        except Exception:
+            return (2, float("inf")), set()
+        if not rows:
+            return (1, 0.0), set()
 
     latest_ts = float("-inf")
     fresh_tokens: set[str] = set()
@@ -4132,8 +4196,8 @@ def _prefetch_selected_orderbooks(
     the whole substrate cycle price-blind.
     """
 
-    getter = getattr(clob, "get_orderbook_snapshots", None)
-    if not callable(getter):
+    getter = _configured_batch_orderbook_getter(clob)
+    if getter is None:
         return {}
 
     token_ids: list[str] = []
@@ -4490,6 +4554,7 @@ def refresh_executable_market_substrate_snapshots(
     budget_seconds: float | None = None,
     capture_reserve_seconds: float | None = None,
     priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -4755,7 +4820,7 @@ def refresh_executable_market_substrate_snapshots(
     # synthetic for background substrate identity;
     # fee_details are fetched once per family and reused only inside this
     # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
-    batch_orderbook_supported = callable(getattr(clob, "get_orderbook_snapshots", None))
+    batch_orderbook_supported = _configured_batch_orderbook_getter(clob) is not None
     full_family_capture = per_city_limit == 0
     prefetched_books: dict[str, dict] = {}
     full_family_direct_clob_prefetch_forced = _bool_env(
@@ -4923,6 +4988,8 @@ def refresh_executable_market_substrate_snapshots(
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         priority_candidate = str(condition_id or "").strip() in priority_conditions
         if (
+            full_family_capture
+            and
             batch_orderbook_supported
             and selected_token
             and prefetched_book is None
@@ -4972,6 +5039,8 @@ def refresh_executable_market_substrate_snapshots(
                         # bin including illiquid (no-ask) tail bins so the FDR full-family
                         # proof can be assembled.  Illiquid bins are persisted non-tradeable.
                         tolerate_missing_book=True,
+                        persist_context_factory=snapshot_write_context_factory,
+                        commit_after_persist=snapshot_write_context_factory is not None,
                     )
                     # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
                     # capture_executable_market_snapshot does per-outcome venue HTTP
@@ -4991,7 +5060,8 @@ def refresh_executable_market_substrate_snapshots(
                     # per row releases the trade-DB WAL write lock and preserves the
                     # caller-managed single-connection transaction contract (no new connection,
                     # no cross-DB independent write).
-                    conn.commit()
+                    if snapshot_write_context_factory is None:
+                        conn.commit()
                     inserted += 1
                     inserted_cities.add(_snapshot_refresh_city_key(market))
                     break

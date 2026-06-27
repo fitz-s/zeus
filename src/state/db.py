@@ -808,8 +808,8 @@ def forecasts_connection_with_trades_flocked(
     INV-37 harvester fix (ChatGPT PR#408 review B1, 2026-06-14): the settlement
     harvester must write BOTH forecasts-class tables (settlements, calibration_pairs,
     ensemble_snapshots, observations) AND trade-class tables (position_current,
-    position_events, decision_log, chronicle, settlement_commands) in a SINGLE
-    atomic SAVEPOINT.  Opening two independent connections and committing them
+    position_events, decision_log, chronicle, settlement_commands) in a single
+    attached-connection SAVEPOINT. Opening two independent connections and committing them
     separately violates INV-37 — a crash / busy / kill between the two commits
     leaves logically impossible state (settlement truth written but positions not
     settled, or the reverse).
@@ -824,8 +824,10 @@ def forecasts_connection_with_trades_flocked(
         in forecasts.db so SQLite name resolution finds them in the attached
         'trades' schema (zeus_trades.db) ✓
 
-    Single SAVEPOINT spanning all writes makes the entire settlement cycle
-    all-or-nothing per INV-37 law.
+    A single SAVEPOINT spanning all writes keeps normal successful execution
+    all-or-nothing per INV-37 law. In WAL mode, ATTACHed DB files are not a
+    cross-file host-crash-atomic contract; crash recovery must still prove or
+    repair cross-file invariants.
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-forecasts.db`` before ``zeus_trades.db``) to prevent deadlocks with
@@ -878,10 +880,10 @@ def get_world_connection_with_trades_required(
     of ``world_connection_with_trades_flocked``, for callers that must hold the
     connection across a LONG-LIVED loop (the forever market-channel ingestor thread)
     where holding cross-DB writer flocks for the whole lifetime would starve every
-    other writer. Atomicity of each write unit still comes from the single connection
-    + single ``commit()`` (SQLite commits the MAIN + ATTACHed databases atomically —
-    the same shape ``get_trade_connection_with_world_required`` relies on); the
-    per-commit world-WAL serialization is provided by the caller's world write mutex.
+    other writer. Each write unit uses one attached SQLite connection and one
+    ``commit()`` for normal successful-execution consistency, while the caller's
+    world write mutex provides per-commit world-WAL serialization. WAL mode does
+    not make MAIN + ATTACHed DB files a cross-file host-crash-atomic unit.
 
     world.db is MAIN so the EventStore's UNQUALIFIED ``opportunity_events`` (and its
     ``sqlite_master`` table-presence guard) resolve to the REAL world log; the
@@ -920,7 +922,8 @@ def world_connection_with_trades_flocked(
     INV-37 price-channel fix (PR415 review B5, 2026-06-20): the held/candidate
     quote-evidence ingest must write BOTH the world event (``opportunity_events``,
     world-class, via EventWriter/EventStore) AND the trade-owned book witness
-    (``execution_feasibility_evidence``, trade-class) in a SINGLE atomic SAVEPOINT.
+    (``execution_feasibility_evidence``, trade-class) in a single attached-connection
+    SAVEPOINT.
     The prior shape opened two independent connections (``get_world_connection`` +
     ``get_trade_connection``) and committed them SEPARATELY — a crash/busy/kill
     between the two commits left divergent state, violating INV-37.
@@ -948,8 +951,9 @@ def world_connection_with_trades_flocked(
         ``trades`` qualifier), reaching the runtime-read table and NEVER the world
         ghost copy.
 
-    Single SAVEPOINT / single commit spanning both writes makes the pair
-    all-or-nothing per INV-37.
+    A single SAVEPOINT / single commit spanning both writes keeps the pair
+    all-or-nothing during normal successful execution per INV-37. In WAL mode,
+    ATTACHed DB files are not a cross-file host-crash-atomic contract.
 
     Acquires writer-lock flocks on BOTH DBs in canonical alphabetical order
     (``zeus-world.db`` before ``zeus_trades.db``) — the SAME order as
@@ -2605,7 +2609,7 @@ def init_schema(
 
     """)
     _ensure_job_run_release_key_identity(conn)
-    init_snapshot_schema(conn)
+    init_snapshot_schema(conn, include_latest=False)
     init_collateral_schema(conn)
     # R3 M4 exit mutex DDL lives here to keep DB initialization independent of
     # importing src.execution modules.  The execution module repeats the same

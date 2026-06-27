@@ -23,11 +23,21 @@ from src.contracts.executable_market_snapshot import (
 )
 
 SNAPSHOT_TABLE = "executable_market_snapshots"
+SNAPSHOT_LATEST_TABLE = "executable_market_snapshot_latest"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 
-def init_snapshot_schema(conn: sqlite3.Connection) -> None:
-    """Create the U1 append-only executable-market snapshot table."""
+def init_snapshot_schema(
+    conn: sqlite3.Connection,
+    *,
+    include_latest: bool = True,
+) -> None:
+    """Create executable-market snapshot tables.
+
+    The append table has a legacy world-class ghost shell and a trade-class live
+    copy. The compact latest mirror is live execution evidence and belongs only
+    on the trade DB.
+    """
 
     conn.executescript(
         """
@@ -84,6 +94,40 @@ def init_snapshot_schema(conn: sqlite3.Connection) -> None:
         BEGIN SELECT RAISE(ABORT, 'executable_market_snapshots is APPEND-ONLY (NC-NEW-B)'); END;
         """
     )
+    if include_latest:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS executable_market_snapshot_latest (
+              condition_id TEXT NOT NULL,
+              selected_outcome_token_id TEXT NOT NULL,
+              snapshot_id TEXT NOT NULL,
+              gamma_market_id TEXT NOT NULL,
+              event_id TEXT NOT NULL,
+              event_slug TEXT,
+              question_id TEXT NOT NULL,
+              yes_token_id TEXT NOT NULL,
+              no_token_id TEXT NOT NULL,
+              outcome_label TEXT CHECK (outcome_label IN ('YES','NO') OR outcome_label IS NULL),
+              active INTEGER NOT NULL CHECK (active IN (0,1)),
+              closed INTEGER NOT NULL CHECK (closed IN (0,1)),
+              accepting_orders INTEGER CHECK (accepting_orders IN (0,1) OR accepting_orders IS NULL),
+              orderbook_top_bid TEXT NOT NULL,
+              orderbook_top_ask TEXT NOT NULL,
+              tradeability_status_json TEXT NOT NULL DEFAULT '{}',
+              captured_at TEXT NOT NULL,
+              freshness_deadline TEXT NOT NULL,
+              PRIMARY KEY (condition_id, selected_outcome_token_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_snapshot_latest_condition_captured
+              ON executable_market_snapshot_latest (condition_id, captured_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_latest_selected_token_captured
+              ON executable_market_snapshot_latest (selected_outcome_token_id, captured_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_latest_yes_token_captured
+              ON executable_market_snapshot_latest (yes_token_id, captured_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_snapshot_latest_no_token_captured
+              ON executable_market_snapshot_latest (no_token_id, captured_at DESC);
+            """
+        )
     # PR 2: add microstructure transparency columns (idempotent ADD COLUMN).
     # spread_observed_window_ms deferred to follow-up PR (Finding #8 decision-a).
     import logging as _logging
@@ -107,6 +151,7 @@ def init_snapshot_schema(conn: sqlite3.Connection) -> None:
 def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot) -> None:
     """Persist one immutable executable market snapshot."""
 
+    row = _row_from_snapshot(snapshot)
     conn.execute(
         """
         INSERT INTO executable_market_snapshots (
@@ -135,7 +180,51 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
           :tradeability_status_json
         )
         """,
-        _row_from_snapshot(snapshot),
+        row,
+    )
+    _upsert_latest_snapshot(conn, row)
+
+
+def _upsert_latest_snapshot(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    """Update the compact latest-state mirror after appending immutable evidence."""
+
+    if not str(row.get("selected_outcome_token_id") or "").strip():
+        return
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest (
+          condition_id, selected_outcome_token_id, snapshot_id, gamma_market_id,
+          event_id, event_slug, question_id, yes_token_id, no_token_id,
+          outcome_label, active, closed, accepting_orders, orderbook_top_bid,
+          orderbook_top_ask, tradeability_status_json, captured_at,
+          freshness_deadline
+        ) VALUES (
+          :condition_id, :selected_outcome_token_id, :snapshot_id, :gamma_market_id,
+          :event_id, :event_slug, :question_id, :yes_token_id, :no_token_id,
+          :outcome_label, :active, :closed, :accepting_orders, :orderbook_top_bid,
+          :orderbook_top_ask, :tradeability_status_json, :captured_at,
+          :freshness_deadline
+        )
+        ON CONFLICT(condition_id, selected_outcome_token_id) DO UPDATE SET
+          snapshot_id = excluded.snapshot_id,
+          gamma_market_id = excluded.gamma_market_id,
+          event_id = excluded.event_id,
+          event_slug = excluded.event_slug,
+          question_id = excluded.question_id,
+          yes_token_id = excluded.yes_token_id,
+          no_token_id = excluded.no_token_id,
+          outcome_label = excluded.outcome_label,
+          active = excluded.active,
+          closed = excluded.closed,
+          accepting_orders = excluded.accepting_orders,
+          orderbook_top_bid = excluded.orderbook_top_bid,
+          orderbook_top_ask = excluded.orderbook_top_ask,
+          tradeability_status_json = excluded.tradeability_status_json,
+          captured_at = excluded.captured_at,
+          freshness_deadline = excluded.freshness_deadline
+        WHERE excluded.captured_at >= executable_market_snapshot_latest.captured_at
+        """,
+        row,
     )
 
 
@@ -166,7 +255,29 @@ def latest_snapshot_for_market(
 
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
+    fresh_as_of_text = _dt(fresh_as_of)
     try:
+        try:
+            latest = conn.execute(
+                """
+                SELECT snapshot_id
+                FROM executable_market_snapshot_latest
+                WHERE condition_id = ?
+                  AND freshness_deadline >= ?
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """,
+                (condition_id, fresh_as_of_text),
+            ).fetchone()
+        except Exception:
+            latest = None
+        if latest is not None:
+            row = conn.execute(
+                "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
+                (latest["snapshot_id"],),
+            ).fetchone()
+            if row is not None:
+                return _snapshot_from_row(row)
         row = conn.execute(
             """
             SELECT * FROM executable_market_snapshots
@@ -175,7 +286,7 @@ def latest_snapshot_for_market(
             ORDER BY captured_at DESC
             LIMIT 1
             """,
-            (condition_id, _dt(fresh_as_of)),
+            (condition_id, fresh_as_of_text),
         ).fetchone()
     finally:
         conn.row_factory = saved

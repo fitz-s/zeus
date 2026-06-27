@@ -60,6 +60,7 @@ ALL imports are LAZY (inside functions), exactly as the order daemon kept them, 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -100,6 +101,69 @@ EDLI_EVENT_DRIVEN_MODES = {
 
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 15.0
 MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 45.0
+PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 5000
+PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
+
+
+class _PriceChannelWorldTradeWriteGate:
+    """Reusable context manager for one price-channel world+trade write unit."""
+
+    def __init__(self, *, owner: str) -> None:
+        self._owner = owner
+        self._stack: contextlib.ExitStack | None = None
+
+    def __enter__(self):
+        from src.events.triggers.market_channel_ingestor import _world_write_mutex
+        from src.state.write_coordinator import (
+            DBIdentity,
+            default_runtime_write_coordinator,
+        )
+
+        stack = contextlib.ExitStack()
+        try:
+            stack.enter_context(
+                default_runtime_write_coordinator().lease(
+                    (DBIdentity.WORLD, DBIdentity.TRADE),
+                    owner=self._owner,
+                    write_class="live",
+                    deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                )
+            )
+            stack.enter_context(_world_write_mutex())
+        except BaseException:
+            stack.close()
+            raise
+        self._stack = stack
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+        if self._stack is None:
+            return False
+        try:
+            return self._stack.__exit__(exc_type, exc, tb)
+        finally:
+            self._stack = None
+
+
+def _edli_price_channel_world_trade_write_gate(*, owner: str) -> _PriceChannelWorldTradeWriteGate:
+    return _PriceChannelWorldTradeWriteGate(owner=owner)
+
+
+def _edli_price_channel_trade_write_context_factory(*, owner: str):
+    def _factory():
+        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+        return default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        )
+
+    return _factory
+
 
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
 USER_CHANNEL_REQUIRED_ENV_VARS = (
@@ -1517,22 +1581,44 @@ def _edli_order_token_ids_by_feasibility_age(
         return tokens
     if not has_table:
         return tokens
-    latest_by_token: dict[str, str | None] = {}
-    for token in tokens:
-        try:
-            row = trade_conn.execute(
-                """
-                SELECT created_at
-                  FROM execution_feasibility_evidence
-                 WHERE token_id = ?
-                 ORDER BY created_at DESC
-                 LIMIT 1
-                """,
-                (token,),
-            ).fetchone()
-        except Exception:
-            return tokens
-        latest_by_token[token] = str(row[0]) if row and row[0] else None
+    latest_by_token: dict[str, str | None] = {token: None for token in tokens}
+
+    def _created_by_token_from(table: str, subset: list[str]) -> dict[str, str]:
+        if not subset:
+            return {}
+        placeholders = ",".join("?" for _ in subset)
+        rows = trade_conn.execute(
+            f"""
+            SELECT token_id, MAX(created_at) AS created_at
+              FROM {table}
+             WHERE token_id IN ({placeholders})
+             GROUP BY token_id
+            """,
+            tuple(subset),
+        ).fetchall()
+        return {
+            str(row[0]): str(row[1])
+            for row in rows
+            if row and row[0] is not None and row[1] is not None
+        }
+
+    try:
+        if _edli_table_exists(trade_conn, "execution_feasibility_latest"):
+            latest_by_token.update(
+                _created_by_token_from("execution_feasibility_latest", tokens)
+            )
+        missing_from_latest = [
+            token for token in tokens if latest_by_token.get(token) is None
+        ]
+        if missing_from_latest:
+            latest_by_token.update(
+                _created_by_token_from(
+                    "execution_feasibility_evidence",
+                    missing_from_latest,
+                )
+            )
+    except Exception:
+        return tokens
     return sorted(
         tokens,
         key=lambda token: (
@@ -1959,7 +2045,7 @@ def _edli_emit_price_channel_redecisions_for_events(
 
 
 def _edli_price_channel_redecision_sink(world_with_trades_conn, *, trade_schema: str = "trades"):
-    """Build a market-event sink bound to the atomic world+trades connection."""
+    """Build a market-event sink bound to the attached world+trades connection."""
 
     def _sink(events) -> None:
         from src.state.db import get_forecasts_connection_read_only
@@ -2028,10 +2114,9 @@ def _edli_refresh_held_position_quote_evidence(
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
         MarketChannelOnlineService,
-        _world_write_mutex,
         active_weather_token_metadata_for_tokens,
     )
-    from src.state.db import get_trade_connection, get_world_connection
+    from src.state.db import get_trade_connection
 
     edli_cfg = _settings_section("edli_v1", {})
     budget = max(
@@ -2075,21 +2160,21 @@ def _edli_refresh_held_position_quote_evidence(
 
     # INV-37 (PR415 B5, 2026-06-20): write the world event (opportunity_events) AND
     # the trade-owned book witness (execution_feasibility_evidence) through ONE
-    # connection with a SINGLE atomic commit, never two independent connections
+    # attached connection with a single commit, never two independent connections
     # committed separately. world.db is MAIN (so the EventStore's unqualified
     # opportunity_events + its sqlite_master guard resolve to the real world log)
     # and zeus_trades.db is ATTACHed as 'trades' (so the schema-qualified feasibility
     # insert reaches the runtime-read trades table, never the world ghost copy). A single
-    # conn.commit() on the ATTACHed connection is atomic across BOTH databases — the
-    # same INV-37 atomic-commit shape the EDLI position bridge uses.
+    # conn.commit() keeps the pair together in normal successful execution; WAL mode
+    # does not make ATTACHed DB files cross-file host-crash-atomic.
     from src.state.db import get_world_connection_with_trades_required
 
     ordered_metadata_tokens = [
         token_id for token_id in ordered_held_token_ids if token_id in token_metadata
     ]
 
-    # The single ATTACHed connection preserves the atomic world-event +
-    # trades.feasibility commit. Do not use the flocked context here: REST book
+    # The single ATTACHed connection preserves one world-event + trades.feasibility
+    # commit path. Do not use the flocked context here: REST book
     # fetches happen inside seed_rest_books_in_chunks before each DB chunk write,
     # and holding cross-process trade/world writer flocks across those network
     # calls starves live redecision's executable snapshot refresh.
@@ -2110,12 +2195,14 @@ def _edli_refresh_held_position_quote_evidence(
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
-                fetch_orderbooks=clob.get_orderbook_snapshots,
+                fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
             )
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                world_mutex=_world_write_mutex(),
+                world_mutex=_edli_price_channel_world_trade_write_gate(
+                    owner="price_channel_held_quote_refresh"
+                ),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
                 deadline_monotonic=deadline,
@@ -2154,7 +2241,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
         MarketChannelOnlineService,
-        _world_write_mutex,
         active_weather_token_metadata_for_tokens,
     )
     from src.state.db import get_trade_connection, get_world_connection
@@ -2204,15 +2290,15 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "skipped": "no_candidate_token_metadata",
         }
 
-    # INV-37 (PR415 B5, 2026-06-20): single connection + single atomic commit for the
-    # world-event + trade-feasibility cross-DB pair (see the held-priority twin above
-    # for the full rationale + the ghost-table hazard this world-MAIN + ATTACHed
-    # 'trades' + schema-qualified-feasibility shape avoids).
+    # INV-37 (PR415 B5, 2026-06-20): one attached connection + one commit for the
+    # world-event + trade-feasibility cross-DB pair during normal successful execution
+    # (see the held-priority twin above for the full rationale + the ghost-table hazard
+    # this world-MAIN + ATTACHed 'trades' + schema-qualified-feasibility shape avoids).
     from src.state.db import get_world_connection_with_trades_required
 
     # Same lock discipline as held-position refresh: one world-main connection
     # with trades attached, but no cross-process writer flock held across REST
-    # fetches. Each seed chunk still commits atomically on this single connection.
+    # fetches. Each seed chunk still commits on this single attached connection.
     conn = get_world_connection_with_trades_required(write_class="live")
     try:
         def _commit_atomic_cross_db() -> None:
@@ -2230,7 +2316,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
                 fetch_orderbook=clob.get_orderbook_snapshot,
-                fetch_orderbooks=clob.get_orderbook_snapshots,
+                fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
             )
             ordered_metadata_tokens = [
                 token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
@@ -2238,7 +2324,9 @@ def _edli_refresh_candidate_priority_quote_evidence(
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                world_mutex=_world_write_mutex(),
+                world_mutex=_edli_price_channel_world_trade_write_gate(
+                    owner="price_channel_candidate_quote_refresh"
+                ),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
                 deadline_monotonic=deadline,
@@ -2407,13 +2495,14 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
         # INV-37 (PR415 B5, 2026-06-20): the long-lived market-channel ingestor writes
         # the world event (opportunity_events) AND the trade-owned feasibility witness
-        # (execution_feasibility_evidence) atomically per unit through ONE connection
+        # (execution_feasibility_evidence) per unit through ONE attached connection
         # (world.db MAIN + zeus_trades.db ATTACHed as 'trades'), never two independent
         # connections committed separately. The NON-flocked helper is used here because
         # this connection lives for the whole forever-loop — holding cross-DB writer
         # flocks for that lifetime would starve every other writer; each per-unit
-        # commit is still atomic across both DBs (single connection) and serialized on
-        # zeus-world.db by the world write mutex inside the service loop. The
+        # commit stays on one attached connection and is serialized on zeus-world.db by
+        # the world write mutex inside the service loop. WAL mode does not make that
+        # cross-file host-crash-atomic. The
         # feasibility insert is schema-qualified 'trades' (feasibility_schema below) so
         # it reaches the runtime-read trades table, never the world ghost copy.
         conn = get_world_connection_with_trades_required(write_class="live")
@@ -2428,21 +2517,31 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
         try:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
-                from src.state.db import _zeus_trade_db_path, get_trade_connection
-                from src.state.db_writer_lock import WriteClass, db_writer_lock
+                from src.state.db import get_trade_connection
 
-                trade_conn = get_trade_connection(write_class="live")
-                try:
-                    with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
+                with _edli_price_channel_trade_write_context_factory(
+                    owner="price_channel_snapshot_invalidate"
+                )() as write_lease:
+                    trade_conn = get_trade_connection(write_class="live")
+                    before_changes = int(trade_conn.total_changes)
+                    try:
                         invalidated = invalidate_executable_snapshots_for_market_channel_action(
                             trade_conn,
                             action,
                             invalidated_at=datetime.now(timezone.utc),
                         )
-                    if invalidated:
-                        trade_conn.commit()
-                finally:
-                    trade_conn.close()
+                        if invalidated:
+                            commit_started = time.monotonic()
+                            trade_conn.commit()
+                            write_lease.record_commit(
+                                commit_ms=(time.monotonic() - commit_started) * 1000.0,
+                                rows_changed=max(
+                                    0,
+                                    int(trade_conn.total_changes) - before_changes,
+                                ),
+                            )
+                    finally:
+                        trade_conn.close()
 
             def _refresh_snapshot_action(action: "MarketChannelAction") -> None:
                 from src.data.market_scanner import (
@@ -2451,8 +2550,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     refresh_executable_market_substrate_snapshots,
                 )
                 from src.data.dual_run_lock import acquire_lock
-                from src.state.db import _zeus_trade_db_path, get_trade_connection
-                from src.state.db_writer_lock import WriteClass, db_writer_lock
+                from src.state.db import get_trade_connection
 
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
                 if not substrate_acquired:
@@ -2472,7 +2570,6 @@ def _edli_market_channel_ingestor_cycle() -> None:
                             "EDLI market-channel refresh skipped: cross-process executable substrate refresh already running"
                         )
                         return
-                    trade_conn = get_trade_connection(write_class="live")
                     try:
                         markets = find_weather_markets_or_raise(
                             min_hours_to_resolution=0.0,
@@ -2493,14 +2590,16 @@ def _edli_market_channel_ingestor_cycle() -> None:
                                 action.condition_id,
                             )
                             return
-                    with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):
-                        summary = refresh_executable_market_substrate_snapshots(
-                            trade_conn,
-                            **_edli_market_channel_refresh_kwargs(
-                                action, markets, clob, datetime.now(timezone.utc)
-                            ),
-                        )
-                    trade_conn.commit()
+                    trade_conn = get_trade_connection(write_class="live")
+                    summary = refresh_executable_market_substrate_snapshots(
+                        trade_conn,
+                        **_edli_market_channel_refresh_kwargs(
+                            action, markets, clob, datetime.now(timezone.utc)
+                        ),
+                        snapshot_write_context_factory=_edli_price_channel_trade_write_context_factory(
+                            owner="price_channel_snapshot_refresh"
+                        ),
+                    )
                 finally:
                     try:
                         if trade_conn is not None:
@@ -2531,7 +2630,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                         market_event_sink=_edli_price_channel_redecision_sink(conn),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
-                    fetch_orderbooks=clob.get_orderbook_snapshots,
+                    fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
                     invalidate_snapshot=_invalidate_snapshot_action,
                     refresh_snapshot=_refresh_snapshot_action,
                     max_refresh_actions_per_window=_edli_bounded_positive_int(
@@ -2548,6 +2647,9 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     logger=logger,
                     commit=_commit_event_and_feasibility,
                     rollback=_rollback_event_and_feasibility,
+                    world_mutex=_edli_price_channel_world_trade_write_gate(
+                        owner="price_channel_market_channel"
+                    ),
                 )
         finally:
             conn.close()

@@ -21,6 +21,7 @@ Three tests:
 """
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 import time
@@ -704,11 +705,14 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     Pre-fix baseline: _market_discovery_cycle imports and calls
     find_slug_pattern_weather_markets only; find_weather_markets never called.
     """
-    import src.main as main_mod
-
     tag_scan_called = []
     slug_only_called = []
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
 
     def _mock_find_weather_markets(**kwargs):
         tag_scan_called.append(kwargs)
@@ -724,7 +728,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
 
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
-        lambda conn, *, markets, clob, captured_at, scan_authority: {
+        lambda conn, *, markets, clob, captured_at, scan_authority, **_kwargs: {
             "attempted": 0, "inserted": 0, "skipped": 0, "failed": 0,
             "truncated": 0, "budget_exhausted": 0,
         },
@@ -790,6 +794,11 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     calls: list[dict] = []
     captured: list[dict] = []
     monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
     # STALE substrate: last full capture 400s ago (> 300s fairness window).
@@ -802,7 +811,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
 
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
 
-    def _capture(conn, *, markets, clob, captured_at, scan_authority):
+    def _capture(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
         captured.append({"scan_authority": scan_authority})
         return {"attempted": 0, "inserted": 0, "skipped": 0, "failed": 0, "truncated": 0, "budget_exhausted": 0}
 
@@ -854,11 +863,15 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     broken by it. This test now asserts the stronger invariant: with a STALE substrate the
     producer captures the universe, with zero reference to any pending/reactor state.
     """
-    import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     calls: list[dict] = []
     monkeypatch.setattr(substrate_observer, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     # P2: force STALE substrate so the staleness gate falls through to capture (order-independent).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
@@ -870,7 +883,7 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
-        lambda conn, *, markets, clob, captured_at, scan_authority: {
+        lambda conn, *, markets, clob, captured_at, scan_authority, **_kwargs: {
             "attempted": 0, "inserted": 0, "skipped": 0, "failed": 0,
             "truncated": 0, "budget_exhausted": 0,
         },
@@ -902,7 +915,6 @@ class _FakeLock:
 
 
 def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatch):
-    import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     discovery_lock = _FakeLock(True)
@@ -926,7 +938,6 @@ def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatc
 
 
 def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
-    import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     discovery_lock = _FakeLock(True)
@@ -2969,11 +2980,8 @@ def test_fetch_events_by_tags_stops_when_budget_exhausted(monkeypatch):
 
     tag_calls: list[str] = []
 
-    original_gamma_get = ms_mod._gamma_get
-
     def _slow_gamma_get(path, **kwargs):
         import time as _time
-        import httpx
         if path.startswith("/tags/slug/"):
             tag_calls.append(path)
             _time.sleep(SLEEP_PER_TAG)

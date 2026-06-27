@@ -296,6 +296,24 @@ def test_init_schema_creates_all_tables():
     conn.close()
 
 
+def test_init_schema_world_does_not_create_trade_latest_snapshot_mirror():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    init_schema(conn)
+
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    conn.close()
+
+    assert "executable_market_snapshots" in tables
+    assert "executable_market_snapshot_latest" not in tables
+
+
 def test_init_schema_creates_daily_observation_revision_indexes():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1552,10 +1570,24 @@ def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
                 "PRAGMA index_list('execution_feasibility_evidence')"
             ).fetchall()
         }
+        latest_tables = {
+            row[0]
+            for row in reopened.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='execution_feasibility_latest'"
+            ).fetchall()
+        }
+        latest_indexes = {
+            row[1]
+            for row in reopened.execute(
+                "PRAGMA index_list('execution_feasibility_latest')"
+            ).fetchall()
+        }
     finally:
         reopened.close()
 
     assert "idx_execution_feasibility_evidence_token_created" in indexes
+    assert "execution_feasibility_latest" in latest_tables
+    assert "idx_execution_feasibility_latest_token_created" in latest_indexes
 
 
 def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):

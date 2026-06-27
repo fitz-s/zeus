@@ -989,6 +989,25 @@ tables:
       runtime reads them as the DB-mediated pre-submit book evidence seam. Rows
       are evidence only and cannot assert accepted/fill truth.
 
+  - name: execution_feasibility_latest
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: "[token_id, direction]"
+    required_columns:
+      - {name: token_id, type: TEXT, nullable: false}
+      - {name: direction, type: TEXT, nullable: false}
+      - {name: evidence_id, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: quote_seen_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+    notes: >
+      Compact latest-state mirror for execution_feasibility_evidence keyed by
+      token_id and direction. Hot live readers use this table first so quote
+      freshness checks do not scan the high-frequency append log.
+
   - name: no_trade_regret_events
     db: world
     schema_class: world_class
@@ -2546,6 +2565,27 @@ tables:
       are applied by init_snapshot_schema() in snapshot_repo.py on the trade
       substrate connection. P0-2 live release proof adds tradeability_status_json
       under SCHEMA_VERSION 19 for scanner/snapshot/submit tradeability alignment.
+
+  - name: executable_market_snapshot_latest
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: "[condition_id, selected_outcome_token_id]"
+    required_columns:
+      - {name: condition_id, type: TEXT, nullable: false}
+      - {name: selected_outcome_token_id, type: TEXT, nullable: false}
+      - {name: snapshot_id, type: TEXT, nullable: false}
+      - {name: question_id, type: TEXT, nullable: false}
+      - {name: yes_token_id, type: TEXT, nullable: false}
+      - {name: no_token_id, type: TEXT, nullable: false}
+      - {name: captured_at, type: TEXT, nullable: false}
+      - {name: freshness_deadline, type: TEXT, nullable: false}
+    notes: >
+      Compact latest-state mirror for executable_market_snapshots. The append
+      table remains immutable evidence; hot live refresh-priority readers use
+      this bounded per-condition/token state first and fall back to the append
+      table for legacy databases without mirror rows.
 
   - name: book_hash_transitions
     db: trade

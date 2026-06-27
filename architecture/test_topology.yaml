@@ -25,12 +25,15 @@ test_trust_policy:
     audit_required: "No lifecycle header or missing required dates"
   enforcement: "topology_doctor test_trust check + digest gate output"
 
-  # Machine-readable registry: 123 tests with valid lifecycle headers.
+  # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_phase2_exit_emitter_revival.py: {created: "2026-06-20", last_used: "2026-06-21", note: "Phase 2 live exit-POST emitter revival RED-on-revert antibodies: break exit_pending_missing re-stamp loop (still-held -> evaluate, non-mutating in-flight skip, RPC reject dedupe), defer day0 static-close pre-emption when a bid exists, canonical EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog."}
     tests/test_p2_substrate_observer_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P2 relationship tests: substrate observer producers move out of src.main, keep shared snapshot lock, remove reactor-backlog gates, and register in substrate-observer daemon."}
-    tests/test_p3_price_channel_ingest_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P3 relationship tests: price/user channel ingest and durable fill bridge move out of src.main into price-channel daemon while order runtime keeps only DB read/boot recovery seams."}
+    tests/test_p3_price_channel_ingest_lift.py: {created: "2026-06-08", last_used: "2026-06-26", note: "P3 relationship tests: price/user channel ingest and durable fill bridge move out of src.main into price-channel daemon while order runtime keeps only DB read/boot recovery seams. Extended 2026-06-26 with execution_feasibility_latest hot-read antibody and market-channel snapshot refresh/invalidation coordinator checks."}
+    tests/test_market_substrate_warm_lock_contention.py: {created: "2026-06-08", last_used: "2026-06-26", note: "Executable substrate refresh lock-contention antibodies: per-row busy_timeout floor waits out trade-DB contention; extended 2026-06-26 to prove snapshot persist context wraps insert/transition/commit inside the unified trade write coordinator lease."}
+    tests/test_market_discovery_full_coverage.py: {created: "2026-05-24", last_used: "2026-06-26", note: "Market discovery/substrate coverage antibodies: full tag-query scan, city-scoped caps, budgeted refresh, and non-tradeable family identity capture. Extended 2026-06-26 to isolate discovery tests from live substrate-priority and process-lock state while accepting per-row snapshot write coordinator context."}
+    tests/test_b5_price_channel_inv37_single_writer.py: {created: "2026-06-20", last_used: "2026-06-26", note: "INV-37 price-channel single attached-connection and unified world+trade write-gate antibodies for held/candidate REST seed chunks and forever market-channel writes."}
     tests/test_p4_post_trade_capital_lift.py: {created: "2026-06-08", last_used: "2026-06-18", note: "P4 relationship tests: post-trade capital lifecycle and chain-sync READ move out of order daemon while exit-SUBMIT phase stays in src.main."}
     tests/test_step4_wu_daily_dedup.py: {created: "2026-06-08", last_used: "2026-06-18", note: "WU daily dedup relationship tests: remove duplicate src.main WU collector and leave data-ingest as sole WU daily owner with duplicate-owner antibody."}
     tests/test_check_live_restart_preflight.py: {created: "2026-06-18", last_used: "2026-06-19", note: "Read-only restart preflight gate: proves live trading daemon absence/presence, submit config, live posterior freshness, pending-exit restart risk, and held-position live belief coverage before operator restart. No DB writes or venue actions."}
@@ -142,9 +145,10 @@ test_trust_policy:
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-31"}
+    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-06-26", note: "Market-channel ingestor and feasibility evidence tests, including execution_feasibility_latest schema/upsert coverage."}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
+    tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_edge_zone_admission_102.py: {created: "2026-06-04", last_used: "2026-06-05", note: "RT (#102): book-wide EV-per-dollar edge-zone admission — positive after-cost EV admitted / negative rejected regardless of arrival order; flag-gated last money-path step"}
@@ -183,9 +187,10 @@ test_trust_policy:
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/money_path/test_edli_bankroll_warm_cycle.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-06-13", note: "Warm-lane decoupling + venue-close warm-skip (2026-06-13) relationship tests: a pending family whose Polymarket venue market is POST_TRADING (F1 12:00-UTC close of target_date, EARLIER than EventStore._strictly_past_in_tz local-day end) is SKIPPED so the bounded time-box serves LIVE families, not closed 06-13 re-probes (the gamma_slug_timebox_unattempted clog starving live 06-14/06-15 inventory). Venue-open ⇒ refreshed; venue-closed ⇒ venue_closed_skipped++ no submit; UNRESOLVABLE family ⇒ fail-soft KEPT (uncertain⇒keep, never drop a tradeable family). Authority single F1 anchor = market_phase.family_venue_closed (complement of market_open_at_decision), shared with reactor _venue_market_closed_horizon. RED-on-revert: drop the skip → closed family refreshes (venue_closed_skipped==0)."}
+    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-06-26", note: "Warm-lane decoupling + venue-close warm-skip relationship tests. Extended 2026-06-26 to assert main/substrate snapshot refresh paths keep cross-process substrate orchestration locks but route per-row trade snapshot persist+commit through the unified write coordinator, not the legacy long db_writer_lock."}
     tests/money_path/test_edli_durable_fill_bridge_scan.py: {created: "2026-06-01", last_used: "2026-06-03"}
-    tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-06-26", note: "EDLI world/trade table ownership, including execution_feasibility_latest trade ownership."}
+    tests/state/test_write_coordinator.py: {created: "2026-06-26", last_used: "2026-06-26", note: "Runtime DB write coordinator skeleton antibodies: same-file LIVE/BULK serialization, canonical multi-DB lease ordering, single-DB BEGIN IMMEDIATE commit/rollback telemetry, and rejection of fake independent multi-DB transactions."}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
     # All packet-specific test files registered here so topology_doctor
     # accepts them as trusted; the rebuild floor (test_authority_rebuild_invariants)
@@ -441,10 +446,10 @@ test_trust_policy:
     tests/test_zpkt_current_package.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_z0_plan_lock.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_cutover_guard.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-06-26", note: "Heartbeat supervisor fail-closed and market-discovery scheduler antibodies. Extended 2026-06-26 to assert substrate discovery no longer outer-commits snapshot refresh; commit is owned by per-row refresh persist context."}
     tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-04-29"}
+    tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-06-26", note: "Executable snapshot persistence/freshness/command antibodies. Extended 2026-06-26 to prove executable_market_snapshot_latest upsert semantics and refresh-priority latest reads without append scans."}
     tests/test_provenance_5_projections.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -681,6 +686,7 @@ test_trust_policy:
     tests/test_live_order_ack_durability.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-06-20 B6 live-submit observability: end-to-end canary chain (submit→ACK→crash→reconcile, no dupe).
     tests/execution/test_live_submit_canary_chain.py: {created: "2026-06-20", last_used: "2026-06-20"}
+    tests/execution/test_escalation_redecision_emit.py: {created: "2026-06-16", last_used: "2026-06-26", note: "Escalation redecision family recovery and emit routing antibodies; extended 2026-06-26 to prove cancelled-rest token->condition recovery reads executable_market_snapshot_latest without append scans when latest rows exist."}
     # 2026-06-20 B6 live-submit observability: armed_live + no submit receipts → infrastructure_level RED.
     tests/observability/test_status_red_on_armed_live_no_submit_receipts.py: {created: "2026-06-20", last_used: "2026-06-20"}
     # PR #219 — autonomous USDC.e → pUSD post-redeem wrap (Confirm Deposit automation).
@@ -1207,6 +1213,7 @@ categories:
     - tests/test_daemon_ingest_acquires_bulk_lock.py
     - tests/test_db_writer_lock.py
     - tests/test_db_writer_lock_k3_live_yield.py
+    - tests/state/test_write_coordinator.py
     - tests/test_dispatch_session_start.py
     - tests/test_doc_citation_lint.py
     - tests/test_ecmwf_open_data_collect_cycle.py

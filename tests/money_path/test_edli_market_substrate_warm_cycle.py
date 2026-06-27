@@ -315,13 +315,13 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "_edli_confirmation_refresh_unavailable(confirm_refresh_summary)" in screen_src
 
 
-def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
+def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
     """Live snapshot writers must serialize across daemon processes.
 
     `_market_substrate_refresh_lock` is process-local. The live daemon and the
     substrate observer are separate processes, so every producer path must take
-    the shared substrate refresh lock around the refresh and the trade-DB LIVE
-    writer lock around the write.
+    the shared substrate refresh lock around refresh orchestration and the
+    trade-DB coordinator lease around each snapshot persist+commit.
     """
 
     decision_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
@@ -343,10 +343,21 @@ def test_live_snapshot_refresh_paths_use_shared_trade_db_writer_lock():
         inspect.getsource(substrate_observer._refresh_pending_family_snapshots),
         observer_discovery_src,
     ):
-        assert "_zeus_trade_db_path" in src
-        assert "WriteClass.LIVE" in src
-        assert "with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):" in src
+        assert "snapshot_write_context_factory=" in src
+        assert "db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE)" not in src
         assert "refresh_executable_market_substrate_snapshots(" in src
+
+    for src in (
+        inspect.getsource(main_module._refresh_pending_family_snapshots),
+        decision_src,
+    ):
+        assert "_snapshot_trade_write_context_factory(" in src
+
+    for src in (
+        inspect.getsource(substrate_observer._refresh_pending_family_snapshots),
+        observer_discovery_src,
+    ):
+        assert "_substrate_snapshot_trade_write_context_factory(" in src
 
     assert "capture_reserve_seconds=snapshot_reserve_s" in inspect.getsource(
         main_module._refresh_pending_family_snapshots
@@ -1916,6 +1927,93 @@ def test_condition_buy_sides_fresh_requires_yes_and_no_selected_tokens():
         "cond-1",
         "2026-06-06T00:00:30+00:00",
     )
+
+
+def test_condition_buy_sides_fresh_runtime_paths_use_latest_mirror_without_append_scan():
+    class _TracingConn:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.latest_queries = 0
+            self.append_queries = 0
+
+        def execute(self, sql, params=()):
+            text = " ".join(str(sql).split())
+            if "FROM executable_market_snapshot_latest" in text:
+                self.latest_queries += 1
+            if "FROM executable_market_snapshots" in text:
+                self.append_queries += 1
+            return self._wrapped.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    for snapshot_id, selected in (("snap-yes", "yes-1"), ("snap-no", "no-1")):
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshot_latest (
+                snapshot_id, condition_id, yes_token_id, no_token_id,
+                selected_outcome_token_id, captured_at, freshness_deadline
+            ) VALUES (?, 'cond-1', 'yes-1', 'no-1', ?,
+                      '2026-06-06T00:00:00+00:00', '2026-06-06T00:01:00+00:00')
+            """,
+            (snapshot_id, selected),
+        )
+    conn.executemany(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, yes_token_id, no_token_id,
+            selected_outcome_token_id, captured_at, freshness_deadline
+        ) VALUES (?, 'cond-1', 'yes-1', 'no-1', ?,
+                  '2026-06-05T00:00:00+00:00', '2026-06-06T00:01:00+00:00')
+        """,
+        [(f"old-{idx}", "yes-1" if idx % 2 == 0 else "no-1") for idx in range(20)],
+    )
+
+    substrate_tracing = _TracingConn(conn)
+
+    assert substrate_observer._condition_buy_sides_fresh(
+        substrate_tracing,
+        "cond-1",
+        "2026-06-06T00:00:30+00:00",
+    )
+    assert substrate_tracing.latest_queries == 1
+    assert substrate_tracing.append_queries == 0
+
+    main_tracing = _TracingConn(conn)
+    assert main_module._condition_buy_sides_fresh(
+        main_tracing,
+        "cond-1",
+        "2026-06-06T00:00:30+00:00",
+    )
+    assert main_tracing.latest_queries == 1
+    assert main_tracing.append_queries == 0
 
 
 def test_prune_fresh_market_outcomes_keeps_refresh_moving_past_completed_conditions():

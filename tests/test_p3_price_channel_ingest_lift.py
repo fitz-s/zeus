@@ -32,9 +32,8 @@ from __future__ import annotations
 import ast
 import inspect
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MAIN_PY = _REPO_ROOT / "src" / "main.py"
@@ -464,6 +463,53 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     assert ordered == ["missing-token", "stale-token", "newer-token"]
 
 
+def test_feasibility_age_reads_latest_state_without_append_scan():
+    from src.ingest.price_channel_ingest import _edli_order_token_ids_by_feasibility_age
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    conn.executemany(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, created_at, schema_version
+        ) VALUES (?, 'buy_yes', ?, ?, 'cond', 'YES', ?, ?, 1)
+        """,
+        [
+            (
+                "newer-token",
+                "latest-newer",
+                "event-newer",
+                "2026-06-24T08:00:00+00:00",
+                "2026-06-24T08:00:00+00:00",
+            ),
+            (
+                "stale-token",
+                "latest-stale",
+                "event-stale",
+                "2026-06-24T07:30:00+00:00",
+                "2026-06-24T07:30:00+00:00",
+            ),
+        ],
+    )
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
+
+    ordered = _edli_order_token_ids_by_feasibility_age(
+        conn,
+        ["newer-token", "stale-token"],
+    )
+
+    append_reads = [
+        sql
+        for sql in traces
+        if "FROM execution_feasibility_evidence" in sql and "sqlite_master" not in sql
+    ]
+    assert ordered == ["stale-token", "newer-token"]
+    assert append_reads == []
+
+
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
     from src.data import polymarket_client
     from src.ingest.price_channel_ingest import _edli_refresh_held_position_quote_evidence
@@ -590,6 +636,10 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
             '2026-06-24T10:00:00+00:00', 1
         )
         """
+    )
+    world_conn.execute(
+        "UPDATE no_trade_regret_events SET created_at = ? WHERE regret_event_id = 'regret-1'",
+        (datetime.now(timezone.utc).isoformat(),),
     )
     world_conn.commit()
     world_conn.close()
@@ -773,6 +823,12 @@ def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(mon
     from src.state import db as state_db
     from src.state.db import init_schema, init_schema_trade_only
 
+    now = datetime.now(timezone.utc)
+    decision_time = (now - timedelta(minutes=30)).isoformat()
+    new_created_at = (now - timedelta(minutes=10)).isoformat()
+    old_created_at = (now - timedelta(minutes=20)).isoformat()
+    market_end_at = (now + timedelta(days=1)).isoformat()
+
     world_path = tmp_path / "world.db"
     trade_path = tmp_path / "trade.db"
     world_conn = sqlite3.connect(world_path)
@@ -785,15 +841,15 @@ def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(mon
             family_id, bin_label, direction, created_at, schema_version
         ) VALUES (?, ?, 'EXECUTOR_EXPRESSIBILITY',
             'EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_MISSING',
-            'BOOK_GAP', ?, '2026-06-25T16:00:00+00:00',
-            'Wellington', '2026-06-27', 'high', 'family-wellington-high',
-            'Will the highest temperature in Wellington be 12C?', 'buy_no',
-            ?, 1
+                'BOOK_GAP', ?, ?,
+                'Wellington', '2026-06-27', 'high', 'family-wellington-high',
+                'Will the highest temperature in Wellington be 12C?', 'buy_no',
+                ?, 1
         )
         """,
         [
-            ("regret-new", "event-new", "zz-new-token", "2026-06-25T16:10:00+00:00"),
-            ("regret-old", "event-old", "aa-old-token", "2026-06-25T16:00:00+00:00"),
+            ("regret-new", "event-new", "zz-new-token", decision_time, new_created_at),
+            ("regret-old", "event-old", "aa-old-token", decision_time, old_created_at),
         ],
     )
     world_conn.commit()
@@ -812,15 +868,15 @@ def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(mon
             raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
             captured_at, freshness_deadline
         ) VALUES (?, ?, ?, 'weather-test', ?, ?,
-            ?, ?, 1, 1, 0, '2026-06-27T12:00:00+00:00', '0.01', '5',
+            ?, ?, 1, 1, 0, ?, '0.01', '5',
             '{}', '{}', 0, '0.40', '0.60', '{}', 'gh', 'ch', 'oh',
             'CLOB', '2026-06-25T16:00:00+00:00',
             '2026-06-25T16:05:00+00:00'
         )
         """,
         [
-            ("snap-new", "gamma-new", "event-new", "0xnew", "question-new", "yes-new", "zz-new-token"),
-            ("snap-old", "gamma-old", "event-old", "0xold", "question-old", "yes-old", "aa-old-token"),
+            ("snap-new", "gamma-new", "event-new", "0xnew", "question-new", "yes-new", "zz-new-token", market_end_at),
+            ("snap-old", "gamma-old", "event-old", "0xold", "question-old", "yes-old", "aa-old-token", market_end_at),
         ],
     )
     trade_conn.commit()
@@ -1194,10 +1250,13 @@ def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module
     assert "run_market_channel_service_forever" not in main_src
 
 
-def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_writer_locks():
+def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_coordinator():
     """The lifted price-channel lane must not race main/substrate snapshot writers."""
 
     lane_src = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
     assert 'acquire_lock("market_substrate_refresh")' in lane_src
-    assert "with db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE):" in lane_src
+    assert "_edli_price_channel_trade_write_context_factory(" in lane_src
+    assert "snapshot_write_context_factory=" in lane_src
+    assert "price_channel_snapshot_invalidate" in lane_src
+    assert "db_writer_lock(_zeus_trade_db_path(), WriteClass.LIVE)" not in lane_src
     assert "refresh_executable_market_substrate_snapshots(" in lane_src

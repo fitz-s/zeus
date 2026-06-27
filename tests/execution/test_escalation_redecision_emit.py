@@ -62,6 +62,19 @@ def _forecasts_conn_with_market_events(
     return conn
 
 
+class _SqlCaptureConn:
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self.statements: list[str] = []
+
+    def execute(self, sql, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        self.statements.append(str(sql))
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
 def test_family_recovery_resolves_city_date_metric_from_venue_truth():
     import src.main as m
 
@@ -79,6 +92,40 @@ def test_family_recovery_resolves_city_date_metric_from_venue_truth():
         ("Moscow", "2026-06-17", "high"),
         ("Singapore", "2026-06-17", "high"),
     }
+
+
+def test_family_recovery_uses_latest_snapshot_mirror_without_append_scan():
+    import src.main as m
+
+    trade = _trade_conn_with_snapshot({"tokA": "condA"})
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            selected_outcome_token_id TEXT,
+            condition_id TEXT,
+            captured_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?)",
+        ("tokA", "condA", "2026-06-16T11:00:00+00:00"),
+    )
+    forecasts = _forecasts_conn_with_market_events(
+        {"condA": ("Moscow", "2026-06-17", "high")}
+    )
+    captured_trade = _SqlCaptureConn(trade)
+
+    families = m._escalation_families_from_cancelled(
+        [{"command_id": "c1", "token_id": "tokA", "market_id": "mA"}],
+        captured_trade,
+        forecasts,
+    )
+
+    assert families == {("Moscow", "2026-06-17", "high")}
+    statements = "\n".join(captured_trade.statements)
+    assert "FROM executable_market_snapshot_latest" in statements
+    assert "FROM executable_market_snapshots" not in statements
 
 
 def test_family_recovery_skips_unresolvable_entry_without_crashing():

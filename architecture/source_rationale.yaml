@@ -295,7 +295,7 @@ files:
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
-    why: Live-only daemon entry point.
+    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log.
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
@@ -1084,7 +1084,9 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: Discovers and parses Polymarket weather markets and bin labels.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease.
+    write_routes:
+    - runtime_trade_write_coordinator
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/monitor_refresh.py
@@ -2074,7 +2076,7 @@ files:
   src/state/snapshot_repo.py:
     zone: K2_runtime
     authority_role: executable_market_snapshot_journal
-    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands.
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands. Also maintains executable_market_snapshot_latest as a compact trade-DB read model so hot refresh-priority paths do not scan the high-frequency append log.
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py
@@ -2181,6 +2183,18 @@ files:
     - src/state/decision_chain.py
     - src/state/portfolio.py
     - src/state/strategy_tracker.py
+  src/state/write_coordinator.py:
+    zone: K2_runtime
+    authority_role: db_write_coordination_contract
+    why: Runtime DB write coordinator for declared DB-set leases, same-file writer serialization across LIVE/BULK classes, single-DB BEGIN IMMEDIATE transactions, and telemetry. Price-channel world+trade write units are migrated; remaining production writers still need coverage.
+    write_routes:
+    - canonical_db_write_coordination
+    downstream:
+    - src/state/db.py
+    - src/ingest/price_channel_ingest.py
+    - src/events/triggers/market_channel_ingestor.py
+    - src/data/substrate_observer.py
+    - src/riskguard/riskguard.py
   src/state/decision_chain.py:
     zone: K2_runtime
     authority_role: decision_fact_logging
@@ -2214,6 +2228,14 @@ files:
     downstream:
     - src/state/db.py
     - src/state/book_hash_transitions.py
+  src/state/schema/execution_feasibility_evidence_schema.py:
+    zone: K2_runtime
+    authority_role: execution_feasibility_schema_owner
+    why: "Trade DB DDL owner for execution_feasibility_evidence append evidence and execution_feasibility_latest compact latest-state mirror. Latest table keeps hot quote freshness reads in bounded indexed state instead of scanning the high-frequency append log."
+    downstream:
+    - src/state/db.py
+    - src/events/triggers/market_channel_ingestor.py
+    - src/ingest/price_channel_ingest.py
   src/state/schema/no_trade_events_schema.py:
     zone: K2_runtime
     authority_role: no_trade_events_schema_owner
@@ -2562,7 +2584,7 @@ files:
   src/data/substrate_observer.py:
     zone: K2_runtime
     authority_role: executable_substrate_producer_lane
-    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production.
+    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production. Snapshot writes are routed through per-row trade write coordinator leases.
     downstream:
     - src/ingest/substrate_observer_daemon.py
     - src/engine/event_reactor_adapter.py
@@ -2575,7 +2597,7 @@ files:
   src/ingest/price_channel_ingest.py:
     zone: K2_runtime
     authority_role: price_channel_fact_producer_lane
-    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon.
+    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon. Market-channel snapshot invalidation/refresh now uses the unified trade write coordinator.
     downstream:
     - src/ingest/price_channel_daemon.py
     - src/main.py

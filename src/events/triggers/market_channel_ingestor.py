@@ -10,13 +10,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter, EventWriteResult
@@ -106,7 +107,7 @@ class MarketChannelIngestor:
         self._writer = writer
         self._feasibility_conn = feasibility_conn or writer.conn
         # INV-37 (PR415 B5): when feasibility writes share the EventWriter's
-        # connection (single-connection atomic cross-DB path, feasibility_conn=None or
+        # connection (single-connection attached cross-DB path, feasibility_conn=None or
         # the same conn), that connection is world-MAIN with zeus_trades.db ATTACHed as
         # 'trades', so the feasibility insert must be schema-qualified 'trades' to reach
         # the runtime-read table and never the world ghost copy. Default "" (own trade
@@ -117,6 +118,8 @@ class MarketChannelIngestor:
         self.quote_cache = quote_cache or QuoteCache()
         self._coalescer = coalescer
         self._market_event_sink = market_event_sink
+        self._deferred_market_event_sink_depth = 0
+        self._deferred_market_event_sink_events: list[OpportunityEvent] = []
 
     def handle_message(self, message: dict[str, Any], *, received_at: str) -> EventWriteResult | MarketChannelAction | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -431,7 +434,46 @@ class MarketChannelIngestor:
     def _notify_market_event_sink(self, events: list[OpportunityEvent]) -> None:
         if self._market_event_sink is None or not events:
             return
-        self._market_event_sink(events)
+        if self._deferred_market_event_sink_depth > 0:
+            self._deferred_market_event_sink_events.extend(events)
+            return
+        try:
+            self._market_event_sink(events)
+        except Exception as exc:  # noqa: BLE001 - derived sink must not poison ingest.
+            _logger.warning(
+                "market-channel post-write sink failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+
+    @contextlib.contextmanager
+    def defer_market_event_sink(self) -> Iterator[None]:
+        self._deferred_market_event_sink_depth += 1
+        try:
+            yield
+        except BaseException:
+            if self._deferred_market_event_sink_depth == 1:
+                self._deferred_market_event_sink_events.clear()
+            raise
+        finally:
+            self._deferred_market_event_sink_depth -= 1
+
+    def flush_deferred_market_event_sink(self) -> None:
+        if self._market_event_sink is None or not self._deferred_market_event_sink_events:
+            self._deferred_market_event_sink_events.clear()
+            return
+        events = list(self._deferred_market_event_sink_events)
+        self._deferred_market_event_sink_events.clear()
+        try:
+            self._market_event_sink(events)
+        except Exception as exc:  # noqa: BLE001 - post-commit derived sink failure.
+            _logger.warning(
+                "market-channel post-commit sink failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
 
 
 def active_weather_token_ids_from_snapshots(
@@ -824,15 +866,17 @@ class MarketChannelOnlineService:
             )
             if not pre_captured_books:
                 continue
-            with world_mutex:
-                results = self.ingestor.seed_from_rest(
-                    self.fetch_orderbook,
-                    received_at=received_at,
-                    pre_cached=pre_captured_books,
-                    token_ids=pre_captured_books.keys(),
-                )
-                if commit is not None:
-                    commit()
+            with self.ingestor.defer_market_event_sink():
+                with world_mutex:
+                    results = self.ingestor.seed_from_rest(
+                        self.fetch_orderbook,
+                        received_at=received_at,
+                        pre_cached=pre_captured_books,
+                        token_ids=pre_captured_books.keys(),
+                    )
+                    if commit is not None:
+                        commit()
+                self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -997,15 +1041,17 @@ class MarketChannelOnlineService:
             )
             if not pre_captured_books:
                 continue
-            with world_mutex:
-                results = self.on_reconnect(
-                    received_at=received_at,
-                    pre_captured_books=pre_captured_books,
-                    token_ids=pre_captured_books.keys(),
-                    gap_start=gap_start_captured,
-                )
-                if commit is not None:
-                    commit()
+            with self.ingestor.defer_market_event_sink():
+                with world_mutex:
+                    results = self.on_reconnect(
+                        received_at=received_at,
+                        pre_captured_books=pre_captured_books,
+                        token_ids=pre_captured_books.keys(),
+                        gap_start=gap_start_captured,
+                    )
+                    if commit is not None:
+                        commit()
+                self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -1025,6 +1071,7 @@ class MarketChannelOnlineService:
         logger: Any | None = None,
         commit: Callable[[], None] | None = None,
         rollback: Callable[[], None] | None = None,
+        world_mutex: Any | None = None,
     ) -> None:
         """Run the public market channel online.
 
@@ -1039,7 +1086,7 @@ class MarketChannelOnlineService:
         # process-global world-DB write mutex. Held ONLY around the DB
         # write+commit (never across the WS recv / network I/O), so it stays
         # short and the reactor's per-event writes are never lock-starved.
-        _world_mutex = _world_write_mutex()
+        _world_mutex = world_mutex if world_mutex is not None else _world_write_mutex()
 
         while stop_event is None or not stop_event.is_set():
             received_at = datetime.now(UTC).isoformat()
@@ -1097,17 +1144,19 @@ class MarketChannelOnlineService:
                         # AFTER release so the world mutex stays short and never
                         # spans a venue fetch.
                         pending_actions: list[MarketChannelAction] = []
-                        with _world_mutex:
-                            for message in _parse_channel_messages(raw_message):
-                                action_or_result = self.ingestor.handle_message(
-                                    message,
-                                    received_at=datetime.now(UTC).isoformat(),
-                                )
-                                if isinstance(action_or_result, MarketChannelAction):
-                                    pending_actions.append(action_or_result)
-                            self.ingestor.flush_coalesced(market_budget=100)
-                            if commit is not None:
-                                commit()
+                        with self.ingestor.defer_market_event_sink():
+                            with _world_mutex:
+                                for message in _parse_channel_messages(raw_message):
+                                    action_or_result = self.ingestor.handle_message(
+                                        message,
+                                        received_at=datetime.now(UTC).isoformat(),
+                                    )
+                                    if isinstance(action_or_result, MarketChannelAction):
+                                        pending_actions.append(action_or_result)
+                                self.ingestor.flush_coalesced(market_budget=100)
+                                if commit is not None:
+                                    commit()
+                            self.ingestor.flush_deferred_market_event_sink()
                         for _action in pending_actions:
                             self._handle_action(_action)
             except Exception as exc:  # noqa: BLE001 - network loop must retry
@@ -1197,6 +1246,7 @@ def run_market_channel_service_forever(
     logger: Any | None = None,
     commit: Callable[[], None] | None = None,
     rollback: Callable[[], None] | None = None,
+    world_mutex: Any | None = None,
 ) -> None:
     asyncio.run(
         service.run_websocket_forever(
@@ -1205,6 +1255,7 @@ def run_market_channel_service_forever(
             logger=logger,
             commit=commit,
             rollback=rollback,
+            world_mutex=world_mutex,
         )
     )
 
@@ -1229,7 +1280,7 @@ def assert_user_channel_fill_authority(*, source: str) -> None:
 
 # INV-37 (PR415 B5, 2026-06-20): the schemas this insert may target. When the
 # write runs on a world-MAIN connection with zeus_trades.db ATTACHed as 'trades'
-# (the price-channel atomic cross-DB path), the caller passes schema='trades' so
+# (the price-channel attached cross-DB path), the caller passes schema='trades' so
 # the row lands in the runtime-read trades.execution_feasibility_evidence and NEVER
 # the populated-but-not-read world ghost table. Allowlisted (never interpolate a
 # caller string into SQL) and defaulted to "" = unqualified for all other callers.
@@ -1248,6 +1299,7 @@ def insert_execution_feasibility_evidence(
             f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
         )
     table = "execution_feasibility_evidence" if not schema else f"{schema}.execution_feasibility_evidence"
+    latest_table = "execution_feasibility_latest" if not schema else f"{schema}.execution_feasibility_latest"
     values = dict(row)
     values.setdefault("schema_version", 1)
     values.setdefault("created_at", datetime.now(UTC).isoformat())
@@ -1289,6 +1341,36 @@ def insert_execution_feasibility_evidence(
         """,
         values,
     )
+    try:
+        conn.execute(
+            f"""
+            INSERT INTO {latest_table} (
+                token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+                quote_seen_at, book_hash_before, best_bid_before, best_ask_before,
+                depth_before_json, created_at, schema_version
+            ) VALUES (
+                :token_id, :direction, :evidence_id, :event_id, :condition_id, :outcome_label,
+                :quote_seen_at, :book_hash_before, :best_bid_before, :best_ask_before,
+                :depth_before_json, :created_at, :schema_version
+            )
+            ON CONFLICT(token_id, direction) DO UPDATE SET
+                evidence_id = excluded.evidence_id,
+                event_id = excluded.event_id,
+                condition_id = excluded.condition_id,
+                outcome_label = excluded.outcome_label,
+                quote_seen_at = excluded.quote_seen_at,
+                book_hash_before = excluded.book_hash_before,
+                best_bid_before = excluded.best_bid_before,
+                best_ask_before = excluded.best_ask_before,
+                depth_before_json = excluded.depth_before_json,
+                created_at = excluded.created_at,
+                schema_version = excluded.schema_version
+            """,
+            values,
+        )
+    except sqlite3.OperationalError as exc:
+        if "execution_feasibility_latest" not in str(exc):
+            raise
 
 
 def feasibility_evidence_from_quote(
