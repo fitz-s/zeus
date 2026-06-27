@@ -268,6 +268,18 @@ def _make_entry_intent(
         executable_snapshot_min_order_size=Decimal("0.01"),
         executable_snapshot_neg_risk=False,
         decision_source_context=decision_source_context,
+        q_live=0.99,
+        q_lcb_5pct=0.95,
+        expected_edge=0.07,
+        min_expected_profit_usd=0.05,
+        min_submit_edge_density=0.02,
+        qkernel_execution_economics={
+            "side": "YES",
+            "payoff_q_point": 0.99,
+            "payoff_q_lcb": 0.95,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
     )
 
 

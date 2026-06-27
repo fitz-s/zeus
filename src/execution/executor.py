@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from src.config import get_mode, settings
 from src.riskguard.discord_alerts import alert_trade
@@ -575,6 +575,156 @@ def _entry_taker_quality_component(
         "incremental_expected_profit_usd": str(incremental_profit),
         "model_confidence": str(confidence),
     }
+
+
+def _float_field(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dict:
+    """Executor-side live ENTRY submit proof.
+
+    Upstream qkernel/family selection owns probability math. The executor's job
+    is fail-closed consumption: an ENTRY cannot reach the venue unless the final
+    intent carries the selected-side q/q_lcb and proves the submit price still
+    has positive conservative edge after the exact submitted share count.
+    """
+
+    q_live = _float_field(getattr(intent, "q_live", None))
+    q_lcb = _float_field(getattr(intent, "q_lcb_5pct", None))
+    expected_edge = _float_field(getattr(intent, "expected_edge", None))
+    min_expected_profit = _float_field(getattr(intent, "min_expected_profit_usd", None))
+    min_edge_density = _float_field(getattr(intent, "min_submit_edge_density", None))
+    limit_price = _float_field(getattr(intent, "limit_price", None))
+    submitted_shares = _float_field(shares)
+    missing = [
+        name
+        for name, value in (
+            ("q_live", q_live),
+            ("q_lcb_5pct", q_lcb),
+            ("expected_edge", expected_edge),
+            ("min_expected_profit_usd", min_expected_profit),
+            ("min_submit_edge_density", min_edge_density),
+            ("limit_price", limit_price),
+            ("shares", submitted_shares),
+        )
+        if value is None
+    ]
+    economics = getattr(intent, "qkernel_execution_economics", None)
+    if not isinstance(economics, Mapping):
+        missing.append("qkernel_execution_economics")
+    if missing:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="missing_entry_economics",
+            missing=",".join(missing),
+        )
+    assert q_live is not None
+    assert q_lcb is not None
+    assert expected_edge is not None
+    assert min_expected_profit is not None
+    assert min_edge_density is not None
+    assert limit_price is not None
+    assert submitted_shares is not None
+    if not (0.0 <= q_lcb <= q_live <= 1.0):
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="invalid_probability_order",
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+        )
+    if not (0.0 < limit_price < 1.0 and submitted_shares > 0.0):
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="invalid_price_or_size",
+            limit_price=limit_price,
+            shares=submitted_shares,
+        )
+    submit_edge = q_lcb - limit_price
+    expected_profit = submit_edge * submitted_shares
+    edge_density = submit_edge / limit_price
+    if expected_edge <= 0.0:
+        reason = "expected_edge_non_positive"
+    elif submit_edge <= 0.0:
+        reason = "submit_q_lcb_minus_limit_non_positive"
+    elif expected_edge > submit_edge + 1e-6:
+        reason = "expected_edge_exceeds_submit_edge"
+    elif expected_profit + 1e-9 < min_expected_profit:
+        reason = "expected_profit_below_floor"
+    elif edge_density + 1e-9 < min_edge_density:
+        reason = "submit_edge_density_below_floor"
+    else:
+        reason = ""
+    if reason:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason=reason,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            expected_edge=expected_edge,
+            limit_price=limit_price,
+            submit_edge=submit_edge,
+            expected_profit_usd=expected_profit,
+            min_expected_profit_usd=min_expected_profit,
+            submit_edge_density=edge_density,
+            min_submit_edge_density=min_edge_density,
+            shares=submitted_shares,
+        )
+    direction = str(getattr(intent, "direction", "") or "")
+    expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
+    econ_side = str(economics.get("side") or "").upper()
+    payoff_q_point = _float_field(economics.get("payoff_q_point"))
+    payoff_q_lcb = _float_field(economics.get("payoff_q_lcb"))
+    if expected_side and econ_side != expected_side:
+        reason = "qkernel_side_mismatch"
+    elif payoff_q_point is None or payoff_q_lcb is None:
+        reason = "qkernel_payoff_probability_missing"
+    elif payoff_q_point > q_live + 1e-6:
+        reason = "qkernel_payoff_q_point_exceeds_q_live"
+    elif payoff_q_lcb > q_lcb + 1e-6:
+        reason = "qkernel_payoff_q_lcb_exceeds_q_lcb"
+    elif economics.get("direction_law_ok") is not True:
+        reason = "qkernel_direction_law_not_ok"
+    elif economics.get("coherence_allows") is not True:
+        reason = "qkernel_coherence_blocks"
+    else:
+        reason = ""
+    if reason:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason=reason,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb,
+            qkernel_side=econ_side,
+            expected_side=expected_side,
+            qkernel_payoff_q_point=payoff_q_point if payoff_q_point is not None else "",
+            qkernel_payoff_q_lcb=payoff_q_lcb if payoff_q_lcb is not None else "",
+        )
+    return _capability_component(
+        "entry_economics",
+        q_live=q_live,
+        q_lcb_5pct=q_lcb,
+        expected_edge=expected_edge,
+        limit_price=limit_price,
+        submit_edge=submit_edge,
+        expected_profit_usd=expected_profit,
+        min_expected_profit_usd=min_expected_profit,
+        submit_edge_density=edge_density,
+        min_submit_edge_density=min_edge_density,
+        shares=submitted_shares,
+        qkernel_side=econ_side,
+    )
 
 
 def _parse_sqlite_timestamp(value: object) -> datetime | None:
@@ -2892,6 +3042,12 @@ def _legacy_entry_intent_from_final(
         submit_order_type=intent.order_type,
         post_only=intent.post_only,
         taker_quality_proof=intent.taker_quality_proof,
+        q_live=intent.q_live,
+        q_lcb_5pct=intent.q_lcb_5pct,
+        expected_edge=intent.expected_edge,
+        min_expected_profit_usd=intent.min_expected_profit_usd,
+        min_submit_edge_density=intent.min_submit_edge_density,
+        qkernel_execution_economics=intent.qkernel_execution_economics,
     )
 
 
@@ -4342,6 +4498,27 @@ def _live_order(
                 idempotency_key=idem.value,
                 command_state="REJECTED",
             )
+        entry_economics_component = _entry_economics_component(intent, shares=shares)
+        if not entry_economics_component.get("allowed"):
+            reason = str(entry_economics_component.get("reason") or "entry_economics")
+            logger.warning(
+                "_live_order: entry economics blocked before command persistence "
+                "for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                entry_economics_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_economics:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
             shares=shares,
@@ -4644,6 +4821,7 @@ def _live_order(
                                 post_only=submit_post_only,
                             ),
                             taker_quality_component,
+                            entry_economics_component,
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,

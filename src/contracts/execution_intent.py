@@ -1060,6 +1060,12 @@ class ExecutionIntent:
     submit_order_type: OrderType | None = None
     post_only: bool = False
     taker_quality_proof: Mapping[str, Any] | None = None
+    q_live: float | None = None
+    q_lcb_5pct: float | None = None
+    expected_edge: float | None = None
+    min_expected_profit_usd: float | None = None
+    min_submit_edge_density: float | None = None
+    qkernel_execution_economics: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -1760,6 +1766,12 @@ class FinalExecutionIntent:
     decision_source_context: DecisionSourceContext | None = None
     passive_maker_context: PassiveMakerExecutionContext | None = None
     taker_quality_proof: Mapping[str, Any] | None = None
+    q_live: float | None = None
+    q_lcb_5pct: float | None = None
+    expected_edge: float | None = None
+    min_expected_profit_usd: float | None = None
+    min_submit_edge_density: float | None = None
+    qkernel_execution_economics: Mapping[str, Any] | None = None
     pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
@@ -1780,6 +1792,12 @@ class FinalExecutionIntent:
         decision_source_context: DecisionSourceContext | None = None,
         passive_maker_context: PassiveMakerExecutionContext | None = None,
         taker_quality_proof: Mapping[str, Any] | None = None,
+        q_live: float | None = None,
+        q_lcb_5pct: float | None = None,
+        expected_edge: float | None = None,
+        min_expected_profit_usd: float | None = None,
+        min_submit_edge_density: float | None = None,
+        qkernel_execution_economics: Mapping[str, Any] | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
         cost_basis.assert_submit_safe()
@@ -1821,6 +1839,12 @@ class FinalExecutionIntent:
             decision_source_context=decision_source_context,
             passive_maker_context=passive_maker_context,
             taker_quality_proof=taker_quality_proof,
+            q_live=q_live,
+            q_lcb_5pct=q_lcb_5pct,
+            expected_edge=expected_edge,
+            min_expected_profit_usd=min_expected_profit_usd,
+            min_submit_edge_density=min_submit_edge_density,
+            qkernel_execution_economics=qkernel_execution_economics,
         )
 
     def __post_init__(self) -> None:

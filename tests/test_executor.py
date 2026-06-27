@@ -281,6 +281,7 @@ def _final_execution_intent(
                 * Decimal("0.01")
             )
     cost_basis_hash = "d" * 64
+    qkernel_side = "NO" if direction == "buy_no" else "YES"
     return FinalExecutionIntent(
         hypothesis_id="hyp-final-1",
         selected_token_id=token_id,
@@ -313,6 +314,18 @@ def _final_execution_intent(
             else decision_source_context
         ),
         passive_maker_context=passive_maker_context,
+        q_live=0.99,
+        q_lcb_5pct=0.95,
+        expected_edge=0.10,
+        min_expected_profit_usd=0.05,
+        min_submit_edge_density=0.02,
+        qkernel_execution_economics={
+            "side": qkernel_side,
+            "payoff_q_point": 0.99,
+            "payoff_q_lcb": 0.95,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
     )
 
 
