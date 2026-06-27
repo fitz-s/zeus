@@ -8508,6 +8508,12 @@ def _abandoned_unsubmitted_ghost_candidates(
         already implies it;
       * no venue_commands row links to the execution_command_id (decision_id key).
     """
+    if not _table_exists(conn, "venue_commands"):
+        logger.warning(
+            "recovery: abandoned-unsubmitted-ghost pass skipped because "
+            "venue_commands is not visible on this connection"
+        )
+        return []
     disqualifier_placeholders = ",".join("?" for _ in _GHOST_DISQUALIFYING_EVENT_TYPES)
     rows = conn.execute(
         f"""
@@ -8543,13 +8549,12 @@ def _abandoned_unsubmitted_ghost_candidates(
             continue
         # VENUE-TRUTH GUARD: any venue_commands row for this execution_command_id
         # means the order reached the command bus — never terminalize.
-        if _table_exists(conn, "venue_commands"):
-            venue_cmd = conn.execute(
-                "SELECT 1 FROM venue_commands WHERE decision_id = ? LIMIT 1",
-                (execution_command_id,),
-            ).fetchone()
-            if venue_cmd is not None:
-                continue
+        venue_cmd = conn.execute(
+            "SELECT 1 FROM venue_commands WHERE decision_id = ? LIMIT 1",
+            (execution_command_id,),
+        ).fetchone()
+        if venue_cmd is not None:
+            continue
         record["execution_command_id"] = execution_command_id
         candidates.append(record)
     return candidates

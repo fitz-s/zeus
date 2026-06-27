@@ -812,7 +812,7 @@ def _probability_number(value: Any, name: str) -> float:
 def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: float, q_lcb: float) -> None:
     economics = payload.get("qkernel_execution_economics")
     if economics in (None, ""):
-        return
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel_execution_economics")
     if not isinstance(economics, dict):
         raise LiveOrderAggregateError("PreSubmitRevalidated requires object qkernel_execution_economics")
     route_id = str(economics.get("route_id") or "").upper()

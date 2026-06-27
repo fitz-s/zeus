@@ -281,12 +281,142 @@ def _insert_edli_live_order_event(
     )
 
 
+def _seed_abandoned_unsubmitted_edli_ghost(
+    conn,
+    *,
+    aggregate_id: str = "agg-abandoned-ghost",
+    event_id: str = "event-abandoned-ghost",
+    final_intent_id: str = "intent-abandoned-ghost",
+    execution_command_id: str = "exec-abandoned-ghost",
+    usage_id: str = "cap-abandoned-ghost",
+) -> None:
+    command_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "execution_command_id": execution_command_id,
+        "execution_receipt_hash": "receipt-abandoned-ghost",
+    }
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="PreSubmitRevalidated",
+        payload={**command_payload, "direction": "buy_yes", "limit_price": 0.01},
+        occurred_at="2026-04-26T00:00:00Z",
+    )
+    _insert_edli_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload=command_payload,
+        occurred_at="2026-04-26T00:00:01Z",
+    )
+    last_hash = conn.execute(
+        """
+        SELECT event_hash
+          FROM edli_live_order_events
+         WHERE aggregate_id = ? AND event_sequence = 2
+        """,
+        (aggregate_id,),
+    ).fetchone()["event_hash"]
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, 'EXECUTION_COMMAND_CREATED',
+                  2, 'ExecutionCommandCreated', ?, 0, NULL,
+                  '2026-04-26T00:00:01Z', 1)
+        """,
+        (aggregate_id, event_id, final_intent_id, last_hash),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (?, ?, '2026-04-26T00:00:00Z', 'tiny_live_canary',
+                  5.0, 1, 5.0, 1, 'RESERVED', ?, ?,
+                  '2026-04-26T00:00:00Z', 1)
+        """,
+        (usage_id, event_id, final_intent_id, execution_command_id),
+    )
+
+
 def _advance_to_unknown(conn, command_id="cmd-001", venue_order_id=None):
     """Advance to UNKNOWN state (INTENT_CREATED u2192 SUBMITTING u2192 UNKNOWN)."""
     from src.state.venue_command_repo import append_event
     _advance_to_submitting(conn, command_id=command_id, venue_order_id=venue_order_id)
     append_event(conn, command_id=command_id, event_type="SUBMIT_UNKNOWN",
                  occurred_at="2026-04-26T00:02:00Z")
+
+
+def test_abandoned_unsubmitted_ghost_recovery_requires_visible_venue_commands(conn):
+    from src.execution.command_recovery import reconcile_abandoned_unsubmitted_ghosts
+
+    _seed_abandoned_unsubmitted_edli_ghost(conn)
+    conn.execute("DROP TABLE venue_commands")
+
+    summary = reconcile_abandoned_unsubmitted_ghosts(
+        conn,
+        updated_before="2026-04-26T00:10:00Z",
+    )
+
+    assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    event_types = [
+        row["event_type"]
+        for row in conn.execute(
+            """
+            SELECT event_type
+              FROM edli_live_order_events
+             WHERE aggregate_id = 'agg-abandoned-ghost'
+             ORDER BY event_sequence
+            """
+        )
+    ]
+    assert event_types == ["PreSubmitRevalidated", "ExecutionCommandCreated"]
+
+
+def test_abandoned_unsubmitted_ghost_recovery_terminalizes_only_without_command_row(conn):
+    from src.execution.command_recovery import reconcile_abandoned_unsubmitted_ghosts
+
+    _seed_abandoned_unsubmitted_edli_ghost(conn)
+
+    summary = reconcile_abandoned_unsubmitted_ghosts(
+        conn,
+        updated_before="2026-04-26T00:10:00Z",
+    )
+
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    event_types = [
+        row["event_type"]
+        for row in conn.execute(
+            """
+            SELECT event_type
+              FROM edli_live_order_events
+             WHERE aggregate_id = 'agg-abandoned-ghost'
+             ORDER BY event_sequence
+            """
+        )
+    ]
+    assert event_types == [
+        "PreSubmitRevalidated",
+        "ExecutionCommandCreated",
+        "SubmitRejected",
+    ]
+    projection = conn.execute(
+        """
+        SELECT current_state
+          FROM edli_live_order_projection
+         WHERE aggregate_id = 'agg-abandoned-ghost'
+        """
+    ).fetchone()
+    assert projection["current_state"] == "SUBMIT_REJECTED"
 
 
 def _advance_to_unknown_side_effect(conn, command_id="cmd-001", venue_order_id=None):

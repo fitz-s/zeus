@@ -437,6 +437,7 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"min_submit_edge_density": 0.75}, "submit edge density below"),
         ({"expected_edge_source_certificate_hash": ""}, "expected_edge_source_certificate_hash"),
         ({"cost_basis_source_certificate_hash": ""}, "cost_basis_source_certificate_hash"),
+        ({"qkernel_execution_economics": None}, "qkernel_execution_economics"),
     ],
 )
 def test_pre_submit_revalidation_failures_block_command(override, message):
@@ -691,6 +692,14 @@ def _pre_submit_payload(**overrides):
         "balance_allowance_checked_at": "2026-05-25T18:00:00+00:00",
         "expected_edge_source_certificate_hash": "actionable-hash-1",
         "cost_basis_source_certificate_hash": "cost-hash-1",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:b20@proof",
+            "route_type": "direct",
+            "side": "YES",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": 0.60,
+        },
     }
     payload.update(overrides)
     return payload

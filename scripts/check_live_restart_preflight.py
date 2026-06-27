@@ -111,6 +111,7 @@ PRE_SUBMIT_ECONOMIC_FIELDS = (
     "size",
     "min_expected_profit_usd",
     "min_submit_edge_density",
+    "qkernel_execution_economics",
 )
 ENTRY_ECONOMICS_COMPONENT_FIELDS = (
     "q_live",
@@ -597,135 +598,8 @@ def _edli_live_order_presubmit_shape_check() -> CheckResult:
             ).fetchone()[0]
             or 0
         )
-        recoverable_count = 0
-        unsubmitted_ghost_recoverable_count = 0
-        terminal_command_recoverable_count = 0
         unsafe_count = missing_count
         unsafe_samples = samples
-        trade_attached = False
-        if missing_count:
-            try:
-                if TRADE_DB.exists():
-                    conn.execute("ATTACH DATABASE ? AS trade_ro", (f"file:{TRADE_DB}?mode=ro",))
-                    trade_tables = {
-                        str(row["name"])
-                        for row in conn.execute(
-                            "SELECT name FROM trade_ro.sqlite_master WHERE type='table'"
-                        ).fetchall()
-                    }
-                    trade_attached = "venue_commands" in trade_tables
-            except sqlite3.Error as exc:
-                evidence["trade_attach_error"] = str(exc)
-                trade_attached = False
-        if missing_count and trade_attached:
-            disqualifying = (
-                "VenueSubmitAttempted",
-                "VenueSubmitAcknowledged",
-                "SubmitUnknown",
-                "UserOrderObserved",
-                "UserTradeObserved",
-                "SubmitRejected",
-                "Reconciled",
-                "CapTransitioned",
-            )
-            terminal_command_states = ("CANCELLED", "EXPIRED", "REJECTED", "FAILED")
-            disq_placeholders = ",".join("?" for _ in disqualifying)
-            terminal_placeholders = ",".join("?" for _ in terminal_command_states)
-            base_recoverable_params = (
-                *params,
-                *disqualifying,
-                *terminal_command_states,
-            )
-            recoverable_sql = f"""
-                {risk_cte}
-                SELECT
-                    COUNT(*) AS recoverable_count,
-                    SUM(CASE WHEN vc.command_id IS NULL THEN 1 ELSE 0 END)
-                        AS unsubmitted_ghost_recoverable_count,
-                    SUM(CASE WHEN vc.command_id IS NOT NULL THEN 1 ELSE 0 END)
-                        AS terminal_command_recoverable_count
-                FROM current_command cc
-                LEFT JOIN trade_ro.venue_commands vc
-                  ON vc.decision_id = cc.execution_command_id
-                WHERE cc.current_state = 'EXECUTION_COMMAND_CREATED'
-                  AND COALESCE(cc.venue_order_id, '') = ''
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM edli_live_order_events later
-                      WHERE later.aggregate_id = cc.aggregate_id
-                        AND later.event_type IN ({disq_placeholders})
-                        AND later.event_sequence > cc.command_sequence
-                  )
-                  AND (
-                      vc.command_id IS NULL
-                      OR (
-                          UPPER(COALESCE(vc.state, '')) IN ({terminal_placeholders})
-                          AND COALESCE(vc.venue_order_id, '') != ''
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM trade_ro.venue_trade_facts vtf
-                              WHERE vtf.command_id = vc.command_id
-                                AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
-                          )
-                      )
-                  )
-            """
-            rec = conn.execute(recoverable_sql, base_recoverable_params).fetchone()
-            recoverable_count = int(rec["recoverable_count"] or 0)
-            unsubmitted_ghost_recoverable_count = int(
-                rec["unsubmitted_ghost_recoverable_count"] or 0
-            )
-            terminal_command_recoverable_count = int(
-                rec["terminal_command_recoverable_count"] or 0
-            )
-            unsafe_count = max(0, missing_count - recoverable_count)
-            if unsafe_count:
-                unsafe_samples = conn.execute(
-                    f"""
-                    {risk_cte}
-                    SELECT
-                        risk.aggregate_id,
-                        risk.current_state,
-                        risk.pending_reconcile,
-                        risk.venue_order_id,
-                        risk.occurred_at,
-                        risk.event_id,
-                        risk.direction,
-                        risk.limit_price
-                    FROM risk
-                    WHERE risk.aggregate_id NOT IN (
-                        SELECT cc.aggregate_id
-                        FROM current_command cc
-                        LEFT JOIN trade_ro.venue_commands vc
-                          ON vc.decision_id = cc.execution_command_id
-                        WHERE cc.current_state = 'EXECUTION_COMMAND_CREATED'
-                          AND COALESCE(cc.venue_order_id, '') = ''
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM edli_live_order_events later
-                              WHERE later.aggregate_id = cc.aggregate_id
-                                AND later.event_type IN ({disq_placeholders})
-                                AND later.event_sequence > cc.command_sequence
-                          )
-                          AND (
-                              vc.command_id IS NULL
-                              OR (
-                                  UPPER(COALESCE(vc.state, '')) IN ({terminal_placeholders})
-                                  AND COALESCE(vc.venue_order_id, '') != ''
-                                  AND NOT EXISTS (
-                                      SELECT 1
-                                      FROM trade_ro.venue_trade_facts vtf
-                                      WHERE vtf.command_id = vc.command_id
-                                        AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
-                                  )
-                              )
-                          )
-                    )
-                    ORDER BY risk.occurred_at DESC
-                    LIMIT 25
-                    """,
-                    base_recoverable_params,
-                ).fetchall()
     except sqlite3.Error as exc:
         evidence["error"] = str(exc)
         return CheckResult(
@@ -739,9 +613,12 @@ def _edli_live_order_presubmit_shape_check() -> CheckResult:
             conn.close()
 
     evidence["missing_count"] = missing_count
-    evidence["boot_recoverable_count"] = recoverable_count
-    evidence["unsubmitted_ghost_recoverable_count"] = unsubmitted_ghost_recoverable_count
-    evidence["terminal_command_recoverable_count"] = terminal_command_recoverable_count
+    evidence["boot_recoverable_count"] = 0
+    evidence["unsubmitted_ghost_recoverable_count"] = 0
+    evidence["terminal_command_recoverable_count"] = 0
+    evidence["restart_policy"] = (
+        "fail_closed_restart_relevant_presubmit_requires_current_entry_economics"
+    )
     evidence["unsafe_count"] = unsafe_count
     evidence["samples"] = [dict(row) for row in unsafe_samples]
     return CheckResult(
@@ -750,9 +627,7 @@ def _edli_live_order_presubmit_shape_check() -> CheckResult:
         "restart-relevant live-order aggregates carry pre-submit economics"
         if missing_count == 0
         else (
-            "restart-relevant old pre-submit payloads are covered by boot command recovery"
-            if unsafe_count == 0
-            else "restart-relevant live-order aggregates predate pre-submit economics"
+            "restart-relevant live-order aggregates predate pre-submit economics"
         ),
         evidence,
     )

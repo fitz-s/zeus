@@ -356,7 +356,7 @@ def test_live_order_presubmit_shape_ignores_terminal_old_payload(monkeypatch, tm
     assert result.evidence["missing_count"] == 0
 
 
-def test_live_order_presubmit_shape_allows_boot_recoverable_current_command(monkeypatch, tmp_path):
+def test_live_order_presubmit_shape_blocks_boot_recoverable_current_command(monkeypatch, tmp_path):
     world_db = tmp_path / "zeus-world.db"
     trade_db = tmp_path / "zeus_trades.db"
     trade_conn = sqlite3.connect(trade_db)
@@ -442,11 +442,15 @@ def test_live_order_presubmit_shape_allows_boot_recoverable_current_command(monk
 
     result = preflight._edli_live_order_presubmit_shape_check()
 
-    assert result.ok is True
+    assert result.ok is False
     assert result.evidence["missing_count"] == 1
-    assert result.evidence["boot_recoverable_count"] == 1
-    assert result.evidence["unsubmitted_ghost_recoverable_count"] == 1
-    assert result.evidence["unsafe_count"] == 0
+    assert result.evidence["boot_recoverable_count"] == 0
+    assert result.evidence["unsubmitted_ghost_recoverable_count"] == 0
+    assert result.evidence["unsafe_count"] == 1
+    assert (
+        result.evidence["restart_policy"]
+        == "fail_closed_restart_relevant_presubmit_requires_current_entry_economics"
+    )
 
 
 def _init_entry_provenance_trade_db(path, *, submit_payload: dict[str, object]) -> None:
