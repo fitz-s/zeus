@@ -668,7 +668,10 @@ def _init_resting_command_trade_db(path, *, phase: str, intent_kind: str = "EXIT
             command_id TEXT,
             state TEXT,
             observed_at TEXT,
-            venue_order_id TEXT
+            venue_order_id TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            raw_payload_json TEXT
         )
         """
     )
@@ -715,22 +718,45 @@ def _init_resting_command_trade_db(path, *, phase: str, intent_kind: str = "EXIT
     )
     conn.execute(
         """
-        INSERT INTO venue_order_facts (command_id, state, observed_at, venue_order_id)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO venue_order_facts (
+            command_id, state, observed_at, venue_order_id,
+            matched_size, remaining_size, raw_payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        ("cmd-1", "LIVE", now, "0xabc"),
+        ("cmd-1", "LIVE", now, "0xabc", "0", "12.0", "{}"),
     )
     conn.commit()
     conn.close()
 
 
-def test_resting_exit_order_blocks_when_position_not_pending_exit(monkeypatch, tmp_path):
+def test_resting_exit_order_is_boot_recoverable_when_position_not_pending_exit(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
     sqlite3.connect(world_db).close()
     sqlite3.connect(forecast_db).close()
     _init_resting_command_trade_db(trade_db, phase="quarantined")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["boot_recoverable"][0]["risk"] == "resting_exit_order_without_pending_exit_lifecycle"
+    assert (
+        result.evidence["boot_recoverable"][0]["repair_action"]
+        == "restore_position_pending_exit_for_live_exit_order"
+    )
+
+
+def test_resting_exit_order_blocks_when_phase_is_not_boot_recoverable(monkeypatch, tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(trade_db, phase="settled")
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
     monkeypatch.setattr(preflight, "WORLD_DB", world_db)
     monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)

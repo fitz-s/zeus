@@ -1001,14 +1001,40 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         price_select = "cmd.price" if "price" in command_columns else "NULL"
         created_at_select = "cmd.created_at" if "created_at" in command_columns else "NULL"
         fact_join = ""
-        fact_select = "NULL AS latest_fact_state, NULL AS latest_fact_observed_at"
+        fact_select = (
+            "NULL AS latest_fact_state, NULL AS latest_fact_observed_at, "
+            "NULL AS latest_fact_matched_size, NULL AS latest_fact_remaining_size, "
+            "NULL AS latest_fact_raw_payload_json"
+        )
         if _table_exists(conn, "main", "venue_order_facts"):
-            fact_select = "lf.state AS latest_fact_state, lf.observed_at AS latest_fact_observed_at"
+            fact_columns = _table_columns(conn, "main", "venue_order_facts")
+            matched_select = (
+                "vof.matched_size AS matched_size"
+                if "matched_size" in fact_columns
+                else "NULL AS matched_size"
+            )
+            remaining_select = (
+                "vof.remaining_size AS remaining_size"
+                if "remaining_size" in fact_columns
+                else "NULL AS remaining_size"
+            )
+            raw_select = (
+                "vof.raw_payload_json AS raw_payload_json"
+                if "raw_payload_json" in fact_columns
+                else "NULL AS raw_payload_json"
+            )
+            fact_select = (
+                "lf.state AS latest_fact_state, lf.observed_at AS latest_fact_observed_at, "
+                "lf.matched_size AS latest_fact_matched_size, "
+                "lf.remaining_size AS latest_fact_remaining_size, "
+                "lf.raw_payload_json AS latest_fact_raw_payload_json"
+            )
             fact_join = """
               LEFT JOIN (
-                SELECT command_id, state, observed_at
+                SELECT command_id, state, observed_at, matched_size, remaining_size, raw_payload_json
                   FROM (
-                    SELECT vof.*,
+                    SELECT vof.command_id, vof.state, vof.observed_at,
+                           {matched_select}, {remaining_select}, {raw_select},
                            ROW_NUMBER() OVER (
                                PARTITION BY vof.command_id
                                ORDER BY datetime(vof.observed_at) DESC, vof.rowid DESC
@@ -1018,7 +1044,11 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
                  WHERE rn = 1
               ) lf
                 ON lf.command_id = cmd.command_id
-            """
+            """.format(
+                matched_select=matched_select,
+                remaining_select=remaining_select,
+                raw_select=raw_select,
+            )
         terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
         rows = conn.execute(
             f"""
@@ -1052,6 +1082,7 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         ).fetchall()
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
+    boot_recoverable: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
         intent_kind = str(row["intent_kind"] or "").upper()
@@ -1067,19 +1098,92 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         elif not phase:
             risk = "resting_order_missing_position_projection"
         if risk:
-            risky.append({**item, "risk": risk})
+            recoverable = _resting_venue_command_boot_recoverable(item, risk)
+            if recoverable is not None:
+                boot_recoverable.append(recoverable)
+            else:
+                risky.append({**item, "risk": risk})
         else:
             covered.append(item)
     evidence["risky"] = risky
+    evidence["boot_recoverable"] = boot_recoverable
     evidence["covered_count"] = len(covered)
     return CheckResult(
         "resting_venue_command_lifecycle_alignment",
         not risky,
-        "resting venue commands are aligned with position lifecycle"
+        (
+            "resting venue commands are aligned with position lifecycle"
+            if not boot_recoverable
+            else "resting venue command conflicts are boot-recoverable"
+        )
         if not risky
         else "resting venue commands conflict with position lifecycle or terminal venue facts",
         evidence,
     )
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed > 0.0:
+        return parsed
+    return None
+
+
+def _payload_has_exit_fill_economics(raw: object, fallback_price: object) -> bool:
+    try:
+        payload = json.loads(str(raw or "{}"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    submit = payload.get("submit_result")
+    if isinstance(submit, dict):
+        making = _positive_float(submit.get("makingAmount") or submit.get("making_amount"))
+        taking = _positive_float(submit.get("takingAmount") or submit.get("taking_amount"))
+        if making is not None and taking is not None:
+            return True
+    return _positive_float(fallback_price) is not None
+
+
+def _resting_venue_command_boot_recoverable(
+    item: dict[str, Any],
+    risk: str,
+) -> dict[str, Any] | None:
+    intent_kind = str(item.get("intent_kind") or "").upper()
+    fact_state = str(item.get("latest_fact_state") or "").upper()
+    phase = str(item.get("position_phase") or "")
+    if (
+        risk == "resting_exit_order_without_pending_exit_lifecycle"
+        and intent_kind == "EXIT"
+        and phase in {"active", "day0_window", "quarantined"}
+        and fact_state in {"LIVE", "OPEN", "RESTING", "PARTIALLY_MATCHED", "PARTIAL"}
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.exit_lifecycle_alignment_repair",
+            "repair_action": "restore_position_pending_exit_for_live_exit_order",
+        }
+    if (
+        risk == "command_projection_stale_after_terminal_venue_fact"
+        and intent_kind == "EXIT"
+        and fact_state in {"MATCHED", "FILLED"}
+        and _positive_float(item.get("latest_fact_matched_size")) is not None
+        and _payload_has_exit_fill_economics(
+            item.get("latest_fact_raw_payload_json"),
+            item.get("price"),
+        )
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.exit_lifecycle_alignment_repair",
+            "repair_action": "terminalize_exit_command_and_project_economic_close",
+        }
+    return None
 
 
 def _latest_iso_from_covered(rows: list[dict[str, Any]], key: str) -> str | None:

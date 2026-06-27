@@ -135,6 +135,27 @@ _EXIT_PENDING_PROJECTION_TRADE_STATES = frozenset({
     "MATCHED",
     "MINED",
 })
+_EXIT_LIFECYCLE_REPAIR_COMMAND_STATES = frozenset({
+    CommandState.ACKED.value,
+    CommandState.POST_ACKED.value,
+    CommandState.PARTIAL.value,
+})
+_EXIT_LIVE_ORDER_FACT_STATES = frozenset({
+    "LIVE",
+    "OPEN",
+    "RESTING",
+    "PARTIALLY_MATCHED",
+    "PARTIAL",
+})
+_EXIT_FILL_ORDER_FACT_STATES = frozenset({
+    "MATCHED",
+    "FILLED",
+})
+_EXIT_LIVE_ORDER_RESTORE_PHASES = frozenset({
+    "active",
+    "day0_window",
+    "quarantined",
+})
 _SHIFT_BIN_EXIT_ACTIVE_STATUSES = frozenset({
     "EXIT_SUBMITTED",
     "EXIT_UNKNOWN",
@@ -1933,6 +1954,21 @@ def _append_exit_order_fill_projection(
             fill_price=fill_price,
             observed_at=_coerce_iso_datetime(observed_at),
             command_event=event_type,
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET order_status = 'sell_filled',
+                   exit_price = COALESCE(exit_price, ?),
+                   updated_at = ?
+             WHERE position_id = ?
+               AND phase = 'economically_closed'
+            """,
+            (
+                float(_positive_decimal_or_none(fill_price) or Decimal("0")),
+                observed_at,
+                str(command.get("position_id") or ""),
+            ),
         )
     except Exception:
         logger.exception(
@@ -4388,6 +4424,17 @@ def _append_exit_filled_projection(
         venue_status="FILLED",
         terminal_exec_status="filled",
     )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET order_status = 'sell_filled',
+               exit_price = COALESCE(exit_price, ?),
+               updated_at = ?
+         WHERE position_id = ?
+           AND phase = 'economically_closed'
+        """,
+        (float(fill_price), occurred_at, position_id),
+    )
 
 
 def _append_exit_pending_projection(
@@ -5289,6 +5336,290 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
         except Exception as exc:
             logger.error(
                 "recovery: completed partial order fact reconciliation failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _exit_lifecycle_alignment_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_order_facts")
+        and _table_exists(conn, "position_current")
+    ):
+        return []
+    command_placeholders = ", ".join("?" for _ in _EXIT_LIFECYCLE_REPAIR_COMMAND_STATES)
+    sql = "WITH " + _canonical_order_truth_cte(cte_name="latest_order") + f"""
+        SELECT
+            cmd.*,
+            pc.phase AS position_phase,
+            pc.strategy_key AS position_strategy_key,
+            pc.chain_shares AS position_chain_shares,
+            pc.shares AS position_shares,
+            latest_order.fact_id AS order_fact_id,
+            latest_order.state AS order_fact_state,
+            latest_order.remaining_size AS order_fact_remaining_size,
+            latest_order.matched_size AS order_fact_matched_size,
+            latest_order.source AS order_fact_source,
+            latest_order.observed_at AS order_fact_observed_at,
+            latest_order.raw_payload_json AS order_fact_raw_payload_json
+          FROM venue_commands cmd
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+          JOIN latest_order
+            ON latest_order.command_id = cmd.command_id
+           AND latest_order.venue_order_id = cmd.venue_order_id
+         WHERE cmd.intent_kind = 'EXIT'
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND cmd.state IN ({command_placeholders})
+           AND (
+                pc.phase != 'pending_exit'
+                OR UPPER(COALESCE(latest_order.state, '')) IN ('MATCHED', 'FILLED')
+           )
+         ORDER BY datetime(latest_order.observed_at), cmd.command_id
+    """
+    return [
+        _dict_row(row)
+        for row in conn.execute(sql, tuple(sorted(_EXIT_LIFECYCLE_REPAIR_COMMAND_STATES))).fetchall()
+    ]
+
+
+def _order_fact_point_payload(candidate: Mapping[str, object]) -> dict | None:
+    raw = _json_mapping(candidate.get("order_fact_raw_payload_json"))
+    nested = raw.get("submit_result")
+    if isinstance(nested, Mapping):
+        payload = _venue_order_payload(nested)
+        if payload is not None:
+            return payload
+    return _venue_order_payload(raw)
+
+
+def _restore_exit_order_pending_projection(
+    conn: sqlite3.Connection,
+    *,
+    candidate: Mapping[str, object],
+    occurred_at: str,
+) -> bool:
+    position_id = str(candidate.get("position_id") or "").strip()
+    command_id = str(candidate.get("command_id") or "").strip()
+    venue_order_id = str(candidate.get("venue_order_id") or "").strip()
+    phase_before = str(candidate.get("position_phase") or "").strip()
+    if not position_id or not command_id or not venue_order_id:
+        return False
+    if phase_before == "pending_exit":
+        return False
+    if phase_before not in _EXIT_LIVE_ORDER_RESTORE_PHASES:
+        return False
+    # A live venue EXIT order is stronger current money-path truth than a stale
+    # quarantined projection. This mirrors M5 ghost-sell recovery, which must
+    # restore the position to pending_exit so the live order can be reconciled.
+    phase_after = "pending_exit"
+    event_key = f"{position_id}:exit_order_recovered:{command_id}"
+    existing = conn.execute(
+        "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
+        (event_key,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = ?,
+               order_id = ?,
+               order_status = 'sell_pending_confirmation',
+               exit_reason = COALESCE(exit_reason, 'COMMAND_RECOVERY_RESTING_EXIT_ORDER'),
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (phase_after, venue_order_id, occurred_at, position_id),
+    )
+    if existing is not None:
+        return True
+    seq = _latest_position_sequence(conn, position_id) + 1
+    payload = {
+        "reason": "resting_exit_order_restored_pending_exit_projection",
+        "proof_class": "live_exit_order_fact_with_non_pending_exit_position",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "command_state": candidate.get("state"),
+        "order_fact_id": candidate.get("order_fact_id"),
+        "order_fact_state": candidate.get("order_fact_state"),
+        "order_fact_remaining_size": candidate.get("order_fact_remaining_size"),
+        "phase_before": phase_before,
+        "phase_after": phase_after,
+    }
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_POSTED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_key,
+            position_id,
+            seq,
+            occurred_at,
+            phase_before,
+            phase_after,
+            str(candidate.get("position_strategy_key") or "opening_inertia"),
+            str(candidate.get("decision_id") or ""),
+            str(candidate.get("snapshot_id") or ""),
+            venue_order_id,
+            command_id,
+            f"venue_command:{command_id}",
+            event_key,
+            str(candidate.get("order_fact_state") or candidate.get("state") or ""),
+            "src.execution.command_recovery",
+            json.dumps(payload, sort_keys=True, default=str),
+            _latest_position_env(conn, position_id),
+        ),
+    )
+    return True
+
+
+def _append_missing_exit_trade_fact_from_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    candidate: Mapping[str, object],
+    point_order: dict,
+    matched_size: str,
+    fill_price: str,
+    observed_at: str,
+) -> None:
+    command_id = str(candidate.get("command_id") or "")
+    venue_order_id = str(candidate.get("venue_order_id") or "")
+    if _fill_trade_fact_count(conn, command_id) > 0:
+        return
+    trade_ids = _point_order_trade_ids(point_order)
+    tx_hashes = _point_order_transaction_hashes(point_order)
+    tx_hash = next(iter(tx_hashes), "")
+    trade_id = next(iter(trade_ids), "")
+    if not trade_id:
+        trade_id = tx_hash or f"order_fact:{candidate.get('order_fact_id') or command_id}"
+    payload = {
+        "reason": "exit_order_fact_matched_missing_trade_fact_repair",
+        "proof_class": "matched_exit_order_fact_with_fill_economics",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "order_fact_id": candidate.get("order_fact_id"),
+        "order_fact_state": candidate.get("order_fact_state"),
+        "matched_size": matched_size,
+        "fill_price": fill_price,
+        "tx_hash": tx_hash,
+        "point_order": point_order,
+    }
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="MATCHED",
+        filled_size=matched_size,
+        fill_price=fill_price,
+        source=str(candidate.get("order_fact_source") or "REST"),
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        tx_hash=tx_hash or None,
+        raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
+        raw_payload_json=payload,
+    )
+
+
+def _repair_exit_matched_order_fact_projection(
+    conn: sqlite3.Connection,
+    *,
+    candidate: Mapping[str, object],
+    occurred_at: str,
+) -> bool:
+    command_id = str(candidate.get("command_id") or "")
+    venue_order_id = str(candidate.get("venue_order_id") or "")
+    point_order = _order_fact_point_payload(candidate)
+    matched_size = _point_order_matched_size(
+        point_order,
+        fallback=candidate.get("order_fact_matched_size"),
+        side=candidate.get("side"),
+    )
+    fill_price = _point_order_fill_price(point_order, fallback=candidate.get("price"), side=candidate.get("side"))
+    if _positive_decimal_or_none(matched_size) is None or _positive_decimal_or_none(fill_price) is None:
+        return False
+    _append_missing_exit_trade_fact_from_order_fact(
+        conn,
+        candidate=candidate,
+        point_order=point_order or {},
+        matched_size=matched_size,
+        fill_price=fill_price,
+        observed_at=occurred_at,
+    )
+    if str(candidate.get("state") or "") != CommandState.FILLED.value:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.FILL_CONFIRMED.value,
+            occurred_at=occurred_at,
+            payload={
+                "reason": "exit_order_fact_matched_projection_repair",
+                "proof_class": "matched_exit_order_fact_with_trade_economics",
+                "venue_order_id": venue_order_id,
+                "command_id": command_id,
+                "matched_size": matched_size,
+                "fill_price": fill_price,
+                "latest_order_fact_id": candidate.get("order_fact_id"),
+                "latest_order_fact_state": candidate.get("order_fact_state"),
+            },
+        )
+    updated_command = dict(candidate)
+    updated_command["state"] = CommandState.FILLED.value
+    _append_exit_order_fill_projection(
+        conn,
+        command=updated_command,
+        venue_order_id=venue_order_id,
+        matched_size=matched_size,
+        fill_price=fill_price,
+        observed_at=occurred_at,
+        event_type=CommandEventType.FILL_CONFIRMED.value,
+    )
+    return True
+
+
+def reconcile_exit_lifecycle_alignment_repairs(conn: sqlite3.Connection) -> dict:
+    """Repair EXIT command/projection disagreements visible at live restart."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _exit_lifecycle_alignment_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        fact_state = str(candidate.get("order_fact_state") or "").upper()
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_exit_lifecycle_align_{safe_command_id}"
+        occurred_at = str(candidate.get("order_fact_observed_at") or candidate.get("updated_at") or _now_iso())
+        try:
+            conn.execute(f"SAVEPOINT {sp_name}")
+            advanced = False
+            if fact_state in _EXIT_FILL_ORDER_FACT_STATES:
+                advanced = _repair_exit_matched_order_fact_projection(
+                    conn,
+                    candidate=candidate,
+                    occurred_at=occurred_at,
+                )
+            elif fact_state in _EXIT_LIVE_ORDER_FACT_STATES:
+                advanced = _restore_exit_order_pending_projection(
+                    conn,
+                    candidate=candidate,
+                    occurred_at=occurred_at,
+                )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: exit lifecycle alignment repair failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -11134,6 +11465,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += exit_pending_summary["stayed"]
         summary["errors"] += exit_pending_summary["errors"]
 
+        exit_lifecycle_alignment_summary = reconcile_exit_lifecycle_alignment_repairs(conn)
+        summary["exit_lifecycle_alignment_repair"] = exit_lifecycle_alignment_summary
+        summary["advanced"] += exit_lifecycle_alignment_summary["advanced"]
+        summary["stayed"] += exit_lifecycle_alignment_summary["stayed"]
+        summary["errors"] += exit_lifecycle_alignment_summary["errors"]
+
         spurious_panic_summary = repair_spurious_model_divergence_pending_exits(conn)
         summary["spurious_model_divergence_pending_exit_repair"] = spurious_panic_summary
         summary["advanced"] += spurious_panic_summary["advanced"]
@@ -11509,6 +11846,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,
                  "edli_acknowledged_venue_command_sync")
+        _db_pass(
+            "exit_lifecycle_alignment_repair",
+            reconcile_exit_lifecycle_alignment_repairs,
+            "exit_lifecycle_alignment_repair",
+        )
         _client_pass(
             "partial_remainders",
             reconcile_partial_remainders,
@@ -11558,6 +11900,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              reconcile_filled_entry_execution_fact_repairs, "filled_entry_execution_fact_repair")
     _db_pass("exit_pending_projections",
              reconcile_exit_pending_projections, "exit_pending_projections")
+    _db_pass("exit_lifecycle_alignment_repair",
+             reconcile_exit_lifecycle_alignment_repairs, "exit_lifecycle_alignment_repair")
     _db_pass("spurious_model_divergence_pending_exit_repair",
              repair_spurious_model_divergence_pending_exits,
              "spurious_model_divergence_pending_exit_repair")
