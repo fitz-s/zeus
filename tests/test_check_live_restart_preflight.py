@@ -644,6 +644,120 @@ def test_open_entry_submit_economics_allows_live_exposure_with_component(monkeyp
     assert result.evidence["covered"][0]["q_lcb_5pct"] == 0.72
 
 
+def _init_resting_command_trade_db(path, *, phase: str, intent_kind: str = "EXIT") -> None:
+    conn = _init_trade_db(path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            intent_kind TEXT,
+            position_id TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            price REAL,
+            size REAL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            command_id TEXT,
+            state TEXT,
+            observed_at TEXT,
+            venue_order_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "pos-1",
+            phase,
+            "Singapore",
+            "2026-06-27",
+            "high",
+            "32C",
+            "buy_no",
+            12.0,
+            12.0,
+            "filled",
+            None,
+            0,
+            None,
+            0.80,
+            1,
+            0.49,
+            1,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, intent_kind, position_id, state, venue_order_id,
+            price, size, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("cmd-1", intent_kind, "pos-1", "ACKED", "0xabc", 0.49, 12.0, now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (command_id, state, observed_at, venue_order_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("cmd-1", "LIVE", now, "0xabc"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_resting_exit_order_blocks_when_position_not_pending_exit(monkeypatch, tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(trade_db, phase="quarantined")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "resting_exit_order_without_pending_exit_lifecycle"
+
+
+def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(trade_db, phase="pending_exit")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["covered_count"] == 1
+
+
 def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
     monkeypatch.delenv("ZEUS_LIVE_PREFLIGHT_STATE_DIR", raising=False)
     monkeypatch.delenv("ZEUS_STATE_DIR", raising=False)

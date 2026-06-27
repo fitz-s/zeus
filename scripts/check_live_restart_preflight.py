@@ -125,6 +125,12 @@ ENTRY_ECONOMICS_COMPONENT_FIELDS = (
     "shares",
     "qkernel_side",
 )
+TERMINAL_VENUE_COMMAND_STATES = frozenset(
+    {"EXPIRED", "CANCELLED", "CANCELED", "REJECTED", "FAILED", "FILLED"}
+)
+TERMINAL_VENUE_FACT_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "CANCELED", "CANCELLED", "EXPIRED", "MATCHED", "FILLED"}
+)
 REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -965,6 +971,113 @@ def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
         "open positive-share positions have entry submit economics provenance"
         if not risky
         else "open positive-share positions include entries submitted without economics provenance",
+        evidence,
+    )
+
+
+def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
+    """Block restart when a live venue order is attached to the wrong lifecycle phase."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "terminal_command_states": sorted(TERMINAL_VENUE_COMMAND_STATES),
+    }
+    with _connect_live_ro() as conn:
+        required_tables = ("venue_commands", "position_current")
+        missing_tables = [
+            table
+            for table in required_tables
+            if not _table_exists(conn, "main", table)
+        ]
+        if missing_tables:
+            evidence["missing_tables"] = missing_tables
+            return CheckResult(
+                "resting_venue_command_lifecycle_alignment",
+                True,
+                "venue command tables absent; no resting venue command lifecycle alignment to inspect",
+                evidence,
+            )
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        price_select = "cmd.price" if "price" in command_columns else "NULL"
+        created_at_select = "cmd.created_at" if "created_at" in command_columns else "NULL"
+        fact_join = ""
+        fact_select = "NULL AS latest_fact_state, NULL AS latest_fact_observed_at"
+        if _table_exists(conn, "main", "venue_order_facts"):
+            fact_select = "lf.state AS latest_fact_state, lf.observed_at AS latest_fact_observed_at"
+            fact_join = """
+              LEFT JOIN (
+                SELECT command_id, state, observed_at
+                  FROM (
+                    SELECT vof.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY vof.command_id
+                               ORDER BY datetime(vof.observed_at) DESC, vof.rowid DESC
+                           ) AS rn
+                      FROM venue_order_facts vof
+                  )
+                 WHERE rn = 1
+              ) lf
+                ON lf.command_id = cmd.command_id
+            """
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        rows = conn.execute(
+            f"""
+            SELECT
+                cmd.command_id,
+                cmd.intent_kind,
+                cmd.position_id,
+                cmd.state AS command_state,
+                cmd.venue_order_id,
+                {price_select} AS price,
+                cmd.size,
+                {created_at_select} AS created_at,
+                cmd.updated_at,
+                pc.phase AS position_phase,
+                pc.city,
+                pc.target_date,
+                pc.bin_label,
+                pc.direction,
+                pc.chain_shares,
+                {fact_select}
+              FROM venue_commands cmd
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+              {fact_join}
+             WHERE UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(cmd.venue_order_id, '') != ''
+             ORDER BY datetime(cmd.updated_at) DESC
+             LIMIT 100
+            """,
+            tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
+        ).fetchall()
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        intent_kind = str(row["intent_kind"] or "").upper()
+        phase = str(row["position_phase"] or "")
+        fact_state = str(row["latest_fact_state"] or "").upper()
+        risk = ""
+        if fact_state in TERMINAL_VENUE_FACT_STATES and str(row["command_state"] or "").upper() not in TERMINAL_VENUE_COMMAND_STATES:
+            risk = "command_projection_stale_after_terminal_venue_fact"
+        elif intent_kind == "EXIT" and phase != "pending_exit":
+            risk = "resting_exit_order_without_pending_exit_lifecycle"
+        elif intent_kind == "ENTRY" and phase not in {"pending_entry", "active", "day0_window"}:
+            risk = "resting_entry_order_without_entry_lifecycle"
+        elif not phase:
+            risk = "resting_order_missing_position_projection"
+        if risk:
+            risky.append({**item, "risk": risk})
+        else:
+            covered.append(item)
+    evidence["risky"] = risky
+    evidence["covered_count"] = len(covered)
+    return CheckResult(
+        "resting_venue_command_lifecycle_alignment",
+        not risky,
+        "resting venue commands are aligned with position lifecycle"
+        if not risky
+        else "resting venue commands conflict with position lifecycle or terminal venue facts",
         evidence,
     )
 
@@ -2099,6 +2212,7 @@ def evaluate() -> dict[str, Any]:
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
         _open_entry_submit_economics_check(rows),
+        _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
