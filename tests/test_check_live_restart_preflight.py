@@ -449,6 +449,201 @@ def test_live_order_presubmit_shape_allows_boot_recoverable_current_command(monk
     assert result.evidence["unsafe_count"] == 0
 
 
+def _init_entry_provenance_trade_db(path, *, submit_payload: dict[str, object]) -> None:
+    conn = _init_trade_db(path)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            snapshot_id TEXT,
+            envelope_id TEXT,
+            position_id TEXT,
+            decision_id TEXT,
+            idempotency_key TEXT,
+            intent_kind TEXT,
+            market_id TEXT,
+            token_id TEXT,
+            side TEXT,
+            size REAL,
+            price REAL,
+            venue_order_id TEXT,
+            state TEXT,
+            last_event_id TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            review_required_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_command_events (
+            event_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT,
+            state_after TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "pos-1",
+            "active",
+            "Lucknow",
+            "2026-06-28",
+            "high",
+            "35C or below",
+            "buy_yes",
+            20.0,
+            20.0,
+            "partial",
+            None,
+            0,
+            None,
+            0.80,
+            1,
+            0.006,
+            1,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-1",
+            "snap-1",
+            "env-1",
+            "pos-1",
+            "decision-1",
+            "idem-1",
+            "ENTRY",
+            "market-1",
+            "token-1",
+            "BUY",
+            100.0,
+            0.006,
+            "0xabc",
+            "EXPIRED",
+            "event-1",
+            now,
+            now,
+            None,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "event-1",
+            "cmd-1",
+            1,
+            "SUBMIT_REQUESTED",
+            now,
+            json.dumps(submit_payload),
+            "REQUESTED",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_open_entry_submit_economics_blocks_live_exposure_without_component(monkeypatch, tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={
+            "execution_capability": {
+                "components": [
+                    {"component": "cutover_guard", "allowed": True, "reason": "allowed"}
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._open_entry_submit_economics_check(preflight._open_positions())
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["position_id"] == "pos-1"
+    assert result.evidence["risky"][0]["risk"] == "open_position_entry_submit_economics_missing"
+    assert "entry_economics" in result.evidence["risky"][0]["missing"]
+
+
+def test_open_entry_submit_economics_allows_live_exposure_with_component(monkeypatch, tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={
+            "execution_capability": {
+                "components": [
+                    {
+                        "component": "entry_economics",
+                        "allowed": True,
+                        "reason": "allowed",
+                        "details": {
+                            "q_live": 0.82,
+                            "q_lcb_5pct": 0.72,
+                            "expected_edge": 0.70,
+                            "limit_price": 0.006,
+                            "submit_edge": 0.714,
+                            "expected_profit_usd": 14.28,
+                            "min_expected_profit_usd": 1.0,
+                            "submit_edge_density": 119.0,
+                            "min_submit_edge_density": 0.04,
+                            "shares": 20.0,
+                            "qkernel_side": "YES",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._open_entry_submit_economics_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["covered"][0]["position_id"] == "pos-1"
+    assert result.evidence["covered"][0]["q_lcb_5pct"] == 0.72
+
+
 def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
     monkeypatch.delenv("ZEUS_LIVE_PREFLIGHT_STATE_DIR", raising=False)
     monkeypatch.delenv("ZEUS_STATE_DIR", raising=False)

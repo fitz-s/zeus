@@ -282,6 +282,7 @@ capabilities:
         - kill_switch_active
         - settlement_window_freeze_active
         - risk_level_RED
+        - deployment_freshness_mismatch
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/venue_adapter.py  # Phase 4 deliverable — created when LiveAuthToken phantom + ABC split lands; entry pre-registers the path so the route function can recognize the future hard kernel from day 1

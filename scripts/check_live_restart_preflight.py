@@ -112,6 +112,19 @@ PRE_SUBMIT_ECONOMIC_FIELDS = (
     "min_expected_profit_usd",
     "min_submit_edge_density",
 )
+ENTRY_ECONOMICS_COMPONENT_FIELDS = (
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "limit_price",
+    "submit_edge",
+    "expected_profit_usd",
+    "min_expected_profit_usd",
+    "submit_edge_density",
+    "min_submit_edge_density",
+    "shares",
+    "qkernel_side",
+)
 REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -735,6 +748,223 @@ def _edli_live_order_presubmit_shape_check() -> CheckResult:
             if unsafe_count == 0
             else "restart-relevant live-order aggregates predate pre-submit economics"
         ),
+        evidence,
+    )
+
+
+def _entry_economics_component_from_submit(payload_json: str | None) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(str(payload_json or "{}"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    capability = payload.get("execution_capability")
+    if not isinstance(capability, dict):
+        return None
+    components = capability.get("components")
+    if not isinstance(components, list):
+        return None
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if str(component.get("component") or "") == "entry_economics":
+            return component
+    return None
+
+
+def _entry_economics_component_missing_fields(component: dict[str, Any] | None) -> list[str]:
+    if component is None:
+        return ["entry_economics"]
+    missing: list[str] = []
+    if component.get("allowed") is not True:
+        missing.append("entry_economics.allowed")
+    details = component.get("details")
+    if not isinstance(details, dict):
+        return [*missing, "entry_economics.details"]
+    for field in ENTRY_ECONOMICS_COMPONENT_FIELDS:
+        if field not in details or details.get(field) in (None, ""):
+            missing.append(f"entry_economics.details.{field}")
+    return missing
+
+
+def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
+    """Block restart when live exposure lacks an executable entry-economics receipt."""
+
+    settlement_truth = _verified_settlement_truth_for(rows)
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "required_component": "entry_economics",
+        "required_detail_fields": list(ENTRY_ECONOMICS_COMPONENT_FIELDS),
+    }
+    row_by_position = {
+        str(row["position_id"] or ""): row
+        for row in rows
+        if str(row["position_id"] or "").strip()
+    }
+    covered: list[dict[str, Any]] = []
+    rows_requiring_provenance: dict[str, sqlite3.Row] = {}
+    for position_id, row in row_by_position.items():
+        item = {
+            "position_id": position_id,
+            "phase": row["phase"],
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "bin_label": row["bin_label"],
+            "direction": row["direction"],
+            "shares": row["shares"],
+            "chain_shares": row["chain_shares"],
+        }
+        settlement = settlement_truth.get(
+            (
+                str(row["city"] or ""),
+                str(row["target_date"] or ""),
+                str(row["temperature_metric"] or "high").lower(),
+            )
+        )
+        if settlement is not None:
+            covered.append(
+                {
+                    **item,
+                    "restart_resolution": "verified_settlement_harvester_recovery",
+                    "settlement": settlement,
+                }
+            )
+            continue
+        rows_requiring_provenance[position_id] = row
+    open_position_ids = list(rows_requiring_provenance)
+    if not open_position_ids:
+        evidence["covered"] = covered
+        return CheckResult(
+            "open_entry_submit_economics",
+            True,
+            "no unsettled open positive-share positions require entry submit economics provenance",
+            evidence,
+        )
+    with _connect_live_ro() as conn:
+        required_tables = ("venue_commands", "venue_command_events")
+        missing_tables = [
+            table
+            for table in required_tables
+            if not _table_exists(conn, "main", table)
+        ]
+        if missing_tables:
+            evidence["missing_tables"] = missing_tables
+            return CheckResult(
+                "open_entry_submit_economics",
+                False,
+                "trade DB is missing entry submit provenance tables",
+                evidence,
+            )
+        placeholders = ",".join("?" for _ in open_position_ids)
+        latest_rows = conn.execute(
+            f"""
+            WITH latest_entry AS (
+                SELECT
+                    vc.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY vc.position_id
+                        ORDER BY datetime(vc.created_at) DESC, vc.command_id DESC
+                    ) AS rn
+                  FROM venue_commands vc
+                 WHERE vc.intent_kind = 'ENTRY'
+                   AND vc.position_id IN ({placeholders})
+            ),
+            latest_submit AS (
+                SELECT
+                    vce.command_id,
+                    vce.occurred_at,
+                    vce.payload_json,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY vce.command_id
+                        ORDER BY vce.sequence_no DESC, datetime(vce.occurred_at) DESC
+                    ) AS rn
+                  FROM venue_command_events vce
+                 WHERE vce.event_type = 'SUBMIT_REQUESTED'
+            )
+            SELECT
+                le.position_id,
+                le.command_id,
+                le.decision_id,
+                le.state AS command_state,
+                le.venue_order_id,
+                le.price,
+                le.size,
+                le.created_at,
+                ls.occurred_at AS submit_requested_at,
+                ls.payload_json AS submit_payload_json
+              FROM latest_entry le
+              LEFT JOIN latest_submit ls
+                ON ls.command_id = le.command_id
+               AND ls.rn = 1
+             WHERE le.rn = 1
+            """,
+            tuple(open_position_ids),
+        ).fetchall()
+    latest_by_position = {str(row["position_id"]): row for row in latest_rows}
+    risky: list[dict[str, Any]] = []
+    for position_id in open_position_ids:
+        position = rows_requiring_provenance[position_id]
+        latest = latest_by_position.get(position_id)
+        item = {
+            "position_id": position_id,
+            "phase": position["phase"],
+            "city": position["city"],
+            "target_date": position["target_date"],
+            "temperature_metric": position["temperature_metric"],
+            "bin_label": position["bin_label"],
+            "direction": position["direction"],
+            "shares": position["shares"],
+            "chain_shares": position["chain_shares"],
+        }
+        if latest is None:
+            risky.append({**item, "risk": "open_position_missing_entry_command"})
+            continue
+        command_item = {
+            **item,
+            "command_id": latest["command_id"],
+            "decision_id": latest["decision_id"],
+            "command_state": latest["command_state"],
+            "venue_order_id": latest["venue_order_id"],
+            "price": latest["price"],
+            "size": latest["size"],
+            "command_created_at": latest["created_at"],
+            "submit_requested_at": latest["submit_requested_at"],
+        }
+        component = _entry_economics_component_from_submit(latest["submit_payload_json"])
+        missing = _entry_economics_component_missing_fields(component)
+        if missing:
+            risky.append(
+                {
+                    **command_item,
+                    "risk": "open_position_entry_submit_economics_missing",
+                    "missing": missing,
+                    "entry_economics_reason": None if component is None else component.get("reason"),
+                }
+            )
+            continue
+        details = component.get("details") if isinstance(component, dict) else {}
+        covered.append(
+            {
+                **command_item,
+                "entry_economics_reason": component.get("reason"),
+                "q_live": details.get("q_live") if isinstance(details, dict) else None,
+                "q_lcb_5pct": details.get("q_lcb_5pct") if isinstance(details, dict) else None,
+                "expected_profit_usd": details.get("expected_profit_usd")
+                if isinstance(details, dict)
+                else None,
+                "submit_edge": details.get("submit_edge") if isinstance(details, dict) else None,
+            }
+        )
+    evidence["risky"] = risky
+    evidence["covered"] = covered
+    return CheckResult(
+        "open_entry_submit_economics",
+        not risky,
+        "open positive-share positions have entry submit economics provenance"
+        if not risky
+        else "open positive-share positions include entries submitted without economics provenance",
         evidence,
     )
 
@@ -1868,6 +2098,7 @@ def evaluate() -> dict[str, Any]:
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
+        _open_entry_submit_economics_check(rows),
         _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),

@@ -6,15 +6,12 @@
 
 ``_available_after_decision(available_at, decision_utc)`` is the gate that
 excludes a provider whose source data became available STRICTLY AFTER the
-decision instant (no-future-leakage). It is FAIL-OPEN: missing / empty /
-unparseable availability -> False (admit), so the guard never excludes a model
-on the strength of absent or malformed availability evidence. Naive timestamps
-are interpreted as UTC (Zeus persists UTC wall-clocks).
+decision instant (no-future-leakage). Missing / empty / unparseable availability
+is also excluded: absent provenance is not live authority. Naive timestamps are
+interpreted as UTC (Zeus persists UTC wall-clocks).
 
-FRESHNESS CONTRACT: every admit on missing/malformed evidence must emit a
+FRESHNESS CONTRACT: every exclusion on missing/malformed evidence must emit a
 WARNING (LOUD, never silent) so the caller is observable in logs.
-The ``admitted_on_missing_availability`` counter in ``BayesPrecisionFusionCaptureResult``
-surfaces the count to the caller for telemetry.
 """
 
 import logging
@@ -40,15 +37,14 @@ def test_available_equal_to_decision_is_not_after():
     assert _available_after_decision("2026-06-01T12:00:00+00:00", _DECISION) is False
 
 
-def test_missing_availability_fails_open_admit():
-    # The guard must never exclude a provider on missing availability evidence.
-    assert _available_after_decision(None, _DECISION) is False
-    assert _available_after_decision("", _DECISION) is False
-    assert _available_after_decision("   ", _DECISION) is False
+def test_missing_availability_fails_closed_exclude():
+    assert _available_after_decision(None, _DECISION) is True
+    assert _available_after_decision("", _DECISION) is True
+    assert _available_after_decision("   ", _DECISION) is True
 
 
-def test_unparseable_availability_fails_open_admit():
-    assert _available_after_decision("not-a-timestamp", _DECISION) is False
+def test_unparseable_availability_fails_closed_exclude():
+    assert _available_after_decision("not-a-timestamp", _DECISION) is True
 
 
 def test_naive_timestamp_interpreted_as_utc():
@@ -72,30 +68,30 @@ def test_datetime_input_accepted():
 # ---------------------------------------------------------------------------
 
 def test_missing_availability_none_emits_warning(caplog):
-    """A None available_at admit must emit a WARNING (not silent)."""
+    """A None available_at exclusion must emit a WARNING (not silent)."""
     with caplog.at_level(logging.WARNING, logger="zeus.bayes_precision_fusion_capture"):
         result = _available_after_decision(None, _DECISION, model_label="test_model")
-    assert result is False
+    assert result is True
     assert any("MISSING available_at" in r.message or "MISSING" in r.message for r in caplog.records), (
         f"Expected WARNING about MISSING available_at in logs, got: {[r.message for r in caplog.records]}"
     )
 
 
 def test_missing_availability_empty_string_emits_warning(caplog):
-    """An empty-string available_at admit must emit a WARNING (not silent)."""
+    """An empty-string available_at exclusion must emit a WARNING (not silent)."""
     with caplog.at_level(logging.WARNING, logger="zeus.bayes_precision_fusion_capture"):
         result = _available_after_decision("", _DECISION, model_label="test_model")
-    assert result is False
+    assert result is True
     assert any("EMPTY available_at" in r.message or "EMPTY" in r.message or "MISSING" in r.message for r in caplog.records), (
         f"Expected WARNING about EMPTY available_at in logs, got: {[r.message for r in caplog.records]}"
     )
 
 
 def test_unparseable_availability_emits_warning(caplog):
-    """An unparseable available_at admit must emit a WARNING (not silent)."""
+    """An unparseable available_at exclusion must emit a WARNING (not silent)."""
     with caplog.at_level(logging.WARNING, logger="zeus.bayes_precision_fusion_capture"):
         result = _available_after_decision("not-a-timestamp", _DECISION, model_label="test_model")
-    assert result is False
+    assert result is True
     assert any("UNPARSEABLE" in r.message for r in caplog.records), (
         f"Expected WARNING about UNPARSEABLE available_at in logs, got: {[r.message for r in caplog.records]}"
     )
@@ -121,11 +117,11 @@ def test_valid_past_timestamp_no_warning(caplog):
     )
 
 
-def test_admitted_on_missing_availability_counter():
-    """capture_bayes_precision_instruments must count models admitted on missing availability.
+def test_missing_availability_drops_models_not_admit_counter():
+    """capture_bayes_precision_instruments must drop models missing availability.
 
     When decision_utc is supplied but model_available_at is absent for a model,
-    admitted_on_missing_availability > 0 in the result.
+    that model cannot enter the likelihood.
     """
     from datetime import date
     from src.data.bayes_precision_fusion_capture import capture_bayes_precision_instruments
@@ -149,9 +145,6 @@ def test_admitted_on_missing_availability_counter():
         decision_utc=decision,
         model_available_at={},  # no availability provided -> all models have missing evidence
     )
-    # With decision_utc set and no availability for any model, all candidates
-    # trigger the MISSING-availability path -> counter must be > 0.
-    assert result.admitted_on_missing_availability > 0, (
-        f"Expected admitted_on_missing_availability > 0 when availability absent for all models, "
-        f"got {result.admitted_on_missing_availability}"
-    )
+    assert result.admitted_on_missing_availability == 0
+    assert result.likelihood == ()
+    assert result.dropped_models

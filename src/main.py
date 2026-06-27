@@ -10735,6 +10735,7 @@ def main():
     _BOOT_STATE.update(_boot)
     if _boot.get("sha"):
         logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
+        os.environ["ZEUS_PROCESS_BOOT_SHA"] = str(_boot["sha"])
     # EDLI-mode release-gate surface: persist the genuinely-booted HEAD SHA so the
     # live-release gate's loaded_sha check can compare loaded vs expected. Reuses
     # the boot SHA captured above; written once (not refreshed) so a post-boot
