@@ -1200,7 +1200,7 @@ def _verify_pre_submit_qkernel_economics(
 ) -> None:
     economics = pre_submit.get("qkernel_execution_economics")
     if economics in (None, ""):
-        return
+        raise CertificateVerificationError("pre-submit qkernel_execution_economics missing")
     if not isinstance(economics, dict):
         raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
     route_id = str(economics.get("route_id") or "").upper()

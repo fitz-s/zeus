@@ -735,6 +735,8 @@ def _insert_actionable_certificate_for_recovery(
     q_live: float = 0.37,
     direction: str = "buy_yes",
 ) -> str:
+    q_lcb = max(0.0, q_live - 0.05)
+    side = "YES" if direction == "buy_yes" else "NO"
     payload = {
         "event_id": event_id,
         "event_type": "FORECAST_SNAPSHOT_READY",
@@ -748,7 +750,14 @@ def _insert_actionable_certificate_for_recovery(
         "metric": "high",
         "unit": "C",
         "q_live": q_live,
-        "q_lcb_5pct": max(0.0, q_live - 0.05),
+        "q_lcb_5pct": q_lcb,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": side,
+            "payoff_q_point": q_live,
+            "payoff_q_lcb": q_lcb,
+        },
         "causal_snapshot_id": "forecast-snap-edli",
         "final_intent_id": f"intent:{event_id}:{token_id}",
     }
@@ -4327,6 +4336,14 @@ class TestRecoveryResolutionTable:
                 "direction": "buy_no",
                 "token_id": token_id,
                 "q_live": 0.81,
+                "q_lcb_5pct": 0.76,
+                "selection_authority_applied": "qkernel_spine",
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "payoff_q_point": 0.81,
+                    "payoff_q_lcb": 0.76,
+                },
                 "causal_snapshot_id": "source-run-1",
             },
             "2026-06-07T00:00:00Z",
@@ -4367,6 +4384,92 @@ class TestRecoveryResolutionTable:
         assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
         assert trade_case["direction"] == "buy_no"
         assert trade_case["strategy_key"] == "opening_inertia"
+        assert trade_case["entry_method"] == "qkernel_spine"
+        assert trade_case["discovery_mode"] == "update_reaction"
+        assert trade_case["p_posterior"] == pytest.approx(0.81)
+
+    def test_edli_trade_case_marks_non_qkernel_actionable_as_venue_fact_recovery(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import _edli_trade_case_for_command
+
+        event_id = "edli_evt_legacy_actionable"
+        token_id = "tok-no"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:{token_id}:{token_id}:buy_no"
+
+        def insert_certificate(certificate_type: str, semantic_key: str, payload: dict, created_at: str) -> None:
+            payload_json = json.dumps(payload, sort_keys=True)
+            payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO decision_certificates (
+                    certificate_id, certificate_type, schema_version, canonicalization_version,
+                    semantic_key, claim_type, mode, decision_time, authority_id,
+                    authority_version, algorithm_id, algorithm_version, payload_json,
+                    payload_hash, certificate_hash, verifier_status, created_at
+                ) VALUES (?, ?, 1, 'test', ?, 'test', 'LIVE', ?, 'test',
+                          'test', 'test', 'test', ?, ?, ?, 'VERIFIED', ?)
+                """,
+                (
+                    f"cert:{certificate_type}:{semantic_key}",
+                    certificate_type,
+                    semantic_key,
+                    created_at,
+                    payload_json,
+                    payload_hash,
+                    hashlib.sha256(f"{certificate_type}:{payload_hash}".encode()).hexdigest(),
+                    created_at,
+                ),
+            )
+
+        insert_certificate(
+            "ActionableTradeCertificate",
+            f"actionable:{event_id}:family:condition-1",
+            {
+                "event_id": event_id,
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "condition_id": "condition-1",
+                "direction": "buy_no",
+                "token_id": token_id,
+                "q_live": 0.81,
+                "causal_snapshot_id": "source-run-1",
+            },
+            "2026-06-07T00:00:00Z",
+        )
+        insert_certificate(
+            "FinalIntentCertificate",
+            f"final_intent:{event_id}:intent:{token_id}",
+            {
+                "event_id": event_id,
+                "final_intent_id": f"intent:{token_id}",
+                "condition_id": "condition-1",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "temperature_metric": "high",
+                "unit": "C",
+                "decision_source_context": {
+                    "city": "Madrid",
+                    "target_date": "2026-06-08",
+                },
+            },
+            "2026-06-07T00:00:01Z",
+        )
+
+        trade_case = _edli_trade_case_for_command(
+            conn,
+            {
+                "position_id": "pos-edli",
+                "decision_id": decision_id,
+                "token_id": token_id,
+                "env_condition_id": "condition-1",
+                "env_yes_token_id": "tok-yes",
+                "env_no_token_id": token_id,
+            },
+        )
+
+        assert trade_case["entry_method"] == "venue_fact_recovery"
+        assert trade_case["selected_method"] == "venue_fact_recovery"
+        assert trade_case["discovery_mode"] == "venue_fact_recovery"
         assert trade_case["p_posterior"] == pytest.approx(0.81)
 
     def test_edli_filled_entry_repair_recovers_missing_bin_label_from_clob_market_identity(

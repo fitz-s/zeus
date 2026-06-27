@@ -161,6 +161,16 @@ def test_event_bound_final_intent_normalizes_legacy_fractional_maker_size():
     assert native.size_kind == "shares"
     assert native.size_value == native.submitted_shares
     assert native.submitted_shares == Decimal("5.06")
+    assert native.actionable_certificate_hash == final_intent.payload["actionable_certificate_hash"]
+
+
+def test_execution_command_rejects_missing_pre_submit_qkernel_economics():
+    parents, command = execution_graph(
+        command_payload={"qkernel_execution_economics": None},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="qkernel_execution_economics"):
+        verify_execution_command(command, parents)
 
 
 def test_execution_command_verifies_without_cap_flag():

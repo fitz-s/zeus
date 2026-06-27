@@ -788,6 +788,71 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     )
 
 
+def _entry_actionable_certificate_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+) -> dict:
+    """Require the live actionable certificate to be durably persisted before submit."""
+
+    certificate_hash = str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
+    if not certificate_hash:
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="missing_actionable_certificate_hash",
+        )
+    matching_schema = ""
+    table_seen = False
+    for schema in _attached_schema_names(conn):
+        try:
+            if not _table_exists_in_schema(conn, schema, "decision_certificates"):
+                continue
+            table_seen = True
+            schema_sql = _quote_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT certificate_type, mode, verifier_status
+                  FROM {schema_sql}.decision_certificates
+                 WHERE certificate_hash = ?
+                   AND certificate_type = 'ActionableTradeCertificate'
+                   AND mode = 'LIVE'
+                   AND verifier_status = 'VERIFIED'
+                 LIMIT 1
+                """,
+                (certificate_hash,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="decision_certificate_read_failed",
+                certificate_hash=certificate_hash,
+                error=str(exc),
+            )
+        if row is not None:
+            matching_schema = schema
+            break
+    if not table_seen:
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="decision_certificates_table_unavailable",
+            certificate_hash=certificate_hash,
+        )
+    if not matching_schema:
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_not_persisted_live_verified",
+            certificate_hash=certificate_hash,
+        )
+    return _capability_component(
+        "entry_actionable_certificate",
+        certificate_hash=certificate_hash,
+        certificate_schema=matching_schema,
+    )
+
+
 def _parse_sqlite_timestamp(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -3109,6 +3174,7 @@ def _legacy_entry_intent_from_final(
         min_expected_profit_usd=intent.min_expected_profit_usd,
         min_submit_edge_density=intent.min_submit_edge_density,
         qkernel_execution_economics=intent.qkernel_execution_economics,
+        actionable_certificate_hash=intent.actionable_certificate_hash,
     )
 
 
@@ -4580,6 +4646,33 @@ def _live_order(
                 idempotency_key=idem.value,
                 command_state="REJECTED",
             )
+        actionable_certificate_component = _entry_actionable_certificate_component(
+            conn,
+            intent,
+        )
+        if not actionable_certificate_component.get("allowed"):
+            reason = str(
+                actionable_certificate_component.get("reason")
+                or "entry_actionable_certificate"
+            )
+            logger.warning(
+                "_live_order: actionable certificate guard blocked before command "
+                "persistence for trade_id=%s token=%s reason=%s details=%s",
+                trade_id,
+                intent.token_id,
+                reason,
+                actionable_certificate_component,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"entry_actionable_certificate:{reason}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
             shares=shares,
@@ -4883,6 +4976,7 @@ def _live_order(
                             ),
                             taker_quality_component,
                             entry_economics_component,
+                            actionable_certificate_component,
                             heartbeat_component,
                             ws_gap_component,
                             collateral_refresh_component,

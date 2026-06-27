@@ -6259,8 +6259,14 @@ def _build_live_execution_command_certificates(
         persist=False,
     )
     try:
+        actionable_payload = _actionable_payload_from_receipt(
+            receipt,
+            live_cap,
+            event=event,
+        )
+        _assert_live_entry_uses_qkernel_authority(actionable_payload)
         actionable = build_actionable_trade_certificate(
-            payload=_actionable_payload_from_receipt(receipt, live_cap, event=event),
+            payload=actionable_payload,
             parent_certificates=base_certs + (live_cap,),
             decision_time=decision_time,
         )
@@ -6905,6 +6911,32 @@ def _selected_candidate_mode_fields_from_receipt(
                     result[f"proof_{key}"] = val
             return result
     return {}
+
+
+def _assert_live_entry_uses_qkernel_authority(actionable_payload: Mapping[str, object]) -> None:
+    """Live ENTRY submit is licensed only by qkernel spine execution economics."""
+
+    if str(actionable_payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise ValueError("LIVE_ENTRY_QKERNEL_AUTHORITY_REQUIRED")
+    direction = str(actionable_payload.get("direction") or "")
+    cert = _valid_qkernel_execution_economics_payload(
+        actionable_payload.get("qkernel_execution_economics"),
+        direction=direction,
+    )
+    if cert is None:
+        raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
+    cert_bin_id = str(cert.get("bin_id") or "").strip()
+    if not cert_bin_id:
+        cert_candidate_id = str(cert.get("candidate_id") or "").strip()
+        parts = cert_candidate_id.split(":", 2)
+        if len(parts) >= 2:
+            cert_bin_id = parts[1].strip()
+    payload_bin_id = str(actionable_payload.get("candidate_bin_id") or "").strip()
+    if not cert_bin_id or not payload_bin_id or cert_bin_id != payload_bin_id:
+        raise ValueError(
+            "LIVE_ENTRY_QKERNEL_CERT_BIN_MISMATCH:"
+            f"cert_bin_id={cert_bin_id}:payload_bin_id={payload_bin_id}"
+        )
 
 
 def _actionable_payload_from_receipt(

@@ -1066,6 +1066,7 @@ class ExecutionIntent:
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
     qkernel_execution_economics: Mapping[str, Any] | None = None
+    actionable_certificate_hash: str | None = None
 
     def __post_init__(self) -> None:
         # Slice P3-fix1 (post-review BLOCKER from critic M1 + code-reviewer
@@ -1772,6 +1773,7 @@ class FinalExecutionIntent:
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
     qkernel_execution_economics: Mapping[str, Any] | None = None
+    actionable_certificate_hash: str | None = None
     pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
@@ -1798,6 +1800,7 @@ class FinalExecutionIntent:
         min_expected_profit_usd: float | None = None,
         min_submit_edge_density: float | None = None,
         qkernel_execution_economics: Mapping[str, Any] | None = None,
+        actionable_certificate_hash: str | None = None,
     ) -> "FinalExecutionIntent":
         hypothesis.assert_matches_cost_basis(cost_basis)
         cost_basis.assert_submit_safe()
@@ -1845,6 +1848,7 @@ class FinalExecutionIntent:
             min_expected_profit_usd=min_expected_profit_usd,
             min_submit_edge_density=min_submit_edge_density,
             qkernel_execution_economics=qkernel_execution_economics,
+            actionable_certificate_hash=actionable_certificate_hash,
         )
 
     def __post_init__(self) -> None:

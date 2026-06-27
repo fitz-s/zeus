@@ -2555,6 +2555,10 @@ def _decision_log_trade_case_for_command(
     edli_case = _edli_trade_case_for_command(conn, command, client=client)
     if edli_case:
         return edli_case, None
+    # Chain/venue facts still need projection repair even when an old EDLI
+    # command predates qkernel certificate lineage. Submit authorization is
+    # enforced upstream before venue_commands persistence; recovery must not
+    # make already-real venue exposure invisible.
     return _snapshot_trade_case_for_command(conn, command, client=client), None
 
 
@@ -2752,6 +2756,11 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         event_id=event_id,
         token_id=selected_token_id,
     )
+    if not actionable:
+        return {}
+    qkernel_payload = actionable.get("qkernel_execution_economics")
+    selection_authority = str(actionable.get("selection_authority_applied") or "").strip()
+    qkernel_certified = selection_authority == "qkernel_spine" and isinstance(qkernel_payload, dict)
     source_context = _json_mapping(final_intent.get("decision_source_context"))
     market_event = _market_event_identity_for_condition(
         conn,
@@ -2821,6 +2830,8 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         and no_token_id
     ):
         return {}
+    method = "qkernel_spine" if qkernel_certified else "venue_fact_recovery"
+    discovery_mode = "update_reaction" if qkernel_certified else "venue_fact_recovery"
     return {
         "trade_id": str(command.get("position_id") or ""),
         "decision_id": decision_id,
@@ -2835,10 +2846,10 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         "strategy": strategy_key,
         "temperature_metric": metric,
         "unit": unit,
-        "selected_method": "ens_member_counting",
-        "entry_method": "ens_member_counting",
+        "selected_method": method,
+        "entry_method": method,
         "edge_source": strategy_key,
-        "discovery_mode": "opening_hunt",
+        "discovery_mode": discovery_mode,
         "cluster": city,
         "p_posterior": actionable.get("q_live") or 0.0,
         "decision_snapshot_id": (
