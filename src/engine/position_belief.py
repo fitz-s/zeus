@@ -242,13 +242,6 @@ def _latest_live_input_cycle(
     temperature_metric: str,
     now: datetime,
 ) -> tuple[datetime | None, str | None]:
-    raw_model_cycle = _latest_raw_single_runs_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        temperature_metric=temperature_metric,
-        now=now,
-    )
     raw_artifact_cycle = _latest_raw_artifact_cycle(
         conn,
         city=city,
@@ -256,12 +249,8 @@ def _latest_live_input_cycle(
         temperature_metric=temperature_metric,
         now=now,
     )
-    if raw_model_cycle is None:
-        if raw_artifact_cycle is None:
-            return None, None
-        return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
-    if raw_artifact_cycle is None or raw_model_cycle >= raw_artifact_cycle:
-        return raw_model_cycle, "source_cycle_time_raw_model_forecasts_lag"
+    if raw_artifact_cycle is None:
+        return None, None
     return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
 
 

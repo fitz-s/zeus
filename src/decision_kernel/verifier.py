@@ -316,10 +316,13 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
     for field in ("action_score", "trade_score", "p_fill_lcb"):
         if _finite_float(payload.get(field), field) <= 0.0:
             raise CertificateVerificationError(f"actionable {field} must be positive")
-    for field in ("q_live", "q_lcb_5pct"):
-        value = _finite_float(payload.get(field), field)
+    q_live = _finite_float(payload.get("q_live"), "q_live")
+    q_lcb = _finite_float(payload.get("q_lcb_5pct"), "q_lcb_5pct")
+    for field, value in (("q_live", q_live), ("q_lcb_5pct", q_lcb)):
         if value < 0.0 or value > 1.0:
             raise CertificateVerificationError(f"actionable {field} must be in [0, 1]")
+    if q_lcb > q_live:
+        raise CertificateVerificationError("actionable q_lcb_5pct exceeds q_live")
     for field in ("c_fee_adjusted", "c_cost_95pct"):
         value = _finite_float(payload.get(field), field)
         if value <= 0.0 or value >= 1.0:
@@ -345,6 +348,68 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
     for field in required:
         if payload.get(field) in (None, ""):
             raise CertificateVerificationError(f"actionable {field} missing")
+    _verify_actionable_qkernel_economics(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _verify_actionable_qkernel_economics(
+    payload: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    if str(payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
+        raise CertificateVerificationError(
+            "actionable selection_authority_applied must be qkernel_spine"
+        )
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        raise CertificateVerificationError("actionable qkernel_execution_economics missing")
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
+    native_side = _native_curve_side_for_direction(payload.get("direction"))
+    qkernel_side = str(economics.get("side") or "").upper()
+    if native_side is not None and qkernel_side != native_side:
+        raise CertificateVerificationError("actionable qkernel side must match direction")
+    payoff_q_point = _probability_float(
+        economics.get("payoff_q_point"), "actionable qkernel payoff_q_point"
+    )
+    payoff_q_lcb = _probability_float(
+        economics.get("payoff_q_lcb"), "actionable qkernel payoff_q_lcb"
+    )
+    if payoff_q_point > q_live + 1e-6:
+        raise CertificateVerificationError("actionable qkernel payoff_q_point exceeds q_live")
+    if payoff_q_lcb > q_lcb + 1e-6:
+        raise CertificateVerificationError("actionable qkernel payoff_q_lcb exceeds q_lcb_5pct")
+    cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
+    edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
+    optimal_delta_u = _finite_float(
+        economics.get("optimal_delta_u"), "actionable qkernel optimal_delta_u"
+    )
+    false_edge_rate = _finite_float(
+        economics.get("false_edge_rate"), "actionable qkernel false_edge_rate"
+    )
+    if cost <= 0.0 or cost >= 1.0:
+        raise CertificateVerificationError("actionable qkernel cost must be in (0, 1)")
+    if edge_lcb <= 0.0:
+        raise CertificateVerificationError("actionable qkernel edge_lcb must be positive")
+    if optimal_delta_u <= 0.0:
+        raise CertificateVerificationError(
+            "actionable qkernel optimal_delta_u must be positive"
+        )
+    try:
+        from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+    except Exception:  # noqa: BLE001
+        max_false_edge_rate = 0.05
+    if not (0.0 < false_edge_rate <= max_false_edge_rate):
+        raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
+    if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
+        raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
+    if economics.get("direction_law_ok") is not True:
+        raise CertificateVerificationError("actionable qkernel direction_law_ok must be true")
+    if economics.get("coherence_allows") is not True:
+        raise CertificateVerificationError("actionable qkernel coherence_allows must be true")
 
 
 def _verify_actionable_parent_consistency(

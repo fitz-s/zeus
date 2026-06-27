@@ -91,6 +91,79 @@ def _init_forecast_db(path):
     return conn
 
 
+def _init_actionable_world_db(path, payload: dict, *, decision_time: datetime | None = None):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    now = decision_time or datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_hash, certificate_type, mode,
+            verifier_status, decision_time, payload_json
+        ) VALUES (?, ?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?, ?)
+        """,
+        ("ActionableTradeCertificate:test", "hash-test", now.isoformat(), json.dumps(payload)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _valid_actionable_payload() -> dict:
+    return {
+        "event_id": "event-1",
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": "snap-1",
+        "family_id": "family-1",
+        "candidate_id": "candidate-1",
+        "condition_id": "condition-1",
+        "token_id": "yes-1",
+        "direction": "buy_yes",
+        "strategy_key": "center_buy",
+        "executable_snapshot_id": "exec-1",
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "c_fee_adjusted": 0.4,
+        "c_cost_95pct": 0.45,
+        "p_fill_lcb": 0.1,
+        "trade_score": 0.2,
+        "action_score": 0.2,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.7,
+            "payoff_q_lcb": 0.6,
+            "cost": 0.4,
+            "edge_lcb": 0.2,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+        "fdr_family_id": "family-1",
+        "kelly_decision_id": "kelly-1",
+        "kelly_size_usd": 3.0,
+        "risk_decision_id": "risk-1",
+        "live_cap_usage_id": "cap-1",
+        "final_intent_id": "intent-1",
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "native_quote_available": True,
+        "submitted": False,
+    }
+
+
 def _init_live_order_world_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -235,6 +308,118 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
+
+
+def test_posterior_summary_uses_source_cycle_freshness_not_computed_age(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_trade_db(trade_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Lucknow', '2026-06-28', 'high', ?, ?, '{}', 'live')
+        """,
+        (
+            (now - timedelta(hours=14)).isoformat(),
+            (now - timedelta(hours=6)).isoformat(),
+        ),
+    )
+    forecasts.commit()
+    forecasts.close()
+
+    result = preflight._posterior_summary()
+
+    assert result.ok is True
+    assert result.evidence["freshness_basis"] == "source_cycle_time"
+    assert result.evidence["latest_live_age_hours"] > 3.0
+    assert result.evidence["latest_live_source_cycle_age_hours"] < 30.0
+
+
+def test_posterior_summary_blocks_expired_source_cycle(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_trade_db(trade_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Lucknow', '2026-06-28', 'high', ?, ?, '{}', 'live')
+        """,
+        (
+            (now - timedelta(hours=36)).isoformat(),
+            (now - timedelta(hours=1)).isoformat(),
+        ),
+    )
+    forecasts.commit()
+    forecasts.close()
+
+    result = preflight._posterior_summary()
+
+    assert result.ok is False
+    assert result.evidence["freshness_basis"] == "source_cycle_time"
+    assert result.evidence["latest_live_source_cycle_age_hours"] > 30.0
+
+
+def test_live_actionable_certificate_semantics_blocks_lucknow_style_qkernel_mismatch(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    payload = {
+        **_valid_actionable_payload(),
+        "city": "Lucknow",
+        "target_date": "2026-06-28",
+        "temperature_metric": "high",
+        "bin_label": "Will the highest temperature in Lucknow be 35°C or below on June 28?",
+        "q_live": 0.005426579861923467,
+        "q_lcb_5pct": 0.003,
+        "c_fee_adjusted": 0.014885316546202029,
+        "c_cost_95pct": 0.011,
+        "p_fill_lcb": 0.9997671696598043,
+        "trade_score": 0.04049776073684555,
+        "action_score": 0.04049776073684555,
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.22351072116676574,
+            "payoff_q_lcb": 0.05049776073684555,
+            "cost": 0.01,
+            "edge_lcb": 0.04049776073684555,
+            "optimal_delta_u": 0.013993788651471595,
+            "false_edge_rate": 0.02599350162459385,
+            "direction_law_ok": False,
+            "coherence_allows": True,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is False
+    assert result.evidence["risky_count"] == 1
+    assert result.evidence["risky"][0]["city"] == "Lucknow"
+    assert "payoff_q_point exceeds" in result.evidence["risky"][0]["reason"]
+
+
+def test_live_actionable_certificate_semantics_accepts_current_qkernel_payload(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    _init_actionable_world_db(world_db, _valid_actionable_payload())
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["checked_count"] == 1
+    assert result.evidence["risky_count"] == 0
 
 
 def test_live_order_presubmit_shape_blocks_restart_relevant_old_payload(monkeypatch, tmp_path):

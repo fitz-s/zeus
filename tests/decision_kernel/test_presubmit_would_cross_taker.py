@@ -54,6 +54,16 @@ _PROVENANCE = {
 }
 
 
+def _qkernel_economics_for(payload: dict) -> dict:
+    side = "NO" if str(payload.get("direction") or "").endswith("_no") else "YES"
+    return {
+        "route_id": f"DIRECT_{side}:bin-1@proof",
+        "side": side,
+        "payoff_q_point": payload.get("q_live", 0.70),
+        "payoff_q_lcb": payload.get("q_lcb_5pct", 0.60),
+    }
+
+
 def _maker_pre_submit(**overrides) -> dict:
     """Valid MAKER pre-submit payload (post_only=True, GTC, would_cross_book=False by default)."""
     payload = {
@@ -95,6 +105,7 @@ def _maker_pre_submit(**overrides) -> dict:
         **_PROVENANCE,
     }
     payload.update(overrides)
+    payload.setdefault("qkernel_execution_economics", _qkernel_economics_for(payload))
     return payload
 
 
@@ -144,6 +155,7 @@ def _taker_pre_submit(**overrides) -> dict:
         **_PROVENANCE,
     }
     payload.update(overrides)
+    payload.setdefault("qkernel_execution_economics", _qkernel_economics_for(payload))
     return payload
 
 

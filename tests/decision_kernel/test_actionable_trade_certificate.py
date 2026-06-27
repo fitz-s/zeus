@@ -61,6 +61,49 @@ def test_actionable_rejects_p_fill_lcb_zero():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_rejects_q_lcb_above_q_live():
+    parents, action = actionable_graph(action_payload={"q_live": 0.55, "q_lcb_5pct": 0.56})
+
+    with pytest.raises(CertificateVerificationError, match="q_lcb_5pct exceeds q_live"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_requires_qkernel_spine_selection_authority():
+    parents, action = actionable_graph(action_payload={"selection_authority_applied": None})
+
+    with pytest.raises(CertificateVerificationError, match="selection_authority_applied"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
+    parents, action = actionable_graph(
+        action_payload={
+            "q_live": 0.005426579861923467,
+            "q_lcb_5pct": 0.003,
+            "c_fee_adjusted": 0.014885316546202029,
+            "c_cost_95pct": 0.011,
+            "p_fill_lcb": 0.9997671696598043,
+            "trade_score": 0.04049776073684555,
+            "action_score": 0.04049776073684555,
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.22351072116676574,
+                "payoff_q_lcb": 0.05049776073684555,
+                "cost": 0.01,
+                "edge_lcb": 0.04049776073684555,
+                "optimal_delta_u": 0.013993788651471595,
+                "false_edge_rate": 0.02599350162459385,
+                "direction_law_ok": False,
+                "coherence_allows": True,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="payoff_q_point exceeds|payoff_q_lcb exceeds"):
+        verify_actionable_trade(action, parents)
+
+
 def test_actionable_rejects_execution_command_id_present():
     parents, action = actionable_graph(action_payload={"execution_command_id": "cmd-1"})
 
@@ -70,7 +113,22 @@ def test_actionable_rejects_execution_command_id_present():
 
 def test_actionable_rejects_wrong_cost_source_for_buy_no():
     parents, action = actionable_graph(
-        action_payload={"direction": "buy_no", "token_id": "no-1"},
+        action_payload={
+            "direction": "buy_no",
+            "token_id": "no-1",
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "NO",
+                "payoff_q_point": 0.7,
+                "payoff_q_lcb": 0.6,
+                "cost": 0.4,
+                "edge_lcb": 0.2,
+                "optimal_delta_u": 0.01,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+            },
+        },
         parent_overrides={
             claims.CANDIDATE_EVIDENCE: {"direction": "buy_no", "selected_token_id": "no-1"},
             claims.EXECUTABLE_SNAPSHOT: {"token_id": "no-1"},
@@ -257,6 +315,19 @@ def _action_payload() -> dict:
         "p_fill_lcb": 0.1,
         "trade_score": 0.2,
         "action_score": 0.2,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.7,
+            "payoff_q_lcb": 0.6,
+            "cost": 0.4,
+            "edge_lcb": 0.2,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
         "fdr_family_id": "family-1",
         "kelly_decision_id": "kelly-1",
         "kelly_size_usd": 3.0,

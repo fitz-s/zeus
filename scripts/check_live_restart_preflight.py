@@ -23,7 +23,7 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,8 @@ FORECAST_LIVE_HEARTBEAT_MAX_AGE_SECONDS = 120.0
 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS = 1800.0
 COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
+LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
+LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
@@ -629,6 +631,125 @@ def _edli_live_order_presubmit_shape_check() -> CheckResult:
         else (
             "restart-relevant live-order aggregates predate pre-submit economics"
         ),
+        evidence,
+    )
+
+
+def _live_actionable_certificate_semantics_check() -> CheckResult:
+    """Re-verify recent LIVE ActionableTradeCertificate rows with current money law."""
+
+    evidence: dict[str, Any] = {
+        "world_db": str(WORLD_DB),
+        "lookback_hours": LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS,
+        "certificate_type": "ActionableTradeCertificate",
+    }
+    if not WORLD_DB.exists():
+        return CheckResult(
+            "live_actionable_certificate_semantics",
+            True,
+            "world DB absent; no actionable certificates to inspect",
+            evidence,
+        )
+    since = datetime.now(timezone.utc) - timedelta(
+        hours=LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS
+    )
+    try:
+        from src.decision_kernel.errors import CertificateVerificationError
+        from src.decision_kernel.verifier import _verify_actionable_payload
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_actionable_certificate_semantics",
+            False,
+            "could not load current actionable certificate verifier",
+            evidence,
+        )
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "decision_certificates"):
+            return CheckResult(
+                "live_actionable_certificate_semantics",
+                True,
+                "decision_certificates table absent",
+                evidence,
+            )
+        rows = conn.execute(
+            """
+            SELECT
+                certificate_id,
+                certificate_hash,
+                decision_time,
+                payload_json
+              FROM decision_certificates
+             WHERE certificate_type = 'ActionableTradeCertificate'
+               AND mode = 'LIVE'
+               AND verifier_status = 'VERIFIED'
+               AND datetime(decision_time) >= datetime(?)
+             ORDER BY datetime(decision_time) DESC, certificate_id DESC
+            """,
+            (since.isoformat(),),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_actionable_certificate_semantics",
+            False,
+            "could not inspect actionable certificate rows",
+            evidence,
+        )
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+    risky: list[dict[str, Any]] = []
+    risky_count = 0
+    checked = 0
+    for row in rows:
+        checked += 1
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+            if not isinstance(payload, dict):
+                raise CertificateVerificationError("actionable payload must be object")
+            _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        except Exception as exc:  # noqa: BLE001
+            risky_count += 1
+            sample = {
+                "certificate_id": row["certificate_id"],
+                "certificate_hash": row["certificate_hash"],
+                "decision_time": row["decision_time"],
+                "risk": "live_actionable_certificate_fails_current_verifier",
+                "reason": str(exc),
+            }
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+                if isinstance(payload, dict):
+                    sample.update(
+                        {
+                            "city": payload.get("city"),
+                            "target_date": payload.get("target_date"),
+                            "temperature_metric": payload.get("temperature_metric"),
+                            "direction": payload.get("direction"),
+                            "bin_label": payload.get("bin_label"),
+                            "q_live": payload.get("q_live"),
+                            "q_lcb_5pct": payload.get("q_lcb_5pct"),
+                        }
+                    )
+            except Exception:
+                pass
+            if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                risky.append(sample)
+    evidence["checked_count"] = checked
+    evidence["risky_count"] = risky_count
+    evidence["risky"] = risky
+    return CheckResult(
+        "live_actionable_certificate_semantics",
+        not risky,
+        "recent live actionable certificates verify under current qkernel money law"
+        if not risky
+        else "recent live actionable certificates fail current qkernel money law",
         evidence,
     )
 
@@ -1648,14 +1769,38 @@ def _posterior_summary() -> CheckResult:
             """
         ).fetchone()
     latest_dt = _parse_dt(latest["computed_at"]) if latest else None
+    source_cycle_dt = _parse_dt(latest["source_cycle_time"]) if latest else None
     age_hours = None
     if latest_dt is not None:
         age_hours = (now - latest_dt).total_seconds() / 3600.0
-    non_live = sum(int(row["rows"]) for row in runtime_rows if row["runtime_layer"] != "live")
-    from src.engine.position_belief import monitor_belief_max_age_hours
+    source_cycle_age_hours = None
+    source_cycle_fresh = False
+    if source_cycle_dt is not None:
+        try:
+            from src.data.replacement_forecast_cycle_policy import (
+                cycle_age_exceeds_bound,
+                cycle_age_hours,
+                replacement_source_cycle_max_age_hours,
+            )
 
-    max_age_hours = monitor_belief_max_age_hours()
-    ok = non_live == 0 and age_hours is not None and 0.0 <= age_hours <= max_age_hours
+            source_cycle_age_hours = cycle_age_hours(now, source_cycle_dt)
+            max_age_hours = replacement_source_cycle_max_age_hours()
+            source_cycle_fresh = (
+                0.0 <= source_cycle_age_hours
+                and not cycle_age_exceeds_bound(now, source_cycle_dt, max_age_hours=max_age_hours)
+            )
+        except Exception:
+            source_cycle_age_hours = (now - source_cycle_dt).total_seconds() / 3600.0
+            source_cycle_fresh = False
+            from src.engine.position_belief import monitor_belief_max_age_hours
+
+            max_age_hours = monitor_belief_max_age_hours()
+    else:
+        from src.engine.position_belief import monitor_belief_max_age_hours
+
+        max_age_hours = monitor_belief_max_age_hours()
+    non_live = sum(int(row["rows"]) for row in runtime_rows if row["runtime_layer"] != "live")
+    ok = non_live == 0 and source_cycle_fresh
     return CheckResult(
         "live_posterior_freshness",
         ok,
@@ -1664,7 +1809,10 @@ def _posterior_summary() -> CheckResult:
             "runtime_layers": runtime_rows,
             "latest_live_computed_at": latest["computed_at"] if latest else None,
             "latest_live_age_hours": age_hours,
+            "latest_live_source_cycle_time": latest["source_cycle_time"] if latest else None,
+            "latest_live_source_cycle_age_hours": source_cycle_age_hours,
             "non_live_rows": non_live,
+            "freshness_basis": "source_cycle_time" if source_cycle_dt is not None else "computed_at",
             "fresh_age_limit_hours": max_age_hours,
         },
     )
@@ -2335,6 +2483,7 @@ def evaluate() -> dict[str, Any]:
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
+        _live_actionable_certificate_semantics_check(),
         _open_entry_submit_economics_check(rows),
         _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),

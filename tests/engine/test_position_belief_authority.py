@@ -333,9 +333,13 @@ class TestLoadReplacementBelief:
         assert belief.freshness_basis == "source_cycle_time"
         assert belief.source_cycle_age_hours == pytest.approx(24.0)
 
-    def test_newer_raw_cycle_marks_posterior_stale_until_materialized(self, forecasts_db):
-        """Monitor authority must not treat an older posterior as fresh when
-        newer live-input raw cycles already exist for the same family."""
+    def test_newer_raw_model_without_anchor_does_not_make_belief_stale(self, forecasts_db):
+        """A partial single-model row is not a materializable live family cycle.
+
+        The monitor freshness clock must not fault/reseed a held position from
+        a raw_model high-water mark that the replacement materializer cannot
+        consume yet. The anchor artifact is the family-cycle authority.
+        """
         _insert(
             forecasts_db,
             posterior_id="p1",
@@ -353,14 +357,13 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
 
         assert belief is not None
-        assert belief.fresh is False
-        assert belief.freshness_basis == "source_cycle_time_raw_model_forecasts_lag"
-        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
-        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.latest_raw_cycle_time is None
+        assert belief.raw_cycle_lag_hours is None
         validation = belief.freshness_validation()
-        assert "latest_raw_cycle_time=" in validation
-        assert "raw_cycle_lag_h=6.00" in validation
-        assert validation.endswith(";stale")
+        assert "latest_raw_cycle_time=" not in validation
+        assert validation.endswith(";fresh")
 
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot
