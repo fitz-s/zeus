@@ -8124,12 +8124,15 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
 # family duplicate lock RELEASES and the family re-enters the normal decision pipeline
 # (still fully re-certified downstream — no gate bypassed).
 #
-# VENUE-TRUTH GUARD (money-path, fail-closed): a ghost is terminalized ONLY when it
-# has NO venue presence whatsoever — venue_order_id IS NULL in the projection, NO
-# venue_commands row for its execution_command_id, and NONE of
-# {VenueSubmitAttempted, VenueSubmitAcknowledged, SubmitUnknown, UserOrderObserved,
-# UserTradeObserved, SubmitRejected, Reconciled, CapTransitioned} events exist on
-# the aggregate. A real resting / filled / in-flight order is NEVER terminalized.
+# VENUE-TRUTH GUARD (money-path, fail-closed): a ghost is terminalized ONLY when
+# the CURRENT command has NO venue presence whatsoever — venue_order_id IS NULL
+# in the projection, NO venue_commands row for its execution_command_id, and
+# NONE of {VenueSubmitAttempted, VenueSubmitAcknowledged, SubmitUnknown,
+# UserOrderObserved, UserTradeObserved, SubmitRejected, Reconciled,
+# CapTransitioned} events exist AFTER the current ExecutionCommandCreated. Older
+# rejected attempts on the same aggregate do not prove venue presence for the
+# current command. A real resting / filled / in-flight order is NEVER
+# terminalized.
 
 # The same safe-replay grace the SUBMIT_UNKNOWN path uses: an aggregate is only a
 # terminalizable ghost once it has sat at ExecutionCommandCreated for longer than
@@ -8165,11 +8168,13 @@ def _abandoned_unsubmitted_ghost_candidates(
 
     Predicates (ALL must hold):
       * projection current_state = EXECUTION_COMMAND_CREATED and last_event_type =
-        ExecutionCommandCreated (the aggregate's CURRENT event is the command);
+        ExecutionCommandCreated, with the joined command row matching
+        projection.last_sequence (the aggregate's CURRENT event is the command);
       * projection.venue_order_id IS NULL;
       * the ExecutionCommandCreated event occurred before ``cutoff_iso`` (grace);
-      * no disqualifying (venue / user / later-terminal / cap) event exists on the
-        aggregate — defense-in-depth even though current_state already implies it;
+      * no disqualifying (venue / user / later-terminal / cap) event exists after
+        the current command row — defense-in-depth even though current_state
+        already implies it;
       * no venue_commands row links to the execution_command_id (decision_id key).
     """
     disqualifier_placeholders = ",".join("?" for _ in _GHOST_DISQUALIFYING_EVENT_TYPES)
@@ -8182,6 +8187,7 @@ def _abandoned_unsubmitted_ghost_candidates(
         JOIN {events_ref} cmd_ev
           ON cmd_ev.aggregate_id = proj.aggregate_id
          AND cmd_ev.event_type = 'ExecutionCommandCreated'
+         AND cmd_ev.event_sequence = proj.last_sequence
         WHERE proj.current_state = 'EXECUTION_COMMAND_CREATED'
           AND proj.last_event_type = 'ExecutionCommandCreated'
           AND COALESCE(proj.venue_order_id, '') = ''
@@ -8190,6 +8196,7 @@ def _abandoned_unsubmitted_ghost_candidates(
               SELECT 1 FROM {events_ref} later
               WHERE later.aggregate_id = proj.aggregate_id
                 AND later.event_type IN ({disqualifier_placeholders})
+                AND later.event_sequence > cmd_ev.event_sequence
           )
         ORDER BY cmd_ev.occurred_at, proj.aggregate_id
         """,

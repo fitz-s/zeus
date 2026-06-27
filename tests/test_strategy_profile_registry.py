@@ -283,6 +283,7 @@ def test_live_quality_floors_are_registry_backed() -> None:
     assert profile.min_entry_price == pytest.approx(0.05)
     assert profile.min_strategy_notional_usd == pytest.approx(1.0)
     assert profile.min_expected_profit_usd == pytest.approx(0.05)
+    assert profile.min_submit_edge_density == pytest.approx(0.02)
     assert profile.allow_ultra_low_tail is False
 
 

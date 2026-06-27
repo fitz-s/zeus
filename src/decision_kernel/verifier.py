@@ -573,6 +573,33 @@ def _verify_pre_submit_revalidation_for_command(
     max_quote_age_ms = _finite_float(pre_submit.get("max_quote_age_ms", quote_age_ms), "pre-submit max_quote_age_ms")
     if quote_age_ms > max_quote_age_ms:
         raise CertificateVerificationError("pre-submit revalidation quote_age_ms exceeds max_quote_age_ms")
+    q_live = _probability_float(pre_submit.get("q_live"), "pre-submit q_live")
+    q_lcb = _probability_float(pre_submit.get("q_lcb_5pct"), "pre-submit q_lcb_5pct")
+    if q_lcb > q_live:
+        raise CertificateVerificationError("pre-submit revalidation q_lcb_5pct exceeds q_live")
+    limit_price = _finite_float(pre_submit.get("limit_price"), "pre-submit limit_price")
+    expected_edge = _finite_float(pre_submit.get("expected_edge"), "pre-submit expected_edge")
+    size = _finite_float(pre_submit.get("size"), "pre-submit size")
+    min_expected_profit_usd = _finite_float(
+        pre_submit.get("min_expected_profit_usd"), "pre-submit min_expected_profit_usd"
+    )
+    min_submit_edge_density = _finite_float(
+        pre_submit.get("min_submit_edge_density"), "pre-submit min_submit_edge_density"
+    )
+    if expected_edge <= 0.0:
+        raise CertificateVerificationError("pre-submit revalidation expected_edge must be positive")
+    submit_edge = q_lcb - limit_price
+    if submit_edge <= 0.0:
+        raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
+    if expected_edge > submit_edge + 1e-6:
+        raise CertificateVerificationError("pre-submit revalidation expected_edge exceeds submit edge")
+    if size <= 0.0:
+        raise CertificateVerificationError("pre-submit revalidation size must be positive")
+    if submit_edge * size + 1e-9 < min_expected_profit_usd:
+        raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
+    if submit_edge / limit_price + 1e-9 < min_submit_edge_density:
+        raise CertificateVerificationError("pre-submit revalidation submit edge density below strategy floor")
+    _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
 
 
 def _verify_final_intent_payload(
@@ -1147,6 +1174,54 @@ def _finite_float(value: object, field_name: str) -> float:
     if not math.isfinite(parsed):
         raise CertificateVerificationError(f"{field_name} must be finite")
     return parsed
+
+
+def _probability_float(value: object, field_name: str) -> float:
+    parsed = _finite_float(value, field_name)
+    if parsed < 0.0 or parsed > 1.0:
+        raise CertificateVerificationError(f"{field_name} must be in [0, 1]")
+    return parsed
+
+
+def _native_curve_side_for_direction(direction: object) -> str | None:
+    normalized = str(direction or "").strip().lower()
+    if normalized.endswith("_yes"):
+        return "YES"
+    if normalized.endswith("_no"):
+        return "NO"
+    return None
+
+
+def _verify_pre_submit_qkernel_economics(
+    pre_submit: dict,
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    economics = pre_submit.get("qkernel_execution_economics")
+    if economics in (None, ""):
+        return
+    if not isinstance(economics, dict):
+        raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
+    route_id = str(economics.get("route_id") or "").upper()
+    route_type = str(economics.get("route_type") or "").lower()
+    if route_type != "direct" and not route_id.startswith("DIRECT_"):
+        return
+    route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
+    native_side = _native_curve_side_for_direction(pre_submit.get("direction"))
+    qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
+    if qkernel_side and native_side is not None and qkernel_side != native_side:
+        raise CertificateVerificationError("pre-submit qkernel side must match submit direction")
+    payoff_q_point = _probability_float(
+        economics.get("payoff_q_point"), "pre-submit qkernel payoff_q_point"
+    )
+    payoff_q_lcb = _probability_float(
+        economics.get("payoff_q_lcb"), "pre-submit qkernel payoff_q_lcb"
+    )
+    if payoff_q_point > q_live + 1e-6:
+        raise CertificateVerificationError("pre-submit qkernel payoff_q_point exceeds q_live")
+    if payoff_q_lcb > q_lcb + 1e-6:
+        raise CertificateVerificationError("pre-submit qkernel payoff_q_lcb exceeds q_lcb_5pct")
 
 
 def _is_tick_aligned(price: float, tick_size: float) -> bool:

@@ -94,6 +94,24 @@ SIDECAR_HEARTBEATS = (
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
     ("post_trade_capital_daemon", "daemon-heartbeat-post-trade-capital.json"),
 )
+LIVE_ORDER_RESTART_RELEVANT_STATES = frozenset(
+    {
+        "DECISION_PROOF_ACCEPTED",
+        "SUBMIT_PLAN_BUILT",
+        "PRE_SUBMIT_REVALIDATED",
+        "LIVE_CAP_RESERVED",
+        "EXECUTION_COMMAND_CREATED",
+        "PENDING_RECONCILE",
+    }
+)
+PRE_SUBMIT_ECONOMIC_FIELDS = (
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "size",
+    "min_expected_profit_usd",
+    "min_submit_edge_density",
+)
 REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -430,6 +448,293 @@ def _collateral_snapshot_freshness_check() -> CheckResult:
         "collateral ledger snapshot is fresh"
         if ok
         else "collateral ledger snapshot is stale, degraded, or future-dated",
+        evidence,
+    )
+
+
+def _edli_live_order_presubmit_shape_check() -> CheckResult:
+    """Block restart when active live-order aggregates predate submit economics."""
+
+    evidence: dict[str, Any] = {
+        "world_db": str(WORLD_DB),
+        "required_fields": list(PRE_SUBMIT_ECONOMIC_FIELDS),
+    }
+    if not WORLD_DB.exists():
+        return CheckResult(
+            "edli_live_order_presubmit_shape",
+            True,
+            "world DB absent; no EDLI live-order aggregate rows to inspect",
+            evidence,
+        )
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not {"edli_live_order_events", "edli_live_order_projection"}.issubset(tables):
+            evidence["tables_present"] = sorted(tables)
+            return CheckResult(
+                "edli_live_order_presubmit_shape",
+                True,
+                "EDLI live-order aggregate tables absent",
+                evidence,
+            )
+        field_checks = " OR ".join(
+            f"json_type(pre.payload_json, '$.{field}') IS NULL"
+            for field in PRE_SUBMIT_ECONOMIC_FIELDS
+        )
+        state_placeholders = ",".join("?" for _ in LIVE_ORDER_RESTART_RELEVANT_STATES)
+        risk_predicate = f"""
+          pre.rn = 1
+          AND proj.current_state IN ({state_placeholders})
+          AND ({field_checks})
+        """
+        params = tuple(sorted(LIVE_ORDER_RESTART_RELEVANT_STATES))
+        risk_cte = f"""
+            WITH latest_pre AS (
+                SELECT
+                    aggregate_id,
+                    payload_json,
+                    occurred_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY aggregate_id
+                        ORDER BY event_sequence DESC
+                    ) AS rn
+                FROM edli_live_order_events
+                WHERE event_type = 'PreSubmitRevalidated'
+            ),
+            risk AS (
+                SELECT
+                    proj.aggregate_id,
+                    proj.current_state,
+                    proj.last_sequence,
+                    proj.pending_reconcile,
+                    proj.venue_order_id,
+                    pre.occurred_at,
+                    json_extract(pre.payload_json, '$.event_id') AS event_id,
+                    json_extract(pre.payload_json, '$.direction') AS direction,
+                    json_extract(pre.payload_json, '$.limit_price') AS limit_price
+                FROM latest_pre pre
+                JOIN edli_live_order_projection proj
+                  ON proj.aggregate_id = pre.aggregate_id
+                WHERE {risk_predicate}
+            ),
+            current_command AS (
+                SELECT
+                    risk.*,
+                    cmd.event_sequence AS command_sequence,
+                    json_extract(cmd.payload_json, '$.execution_command_id') AS execution_command_id
+                FROM risk
+                JOIN edli_live_order_events cmd
+                  ON cmd.aggregate_id = risk.aggregate_id
+                 AND cmd.event_type = 'ExecutionCommandCreated'
+                 AND cmd.event_sequence = risk.last_sequence
+            )
+        """
+        samples = conn.execute(
+            f"""
+            {risk_cte}
+            SELECT
+                aggregate_id,
+                current_state,
+                pending_reconcile,
+                venue_order_id,
+                occurred_at,
+                event_id,
+                direction,
+                limit_price
+            FROM risk
+            ORDER BY occurred_at DESC
+            LIMIT 25
+            """,
+            params,
+        ).fetchall()
+        missing_count = int(
+            conn.execute(
+                f"""
+                WITH latest_pre AS (
+                    SELECT
+                        aggregate_id,
+                        payload_json,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY aggregate_id
+                            ORDER BY event_sequence DESC
+                        ) AS rn
+                    FROM edli_live_order_events
+                    WHERE event_type = 'PreSubmitRevalidated'
+                )
+                SELECT COUNT(*)
+                FROM latest_pre pre
+                JOIN edli_live_order_projection proj
+                  ON proj.aggregate_id = pre.aggregate_id
+                WHERE {risk_predicate}
+                """,
+                params,
+            ).fetchone()[0]
+            or 0
+        )
+        recoverable_count = 0
+        unsubmitted_ghost_recoverable_count = 0
+        terminal_command_recoverable_count = 0
+        unsafe_count = missing_count
+        unsafe_samples = samples
+        trade_attached = False
+        if missing_count:
+            try:
+                if TRADE_DB.exists():
+                    conn.execute("ATTACH DATABASE ? AS trade_ro", (f"file:{TRADE_DB}?mode=ro",))
+                    trade_tables = {
+                        str(row["name"])
+                        for row in conn.execute(
+                            "SELECT name FROM trade_ro.sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    trade_attached = "venue_commands" in trade_tables
+            except sqlite3.Error as exc:
+                evidence["trade_attach_error"] = str(exc)
+                trade_attached = False
+        if missing_count and trade_attached:
+            disqualifying = (
+                "VenueSubmitAttempted",
+                "VenueSubmitAcknowledged",
+                "SubmitUnknown",
+                "UserOrderObserved",
+                "UserTradeObserved",
+                "SubmitRejected",
+                "Reconciled",
+                "CapTransitioned",
+            )
+            terminal_command_states = ("CANCELLED", "EXPIRED", "REJECTED", "FAILED")
+            disq_placeholders = ",".join("?" for _ in disqualifying)
+            terminal_placeholders = ",".join("?" for _ in terminal_command_states)
+            base_recoverable_params = (
+                *params,
+                *disqualifying,
+                *terminal_command_states,
+            )
+            recoverable_sql = f"""
+                {risk_cte}
+                SELECT
+                    COUNT(*) AS recoverable_count,
+                    SUM(CASE WHEN vc.command_id IS NULL THEN 1 ELSE 0 END)
+                        AS unsubmitted_ghost_recoverable_count,
+                    SUM(CASE WHEN vc.command_id IS NOT NULL THEN 1 ELSE 0 END)
+                        AS terminal_command_recoverable_count
+                FROM current_command cc
+                LEFT JOIN trade_ro.venue_commands vc
+                  ON vc.decision_id = cc.execution_command_id
+                WHERE cc.current_state = 'EXECUTION_COMMAND_CREATED'
+                  AND COALESCE(cc.venue_order_id, '') = ''
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM edli_live_order_events later
+                      WHERE later.aggregate_id = cc.aggregate_id
+                        AND later.event_type IN ({disq_placeholders})
+                        AND later.event_sequence > cc.command_sequence
+                  )
+                  AND (
+                      vc.command_id IS NULL
+                      OR (
+                          UPPER(COALESCE(vc.state, '')) IN ({terminal_placeholders})
+                          AND COALESCE(vc.venue_order_id, '') != ''
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM trade_ro.venue_trade_facts vtf
+                              WHERE vtf.command_id = vc.command_id
+                                AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
+                          )
+                      )
+                  )
+            """
+            rec = conn.execute(recoverable_sql, base_recoverable_params).fetchone()
+            recoverable_count = int(rec["recoverable_count"] or 0)
+            unsubmitted_ghost_recoverable_count = int(
+                rec["unsubmitted_ghost_recoverable_count"] or 0
+            )
+            terminal_command_recoverable_count = int(
+                rec["terminal_command_recoverable_count"] or 0
+            )
+            unsafe_count = max(0, missing_count - recoverable_count)
+            if unsafe_count:
+                unsafe_samples = conn.execute(
+                    f"""
+                    {risk_cte}
+                    SELECT
+                        risk.aggregate_id,
+                        risk.current_state,
+                        risk.pending_reconcile,
+                        risk.venue_order_id,
+                        risk.occurred_at,
+                        risk.event_id,
+                        risk.direction,
+                        risk.limit_price
+                    FROM risk
+                    WHERE risk.aggregate_id NOT IN (
+                        SELECT cc.aggregate_id
+                        FROM current_command cc
+                        LEFT JOIN trade_ro.venue_commands vc
+                          ON vc.decision_id = cc.execution_command_id
+                        WHERE cc.current_state = 'EXECUTION_COMMAND_CREATED'
+                          AND COALESCE(cc.venue_order_id, '') = ''
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM edli_live_order_events later
+                              WHERE later.aggregate_id = cc.aggregate_id
+                                AND later.event_type IN ({disq_placeholders})
+                                AND later.event_sequence > cc.command_sequence
+                          )
+                          AND (
+                              vc.command_id IS NULL
+                              OR (
+                                  UPPER(COALESCE(vc.state, '')) IN ({terminal_placeholders})
+                                  AND COALESCE(vc.venue_order_id, '') != ''
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                      FROM trade_ro.venue_trade_facts vtf
+                                      WHERE vtf.command_id = vc.command_id
+                                        AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
+                                  )
+                              )
+                          )
+                    )
+                    ORDER BY risk.occurred_at DESC
+                    LIMIT 25
+                    """,
+                    base_recoverable_params,
+                ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "edli_live_order_presubmit_shape",
+            False,
+            "could not inspect EDLI live-order aggregate rows",
+            evidence,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    evidence["missing_count"] = missing_count
+    evidence["boot_recoverable_count"] = recoverable_count
+    evidence["unsubmitted_ghost_recoverable_count"] = unsubmitted_ghost_recoverable_count
+    evidence["terminal_command_recoverable_count"] = terminal_command_recoverable_count
+    evidence["unsafe_count"] = unsafe_count
+    evidence["samples"] = [dict(row) for row in unsafe_samples]
+    return CheckResult(
+        "edli_live_order_presubmit_shape",
+        unsafe_count == 0,
+        "restart-relevant live-order aggregates carry pre-submit economics"
+        if missing_count == 0
+        else (
+            "restart-relevant old pre-submit payloads are covered by boot command recovery"
+            if unsafe_count == 0
+            else "restart-relevant live-order aggregates predate pre-submit economics"
+        ),
         evidence,
     )
 
@@ -1562,6 +1867,7 @@ def evaluate() -> dict[str, Any]:
         _posterior_summary(),
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
+        _edli_live_order_presubmit_shape_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),

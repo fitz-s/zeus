@@ -831,6 +831,47 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     assert calls == ["live_tick"]
 
 
+def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> None:
+    """Boot must clear restart-relevant EDLI order state before first reactor tick."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_conn = FakeConn()
+    calls: list[str] = []
+    refresh_calls: list[FakeConn] = []
+
+    monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope"))) or {"advanced": 1},
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda write_class=None: fake_conn,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_refresh_global_allocator_for_live_bridge",
+        lambda conn: refresh_calls.append(conn) or {"configured": True},
+    )
+
+    main_module._edli_boot_command_recovery_once()
+
+    assert calls == ["live_tick"]
+    assert refresh_calls == [fake_conn]
+    assert fake_conn.closed is True
+
+
 def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) -> None:
     """A no-fill terminal order recovery must continue the redecision chain."""
     import src.execution.command_recovery as command_recovery

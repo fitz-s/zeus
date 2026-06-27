@@ -118,6 +118,7 @@ class StrategyProfile:
     min_entry_price: float = 0.05
     min_strategy_notional_usd: float = 1.0
     min_expected_profit_usd: float = 0.05
+    min_submit_edge_density: float = 0.02
     allow_ultra_low_tail: bool = False
     partial_source_run_allowed: bool = True
     complete_required_for_tail_orders: bool = True
@@ -295,6 +296,7 @@ _OPTIONAL_FIELDS = {
     "min_entry_price",
     "min_strategy_notional_usd",
     "min_expected_profit_usd",
+    "min_submit_edge_density",
     "allow_ultra_low_tail",
     "partial_source_run_allowed",
     "complete_required_for_tail_orders",
@@ -356,6 +358,11 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         raw.get("min_expected_profit_usd", 0.05),
         key=key,
         field_name="min_expected_profit_usd",
+    )
+    min_submit_edge_density = _coerce_nonnegative_float(
+        raw.get("min_submit_edge_density", 0.02),
+        key=key,
+        field_name="min_submit_edge_density",
     )
     allow_ultra_low_tail = raw.get("allow_ultra_low_tail", False)
     if not isinstance(allow_ultra_low_tail, bool):
@@ -457,6 +464,7 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         min_entry_price=min_entry_price,
         min_strategy_notional_usd=min_strategy_notional_usd,
         min_expected_profit_usd=min_expected_profit_usd,
+        min_submit_edge_density=min_submit_edge_density,
         allow_ultra_low_tail=allow_ultra_low_tail,
         partial_source_run_allowed=partial_source_run_allowed,
         complete_required_for_tail_orders=complete_required_for_tail_orders,

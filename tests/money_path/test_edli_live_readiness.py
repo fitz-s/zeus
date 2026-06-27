@@ -3748,6 +3748,8 @@ def test_pre_submit_payload_carries_receipt_economics_from_final_intent():
             "q_lcb_5pct": 0.58,
             "trade_score": 0.08,
             "action_score": 0.07,
+            "min_expected_profit_usd": 0.05,
+            "min_submit_edge_density": 0.02,
             "c_fee_adjusted": 0.50,
             "c_cost_95pct": 0.50,
             "selection_authority_applied": "qkernel_spine",
@@ -3790,6 +3792,9 @@ def test_pre_submit_payload_carries_receipt_economics_from_final_intent():
     assert payload["q_live"] == pytest.approx(0.62)
     assert payload["q_lcb_5pct"] == pytest.approx(0.58)
     assert payload["expected_edge"] == pytest.approx(0.08)
+    assert payload["size"] == pytest.approx(10.0)
+    assert payload["min_expected_profit_usd"] == pytest.approx(0.05)
+    assert payload["min_submit_edge_density"] == pytest.approx(0.02)
     assert payload["expected_edge_source_certificate_hash"] == "actionable-cert"
     assert payload["cost_basis_source_certificate_hash"] == "cost-cert"
     assert payload["qkernel_execution_economics"] == qkernel_economics

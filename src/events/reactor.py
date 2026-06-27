@@ -484,6 +484,13 @@ class EventSubmissionReceipt:
     # vs reactor family_id:condition_id). Threaded the same way q_source / the stamp are.
     candidate_bin_id: str | None = None
     strategy_key: str | None = None
+    # Live execution-quality floors proven by the selected strategy profile.
+    # These travel with new event-bound receipts so the final pre-submit append
+    # can verify the actual submitted order size/price clears the strategy's
+    # minimum executable profit and edge-density bar. None on legacy receipts;
+    # omit-when-None in receipt_json keeps existing hashes stable.
+    min_expected_profit_usd: float | None = None
+    min_submit_edge_density: float | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None

@@ -91,6 +91,47 @@ def _init_forecast_db(path):
     return conn
 
 
+def _init_live_order_world_db(path):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_event_id TEXT PRIMARY KEY,
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            parent_event_hash TEXT,
+            event_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            source_authority TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_projection (
+            aggregate_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            final_intent_id TEXT,
+            current_state TEXT NOT NULL,
+            last_sequence INTEGER NOT NULL,
+            last_event_type TEXT,
+            last_event_hash TEXT,
+            pending_reconcile INTEGER NOT NULL,
+            venue_order_id TEXT,
+            updated_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
 def _patch_paths(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
@@ -194,6 +235,218 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
+
+
+def test_live_order_presubmit_shape_blocks_restart_relevant_old_payload(monkeypatch, tmp_path):
+    world_db = tmp_path / "zeus-world.db"
+    conn = _init_live_order_world_db(world_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "evt-1",
+            "agg-1",
+            1,
+            "PreSubmitRevalidated",
+            None,
+            "hash-1",
+            json.dumps({"event_id": "event-1", "direction": "buy_no", "limit_price": 0.98}),
+            "payload-hash-1",
+            "engine_adapter",
+            now,
+            now,
+            1,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "agg-1",
+            "event-1",
+            "intent-1",
+            "EXECUTION_COMMAND_CREATED",
+            1,
+            "PreSubmitRevalidated",
+            "hash-1",
+            0,
+            "0xabc",
+            now,
+            1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._edli_live_order_presubmit_shape_check()
+
+    assert result.ok is False
+    assert result.evidence["missing_count"] == 1
+    assert result.evidence["samples"][0]["aggregate_id"] == "agg-1"
+
+
+def test_live_order_presubmit_shape_ignores_terminal_old_payload(monkeypatch, tmp_path):
+    world_db = tmp_path / "zeus-world.db"
+    conn = _init_live_order_world_db(world_db)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "evt-1",
+            "agg-1",
+            1,
+            "PreSubmitRevalidated",
+            None,
+            "hash-1",
+            json.dumps({"event_id": "event-1", "direction": "buy_no", "limit_price": 0.98}),
+            "payload-hash-1",
+            "engine_adapter",
+            now,
+            now,
+            1,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "agg-1",
+            "event-1",
+            "intent-1",
+            "RECONCILED",
+            1,
+            "PreSubmitRevalidated",
+            "hash-1",
+            0,
+            "",
+            now,
+            1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._edli_live_order_presubmit_shape_check()
+
+    assert result.ok is True
+    assert result.evidence["missing_count"] == 0
+
+
+def test_live_order_presubmit_shape_allows_boot_recoverable_current_command(monkeypatch, tmp_path):
+    world_db = tmp_path / "zeus-world.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    trade_conn = sqlite3.connect(trade_db)
+    trade_conn.execute("CREATE TABLE venue_commands (command_id TEXT, decision_id TEXT, state TEXT, venue_order_id TEXT)")
+    trade_conn.execute("CREATE TABLE venue_trade_facts (command_id TEXT, filled_size TEXT)")
+    trade_conn.commit()
+    trade_conn.close()
+
+    conn = _init_live_order_world_db(world_db)
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        (
+            "evt-1",
+            "agg-1",
+            1,
+            "PreSubmitRevalidated",
+            None,
+            "hash-1",
+            json.dumps({"event_id": "event-1", "direction": "buy_no", "limit_price": 0.68}),
+            "payload-hash-1",
+            "engine_adapter",
+            now,
+            now,
+            1,
+        ),
+        (
+            "evt-2",
+            "agg-1",
+            2,
+            "ExecutionCommandCreated",
+            "hash-1",
+            "hash-2",
+            json.dumps(
+                {
+                    "event_id": "event-1",
+                    "final_intent_id": "intent-1",
+                    "execution_command_id": "cmd-1",
+                }
+            ),
+            "payload-hash-2",
+            "engine_adapter",
+            now,
+            now,
+            1,
+        ),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "agg-1",
+            "event-1",
+            "intent-1",
+            "EXECUTION_COMMAND_CREATED",
+            2,
+            "ExecutionCommandCreated",
+            "hash-2",
+            0,
+            "",
+            now,
+            1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._edli_live_order_presubmit_shape_check()
+
+    assert result.ok is True
+    assert result.evidence["missing_count"] == 1
+    assert result.evidence["boot_recoverable_count"] == 1
+    assert result.evidence["unsubmitted_ghost_recoverable_count"] == 1
+    assert result.evidence["unsafe_count"] == 0
 
 
 def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):

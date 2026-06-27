@@ -5817,6 +5817,38 @@ def _edli_command_recovery_cycle() -> None:
             )
 
 
+def _edli_boot_command_recovery_once() -> None:
+    """Run one bounded EDLI recovery pass before the first live reactor tick.
+
+    The periodic ``edli_command_recovery`` job starts about a minute after boot.
+    That is too late for restart-relevant live-order projections that can keep
+    family locks active or leave old pre-submit payloads in the restart gate.
+    This boot pass uses the same live_tick recovery contract as the scheduler
+    job, before any new entry order can be produced.
+    """
+
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.db import get_trade_connection_with_world_required
+
+    summary = reconcile_unresolved_commands(scope="live_tick")
+    logger.warning("edli_boot_command_recovery: %s", summary)
+    if _command_recovery_summary_mutated_allocator_inputs(summary):
+        trade_conn = get_trade_connection_with_world_required(write_class=None)
+        try:
+            allocator_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+        finally:
+            trade_conn.close()
+        logger.info(
+            "edli_boot_command_recovery: refreshed allocator after recovery mutation: %s",
+            allocator_refresh,
+        )
+
+
 def _escalation_families_from_cancelled(
     cancelled: list[dict],
     trade_conn,
@@ -10909,6 +10941,7 @@ def main():
     edli_cfg = _settings_section("edli", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
+    _edli_boot_command_recovery_once()
     # SINGLE TRUTH (bias-maze strip 2026-06-17): the EMOS-CI license boot guard is REMOVED
     # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract
     # is now an unconditional logged no-op (not applicable under single-truth).

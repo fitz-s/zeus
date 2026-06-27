@@ -1769,6 +1769,26 @@ def _assert_event_bound_strategy_live_admitted(
         raise ValueError(f"EDLI_STRATEGY_METRIC_BLOCKED:{normalized_strategy}:metric={normalized_metric}")
 
 
+def _event_bound_strategy_live_quality_floors(strategy_key: str | None) -> dict[str, float]:
+    """Return strategy-owned final-submit economic floors for event-bound orders."""
+
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get(str(strategy_key or "").strip())
+    return {
+        "min_expected_profit_usd": float(
+            getattr(profile, "min_expected_profit_usd", 0.05)
+            if profile is not None
+            else 0.05
+        ),
+        "min_submit_edge_density": float(
+            getattr(profile, "min_submit_edge_density", 0.02)
+            if profile is not None
+            else 0.02
+        ),
+    }
+
+
 def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertificate) -> None:
     """Identity fallback is evidence-only; it must never authorize real live commands."""
 
@@ -5061,16 +5081,18 @@ def _build_event_bound_no_submit_receipt_core(
         kelly_size_usd=kelly.size_usd,
         kelly_cost_basis_id=kelly_cost_basis_id,
     )
+    strategy_key = _event_bound_strategy_key(
+        event_type=event.event_type,
+        direction=direction,
+        metric=family.metric,
+    )
+    live_quality_floors = _event_bound_strategy_live_quality_floors(strategy_key)
     raw_receipt.update(
         {
             "city": family.city,
             "target_date": family.target_date,
             "metric": family.metric,
-            "strategy_key": _event_bound_strategy_key(
-                event_type=event.event_type,
-                direction=direction,
-                metric=family.metric,
-            ),
+            "strategy_key": strategy_key,
             "bin_label": candidate.bin.label,
             "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
@@ -5106,6 +5128,8 @@ def _build_event_bound_no_submit_receipt_core(
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
             "trade_score": trade_score,
+            "min_expected_profit_usd": live_quality_floors["min_expected_profit_usd"],
+            "min_submit_edge_density": live_quality_floors["min_submit_edge_density"],
             "bias_decay_applied": bool(_bias_decay_applied),
             "bias_decay_bias_native": _bias_decay_native,
             "bias_decay_reason": _bias_decay_reason,
@@ -6944,6 +6968,8 @@ def _actionable_payload_from_receipt(
         "p_fill_lcb": receipt.p_fill_lcb,
         "trade_score": receipt.trade_score,
         "action_score": receipt.trade_score,
+        "min_expected_profit_usd": receipt.min_expected_profit_usd,
+        "min_submit_edge_density": receipt.min_submit_edge_density,
         "fdr_family_id": receipt.fdr_family_id,
         "kelly_decision_id": receipt.kelly_decision_id,
         "kelly_size_usd": receipt.kelly_size_usd,
@@ -7024,6 +7050,8 @@ def _live_decision_audit_payload(
         "c_cost_95pct": receipt.c_cost_95pct,
         "p_fill_lcb": receipt.p_fill_lcb,
         "trade_score": receipt.trade_score,
+        "min_expected_profit_usd": receipt.min_expected_profit_usd,
+        "min_submit_edge_density": receipt.min_submit_edge_density,
         "kelly_size_usd": receipt.kelly_size_usd,
         "kelly_decision_id": receipt.kelly_decision_id,
         "risk_decision_id": receipt.risk_decision_id,
@@ -7565,6 +7593,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "q_lcb_5pct": payload.get("q_lcb_5pct"),
         "expected_edge": payload.get("trade_score"),
         "action_score": payload.get("action_score"),
+        "size": payload.get("size"),
+        "min_expected_profit_usd": payload.get("min_expected_profit_usd"),
+        "min_submit_edge_density": payload.get("min_submit_edge_density"),
         "c_fee_adjusted": payload.get("c_fee_adjusted"),
         "c_cost_95pct": payload.get("c_cost_95pct"),
         "selection_authority_applied": payload.get("selection_authority_applied"),

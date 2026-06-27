@@ -74,6 +74,14 @@ def _maker_pre_submit(**overrides) -> dict:
         "current_best_bid": 0.39,
         "current_best_ask": 0.41,
         "limit_price": 0.40,
+        "size": 10.0,
+        "q_live": 0.70,
+        "q_lcb_5pct": 0.60,
+        "expected_edge": 0.10,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -114,6 +122,14 @@ def _taker_pre_submit(**overrides) -> dict:
         "current_best_bid": 0.60,
         "current_best_ask": 0.61,
         "limit_price": 0.61,
+        "size": 10.0,
+        "q_live": 0.75,
+        "q_lcb_5pct": 0.70,
+        "expected_edge": 0.05,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "expected_edge_source_certificate_hash": "actionable-hash-1",
+        "cost_basis_source_certificate_hash": "cost-hash-1",
         "would_cross_book": True,
         "tick_size": 0.01,
         "tick_aligned": True,
@@ -267,4 +283,43 @@ class TestLayer2VerifyPreSubmitForCommand:
     def test_none_post_only_crossing_raises_fail_closed(self):
         ps = _taker_pre_submit(post_only=None, would_cross_book=True)
         with pytest.raises(CertificateVerificationError, match="would_cross_book"):
+            self._call(ps)
+
+    def test_negative_submit_edge_raises(self):
+        ps = _maker_pre_submit(q_live=0.0054, q_lcb_5pct=0.003, limit_price=0.006)
+        with pytest.raises(CertificateVerificationError, match="q_lcb-minus-limit"):
+            self._call(ps)
+
+    def test_micro_edge_density_raises(self):
+        ps = _maker_pre_submit(
+            direction="buy_no",
+            token_id="no-1",
+            q_live=0.986261171798223,
+            q_lcb_5pct=0.986261171798223,
+            limit_price=0.98,
+            size=21.99,
+            expected_edge=0.005,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+        )
+        with pytest.raises(CertificateVerificationError, match="submit edge density"):
+            self._call(ps)
+
+    def test_qkernel_direct_payoff_above_receipt_lcb_raises(self):
+        ps = _maker_pre_submit(
+            direction="buy_no",
+            token_id="no-1",
+            q_live=0.986261171798223,
+            q_lcb_5pct=0.986261171798223,
+            limit_price=0.98,
+            expected_edge=0.005,
+            min_submit_edge_density=0.0,
+            qkernel_execution_economics={
+                "route_id": "DIRECT_NO:b24@proof",
+                "side": "NO",
+                "payoff_q_point": 0.986261171798223,
+                "payoff_q_lcb": 0.998678563135879,
+            },
+        )
+        with pytest.raises(CertificateVerificationError, match="payoff_q_lcb exceeds"):
             self._call(ps)

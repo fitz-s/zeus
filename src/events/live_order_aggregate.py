@@ -28,9 +28,12 @@ PRE_SUBMIT_REQUIRED_FIELDS = (
     "current_best_bid",
     "current_best_ask",
     "limit_price",
+    "size",
     "q_live",
     "q_lcb_5pct",
     "expected_edge",
+    "min_expected_profit_usd",
+    "min_submit_edge_density",
     "expected_edge_source_certificate_hash",
     "cost_basis_source_certificate_hash",
     "would_cross_book",
@@ -756,6 +759,13 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     if q_lcb > q_live:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires q_lcb_5pct <= q_live")
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
+    size = _positive_number(payload.get("size"), "size")
+    min_expected_profit_usd = _non_negative_number(
+        payload.get("min_expected_profit_usd"), "min_expected_profit_usd"
+    )
+    min_submit_edge_density = _non_negative_number(
+        payload.get("min_submit_edge_density"), "min_submit_edge_density"
+    )
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
     if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
@@ -765,6 +775,12 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires positive submit q_lcb-minus-limit")
     if expected_edge > submit_edge + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds submit q_lcb-minus-limit")
+    submit_expected_profit_usd = submit_edge * size
+    if submit_expected_profit_usd + 1e-9 < min_expected_profit_usd:
+        raise LiveOrderAggregateError("PreSubmitRevalidated expected profit below strategy floor")
+    submit_edge_density = submit_edge / limit_price
+    if submit_edge_density + 1e-9 < min_submit_edge_density:
+        raise LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
     _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
     # GATE#85 fix (2026-06-01): taker orders (post_only is False, FOK/FAK) are exempt
     # from the post_only=True and GTC/GTD invariants — those are maker-only constraints.
