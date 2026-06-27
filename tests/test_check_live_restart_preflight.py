@@ -600,6 +600,86 @@ def test_open_entry_submit_economics_blocks_live_exposure_without_component(monk
     assert "entry_economics" in result.evidence["risky"][0]["missing"]
 
 
+def test_open_entry_submit_economics_allows_legacy_component_gap_with_current_redecision(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    forecasts = _init_forecast_db(forecast_db)
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={
+            "execution_capability": {
+                "components": [
+                    {"component": "cutover_guard", "allowed": True, "reason": "allowed"}
+                ]
+            }
+        },
+    )
+    now = datetime.now(timezone.utc)
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN condition_id TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN token_id TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN no_token_id TEXT")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET condition_id = 'condition-1',
+               token_id = 'yes-token-1',
+               no_token_id = 'no-token-1'
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("condition-1", "yes-token-1", now.isoformat(), now.isoformat()),
+    )
+    trade.commit()
+    trade.close()
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Lucknow', '2026-06-28', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            now.isoformat(),
+            now.isoformat(),
+            json.dumps({"35C or below": 0.82}),
+        ),
+    )
+    forecasts.commit()
+    forecasts.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._open_entry_submit_economics_check(preflight._open_positions())
+
+    assert result.ok is True
+    covered = result.evidence["covered"][0]
+    assert covered["position_id"] == "pos-1"
+    assert covered["restart_resolution"] == (
+        "legacy_entry_missing_economics_covered_by_current_redecision"
+    )
+    assert covered["legacy_missing"] == ["entry_economics"]
+    assert covered["belief"]["held_side_prob"] == 0.82
+    assert covered["execution_feasibility"]["latest_observed_at"] == now.isoformat()
+
+
 def test_open_entry_submit_economics_allows_live_exposure_with_component(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"

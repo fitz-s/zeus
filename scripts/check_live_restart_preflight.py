@@ -794,14 +794,139 @@ def _entry_economics_component_missing_fields(component: dict[str, Any] | None) 
     return missing
 
 
+def _held_position_current_belief_evidence(
+    row: sqlite3.Row,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    position_id = str(row["position_id"] or "")
+    phase = str(row["phase"] or "")
+    if phase == "day0_window":
+        monitor = _latest_monitor_projection_evidence(position_id, day0_required=True)
+        if monitor is None:
+            return None
+        return {
+            "freshness_basis": "day0_monitor_projection",
+            "monitor_projection": monitor,
+        }
+
+    active_day0 = _latest_monitor_projection_evidence(position_id, day0_required=True)
+    if active_day0 is not None:
+        return {
+            "freshness_basis": "active_day0_monitor_projection",
+            "monitor_projection": active_day0,
+        }
+
+    try:
+        from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
+
+        belief = load_replacement_belief(
+            city=str(row["city"] or ""),
+            target_date=str(row["target_date"] or ""),
+            temperature_metric=str(row["temperature_metric"] or "high"),
+            bin_label=str(row["bin_label"] or ""),
+            direction=str(row["direction"] or ""),
+            now=now,
+            max_age_hours=monitor_belief_max_age_hours(),
+            db_path=str(FORECAST_DB),
+        )
+    except Exception:
+        return None
+    if belief is None or not belief.fresh:
+        return None
+    return {
+        "freshness_basis": belief.freshness_basis,
+        "posterior_id": belief.posterior_id,
+        "computed_at": belief.computed_at,
+        "age_hours": belief.age_hours,
+        "source_cycle_age_hours": belief.source_cycle_age_hours,
+        "held_side_prob": belief.held_side_prob,
+        "q_yes_bin": belief.q_yes_bin,
+    }
+
+
+def _current_execution_feasibility_evidence(
+    row: sqlite3.Row,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "execution_feasibility_evidence"):
+                return None
+            columns = _table_columns(conn, "main", "execution_feasibility_evidence")
+            freshness = _execution_feasibility_exposure_freshness(
+                conn,
+                columns=columns,
+                exposures=[_open_exposure_identity(row)],
+                now=now,
+            )
+    except sqlite3.Error:
+        return None
+    if freshness.get("risky"):
+        return None
+    covered = freshness.get("covered") or []
+    if not covered:
+        return None
+    return covered[0]
+
+
+def _legacy_entry_missing_economics_redecision_evidence(
+    row: sqlite3.Row,
+    *,
+    now: datetime,
+    exit_full_fill_repairable: dict[str, dict[str, Any]],
+    exit_retry_resumable: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Accept old submit receipts only when current live redecision can own them.
+
+    This is intentionally stricter than "old rows are compatible": a positive
+    chain exposure that was submitted before entry-economics receipts existed can
+    restart only when present-tense monitor belief and executable quote evidence
+    prove the redecision loop can make a new hold/exit/shift decision.
+    """
+
+    position_id = str(row["position_id"] or "")
+    phase = str(row["phase"] or "")
+    if phase == "pending_exit":
+        if position_id in exit_full_fill_repairable:
+            return {
+                "restart_resolution": "legacy_entry_missing_economics_exit_full_fill_repairable",
+                "exit_recovery": exit_full_fill_repairable[position_id],
+            }
+        if position_id in exit_retry_resumable:
+            return {
+                "restart_resolution": "legacy_entry_missing_economics_exit_retry_resumable",
+                "exit_recovery": exit_retry_resumable[position_id],
+            }
+        return None
+
+    belief = _held_position_current_belief_evidence(row, now=now)
+    if belief is None:
+        return None
+    feasibility = _current_execution_feasibility_evidence(row, now=now)
+    if feasibility is None:
+        return None
+    return {
+        "restart_resolution": "legacy_entry_missing_economics_covered_by_current_redecision",
+        "belief": belief,
+        "execution_feasibility": feasibility,
+    }
+
+
 def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
     """Block restart when live exposure lacks an executable entry-economics receipt."""
 
+    now = datetime.now(timezone.utc)
     settlement_truth = _verified_settlement_truth_for(rows)
     evidence: dict[str, Any] = {
         "trade_db": str(TRADE_DB),
         "required_component": "entry_economics",
         "required_detail_fields": list(ENTRY_ECONOMICS_COMPONENT_FIELDS),
+        "legacy_missing_component_resolution": (
+            "fresh current belief plus fresh execution feasibility for held positions; "
+            "explicit exit recovery evidence for pending exits"
+        ),
     }
     row_by_position = {
         str(row["position_id"] or ""): row
@@ -910,6 +1035,8 @@ def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
         ).fetchall()
     latest_by_position = {str(row["position_id"]): row for row in latest_rows}
     risky: list[dict[str, Any]] = []
+    exit_full_fill_repairable = _exit_full_fill_repairable_by_position()
+    exit_retry_resumable = _exit_retry_resumable_by_position()
     for position_id in open_position_ids:
         position = rows_requiring_provenance[position_id]
         latest = latest_by_position.get(position_id)
@@ -941,6 +1068,24 @@ def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
         component = _entry_economics_component_from_submit(latest["submit_payload_json"])
         missing = _entry_economics_component_missing_fields(component)
         if missing:
+            redecision = _legacy_entry_missing_economics_redecision_evidence(
+                position,
+                now=now,
+                exit_full_fill_repairable=exit_full_fill_repairable,
+                exit_retry_resumable=exit_retry_resumable,
+            )
+            if redecision is not None:
+                covered.append(
+                    {
+                        **command_item,
+                        "entry_economics_reason": None
+                        if component is None
+                        else component.get("reason"),
+                        "legacy_missing": missing,
+                        **redecision,
+                    }
+                )
+                continue
             risky.append(
                 {
                     **command_item,
