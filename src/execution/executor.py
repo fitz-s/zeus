@@ -792,7 +792,7 @@ def _entry_actionable_certificate_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
 ) -> dict:
-    """Require the live actionable certificate to be durably persisted before submit."""
+    """Require the live actionable certificate to be persisted and currently valid."""
 
     certificate_hash = str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
     if not certificate_hash:
@@ -801,7 +801,15 @@ def _entry_actionable_certificate_component(
             allowed=False,
             reason="missing_actionable_certificate_hash",
         )
+    if _decision_certificate_is_quarantined(conn, certificate_hash):
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_quarantined",
+            certificate_hash=certificate_hash,
+        )
     matching_schema = ""
+    payload_json: str | None = None
     table_seen = False
     for schema in _attached_schema_names(conn):
         try:
@@ -811,7 +819,7 @@ def _entry_actionable_certificate_component(
             schema_sql = _quote_sql_identifier(schema)
             row = conn.execute(
                 f"""
-                SELECT certificate_type, mode, verifier_status
+                SELECT certificate_type, mode, verifier_status, payload_json
                   FROM {schema_sql}.decision_certificates
                  WHERE certificate_hash = ?
                    AND certificate_type = 'ActionableTradeCertificate'
@@ -831,6 +839,10 @@ def _entry_actionable_certificate_component(
             )
         if row is not None:
             matching_schema = schema
+            try:
+                payload_json = str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[3])
+            except (IndexError, KeyError, TypeError):
+                payload_json = None
             break
     if not table_seen:
         return _capability_component(
@@ -846,11 +858,72 @@ def _entry_actionable_certificate_component(
             reason="actionable_certificate_not_persisted_live_verified",
             certificate_hash=certificate_hash,
         )
+    if not payload_json:
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_payload_missing",
+            certificate_hash=certificate_hash,
+            certificate_schema=matching_schema,
+        )
+    try:
+        from src.decision_kernel.verifier import _verify_actionable_payload
+
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("payload_json is not an object")
+        _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+    except Exception as exc:  # noqa: BLE001
+        return _capability_component(
+            "entry_actionable_certificate",
+            allowed=False,
+            reason="actionable_certificate_fails_current_verifier",
+            certificate_hash=certificate_hash,
+            certificate_schema=matching_schema,
+            verification_error=str(exc),
+        )
     return _capability_component(
         "entry_actionable_certificate",
         certificate_hash=certificate_hash,
         certificate_schema=matching_schema,
     )
+
+
+def _decision_certificate_is_quarantined(
+    conn: sqlite3.Connection,
+    certificate_hash: str,
+) -> bool:
+    if not certificate_hash:
+        return False
+    try:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
+    except Exception:
+        DECISION_CERTIFICATES_TABLE = "decision_certificates"
+        REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+    for schema in _attached_schema_names(conn):
+        try:
+            if not _table_exists_in_schema(conn, schema, "decision_integrity_quarantine"):
+                continue
+            schema_sql = _quote_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT 1
+                  FROM {schema_sql}.decision_integrity_quarantine
+                 WHERE table_name = ?
+                   AND row_id = ?
+                   AND reason_code = ?
+                 LIMIT 1
+                """,
+                (DECISION_CERTIFICATES_TABLE, certificate_hash, REASON_INVALID_LIVE_ACTIONABLE),
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        if row is not None:
+            return True
+    return False
 
 
 def _parse_sqlite_timestamp(value: object) -> datetime | None:

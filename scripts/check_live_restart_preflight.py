@@ -656,6 +656,10 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     try:
         from src.decision_kernel.errors import CertificateVerificationError
         from src.decision_kernel.verifier import _verify_actionable_payload
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
     except Exception as exc:  # noqa: BLE001
         evidence["error"] = str(exc)
         return CheckResult(
@@ -664,6 +668,11 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             "could not load current actionable certificate verifier",
             evidence,
         )
+    quarantined_hashes = _decision_certificate_quarantine_hashes(
+        table_name=DECISION_CERTIFICATES_TABLE,
+        reason_code=REASON_INVALID_LIVE_ACTIONABLE,
+    )
+    evidence["quarantined_count"] = len(quarantined_hashes)
     try:
         conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
@@ -706,6 +715,7 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
 
     risky: list[dict[str, Any]] = []
     risky_count = 0
+    quarantined_risky_count = 0
     checked = 0
     for row in rows:
         checked += 1
@@ -715,6 +725,9 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                 raise CertificateVerificationError("actionable payload must be object")
             _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
         except Exception as exc:  # noqa: BLE001
+            if str(row["certificate_hash"] or "") in quarantined_hashes:
+                quarantined_risky_count += 1
+                continue
             risky_count += 1
             sample = {
                 "certificate_id": row["certificate_id"],
@@ -743,6 +756,7 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                 risky.append(sample)
     evidence["checked_count"] = checked
     evidence["risky_count"] = risky_count
+    evidence["quarantined_risky_count"] = quarantined_risky_count
     evidence["risky"] = risky
     return CheckResult(
         "live_actionable_certificate_semantics",
@@ -752,6 +766,37 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         else "recent live actionable certificates fail current qkernel money law",
         evidence,
     )
+
+
+def _decision_certificate_quarantine_hashes(
+    *,
+    table_name: str,
+    reason_code: str,
+) -> set[str]:
+    if not TRADE_DB.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "decision_integrity_quarantine"):
+            return set()
+        rows = conn.execute(
+            """
+            SELECT row_id
+              FROM decision_integrity_quarantine
+             WHERE table_name = ?
+               AND reason_code = ?
+            """,
+            (table_name, reason_code),
+        ).fetchall()
+        return {str(row["row_id"] or "") for row in rows if str(row["row_id"] or "")}
+    except sqlite3.Error:
+        return set()
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
 
 
 def _entry_economics_component_from_submit(payload_json: str | None) -> dict[str, Any] | None:
@@ -800,7 +845,14 @@ def _held_position_current_belief_evidence(
     if phase == "day0_window":
         monitor = _latest_monitor_projection_evidence(position_id, day0_required=True)
         if monitor is None:
-            return None
+            canonical = _day0_canonical_observation_evidence(row, now=now)
+            if canonical is None:
+                return None
+            return {
+                "freshness_basis": "day0_canonical_observation_boot_redecision",
+                "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
+                "canonical_observation": canonical,
+            }
         return {
             "freshness_basis": "day0_monitor_projection",
             "monitor_projection": monitor,
@@ -811,6 +863,13 @@ def _held_position_current_belief_evidence(
         return {
             "freshness_basis": "active_day0_monitor_projection",
             "monitor_projection": active_day0,
+        }
+    canonical_day0 = _day0_canonical_observation_evidence(row, now=now)
+    if canonical_day0 is not None:
+        return {
+            "freshness_basis": "active_day0_canonical_observation_boot_redecision",
+            "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
+            "canonical_observation": canonical_day0,
         }
 
     try:
@@ -838,6 +897,51 @@ def _held_position_current_belief_evidence(
         "source_cycle_age_hours": belief.source_cycle_age_hours,
         "held_side_prob": belief.held_side_prob,
         "q_yes_bin": belief.q_yes_bin,
+    }
+
+
+def _day0_canonical_observation_evidence(
+    row: sqlite3.Row,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    city = str(row["city"] or "")
+    target_date = str(row["target_date"] or "")
+    metric = str(row["temperature_metric"] or "high").lower()
+    if not city or not target_date or metric not in {"high", "low"}:
+        return None
+    try:
+        from src.engine.monitor_refresh import _day0_observed_extreme_from_canonical_surface
+    except Exception:
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        observed = _day0_observed_extreme_from_canonical_surface(
+            city_name=city,
+            target_date=target_date,
+            metric_is_low=(metric == "low"),
+            now=now,
+            world_conn=conn,
+        )
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    if observed is None:
+        return None
+    extreme, observation_time, sample_count = observed
+    return {
+        "city": city,
+        "target_date": target_date,
+        "temperature_metric": metric,
+        "observed_extreme": extreme,
+        "observation_time": observation_time,
+        "sample_count": sample_count,
+        "source": "world.observation_instants",
     }
 
 
@@ -900,6 +1004,13 @@ def _legacy_entry_missing_economics_redecision_evidence(
     belief = _held_position_current_belief_evidence(row, now=now)
     if belief is None:
         return None
+    canonical = _day0_canonical_observation_evidence(row, now=now)
+    if canonical is not None:
+        return {
+            "restart_resolution": "legacy_entry_missing_economics_covered_by_canonical_day0_observation",
+            "belief": belief,
+            "canonical_observation": canonical,
+        }
     feasibility = _current_execution_feasibility_evidence(row, now=now)
     if feasibility is None:
         return None
@@ -1361,6 +1472,34 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
             "no open exposures require execution feasibility evidence",
             evidence,
         )
+    canonical_covered: list[dict[str, Any]] = []
+    quote_required_rows: list[sqlite3.Row] = []
+    for row in rows:
+        canonical = _day0_canonical_observation_evidence(row, now=now)
+        if canonical is not None:
+            canonical_covered.append(
+                {
+                    **_exposure_stub(_open_exposure_identity(row)),
+                    "freshness_basis": "day0_canonical_observation_no_execution_quote_required",
+                    "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
+                    "canonical_observation": canonical,
+                }
+            )
+        else:
+            quote_required_rows.append(row)
+    if not quote_required_rows:
+        evidence["row_count"] = "not_scanned_no_quote_required_after_canonical_day0"
+        evidence["scoped_exposure_count"] = len(rows)
+        evidence["risky"] = []
+        evidence["covered"] = canonical_covered
+        evidence["latest_observed_at"] = None
+        evidence["latest_quote_seen_at"] = None
+        return CheckResult(
+            "execution_feasibility_evidence_freshness",
+            True,
+            "all open exposures are covered by canonical Day0 observations",
+            evidence,
+        )
     with _connect_live_ro() as conn:
         if not _table_exists(conn, "main", "execution_feasibility_evidence"):
             return CheckResult(
@@ -1373,9 +1512,11 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
         exposure_results = _execution_feasibility_exposure_freshness(
             conn,
             columns=columns,
-            exposures=[_open_exposure_identity(row) for row in rows],
+            exposures=[_open_exposure_identity(row) for row in quote_required_rows],
             now=now,
         )
+    exposure_results["covered"] = canonical_covered + list(exposure_results["covered"])
+    exposure_results["scoped_exposure_count"] = len(rows)
     latest = _latest_iso_from_covered(exposure_results["covered"], "latest_observed_at")
     latest_dt = _parse_dt(latest)
     evidence["row_count"] = "not_scanned_append_only_hot_path"
@@ -2353,6 +2494,18 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
                         "fresh": True,
                         "freshness_basis": "day0_monitor_projection",
                         "monitor_projection": monitor_evidence,
+                    }
+                )
+                continue
+            canonical_evidence = _day0_canonical_observation_evidence(row, now=datetime.now(timezone.utc))
+            if canonical_evidence is not None:
+                covered.append(
+                    {
+                        **item,
+                        "fresh": True,
+                        "freshness_basis": "day0_canonical_observation_boot_redecision",
+                        "restart_resolution": "boot_monitor_refresh_from_canonical_day0_observation",
+                        "canonical_observation": canonical_evidence,
                     }
                 )
                 continue

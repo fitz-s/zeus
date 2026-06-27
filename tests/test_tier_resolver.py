@@ -22,6 +22,7 @@ from src.data.tier_resolver import (
     ALLOWED_SOURCES_BY_CITY,
     SOURCE_ROLE_FALLBACK_EVIDENCE,
     SOURCE_ROLE_HISTORICAL_HOURLY,
+    SOURCE_ROLE_RUNTIME_MONITORING,
     SOURCE_ROLE_MODEL_ONLY,
     SOURCE_ROLE_UNKNOWN,
     TIER_ALLOWED_SOURCES,
@@ -252,15 +253,16 @@ def test_registry_tier2_expected_source_is_historical_hourly_and_training_eligib
     assert assessment.training_allowed is True
 
 
-def test_registry_hko_accumulator_is_not_training_eligible_until_reaudit():
+def test_registry_hko_accumulator_is_runtime_monitoring_not_training():
     assessment = source_role_assessment_for_city_source(
         "Hong Kong",
         "hko_hourly_accumulator",
         has_provenance=True,
     )
 
-    assert assessment.source_role == SOURCE_ROLE_FALLBACK_EVIDENCE
+    assert assessment.source_role == SOURCE_ROLE_RUNTIME_MONITORING
     assert assessment.training_allowed is False
+    assert assessment.reason == "hko_runtime_monitoring_not_training"
 
 
 @pytest.mark.parametrize("source_tag", [None, "", "banana"])

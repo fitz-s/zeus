@@ -309,7 +309,8 @@ def source_role_assessment_for_city_source(
     - WU documented fallback source tags remain writer-allowed but classify as
       ``fallback_evidence`` and are not training-eligible in P1.1.
     - Tier 2 primary Ogimet tags may be training-eligible with provenance.
-    - HKO stays ``fallback_evidence`` until a fresh source audit promotes it.
+    - HKO is runtime monitoring and settlement evidence only: it may support
+      live Day0 monitoring, but it is not eligible for calibration training.
     """
     if source_tag is None or not str(source_tag).strip():
         return SourceRoleAssessment(
@@ -346,9 +347,9 @@ def source_role_assessment_for_city_source(
 
     if tier is Tier.HKO_NATIVE:
         return SourceRoleAssessment(
-            source_role=SOURCE_ROLE_FALLBACK_EVIDENCE,
+            source_role=SOURCE_ROLE_RUNTIME_MONITORING,
             training_allowed=False,
-            reason="hko_requires_fresh_audit",
+            reason="hko_runtime_monitoring_not_training",
         )
 
     if normalized_source != primary_source:

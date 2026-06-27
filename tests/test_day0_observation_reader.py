@@ -118,7 +118,7 @@ def _insert(conn: sqlite3.Connection, **kwargs: object) -> None:
         "observation_field": None,
         "training_allowed": 1,
         "causality_status": "OK",
-        "source_role": None,
+        "source_role": "historical_hourly",
     }
     defaults.update(kwargs)
     cols = list(defaults.keys())
@@ -128,6 +128,77 @@ def _insert(conn: sqlite3.Connection, **kwargs: object) -> None:
         [defaults[c] for c in cols],
     )
     conn.commit()
+
+
+def test_reader_rejects_hko_reaudit_rows_until_runtime_monitoring_role():
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        local_hour=7.0,
+        local_timestamp="2026-06-26T07:00:00+08:00",
+        utc_timestamp="2026-06-25T23:00:00+00:00",
+        utc_offset_minutes=480,
+        temp_current=27.0,
+        running_max=27.0,
+        running_min=27.0,
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="REQUIRES_SOURCE_REAUDIT",
+        source_role="fallback_evidence",
+        station_id="HKO",
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 6, 26, 1, 0, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.coverage_status == COVERAGE_NONE
+    assert out.row_count == 0
+
+
+def test_reader_accepts_hko_runtime_monitoring_rows_without_training():
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        local_hour=7.0,
+        local_timestamp="2026-06-26T07:00:00+08:00",
+        utc_timestamp="2026-06-25T23:00:00+00:00",
+        utc_offset_minutes=480,
+        temp_current=27.0,
+        running_max=27.0,
+        running_min=27.0,
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="OK",
+        source_role="runtime_monitoring",
+        station_id="HKO",
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-06-26",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 6, 26, 1, 0, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.coverage_status == COVERAGE_LOW
+    assert out.row_count == 1
+    assert out.low_so_far == 27.0
 
 
 # ---------------------------------------------------------------------------

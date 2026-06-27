@@ -20,15 +20,19 @@ Invariants verified:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
 import pytest
 
 from src.state.decision_integrity_quarantine import (
+    DECISION_CERTIFICATES_TABLE,
+    REASON_INVALID_LIVE_ACTIONABLE,
     REASON_NON_CONTRIBUTING,
     TARGET_TABLE,
     quarantine_decisions_for_noncontributing_forecast,
+    quarantine_invalid_live_actionable_certificates,
 )
 from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 
@@ -243,3 +247,100 @@ def test_no_snapshot_id_skipped(mem_db):
 
     assert result["candidates_found"] == 0
     assert _quarantine_count(conn) == 0
+
+
+def _valid_actionable_payload() -> dict:
+    return {
+        "event_id": "event-1",
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": "snap-1",
+        "family_id": "family-1",
+        "candidate_id": "candidate-1",
+        "condition_id": "condition-1",
+        "token_id": "yes-1",
+        "direction": "buy_yes",
+        "strategy_key": "center_buy",
+        "executable_snapshot_id": "exec-1",
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "c_fee_adjusted": 0.4,
+        "c_cost_95pct": 0.45,
+        "p_fill_lcb": 0.1,
+        "trade_score": 0.2,
+        "action_score": 0.2,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.7,
+            "payoff_q_lcb": 0.6,
+            "cost": 0.4,
+            "edge_lcb": 0.2,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+        "fdr_family_id": "family-1",
+        "kelly_decision_id": "kelly-1",
+        "kelly_size_usd": 3.0,
+        "risk_decision_id": "risk-1",
+        "live_cap_usage_id": "cap-1",
+        "final_intent_id": "intent-1",
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "native_quote_available": True,
+        "submitted": False,
+    }
+
+
+def test_invalid_live_actionable_quarantine_tags_bad_verified_cert(mem_db):
+    conn = mem_db
+    conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    payload = _valid_actionable_payload()
+    payload["q_live"] = 0.005
+    payload["q_lcb_5pct"] = 0.003
+    payload["qkernel_execution_economics"]["payoff_q_point"] = 0.22
+    payload["qkernel_execution_economics"]["payoff_q_lcb"] = 0.05
+    payload["qkernel_execution_economics"]["direction_law_ok"] = False
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_hash, certificate_type, mode,
+            verifier_status, decision_time, payload_json
+        ) VALUES ('cert-1', 'hash-1', 'ActionableTradeCertificate', 'LIVE',
+                  'VERIFIED', ?, ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(), json.dumps(payload)),
+    )
+    conn.commit()
+
+    dry = quarantine_invalid_live_actionable_certificates(conn, dry_run=True)
+    applied = quarantine_invalid_live_actionable_certificates(conn)
+    applied_again = quarantine_invalid_live_actionable_certificates(conn)
+
+    assert dry["candidates_found"] == 1
+    assert dry["dry_run"] is True
+    assert applied["newly_quarantined"] == 1
+    assert applied_again["newly_quarantined"] == 0
+    row = conn.execute(
+        """
+        SELECT row_id
+          FROM decision_integrity_quarantine
+         WHERE table_name = ?
+           AND reason_code = ?
+        """,
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
+    ).fetchone()
+    assert row[0] == "hash-1"

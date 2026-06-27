@@ -14,6 +14,10 @@ from datetime import datetime, timedelta, timezone
 
 from scripts import check_live_restart_preflight as preflight
 from src.decision import qlcb_reliability_guard as guard_mod
+from src.state.decision_integrity_quarantine import (
+    DECISION_CERTIFICATES_TABLE,
+    REASON_INVALID_LIVE_ACTIONABLE,
+)
 
 
 def _qlcb_meta() -> dict[str, object]:
@@ -420,6 +424,116 @@ def test_live_actionable_certificate_semantics_accepts_current_qkernel_payload(
     assert result.ok is True
     assert result.evidence["checked_count"] == 1
     assert result.evidence["risky_count"] == 0
+
+
+def test_live_actionable_certificate_semantics_excludes_quarantined_invalid_rows(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    payload = {
+        **_valid_actionable_payload(),
+        "q_live": 0.005,
+        "q_lcb_5pct": 0.003,
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.22,
+            "payoff_q_lcb": 0.05,
+            "cost": 0.01,
+            "edge_lcb": 0.04,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": False,
+            "coherence_allows": True,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        CREATE TABLE decision_integrity_quarantine (
+            table_name TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            reason_code TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO decision_integrity_quarantine (table_name, row_id, reason_code)
+        VALUES (?, 'hash-test', ?)
+        """,
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["checked_count"] == 1
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["quarantined_risky_count"] == 1
+
+
+def test_day0_belief_preflight_accepts_hko_canonical_observation_without_monitor_event(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    world = sqlite3.connect(world_db)
+    world.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT,
+            running_max REAL, running_min REAL, authority TEXT, causality_status TEXT,
+            source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT
+        )
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO observation_instants VALUES (
+            'Hong Kong', '2026-06-26', '2026-06-26T07:00:00+08:00',
+            '2026-06-25T23:00Z', 27.0, 27.0, 'ICAO_STATION_NATIVE',
+            'OK', 'hko_hourly_accumulator', 'low', 0, 'runtime_monitoring'
+        )
+        """
+    )
+    world.commit()
+    world.close()
+    row_conn = sqlite3.connect(":memory:")
+    row_conn.row_factory = sqlite3.Row
+    row_conn.execute(
+        """
+        CREATE TABLE p (
+            position_id TEXT, phase TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, bin_label TEXT, direction TEXT
+        )
+        """
+    )
+    row_conn.execute(
+        """
+        INSERT INTO p VALUES (
+            'pos-hk', 'day0_window', 'Hong Kong', '2026-06-26',
+            'low', 'Will the lowest temperature in Hong Kong be 28°C on June 26?',
+            'buy_no'
+        )
+        """
+    )
+    row = row_conn.execute("SELECT * FROM p").fetchone()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    evidence = preflight._held_position_current_belief_evidence(
+        row,
+        now=datetime(2026, 6, 26, 1, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert evidence is not None
+    assert evidence["freshness_basis"] == "day0_canonical_observation_boot_redecision"
+    assert evidence["canonical_observation"]["observed_extreme"] == 27.0
 
 
 def test_live_order_presubmit_shape_blocks_restart_relevant_old_payload(monkeypatch, tmp_path):
@@ -869,6 +983,75 @@ def test_open_entry_submit_economics_allows_legacy_component_gap_with_current_re
     assert covered["execution_feasibility"]["latest_observed_at"] == now.isoformat()
 
 
+def test_open_entry_submit_economics_allows_legacy_gap_with_canonical_day0(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={
+            "execution_capability": {
+                "components": [
+                    {"component": "cutover_guard", "allowed": True, "reason": "allowed"}
+                ]
+            }
+        },
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase='day0_window',
+               city='Hong Kong',
+               target_date='2026-06-26',
+               temperature_metric='low',
+               bin_label='Will the lowest temperature in Hong Kong be 28°C on June 26?',
+               direction='buy_no'
+         WHERE position_id='pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    world = sqlite3.connect(world_db)
+    world.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT,
+            running_max REAL, running_min REAL, authority TEXT, causality_status TEXT,
+            source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT
+        )
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO observation_instants VALUES (
+            'Hong Kong', '2026-06-26', '2026-06-26T07:00:00+08:00',
+            '2026-06-25T23:00Z', 27.0, 27.0, 'ICAO_STATION_NATIVE',
+            'OK', 'hko_hourly_accumulator', 'low', 0, 'runtime_monitoring'
+        )
+        """
+    )
+    world.commit()
+    world.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._open_entry_submit_economics_check(preflight._open_positions())
+
+    assert result.ok is True
+    covered = result.evidence["covered"][0]
+    assert covered["position_id"] == "pos-1"
+    assert covered["restart_resolution"] == (
+        "legacy_entry_missing_economics_covered_by_canonical_day0_observation"
+    )
+    assert covered["canonical_observation"]["observed_extreme"] == 27.0
+    assert "execution_feasibility" not in covered
+
+
 def test_open_entry_submit_economics_allows_live_exposure_with_component(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
@@ -911,6 +1094,64 @@ def test_open_entry_submit_economics_allows_live_exposure_with_component(monkeyp
     assert result.ok is True
     assert result.evidence["covered"][0]["position_id"] == "pos-1"
     assert result.evidence["covered"][0]["q_lcb_5pct"] == 0.72
+
+
+def test_execution_feasibility_allows_canonical_day0_without_quote_table(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase='day0_window',
+               city='Hong Kong',
+               target_date='2026-06-26',
+               temperature_metric='low',
+               bin_label='Will the lowest temperature in Hong Kong be 28°C on June 26?',
+               direction='buy_no'
+         WHERE position_id='pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    world = sqlite3.connect(world_db)
+    world.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT,
+            running_max REAL, running_min REAL, authority TEXT, causality_status TEXT,
+            source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT
+        )
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO observation_instants VALUES (
+            'Hong Kong', '2026-06-26', '2026-06-26T07:00:00+08:00',
+            '2026-06-25T23:00Z', 27.0, 27.0, 'ICAO_STATION_NATIVE',
+            'OK', 'hko_hourly_accumulator', 'low', 0, 'runtime_monitoring'
+        )
+        """
+    )
+    world.commit()
+    world.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._execution_feasibility_evidence_check(preflight._open_positions())
+
+    assert result.ok is True
+    assert result.evidence["row_count"] == "not_scanned_no_quote_required_after_canonical_day0"
+    assert result.evidence["covered"][0]["restart_resolution"] == (
+        "boot_monitor_refresh_from_canonical_day0_observation"
+    )
+    assert result.evidence["risky"] == []
 
 
 def _init_resting_command_trade_db(path, *, phase: str, intent_kind: str = "EXIT") -> None:

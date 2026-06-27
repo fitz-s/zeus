@@ -44,9 +44,134 @@ logger = logging.getLogger(__name__)
 
 # Reason code written into decision_integrity_quarantine.
 REASON_NON_CONTRIBUTING = "QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA"
+REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
 
 # Table name tagged in quarantine rows for the original opportunity_fact function.
 TARGET_TABLE = "opportunity_fact"
+DECISION_CERTIFICATES_TABLE = "decision_certificates"
+
+
+def quarantine_invalid_live_actionable_certificates(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool = False,
+    lookback_hours: float | None = None,
+) -> dict:
+    """Tag LIVE ActionableTradeCertificate rows that fail current money-law semantics.
+
+    The row remains immutable in ``decision_certificates``.  The quarantine tag
+    is the durable live-reader exclusion proof: old VERIFIED rows may still
+    exist for audit, but they are no longer consumable as executable authority.
+
+    ``conn`` is expected to expose ``decision_certificates`` in main and may
+    ATTACH the trade DB as ``trade`` for the quarantine write.  In tests, the
+    quarantine table may live unqualified in the same in-memory DB.
+    """
+
+    q_ref = _quarantine_ref(conn)
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    params: list[object] = []
+    since_clause = ""
+    if lookback_hours is not None:
+        from datetime import timedelta
+
+        since = datetime.now(timezone.utc) - timedelta(hours=float(lookback_hours))
+        since_clause = " AND datetime(decision_time) >= datetime(?)"
+        params.append(since.isoformat())
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT certificate_id, certificate_hash, decision_time, payload_json
+              FROM decision_certificates
+             WHERE certificate_type = 'ActionableTradeCertificate'
+               AND mode = 'LIVE'
+               AND verifier_status = 'VERIFIED'
+               {since_clause}
+             ORDER BY datetime(decision_time) DESC, certificate_id DESC
+            """,
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        msg = f"invalid live actionable quarantine scan failed: {exc}"
+        logger.error(msg)
+        return {
+            "checked_count": 0,
+            "candidates_found": 0,
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+            "error": msg,
+        }
+
+    from src.decision_kernel.verifier import _verify_actionable_payload
+
+    candidates: list[tuple[str, str | None, str, str]] = []
+    checked_count = 0
+    for row in rows:
+        checked_count += 1
+        cert_hash = str(row["certificate_hash"] if isinstance(row, sqlite3.Row) else row[1])
+        cert_id = str(row["certificate_id"] if isinstance(row, sqlite3.Row) else row[0])
+        decision_time = str(row["decision_time"] if isinstance(row, sqlite3.Row) else row[2])
+        payload_json = row["payload_json"] if isinstance(row, sqlite3.Row) else row[3]
+        try:
+            payload = json.loads(str(payload_json or "{}"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload_json is not an object")
+            _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        except Exception as exc:  # noqa: BLE001
+            candidates.append((cert_hash, cert_id, decision_time, str(exc)))
+
+    if dry_run or not candidates:
+        return {
+            "checked_count": checked_count,
+            "candidates_found": len(candidates),
+            "already_quarantined": 0,
+            "newly_quarantined": 0,
+            "dry_run": dry_run,
+        }
+
+    pre_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
+    ).fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT OR IGNORE INTO {q_ref}
+            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
+        VALUES (?, ?, ?, NULL, ?, ?)
+        """,
+        [
+            (
+                DECISION_CERTIFICATES_TABLE,
+                cert_hash,
+                REASON_INVALID_LIVE_ACTIONABLE,
+                recorded_at,
+                json.dumps(
+                    {
+                        "source": "quarantine_invalid_live_actionable_certificates",
+                        "certificate_id": cert_id,
+                        "decision_time": decision_time,
+                        "verification_error": reason,
+                    },
+                    sort_keys=True,
+                ),
+            )
+            for cert_hash, cert_id, decision_time, reason in candidates
+        ],
+    )
+    post_count = conn.execute(
+        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
+    ).fetchone()[0]
+    newly_quarantined = post_count - pre_count
+    return {
+        "checked_count": checked_count,
+        "candidates_found": len(candidates),
+        "already_quarantined": len(candidates) - newly_quarantined,
+        "newly_quarantined": newly_quarantined,
+        "dry_run": False,
+    }
 
 
 def quarantine_decisions_for_noncontributing_forecast(

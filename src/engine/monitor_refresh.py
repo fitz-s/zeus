@@ -2025,9 +2025,25 @@ def _day0_observed_extreme_from_canonical_surface(
                       AND target_date = ?
                       AND substr(local_timestamp, 1, 10) = target_date
                       AND utc_timestamp <= ?
-                      AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
                       AND COALESCE(causality_status, 'OK') = 'OK'
-                      AND LOWER(COALESCE(source, '')) LIKE 'wu%'
+                      AND (
+                            (
+                                UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                                AND COALESCE(source_role, '') = 'historical_hourly'
+                                AND COALESCE(training_allowed, 0) = 1
+                                AND (
+                                    LOWER(COALESCE(source, '')) LIKE 'wu%'
+                                    OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+                                )
+                            )
+                            OR (
+                                city = 'Hong Kong'
+                                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+                                AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
+                                AND COALESCE(source_role, '') = 'runtime_monitoring'
+                                AND COALESCE(training_allowed, 0) = 0
+                            )
+                      )
                       AND {extreme_col} IS NOT NULL
                     """,
                     (city_name, target_date, now_iso),

@@ -131,6 +131,17 @@ _EXTREMA_SQL = """
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
       AND authority IN ({auth_placeholders})
+      AND COALESCE(causality_status, '') = 'OK'
+      AND (
+            (
+                COALESCE(source_role, '') = 'historical_hourly'
+                AND COALESCE(training_allowed, 0) = 1
+            )
+            OR (
+                COALESCE(source_role, '') = 'runtime_monitoring'
+                AND COALESCE(training_allowed, 0) = 0
+            )
+      )
 """
 
 _CURRENT_TEMP_SQL = """
@@ -141,6 +152,17 @@ _CURRENT_TEMP_SQL = """
       AND source = ?
       AND datetime(utc_timestamp) <= datetime(?)
       AND authority IN ({auth_placeholders})
+      AND COALESCE(causality_status, '') = 'OK'
+      AND (
+            (
+                COALESCE(source_role, '') = 'historical_hourly'
+                AND COALESCE(training_allowed, 0) = 1
+            )
+            OR (
+                COALESCE(source_role, '') = 'runtime_monitoring'
+                AND COALESCE(training_allowed, 0) = 0
+            )
+      )
       AND temp_current IS NOT NULL
     ORDER BY utc_timestamp DESC
     LIMIT 1

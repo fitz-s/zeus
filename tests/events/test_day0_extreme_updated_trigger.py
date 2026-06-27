@@ -518,6 +518,65 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
 
 
+def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Hong Kong",
+            "2026-06-26",
+            "hko_hourly_accumulator",
+            "Asia/Hong_Kong",
+            7.0,
+            "2026-06-26T07:00:00+08:00",
+            "2026-06-25T23:00:00+00:00",
+            480,
+            0,
+            0,
+            0,
+            "hourly_accumulator",
+            27.0,
+            27.0,
+            27.0,
+            "C",
+            "HKO",
+            1,
+            "2026-06-25T23:05:00+00:00",
+            "ICAO_STATION_NATIVE",
+            "v1.wu-native",
+            '{"source_file":"hko_hourly_accumulator","station_id":"HKO","payload_hash":"sha256:test","parser_version":"test"}',
+            0,
+            "OK",
+            "runtime_monitoring",
+        ),
+    )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(27),
+        decision_time=datetime(2026, 6, 25, 23, 10, tzinfo=timezone.utc),
+        received_at="2026-06-25T23:10:00+00:00",
+    )
+
+    assert len(results) == 2
+    payloads = [
+        json.loads(row[0])
+        for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+    ]
+    assert {payload["metric"] for payload in payloads} == {"high", "low"}
+    assert all(payload["live_authority_status"] == "live" for payload in payloads)
+    assert all(payload["source_authorized_status"] == "AUTHORIZED" for payload in payloads)
+
+
 def test_scan_observation_instants_keeps_west_of_utc_target_day_after_midnight_z():
     """Chicago local 2026-06-17 is still live at 2026-06-18T02Z."""
 

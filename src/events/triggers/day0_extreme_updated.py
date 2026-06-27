@@ -283,9 +283,17 @@ class Day0ExtremeUpdatedTrigger:
                   AND substr(local_timestamp, 1, 10) = target_date
                   AND (running_max IS NOT NULL OR running_min IS NOT NULL)
                   AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
-                  AND COALESCE(training_allowed, 0) = 1
                   AND COALESCE(causality_status, '') = 'OK'
-                  AND COALESCE(source_role, '') = 'historical_hourly'
+                  AND (
+                        (
+                            COALESCE(source_role, '') = 'historical_hourly'
+                            AND COALESCE(training_allowed, 0) = 1
+                        )
+                        OR (
+                            COALESCE(source_role, '') = 'runtime_monitoring'
+                            AND COALESCE(training_allowed, 0) = 0
+                        )
+                  )
                   AND COALESCE(provenance_json, '') NOT IN ('', '{{}}')
                   AND COALESCE(station_id, '') != ''
                   AND COALESCE(source, '') != ''
@@ -482,8 +490,10 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         "AUTHORIZED"
         if (
             (verified or trusted_native)
-            and source_role == "historical_hourly"
-            and training_allowed
+            and (
+                (source_role == "historical_hourly" and training_allowed)
+                or (source_role == "runtime_monitoring" and not training_allowed)
+            )
             and causality_ok
             and source_match == "MATCH"
             and station_match == "MATCH"
@@ -642,7 +652,11 @@ def _source_matches_config(source: str, settlement_source_type: str) -> bool:
     if source_type == "noaa":
         return src.startswith("ogimet_metar_")
     if source_type == "hko":
-        return src == "hko_daily_api" or src.startswith("hko_daily_api_")
+        return (
+            src == "hko_hourly_accumulator"
+            or src == "hko_daily_api"
+            or src.startswith("hko_daily_api_")
+        )
     return False
 
 
