@@ -208,6 +208,9 @@ class NullConditionIdOnOpenPhaseError(ValueError):
 # Phases that require a non-empty condition_id. These are the phases where
 # the position is still active and CTF operations may be needed.
 _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
+_HARD_TERMINAL_PHASES = frozenset(
+    {"voided", "settled", "economically_closed", "admin_closed"}
+)
 _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
     {
         "market_id",
@@ -298,6 +301,18 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     candidate_phase = str(projection.get("phase") or "")
     candidate_token = projection.get("token_id") or projection.get("no_token_id")
     candidate_position_id = str(projection.get("position_id") or "")
+    if candidate_position_id and candidate_phase not in _HARD_TERMINAL_PHASES:
+        existing_phase_row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?",
+            (candidate_position_id,),
+        ).fetchone()
+        existing_phase = str(existing_phase_row[0] if existing_phase_row else "")
+        if existing_phase in _HARD_TERMINAL_PHASES:
+            raise ValueError(
+                "position_current hard-terminal phase is absorbing: "
+                f"position_id={candidate_position_id!r} "
+                f"existing_phase={existing_phase!r} candidate_phase={candidate_phase!r}"
+            )
 
     # Fix B (2026-05-19): fail-closed guard for NULL condition_id on open phases.
     # This makes the category of "CTF operation fails because condition_id is NULL"

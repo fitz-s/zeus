@@ -4030,7 +4030,7 @@ class TestRecoveryResolutionTable:
             no_token_id="tok-001-no",
             selected_token_id="tok-001-no",
             outcome_label="NO",
-            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=5.0,
             price=0.34,
         )
@@ -4795,6 +4795,38 @@ class TestRecoveryResolutionTable:
             "p_posterior": pytest.approx(0.37),
         }
 
+    def test_live_edli_entry_projection_refuses_missing_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-missing-cert"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-missing-cert")
+        _append_order_fact(
+            conn,
+            order_id="ord-edli-missing-cert",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
     def test_edli_entry_posterior_projection_repair_backfills_existing_zero(
         self,
         conn,
@@ -4839,9 +4871,59 @@ class TestRecoveryResolutionTable:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
-            "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
+            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["p_posterior"] == pytest.approx(0.42)
+        assert current["entry_method"] == "qkernel_spine"
+
+    def test_edli_entry_authority_projection_repair_backfills_legacy_method(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-existing-method"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-existing-method")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.914,
+            direction="buy_yes",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Hong Kong', 'Hong Kong',
+                '2026-06-26', 'Will the lowest temperature in Hong Kong be 28C on June 26?',
+                'buy_yes', 'C', 3.05, 5.0, 3.05, 0.61,
+                0.914, 'forecast-snap-old', 'ens_member_counting', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-existing-method', 'filled',
+                '2026-06-24T05:27:15Z', 'low'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_edli_entry_posterior_projection_repairs,
+        )
+
+        summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["p_posterior"] == pytest.approx(0.914)
+        assert current["entry_method"] == "qkernel_spine"
 
     def test_edli_entry_posterior_projection_repair_rejects_final_intent_q_live(
         self,
@@ -4899,6 +4981,60 @@ class TestRecoveryResolutionTable:
             "SELECT p_posterior FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["p_posterior"] == 0.0
+
+    def test_hard_terminal_position_projection_repair_restores_voided_phase(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares
+            ) VALUES (
+                'pos-terminal-drift', 'active', 'condition-test', 'Hong Kong', 'Hong Kong',
+                '2026-06-09', 'Will the highest temperature in Hong Kong be 32C on June 9?',
+                'buy_no', 'C', 17.67, 19.0, 17.67, 0.93,
+                1.0, 'forecast-snap-old', 'ens_member_counting', 'opening_inertia',
+                'opening_inertia', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-terminal-drift', 'filled',
+                '2026-06-25T00:00:00Z', 'high', 0.0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+                'evt-terminal-drift', 'pos-terminal-drift', 7, 'ADMIN_VOIDED',
+                '2026-06-12T11:45:30+00:00', 'pending_exit', 'voided',
+                'opening_inertia', 'dec-1', 'snap-1', 'ord-terminal-drift',
+                'cmd-1', 'operator_review', 'idem-terminal-drift', 'VOIDED',
+                'src.execution.command_recovery', '{}', 'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            "SELECT phase, chain_shares FROM position_current WHERE position_id = 'pos-terminal-drift'"
+        ).fetchone()
+        assert row["phase"] == "voided"
+        assert row["chain_shares"] == 0.0
 
     def test_live_entry_repair_prefers_forecasts_market_events_over_trade_ghost(
         self,
@@ -4973,7 +5109,7 @@ class TestRecoveryResolutionTable:
             no_token_id="tok-001-no",
             selected_token_id="tok-001-no",
             outcome_label="NO",
-            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=13.45,
             price=0.01,
         )
@@ -5092,7 +5228,7 @@ class TestRecoveryResolutionTable:
             no_token_id="tok-001-no",
             selected_token_id="tok-001-no",
             outcome_label="NO",
-            decision_id="edli_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
+            decision_id="legacy_exec_cmd:missing-event:missing-intent:tok-001-no:tok-001-no:buy_no",
             size=13.45,
             price=0.01,
         )

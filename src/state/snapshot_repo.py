@@ -27,6 +27,14 @@ SNAPSHOT_LATEST_TABLE = "executable_market_snapshot_latest"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 
+def _snapshot_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def init_snapshot_schema(
     conn: sqlite3.Connection,
     *,
@@ -189,6 +197,8 @@ def _upsert_latest_snapshot(conn: sqlite3.Connection, row: dict[str, Any]) -> No
     """Update the compact latest-state mirror after appending immutable evidence."""
 
     if not str(row.get("selected_outcome_token_id") or "").strip():
+        return
+    if not _snapshot_table_exists(conn, SNAPSHOT_LATEST_TABLE):
         return
     conn.execute(
         """

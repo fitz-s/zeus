@@ -134,6 +134,20 @@ TERMINAL_VENUE_COMMAND_STATES = frozenset(
 TERMINAL_VENUE_FACT_STATES = frozenset(
     {"CANCEL_CONFIRMED", "CANCELED", "CANCELLED", "EXPIRED", "MATCHED", "FILLED"}
 )
+HARD_TERMINAL_POSITION_PHASES = frozenset(
+    {"voided", "settled", "economically_closed", "admin_closed"}
+)
+HARD_TERMINAL_POSITION_EVENT_TYPES = frozenset(
+    {
+        "ADMIN_VOIDED",
+        "ENTRY_ORDER_VOIDED",
+        "POSITION_VOIDED",
+        "POSITION_SETTLED",
+        "SETTLED",
+        "ECONOMICALLY_CLOSED",
+    }
+)
+OPEN_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
 REPLACEMENT_SCHEDULER_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
@@ -1959,12 +1973,20 @@ def _posterior_summary() -> CheckResult:
     )
 
 
-def _open_positions() -> list[Any]:
+def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
     with _connect_live_ro() as conn:
         columns = _table_columns(conn, "main", "position_current")
         optional_selects = []
-        for column in ("condition_id", "token_id", "no_token_id"):
+        for column in (
+            "condition_id",
+            "token_id",
+            "no_token_id",
+            "entry_method",
+            "p_posterior",
+            "cost_basis_usd",
+        ):
             optional_selects.append(column if column in columns else f"NULL AS {column}")
+        chain_filter = "AND COALESCE(chain_shares, shares, 0) > 0" if positive_chain_only else ""
         return list(
             conn.execute(
                 f"""
@@ -1977,12 +1999,229 @@ def _open_positions() -> list[Any]:
                        {", ".join(optional_selects)}
                   FROM position_current
                  WHERE phase IN ('active', 'day0_window', 'pending_exit')
-                   AND COALESCE(chain_shares, shares, 0) > 0
+                   {chain_filter}
                  ORDER BY CASE phase WHEN 'pending_exit' THEN 0 ELSE 1 END,
                           city, target_date, bin_label
                 """
             )
         )
+
+
+def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> CheckResult:
+    """Block restart when canonical live positions contradict terminal or EDLI authority."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "hard_terminal_phases": sorted(HARD_TERMINAL_POSITION_PHASES),
+        "edli_entry_method_required": "qkernel_spine",
+    }
+    if not rows:
+        return CheckResult(
+            "position_current_projection_integrity",
+            True,
+            "no open positive-share positions require projection integrity checks",
+            evidence,
+        )
+
+    position_ids = [
+        str(row["position_id"] or "")
+        for row in rows
+        if str(row["position_id"] or "").strip()
+    ]
+    terminal_by_position: dict[str, dict[str, Any]] = {}
+    latest_entry_by_position: dict[str, dict[str, Any]] = {}
+    with _connect_live_ro() as conn:
+        if position_ids and _table_exists(conn, "main", "position_events"):
+            event_columns = _table_columns(conn, "main", "position_events")
+            event_conditions: list[str] = []
+            event_params: list[str] = []
+            if "phase_after" in event_columns:
+                phase_placeholders = ",".join("?" for _ in HARD_TERMINAL_POSITION_PHASES)
+                event_conditions.append(f"LOWER(COALESCE(phase_after, '')) IN ({phase_placeholders})")
+                event_params.extend(sorted(HARD_TERMINAL_POSITION_PHASES))
+            if "event_type" in event_columns:
+                event_placeholders = ",".join("?" for _ in HARD_TERMINAL_POSITION_EVENT_TYPES)
+                event_conditions.append(f"UPPER(COALESCE(event_type, '')) IN ({event_placeholders})")
+                event_params.extend(sorted(HARD_TERMINAL_POSITION_EVENT_TYPES))
+            if not event_conditions:
+                event_rows = []
+            else:
+                phase_before_select = (
+                    "phase_before" if "phase_before" in event_columns else "NULL AS phase_before"
+                )
+                phase_after_select = (
+                    "phase_after" if "phase_after" in event_columns else "NULL AS phase_after"
+                )
+                payload_select = (
+                    "payload_json" if "payload_json" in event_columns else "NULL AS payload_json"
+                )
+                event_type_select = (
+                    "event_type" if "event_type" in event_columns else "NULL AS event_type"
+                )
+                occurred_at_select = (
+                    "occurred_at" if "occurred_at" in event_columns else "NULL AS occurred_at"
+                )
+                sequence_select = (
+                    "sequence_no" if "sequence_no" in event_columns else "0 AS sequence_no"
+                )
+                placeholders = ",".join("?" for _ in position_ids)
+                event_rows = conn.execute(
+                    f"""
+                    WITH terminal_events AS (
+                        SELECT
+                            position_id,
+                            {event_type_select},
+                            {phase_before_select},
+                            {phase_after_select},
+                            {sequence_select},
+                            {occurred_at_select},
+                            {payload_select},
+                            ROW_NUMBER() OVER (
+                                PARTITION BY position_id
+                                ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                            ) AS rn
+                          FROM position_events
+                         WHERE position_id IN ({placeholders})
+                           AND ({" OR ".join(event_conditions)})
+                    )
+                    SELECT position_id, event_type, phase_before, phase_after,
+                           sequence_no, occurred_at, payload_json
+                      FROM terminal_events
+                     WHERE rn = 1
+                    """,
+                    tuple(position_ids) + tuple(event_params),
+                ).fetchall()
+            terminal_by_position = {
+                str(row["position_id"]): dict(row)
+                for row in event_rows
+            }
+
+        if position_ids and _table_exists(conn, "main", "venue_commands"):
+            placeholders = ",".join("?" for _ in position_ids)
+            command_columns = _table_columns(conn, "main", "venue_commands")
+            if "intent_kind" not in command_columns or "position_id" not in command_columns:
+                command_rows = []
+            else:
+                decision_select = (
+                    "decision_id" if "decision_id" in command_columns else "NULL AS decision_id"
+                )
+                state_select = "state" if "state" in command_columns else "NULL AS state"
+                venue_order_select = (
+                    "venue_order_id" if "venue_order_id" in command_columns else "NULL AS venue_order_id"
+                )
+                size_select = "size" if "size" in command_columns else "NULL AS size"
+                price_select = "price" if "price" in command_columns else "NULL AS price"
+                created_select = (
+                    "created_at" if "created_at" in command_columns else "updated_at AS created_at"
+                )
+                command_order_time = (
+                    "COALESCE(created_at, updated_at)"
+                    if "created_at" in command_columns
+                    else "updated_at"
+                )
+                command_rows = conn.execute(
+                    f"""
+                    WITH latest_entry AS (
+                        SELECT
+                            position_id,
+                            command_id,
+                            {decision_select},
+                            {state_select},
+                            {venue_order_select},
+                            {price_select},
+                            {size_select},
+                            {created_select},
+                            updated_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY position_id
+                                ORDER BY datetime({command_order_time}) DESC,
+                                         command_id DESC
+                            ) AS rn
+                          FROM venue_commands
+                         WHERE intent_kind = 'ENTRY'
+                           AND position_id IN ({placeholders})
+                    )
+                    SELECT position_id, command_id, decision_id, state, venue_order_id,
+                           price, size, created_at, updated_at
+                      FROM latest_entry
+                     WHERE rn = 1
+                    """,
+                    tuple(position_ids),
+                ).fetchall()
+            latest_entry_by_position = {
+                str(row["position_id"]): dict(row)
+                for row in command_rows
+            }
+
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    for row in rows:
+        position_id = str(row["position_id"] or "")
+        item = {
+            "position_id": position_id,
+            "phase": row["phase"],
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "bin_label": row["bin_label"],
+            "direction": row["direction"],
+            "shares": row["shares"],
+            "chain_shares": row["chain_shares"],
+            "entry_method": row["entry_method"],
+            "p_posterior": row["p_posterior"],
+            "cost_basis_usd": row["cost_basis_usd"],
+        }
+        terminal = terminal_by_position.get(position_id)
+        if terminal is not None:
+            risky.append(
+                {
+                    **item,
+                    "risk": "open_position_after_hard_terminal_event",
+                    "terminal_event": terminal,
+                }
+            )
+            continue
+
+        latest_entry = latest_entry_by_position.get(position_id)
+        decision_id = str((latest_entry or {}).get("decision_id") or "")
+        entry_method = str(row["entry_method"] or "")
+        try:
+            p_posterior = float(row["p_posterior"])
+        except (TypeError, ValueError):
+            p_posterior = None
+        if decision_id.startswith("edli_exec_cmd:") and entry_method != "qkernel_spine":
+            risky.append(
+                {
+                    **item,
+                    "risk": "edli_entry_projected_without_qkernel_authority",
+                    "entry_command": latest_entry,
+                    "required_entry_method": "qkernel_spine",
+                }
+            )
+            continue
+        if decision_id.startswith("edli_exec_cmd:") and (
+            p_posterior is None or p_posterior <= 0.0
+        ):
+            risky.append(
+                {
+                    **item,
+                    "risk": "edli_entry_zero_probability_projection",
+                    "entry_command": latest_entry,
+                }
+            )
+            continue
+        covered.append(item)
+
+    evidence["risky"] = risky
+    evidence["covered_count"] = len(covered)
+    return CheckResult(
+        "position_current_projection_integrity",
+        not risky,
+        "open position projections align with terminal and EDLI authority"
+        if not risky
+        else "open position projections contradict terminal events or EDLI authority",
+        evidence,
+    )
 
 
 def _requires_executable_quote(row: sqlite3.Row, *, now_utc: datetime) -> bool:
@@ -2595,6 +2834,7 @@ def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
     rows = _open_positions()
+    projection_rows = _open_positions(positive_chain_only=False)
     quote_rows = _open_positions_requiring_executable_quote(rows)
     edli_cfg = cfg.get("edli") or {}
     reactor_mode = str(edli_cfg.get("reactor_mode") or "disabled")
@@ -2637,6 +2877,7 @@ def evaluate() -> dict[str, Any]:
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
         _live_actionable_certificate_semantics_check(),
+        _position_current_projection_integrity_check(projection_rows),
         _open_entry_submit_economics_check(rows),
         _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),
@@ -2652,6 +2893,7 @@ def evaluate() -> dict[str, Any]:
         "trade_db": str(TRADE_DB),
         "forecast_db": str(FORECAST_DB),
         "open_position_count": len(rows),
+        "runtime_open_projection_count": len(projection_rows),
         "open_positions_requiring_executable_quote_count": len(quote_rows),
         "real_order_submit_enabled": real_submit,
         "checks": [asdict(check) for check in checks],

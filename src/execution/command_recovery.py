@@ -2502,10 +2502,18 @@ def _decision_log_trade_case_for_command(
     *,
     client=None,
 ) -> tuple[dict, int | None]:
+    decision_id = str(command.get("decision_id") or "")
+    if _edli_event_id_from_decision_id(decision_id):
+        # EDLI commands are live-money decisions with certificate authority.  Do
+        # not hydrate them from legacy decision_log/snapshot identity: that path
+        # can manufacture ens_member_counting rows with zero posterior/economics
+        # for orders that should instead remain unresolved/quarantined.
+        edli_case = _edli_trade_case_for_command(conn, command, client=client)
+        return (edli_case, None) if edli_case else ({}, None)
+
     if not _table_exists(conn, "decision_log"):
         return {}, None
     position_id = str(command.get("position_id") or "")
-    decision_id = str(command.get("decision_id") or "")
     token_id = str(command.get("token_id") or "")
     like_terms = [term for term in (position_id, decision_id, token_id) if term]
     if not like_terms:
@@ -2552,13 +2560,9 @@ def _decision_log_trade_case_for_command(
                         enriched["p_posterior"] = edli_posterior
                         return enriched, int(record.get("id") or 0)
                 return case, int(record.get("id") or 0)
-    edli_case = _edli_trade_case_for_command(conn, command, client=client)
-    if edli_case:
-        return edli_case, None
-    # Chain/venue facts still need projection repair even when an old EDLI
-    # command predates qkernel certificate lineage. Submit authorization is
-    # enforced upstream before venue_commands persistence; recovery must not
-    # make already-real venue exposure invisible.
+    # Non-EDLI chain/venue facts still need projection repair from immutable
+    # command/snapshot identity. EDLI commands are handled above and require
+    # certificate authority.
     return _snapshot_trade_case_for_command(conn, command, client=client), None
 
 
@@ -3301,7 +3305,7 @@ def _append_live_entry_projection_repair(
     *,
     candidate: dict,
     client=None,
-) -> None:
+) -> bool:
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
@@ -3309,7 +3313,12 @@ def _append_live_entry_projection_repair(
     candidate = _hydrate_command_execution_identity(conn, candidate)
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
-        raise ValueError("live entry projection repair requires matching decision_log trade_case")
+        logger.info(
+            "recovery: live entry projection repair skipped command %s: "
+            "missing EDLI/decision trade_case",
+            candidate.get("command_id"),
+        )
+        return False
     position = _live_entry_recovery_position(
         candidate,
         trade_case,
@@ -3325,7 +3334,7 @@ def _append_live_entry_projection_repair(
             existing_order_projection.get("position_id"),
             existing_order_projection.get("phase"),
         )
-        return
+        return False
     projection = build_position_current_projection(position)
     position_id = str(position.trade_id)
     existing_posted = conn.execute(
@@ -3340,7 +3349,7 @@ def _append_live_entry_projection_repair(
     ).fetchone()
     if existing_posted is not None:
         upsert_position_current(conn, projection)
-        return
+        return True
     if _latest_position_sequence(conn, position_id) != 0:
         raise ValueError(
             "live entry projection repair refuses partial position_events without ENTRY_ORDER_POSTED"
@@ -3371,6 +3380,7 @@ def _append_live_entry_projection_repair(
         ),
     ]
     append_many_and_project(conn, events, projection)
+    return True
 
 
 def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection, client=None) -> dict:
@@ -3382,9 +3392,12 @@ def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection, client=Non
         command_id = str(candidate.get("command_id") or "")
         conn.execute("SAVEPOINT sp_live_entry_projection_repair")
         try:
-            _append_live_entry_projection_repair(conn, candidate=candidate, client=client)
+            advanced = _append_live_entry_projection_repair(conn, candidate=candidate, client=client)
             conn.execute("RELEASE SAVEPOINT sp_live_entry_projection_repair")
-            summary["advanced"] += 1
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
         except Exception as exc:
             conn.execute("ROLLBACK TO SAVEPOINT sp_live_entry_projection_repair")
             conn.execute("RELEASE SAVEPOINT sp_live_entry_projection_repair")
@@ -3450,8 +3463,11 @@ def ensure_live_entry_projection_for_command(
         )
     for candidate in candidates:
         try:
-            _append_live_entry_projection_repair(conn, candidate=candidate, client=client)
-            summary["advanced"] += 1
+            advanced = _append_live_entry_projection_repair(conn, candidate=candidate, client=client)
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
         except Exception:
             summary["errors"] += 1
             raise
@@ -3722,6 +3738,8 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=N
 
 
 _EDLI_ENTRY_POSTERIOR_REPAIR_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
+_HARD_TERMINAL_REPAIR_PHASES = ("voided", "settled", "economically_closed", "admin_closed")
+_RUNTIME_OPEN_REPAIR_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
 
 
 def _edli_entry_posterior_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -3734,6 +3752,7 @@ def _edli_entry_posterior_repair_candidates(conn: sqlite3.Connection) -> list[di
         f"""
         SELECT pc.position_id,
                pc.p_posterior AS current_p_posterior,
+               pc.entry_method AS current_entry_method,
                pc.phase,
                pc.order_id AS position_order_id,
                cmd.*
@@ -3749,7 +3768,11 @@ def _edli_entry_posterior_repair_candidates(conn: sqlite3.Connection) -> list[di
            AND cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
            AND cmd.decision_id LIKE 'edli_exec_cmd:%'
-           AND (pc.p_posterior IS NULL OR CAST(pc.p_posterior AS REAL) <= 0)
+           AND (
+               pc.p_posterior IS NULL
+               OR CAST(pc.p_posterior AS REAL) <= 0
+               OR COALESCE(pc.entry_method, '') != 'qkernel_spine'
+           )
          ORDER BY pc.updated_at DESC, cmd.created_at DESC
         """,
         tuple(_EDLI_ENTRY_POSTERIOR_REPAIR_PHASES),
@@ -3770,13 +3793,13 @@ def reconcile_edli_entry_posterior_projection_repairs(
     conn: sqlite3.Connection,
     client=None,
 ) -> dict:
-    """Backfill missing entry belief for EDLI positions from their Actionable certificate.
+    """Backfill EDLI entry authority for positions from their Actionable certificate.
 
     Live order projection can create a visible pending/active row before the
     confirmed fill bridge runs. That row is only safe for monitoring if its
-    entry posterior is the same q_live that justified submission. This lane is
-    idempotent and strictly evidence-bound: no EDLI Actionable certificate q,
-    no update.
+    entry posterior and entry method are the same qkernel authority that
+    justified submission. This lane is idempotent and strictly evidence-bound:
+    no EDLI Actionable certificate qkernel authority, no update.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -3795,7 +3818,8 @@ def reconcile_edli_entry_posterior_projection_repairs(
                 client=client,
             )
             posterior = _positive_probability_or_none(trade_case.get("p_posterior"))
-            if posterior is None:
+            entry_method = str(trade_case.get("entry_method") or "").strip()
+            if posterior is None or entry_method != "qkernel_spine":
                 conn.execute("RELEASE SAVEPOINT " + sp_name)
                 summary["stayed"] += 1
                 continue
@@ -3803,11 +3827,16 @@ def reconcile_edli_entry_posterior_projection_repairs(
                 """
                 UPDATE position_current
                    SET p_posterior = ?,
+                       entry_method = ?,
                        updated_at = ?
                  WHERE position_id = ?
-                   AND (p_posterior IS NULL OR CAST(p_posterior AS REAL) <= 0)
+                   AND (
+                       p_posterior IS NULL
+                       OR CAST(p_posterior AS REAL) <= 0
+                       OR COALESCE(entry_method, '') != 'qkernel_spine'
+                   )
                 """,
-                (posterior, _now_iso(), position_id),
+                (posterior, entry_method, _now_iso(), position_id),
             )
             if cursor.rowcount > 0:
                 summary["advanced"] += 1
@@ -3819,6 +3848,106 @@ def reconcile_edli_entry_posterior_projection_repairs(
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             logger.error(
                 "recovery: EDLI entry posterior projection repair failed for position %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not all(_table_exists(conn, table) for table in ("position_current", "position_events")):
+        return []
+    open_placeholders = ", ".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
+    terminal_placeholders = ", ".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
+    rows = conn.execute(
+        f"""
+        WITH latest_terminal AS (
+            SELECT
+                position_id,
+                event_type,
+                phase_before,
+                phase_after,
+                sequence_no,
+                occurred_at,
+                payload_json,
+                ROW_NUMBER() OVER (
+                    PARTITION BY position_id
+                    ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                ) AS rn
+              FROM position_events
+             WHERE LOWER(COALESCE(phase_after, '')) IN ({terminal_placeholders})
+        )
+        SELECT
+            pc.position_id,
+            pc.phase AS current_phase,
+            pc.chain_shares,
+            pc.shares,
+            pc.city,
+            pc.target_date,
+            pc.temperature_metric,
+            pc.bin_label,
+            pc.direction,
+            lt.event_type,
+            lt.phase_before,
+            lt.phase_after,
+            lt.sequence_no,
+            lt.occurred_at,
+            lt.payload_json
+          FROM position_current pc
+          JOIN latest_terminal lt
+            ON lt.position_id = pc.position_id
+           AND lt.rn = 1
+         WHERE pc.phase IN ({open_placeholders})
+           AND LOWER(COALESCE(lt.phase_after, '')) != LOWER(COALESCE(pc.phase, ''))
+         ORDER BY datetime(lt.occurred_at) DESC, lt.sequence_no DESC
+        """,
+        tuple(_HARD_TERMINAL_REPAIR_PHASES) + tuple(_RUNTIME_OPEN_REPAIR_PHASES),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection) -> dict:
+    """Restore ``position_current.phase`` when a durable terminal event already exists.
+
+    This repairs projection drift only. It does not invent a terminal event and
+    it does not touch venue/chain state; the latest position_events terminal row
+    is the authority.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _hard_terminal_projection_repair_candidates(conn):
+        summary["scanned"] += 1
+        position_id = str(candidate.get("position_id") or "")
+        terminal_phase = str(candidate.get("phase_after") or "").strip().lower()
+        if terminal_phase not in _HARD_TERMINAL_REPAIR_PHASES:
+            summary["stayed"] += 1
+            continue
+        sp_name = "sp_hard_terminal_projection_" + "".join(
+            ch if ch.isalnum() else "_" for ch in position_id
+        )[:80]
+        conn.execute("SAVEPOINT " + sp_name)
+        try:
+            cursor = conn.execute(
+                f"""
+                UPDATE position_current
+                   SET phase = ?,
+                       updated_at = ?
+                 WHERE position_id = ?
+                   AND phase IN ({", ".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)})
+                """,
+                (terminal_phase, _now_iso(), position_id, *_RUNTIME_OPEN_REPAIR_PHASES),
+            )
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            if cursor.rowcount > 0:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            logger.error(
+                "recovery: hard-terminal projection repair failed for position %s: %s",
                 position_id,
                 exc,
             )
@@ -11463,6 +11592,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_entry_posterior_summary["stayed"]
         summary["errors"] += edli_entry_posterior_summary["errors"]
 
+        hard_terminal_projection_summary = reconcile_hard_terminal_position_projection_repairs(conn)
+        summary["hard_terminal_position_projection_repair"] = hard_terminal_projection_summary
+        summary["advanced"] += hard_terminal_projection_summary["advanced"]
+        summary["stayed"] += hard_terminal_projection_summary["stayed"]
+        summary["errors"] += hard_terminal_projection_summary["errors"]
+
         filled_entry_lot_summary = reconcile_filled_entry_position_lot_repairs(conn)
         summary["filled_entry_position_lot_repair"] = filled_entry_lot_summary
         summary["advanced"] += filled_entry_lot_summary["advanced"]
@@ -11910,6 +12045,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_edli_entry_posterior_projection_repairs,
                  "edli_entry_posterior_projection_repair",
                  client_kw=True)
+    _db_pass("hard_terminal_position_projection_repair",
+             reconcile_hard_terminal_position_projection_repairs,
+             "hard_terminal_position_projection_repair")
     _db_pass("filled_entry_position_lot_repair",
              reconcile_filled_entry_position_lot_repairs, "filled_entry_position_lot_repair")
     _db_pass("filled_entry_execution_fact_repair",

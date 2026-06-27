@@ -903,6 +903,170 @@ def test_open_entry_submit_economics_blocks_live_exposure_without_component(monk
     assert "entry_economics" in result.evidence["risky"][0]["missing"]
 
 
+def test_position_projection_integrity_blocks_edli_legacy_projection(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET entry_method = 'ens_member_counting',
+               p_posterior = 0.0,
+               cost_basis_usd = 0.1192
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        UPDATE venue_commands
+           SET decision_id = 'edli_exec_cmd:edli_evt_lucknow:intent:token-1:token-1:buy_yes'
+         WHERE command_id = 'cmd-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "edli_entry_projected_without_qkernel_authority"
+    assert result.evidence["risky"][0]["position_id"] == "pos-1"
+
+
+def test_position_projection_integrity_blocks_hard_terminal_reactivation(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, payload_json
+        ) VALUES (
+            'ev-terminal', 'pos-1', 7, 'ADMIN_VOIDED', ?, 'pending_exit', 'voided', '{}'
+        )
+        """,
+        (now,),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "open_position_after_hard_terminal_event"
+    assert result.evidence["risky"][0]["terminal_event"]["event_type"] == "ADMIN_VOIDED"
+
+
+def test_preflight_projection_integrity_checks_zero_chain_open_ghost(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET shares = 19.0,
+               chain_shares = 0.0
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, payload_json
+        ) VALUES (
+            'ev-terminal-zero-chain', 'pos-1', 7, 'ADMIN_VOIDED',
+            ?, 'pending_exit', 'voided', '{}'
+        )
+        """,
+        (now,),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions(positive_chain_only=False)
+    )
+
+    assert preflight._open_positions() == []
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "open_position_after_hard_terminal_event"
+
+
 def test_open_entry_submit_economics_allows_legacy_component_gap_with_current_redecision(
     monkeypatch, tmp_path
 ):
