@@ -91,6 +91,8 @@ COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
 LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
 LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
+PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT = 12
+PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS = 5.0
 LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
     "ActionableTradeCertificate",
     "FinalIntentCertificate",
@@ -142,6 +144,12 @@ TERMINAL_VENUE_COMMAND_STATES = frozenset(
 )
 TERMINAL_VENUE_FACT_STATES = frozenset(
     {"CANCEL_CONFIRMED", "CANCELED", "CANCELLED", "EXPIRED", "MATCHED", "FILLED"}
+)
+VENUE_POINT_MATCH_STATUSES = frozenset(
+    {"LIVE", "OPEN", "RESTING", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED", "MATCHED", "FILLED", "MINED"}
+)
+VENUE_POINT_TERMINAL_NO_FILL_STATUSES = frozenset(
+    {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
 )
 HARD_TERMINAL_POSITION_PHASES = frozenset(
     {"voided", "settled", "economically_closed", "admin_closed"}
@@ -997,6 +1005,301 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
         item["event_id"] = event_id
         index.setdefault(event_id, []).append(item)
     return index
+
+
+def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
+    """Current nonterminal ENTRY orders whose venue point truth must match local truth."""
+
+    if not TRADE_DB.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True, timeout=1)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "venue_commands"):
+            return []
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        fact_join = ""
+        fact_select = (
+            "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
+            "NULL AS latest_fact_remaining_size, NULL AS latest_fact_observed_at"
+        )
+        if _table_exists(conn, "main", "venue_order_facts"):
+            fact_select = (
+                "lf.state AS latest_fact_state, lf.matched_size AS latest_fact_matched_size, "
+                "lf.remaining_size AS latest_fact_remaining_size, lf.observed_at AS latest_fact_observed_at"
+            )
+            fact_join = """
+              LEFT JOIN (
+                SELECT command_id, venue_order_id, state, matched_size, remaining_size, observed_at
+                  FROM (
+                    SELECT vof.command_id, vof.venue_order_id, vof.state, vof.matched_size,
+                           vof.remaining_size, vof.observed_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY vof.command_id, vof.venue_order_id
+                               ORDER BY datetime(vof.observed_at) DESC, vof.rowid DESC
+                           ) AS rn
+                      FROM venue_order_facts vof
+                  )
+                 WHERE rn = 1
+              ) lf
+                ON lf.command_id = cmd.command_id
+               AND lf.venue_order_id = cmd.venue_order_id
+            """
+        rows = conn.execute(
+            f"""
+            SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
+                   cmd.state, cmd.venue_order_id, cmd.size, cmd.price,
+                   cmd.created_at, cmd.updated_at,
+                   {fact_select}
+              FROM venue_commands cmd
+              {fact_join}
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(cmd.venue_order_id, '') != ''
+             ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+             LIMIT ?
+            """,
+            (*tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)), PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+
+
+def _preflight_venue_adapter():
+    from src.data.polymarket_client import PolymarketClient
+
+    client = PolymarketClient(public_http_timeout=PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS)
+    return client, client._ensure_v2_adapter()
+
+
+def _venue_payload(value: object | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        payload = dict(value)
+    else:
+        raw = getattr(value, "raw", None)
+        payload = dict(raw) if isinstance(raw, dict) else dict(getattr(value, "__dict__", {}) or {})
+    status = getattr(value, "status", None)
+    if status not in (None, "") and not (payload.get("status") or payload.get("state")):
+        payload["status"] = str(status)
+    order_id = getattr(value, "order_id", None)
+    if order_id not in (None, "") and not (payload.get("id") or payload.get("orderID") or payload.get("order_id")):
+        payload["orderID"] = str(order_id)
+    return payload
+
+
+def _venue_status(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "NOT_FOUND"
+    return str(payload.get("status") or payload.get("state") or "").strip().upper()
+
+
+def _decimal_float(value: object) -> float | None:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed else None
+
+
+def _payload_matched_size(payload: dict[str, Any] | None) -> float | None:
+    if not payload:
+        return None
+    for key in ("size_matched", "matched_size", "matchedAmount", "matched_amount", "filled_size"):
+        value = _decimal_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _venue_order_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    return {
+        "id": payload.get("id") or payload.get("orderID") or payload.get("order_id"),
+        "status": payload.get("status") or payload.get("state"),
+        "size_matched": payload.get("size_matched") or payload.get("matched_size"),
+        "original_size": payload.get("original_size") or payload.get("size"),
+        "price": payload.get("price"),
+        "asset_id": payload.get("asset_id") or payload.get("token_id"),
+        "market": payload.get("market"),
+        "outcome": payload.get("outcome"),
+    }
+
+
+def _venue_payload_order_id(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return ""
+    return str(payload.get("id") or payload.get("orderID") or payload.get("order_id") or "").strip()
+
+
+def _find_open_order_payload(adapter: Any, venue_order_id: str) -> dict[str, Any] | None:
+    get_open_orders = getattr(adapter, "get_open_orders", None)
+    if not callable(get_open_orders):
+        return None
+    for raw in get_open_orders() or []:
+        payload = _venue_payload(raw)
+        if _venue_payload_order_id(payload).lower() == venue_order_id.lower():
+            return payload
+    return None
+
+
+def _venue_point_order_boot_recoverable(item: dict[str, Any]) -> dict[str, Any] | None:
+    risk = str(item.get("risk") or "")
+    if risk == "venue_positive_match_not_projected_locally":
+        return {
+            **item,
+            "repair_action": "edli_boot_command_recovery_live_tick_matched_order_facts",
+            "repair_owner": "src.execution.command_recovery.reconcile_matched_order_facts",
+        }
+    if risk == "venue_terminal_match_not_projected_locally":
+        return {
+            **item,
+            "repair_action": "edli_boot_command_recovery_live_tick_terminal_point_orders",
+            "repair_owner": "src.execution.command_recovery.reconcile_terminal_point_orders",
+        }
+    if risk == "venue_terminal_no_fill_not_projected_locally":
+        return {
+            **item,
+            "repair_action": "edli_boot_command_recovery_live_tick_terminal_no_fill",
+            "repair_owner": "src.execution.command_recovery.reconcile_terminal_point_orders",
+        }
+    return None
+
+
+def _venue_point_order_truth_alignment_check() -> CheckResult:
+    """Classify authenticated venue point truth vs local restart order facts."""
+
+    commands = _restart_relevant_entry_commands_for_venue_audit()
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "command_count": len(commands),
+        "audit_limit": PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT,
+        "venue_read_timeout_seconds": PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS,
+    }
+    if not commands:
+        return CheckResult(
+            "venue_point_order_truth_alignment",
+            True,
+            "no restart-relevant entry venue orders require point-order audit",
+            evidence,
+        )
+
+    risky: list[dict[str, Any]] = []
+    boot_recoverable: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    try:
+        client, adapter = _preflight_venue_adapter()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = repr(exc)
+        return CheckResult(
+            "venue_point_order_truth_alignment",
+            False,
+            "authenticated venue point-order reader unavailable for restart-relevant orders",
+            evidence,
+        )
+    try:
+        for command in commands:
+            venue_order_id = str(command.get("venue_order_id") or "").strip()
+            command_id = str(command.get("command_id") or "").strip()
+            try:
+                payload = _venue_payload(adapter.get_order(venue_order_id))
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    payload = _find_open_order_payload(adapter, venue_order_id)
+                except Exception as open_exc:  # noqa: BLE001
+                    risky.append(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": venue_order_id,
+                            "risk": "venue_point_order_read_failed",
+                            "point_error": repr(exc),
+                            "open_orders_error": repr(open_exc),
+                        }
+                    )
+                    continue
+                if payload is None:
+                    risky.append(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": venue_order_id,
+                            "risk": "venue_point_order_read_failed",
+                            "point_error": repr(exc),
+                            "open_orders_fallback_match": False,
+                        }
+                    )
+                    continue
+            status = _venue_status(payload)
+            venue_matched = _payload_matched_size(payload)
+            local_matched = _decimal_float(command.get("latest_fact_matched_size")) or 0.0
+            local_state = str(command.get("latest_fact_state") or "").strip().upper()
+            item = {
+                "command_id": command_id,
+                "position_id": command.get("position_id"),
+                "command_state": command.get("state"),
+                "venue_order_id": venue_order_id,
+                "venue_status": status,
+                "venue_matched_size": venue_matched,
+                "local_fact_state": local_state,
+                "local_fact_matched_size": local_matched,
+                "local_fact_remaining_size": command.get("latest_fact_remaining_size"),
+                "local_fact_observed_at": command.get("latest_fact_observed_at"),
+                "venue_order": _venue_order_summary(payload),
+            }
+            if payload is None:
+                risky.append({**item, "risk": "venue_point_order_not_found"})
+            elif venue_matched is None and status in VENUE_POINT_MATCH_STATUSES:
+                risky.append({**item, "risk": "venue_point_order_matched_size_missing"})
+            else:
+                risk = ""
+                if (venue_matched or 0.0) > local_matched + 1e-9:
+                    risk = "venue_positive_match_not_projected_locally"
+                elif (
+                    status in {"MATCHED", "FILLED", "MINED"}
+                    and local_state not in {"MATCHED", "FILLED"}
+                ):
+                    risk = "venue_terminal_match_not_projected_locally"
+                elif (
+                    status in VENUE_POINT_TERMINAL_NO_FILL_STATUSES
+                    and (venue_matched or 0.0) <= 1e-9
+                    and local_state not in TERMINAL_VENUE_FACT_STATES
+                ):
+                    risk = "venue_terminal_no_fill_not_projected_locally"
+                if risk:
+                    risk_item = {**item, "risk": risk}
+                    recoverable = _venue_point_order_boot_recoverable(risk_item)
+                    if recoverable is not None:
+                        boot_recoverable.append(recoverable)
+                    else:
+                        risky.append(risk_item)
+                else:
+                    covered.append(item)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    evidence["covered_count"] = len(covered)
+    evidence["boot_recoverable"] = boot_recoverable
+    evidence["risky"] = risky
+    return CheckResult(
+        "venue_point_order_truth_alignment",
+        not risky,
+        "authenticated venue point-order truth matches local restart-relevant order facts"
+        if not risky and not boot_recoverable
+        else "authenticated venue point-order drift is boot-recoverable before live order submission"
+        if not risky
+        else "authenticated venue point-order truth conflicts with local restart-relevant order facts",
+        evidence,
+    )
 
 
 def _payload_matches_restart_relevant_entry_command(
@@ -3466,6 +3769,7 @@ def evaluate() -> dict[str, Any]:
         _live_actionable_certificate_semantics_check(),
         _live_money_certificate_parent_mode_check(),
         _open_entry_actionable_certificate_authority_check(rows),
+        _venue_point_order_truth_alignment_check(),
         _position_current_projection_integrity_check(projection_rows),
         _open_entry_submit_economics_check(rows),
         _resting_venue_command_lifecycle_alignment_check(),

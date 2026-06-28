@@ -1788,6 +1788,206 @@ def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
     assert result.evidence["covered_count"] == 1
 
 
+class _FakeVenuePointAdapter:
+    def __init__(self, orders: dict[str, dict], *, point_errors: set[str] | None = None):
+        self.orders = orders
+        self.point_errors = set(point_errors or ())
+
+    def get_order(self, order_id: str):
+        if order_id in self.point_errors:
+            raise RuntimeError("point read failed")
+        return self.orders.get(order_id)
+
+    def get_open_orders(self):
+        return list(self.orders.values())
+
+
+class _FakeVenueClient:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def _init_entry_venue_audit_db(path, *, command_state="ACKED", fact_state="LIVE", matched_size="0"):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT,
+            side TEXT,
+            token_id TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            price REAL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, decision_id, intent_kind, side, token_id,
+            state, venue_order_id, size, price, created_at, updated_at
+        ) VALUES (
+            'cmd-venue-audit', 'pos-venue-audit', 'edli_exec_cmd:event-venue-audit',
+            'ENTRY', 'BUY', 'token-no-1', ?, 'venue-order-1', 10.58, 0.67, ?, ?
+        )
+        """,
+        (command_state, now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            command_id, venue_order_id, state, matched_size, remaining_size, observed_at
+        ) VALUES (
+            'cmd-venue-audit', 'venue-order-1', ?, ?, '10.58', ?
+        )
+        """,
+        (fact_state, matched_size, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_venue_point_order_truth_alignment_marks_live_positive_match_boot_recoverable(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(trade_db, fact_state="LIVE", matched_size="0")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    fake_client = _FakeVenueClient()
+    fake_adapter = _FakeVenuePointAdapter(
+        {
+            "venue-order-1": {
+                "id": "venue-order-1",
+                "status": "LIVE",
+                "size_matched": "4.484847",
+                "original_size": "10.58",
+                "price": "0.67",
+            }
+        }
+    )
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", lambda: (fake_client, fake_adapter))
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["boot_recoverable"][0]["risk"] == "venue_positive_match_not_projected_locally"
+    assert result.evidence["boot_recoverable"][0]["venue_status"] == "LIVE"
+    assert result.evidence["boot_recoverable"][0]["venue_matched_size"] == 4.484847
+    assert (
+        result.evidence["boot_recoverable"][0]["repair_action"]
+        == "edli_boot_command_recovery_live_tick_matched_order_facts"
+    )
+    assert fake_client.closed is True
+
+
+def test_venue_point_order_truth_alignment_uses_open_orders_fallback_on_point_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(trade_db, fact_state="LIVE", matched_size="0")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    fake_adapter = _FakeVenuePointAdapter(
+        {
+            "venue-order-1": {
+                "id": "venue-order-1",
+                "status": "LIVE",
+                "size_matched": "4.484847",
+                "original_size": "10.58",
+                "price": "0.67",
+            }
+        },
+        point_errors={"venue-order-1"},
+    )
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", lambda: (_FakeVenueClient(), fake_adapter))
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["boot_recoverable"][0]["risk"] == "venue_positive_match_not_projected_locally"
+    assert result.evidence["boot_recoverable"][0]["venue_status"] == "LIVE"
+
+
+def test_venue_point_order_truth_alignment_blocks_when_point_and_open_reads_fail(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(trade_db, fact_state="LIVE", matched_size="0")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    class FailingAdapter:
+        def get_order(self, order_id: str):
+            raise RuntimeError("point read failed")
+
+        def get_open_orders(self):
+            raise RuntimeError("open read failed")
+
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", lambda: (_FakeVenueClient(), FailingAdapter()))
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "venue_point_order_read_failed"
+
+
+def test_venue_point_order_truth_alignment_accepts_projected_partial_match(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(
+        trade_db,
+        command_state="PARTIAL",
+        fact_state="PARTIALLY_MATCHED",
+        matched_size="4.484847",
+    )
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    fake_adapter = _FakeVenuePointAdapter(
+        {
+            "venue-order-1": {
+                "id": "venue-order-1",
+                "status": "LIVE",
+                "size_matched": "4.484847",
+                "original_size": "10.58",
+                "price": "0.67",
+            }
+        }
+    )
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", lambda: (_FakeVenueClient(), fake_adapter))
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["covered_count"] == 1
+    assert result.evidence["risky"] == []
+
+
 def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_path):
     monkeypatch.delenv("ZEUS_LIVE_PREFLIGHT_STATE_DIR", raising=False)
     monkeypatch.delenv("ZEUS_STATE_DIR", raising=False)
