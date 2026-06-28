@@ -3588,6 +3588,79 @@ class TestRecoveryResolutionTable:
             "source": "REST",
         }
 
+    def test_live_point_order_with_positive_size_matched_projects_partial_entry(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Polymarket can keep an order LIVE after a maker partial fill."""
+        _insert(conn, size=10.58, price=0.67)
+        _advance_to_acked(conn, venue_order_id="ord-live-partial")
+        _seed_pending_entry_projection(conn, order_id="ord-live-partial")
+        _append_order_fact(
+            conn,
+            order_id="ord-live-partial",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.58",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-live-partial",
+            "status": "LIVE",
+            "size_matched": "4.484847",
+            "original_size": "10.58",
+            "price": "0.67",
+            "associate_trades": ["trade-live-partial"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "6.095153",
+            "matched_size": "4.484847",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT state, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "state": "MATCHED",
+            "filled_size": "4.484847",
+            "fill_price": "0.67",
+        }
+        projection = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert projection["phase"] == "active"
+        assert Decimal(str(projection["shares"])) == Decimal("4.484847")
+        assert Decimal(str(projection["cost_basis_usd"])) == Decimal("3.00484749")
+        assert Decimal(str(projection["entry_price"])) == Decimal("0.67")
+        assert projection["order_status"] == "partial"
+
     def test_partial_entry_finalizes_when_latest_order_fact_is_fully_matched(
         self,
         conn,

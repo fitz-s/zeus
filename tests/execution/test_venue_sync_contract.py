@@ -226,6 +226,107 @@ def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_
     assert "recorded_maker_fill_economics" in summary
 
 
+def test_live_tick_scope_projects_live_order_positive_matched_size(monkeypatch, tmp_path):
+    """Boot/live cadence must ingest partial maker fills before redecision."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick-live-partial.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-live-partial", size=10.58, price=0.67)
+    h._advance_to_acked(
+        seed_conn,
+        command_id="cmd-live-partial",
+        venue_order_id="vord-live-partial",
+    )
+    h._seed_pending_entry_projection(
+        seed_conn,
+        command_id="cmd-live-partial",
+        order_id="vord-live-partial",
+    )
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-live-partial",
+        order_id="vord-live-partial",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10.58",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={
+            "vord-live-partial": {
+                "orderID": "vord-live-partial",
+                "status": "LIVE",
+                "size_matched": "4.484847",
+                "original_size": "10.58",
+                "price": "0.67",
+                "associate_trades": ["trade-live-partial"],
+            }
+        },
+        open_orders=[
+            {
+                "orderID": "vord-live-partial",
+                "status": "LIVE",
+                "size_matched": "4.484847",
+                "original_size": "10.58",
+                "price": "0.67",
+            }
+        ],
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["matched_order_facts"]["advanced"] == 1
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    try:
+        command = verify.execute(
+            "SELECT state FROM venue_commands WHERE command_id = 'cmd-live-partial'"
+        ).fetchone()
+        fact = verify.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-live-partial'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        position = verify.execute(
+            """
+            SELECT phase, shares, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+    finally:
+        verify.close()
+    assert command["state"] == "PARTIAL"
+    assert dict(fact) == {
+        "state": "PARTIALLY_MATCHED",
+        "matched_size": "4.484847",
+        "remaining_size": "6.095153",
+    }
+    assert position["phase"] == "active"
+    assert str(position["shares"]) == "4.484847"
+    assert position["order_status"] == "partial"
+
+
 def test_live_tick_scope_terminalizes_cancelled_partial_remainder(monkeypatch, tmp_path):
     """A cancelled maker remainder must not wait for the deferred full sweep."""
 

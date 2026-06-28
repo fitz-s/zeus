@@ -1858,6 +1858,22 @@ def _venue_status_is_fully_matched(venue_status: str) -> bool:
     return str(venue_status or "").upper() in {"MATCHED", "FILLED"}
 
 
+def _venue_status_can_carry_positive_match(venue_status: str) -> bool:
+    """Whether a point-order payload can be fill truth when matched_size > 0."""
+
+    return str(venue_status or "").upper() in {
+        "LIVE",
+        "OPEN",
+        "RESTING",
+        "MATCHED",
+        "FILLED",
+        "MINED",
+        "PARTIAL",
+        "PARTIALLY_MATCHED",
+        "PARTIALLY_FILLED",
+    }
+
+
 def _matched_remaining_size(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     matched = _decimal_or_none(matched_size)
     if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
@@ -5584,16 +5600,16 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
             if point_order is None:
                 summary["stayed"] += 1
                 continue
-            venue_status = str(_first_present(point_order, "status", "state") or "").upper()
-            if venue_status not in {"MATCHED", "FILLED", "MINED", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}:
-                summary["stayed"] += 1
-                continue
             matched_size = _point_order_matched_size(
                 point_order,
                 fallback=row.get("order_fact_matched_size") or row.get("size") or "0",
                 side=row.get("side"),
             )
             if not _positive_decimal_or_none(matched_size):
+                summary["stayed"] += 1
+                continue
+            venue_status = str(_first_present(point_order, "status", "state") or "").upper()
+            if not _venue_status_can_carry_positive_match(venue_status):
                 summary["stayed"] += 1
                 continue
             fill_price = _point_order_fill_price(point_order, fallback=row.get("price"), side=row.get("side"))
@@ -12269,6 +12285,7 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         for candidate_fn in (
             _local_orphan_no_fill_candidates,
             _terminal_point_order_candidates,
+            _latest_matched_order_fact_candidates,
         ):
             try:
                 _harvest(candidate_fn(conn))
@@ -12511,6 +12528,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _client_pass("terminal_point_orders",
                      reconcile_terminal_point_orders,
                      "terminal_point_orders")
+        _client_pass("matched_order_facts",
+                     reconcile_matched_order_facts,
+                     "matched_order_facts")
         _db_pass("cancel_ack_terminal_no_fill_facts",
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")
