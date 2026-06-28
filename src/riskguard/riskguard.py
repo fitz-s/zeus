@@ -1439,6 +1439,54 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     return level
 
 
+def _persist_tick_in_progress_attestation() -> None:
+    """Keep the entry gate continuous while a full RiskGuard tick is running.
+
+    RiskGuard's full metric pass can occasionally exceed the 5-minute reader
+    freshness window under DB I/O pressure. If the previous full row is still
+    fresh at tick start, persist a short-lived attestation carrying that proven
+    level so live trading does not fail RED in the middle of a still-running
+    tick. Rows written here are not full metrics and are never accepted by
+    _latest_fresh_full_risk_row; they expire through the normal freshness floor.
+    """
+    now = datetime.now(timezone.utc)
+    risk_conn = get_connection(RISK_DB_PATH, write_class="live")
+    try:
+        init_risk_db(risk_conn)
+        previous_full = _latest_fresh_full_risk_row(risk_conn, now=now)
+        if previous_full is None:
+            return
+        details = {
+            "status": "metrics_in_progress_previous_risk_level_preserved",
+            "riskguard_degraded_reason": "metrics_refresh_in_progress",
+            "full_metrics_status": "in_progress_previous_fresh_level_preserved",
+            "previous_full_risk_level": previous_full["level"],
+            "previous_full_risk_checked_at": previous_full["checked_at"],
+        }
+        risk_conn.execute(
+            """
+            INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
+            VALUES (?, NULL, NULL, NULL, ?, ?, ?)
+            """,
+            (
+                previous_full["level"],
+                json.dumps(details),
+                now.isoformat(),
+                int(previous_full["force_exit_review"] or 0),
+            ),
+        )
+        risk_conn.commit()
+    except sqlite3.OperationalError as exc:
+        if not _is_sqlite_database_locked(exc):
+            raise
+        logger.warning(
+            "RiskGuard tick-start attestation skipped because risk_state.db is locked: %s",
+            exc,
+        )
+    finally:
+        _close_conn(risk_conn)
+
+
 def _tick_once() -> RiskLevel:
     """Run one RiskGuard evaluation attempt. Spec §7: 60-second cycle.
 
@@ -2047,6 +2095,7 @@ def tick() -> RiskLevel:
     safety boundary is weakened. ``tick()`` is the public daemon entry; its API
     is unchanged.
     """
+    _persist_tick_in_progress_attestation()
     retries = _riskguard_dependency_lock_retries()
     last_exc: sqlite3.OperationalError | None = None
     for attempt in range(retries + 1):
@@ -2206,14 +2255,17 @@ def get_current_level() -> RiskLevel:
         except (json.JSONDecodeError, TypeError):
             details = {}
         if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
-            # A dependency_db_locked attestation already carries the CORRECT level:
-            # _persist_dependency_db_locked_attestation preserves a FRESH (<5 min)
-            # full level verbatim and stamps DATA_DEGRADED only when no fresh full row
-            # exists. Re-flooring it here would re-block the GREEN-only entry gate on
-            # every transient lock (the 2026-06-08 regression). Trust the attestation's
-            # level for the transient-lock reason; keep the conservative split-brain
-            # floor for ALL OTHER degraded reasons (genuine metric/truth degradation).
-            if details.get("riskguard_degraded_reason") == "dependency_db_locked":
+            # Transient attestations already carry the CORRECT bounded level:
+            # dependency_db_locked preserves a FRESH (<5 min) full level, while
+            # metrics_refresh_in_progress is stamped only at tick start when the
+            # previous full row is still fresh. Re-flooring either here would
+            # re-block the GREEN-only entry gate during a still-running risk pass.
+            # Keep the conservative split-brain floor for ALL OTHER degraded
+            # reasons (genuine metric/truth degradation).
+            if details.get("riskguard_degraded_reason") in {
+                "dependency_db_locked",
+                "metrics_refresh_in_progress",
+            }:
                 return stored_level
             floored = overall_level(stored_level, RiskLevel.DATA_DEGRADED)
             if floored != stored_level:

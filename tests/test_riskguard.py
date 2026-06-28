@@ -1250,6 +1250,81 @@ class TestRiskGuardSettlementSource:
 
         assert level == RiskLevel.RED
 
+    def test_tick_start_attestation_preserves_fresh_full_level_during_long_metrics_pass(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
+            level=RiskLevel.GREEN.value,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+
+        riskguard_module._persist_tick_in_progress_attestation()
+
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["status"] == "metrics_in_progress_previous_risk_level_preserved"
+        assert details["riskguard_degraded_reason"] == "metrics_refresh_in_progress"
+        assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
+        assert riskguard_module.get_current_level() == RiskLevel.GREEN
+
+        # The in-progress row is not itself a full metrics row and cannot extend
+        # the full-risk freshness chain indefinitely.
+        latest_full = riskguard_module._latest_fresh_full_risk_row(
+            get_connection(risk_db),
+            now=datetime.now(timezone.utc),
+        )
+        assert latest_full is not None
+        assert json.loads(latest_full["details_json"]).get("riskguard_degraded_reason") is None
+
+    def test_tick_start_attestation_does_not_extend_stale_full_level(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        risk_conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(risk_conn)
+        _insert_risk_state_row(
+            risk_conn,
+            checked_at=(datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat(),
+            level=RiskLevel.GREEN.value,
+        )
+        risk_conn.commit()
+        risk_conn.close()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            assert path == riskguard_module.RISK_DB_PATH
+            return get_connection(risk_db)
+
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+
+        riskguard_module._persist_tick_in_progress_attestation()
+
+        rows = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC"
+        ).fetchall()
+
+        assert len(rows) == 1
+        assert riskguard_module.get_current_level() == RiskLevel.RED
+
     def test_tick_records_canonical_settlement_source(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
