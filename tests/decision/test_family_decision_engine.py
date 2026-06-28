@@ -821,8 +821,8 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
     assert selected is low_cost
 
 
-def test_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(monkeypatch):
-    """Tokyo-class regression: a coarse OOF cell cannot make non-modal YES live-selectable."""
+def test_abstained_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(monkeypatch):
+    """Tokyo-class regression: an abstained OOF cell cannot make non-modal YES live-selectable."""
     case = _case(metric="low")
     space = _outcome_space(case)
     modal_yes = _hand_decision(
@@ -843,7 +843,7 @@ def test_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(monkeypatch):
         robust_trade_score=0.13,
         direction_law_ok=False,
         q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
+        q_lcb_guard_abstained=True,
         q_lcb_guard_cell_key="low|L2_3|YES|nonmodal|qb2|coarse_global",
     )
     engine = FamilyDecisionEngine(

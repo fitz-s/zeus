@@ -104,6 +104,30 @@ def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_accepts_side_aware_oof_direction_license_for_yes():
+    parents, action = actionable_graph(
+        action_payload={
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.7,
+                "payoff_q_lcb": 0.6,
+                "cost": 0.4,
+                "edge_lcb": 0.2,
+                "optimal_delta_u": 0.01,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": False,
+                "q_lcb_guard_basis": "OOF_WILSON_95",
+                "q_lcb_guard_abstained": False,
+                "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
+                "coherence_allows": True,
+            },
+        }
+    )
+
+    verify_actionable_trade(action, parents)
+
+
 def test_actionable_rejects_execution_command_id_present():
     parents, action = actionable_graph(action_payload={"execution_command_id": "cmd-1"})
 

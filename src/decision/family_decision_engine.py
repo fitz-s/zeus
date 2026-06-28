@@ -498,7 +498,8 @@ def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
 
     * ``YES_i`` is structurally clean when ``i`` IS the forecast bin — buying the forecast
       bin, the ONE bin the predictive distribution most favors. A non-forecast YES is not
-      direction-law-clean and cannot be made live-selectable by q_lcb reliability evidence.
+      structurally direction-law-clean; it needs the later side-aware empirical OOF
+      admission license before it can become live-selectable.
     * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
       wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
 
@@ -765,9 +766,7 @@ class FamilyDecisionEngine:
         empirical_license_bins = frozenset(
             d.route.bin_id
             for d in guarded
-            if d.direction_law_ok
-            and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
-            and not d.q_lcb_guard_abstained
+            if self._has_side_aware_oof_direction_license(d)
             and d.economics.edge_lcb > 0.0
             and d.economics.optimal_delta_u > 0.0
         )
@@ -1016,15 +1015,22 @@ class FamilyDecisionEngine:
         )
 
     # ------------------------------------------------ portfolio comparison
+    def _has_side_aware_oof_direction_license(self, d: CandidateDecision) -> bool:
+        cell_key = str(d.q_lcb_guard_cell_key or "").strip()
+        side = str(d.route.side or "").strip().upper()
+        return (
+            side in {"YES", "NO"}
+            and d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
+            and not d.q_lcb_guard_abstained
+            and bool(cell_key)
+            and f"|{side}|" in cell_key
+        )
+
     def _direction_admitted(self, d: CandidateDecision) -> bool:
         if d.direction_law_ok:
             return True
-        if d.route.side != "NO":
-            return False
         return (
-            d.q_lcb_guard_basis in _OOF_LIVE_RELIABILITY_BASES
-            and not d.q_lcb_guard_abstained
-            and bool(d.q_lcb_guard_cell_key)
+            self._has_side_aware_oof_direction_license(d)
             and d.economics.edge_lcb > 0.0
             and d.economics.optimal_delta_u > 0.0
         )

@@ -1431,7 +1431,12 @@ def _qkernel_execution_direction_admitted(
     if qkernel_execution_economics.get("direction_law_ok") is True:
         return True
     side = str(qkernel_execution_economics.get("side") or "").upper()
-    if side != "NO" or str(direction or "") != "buy_no":
+    if side not in {"YES", "NO"}:
+        return False
+    native_side = "YES" if str(direction or "") == "buy_yes" else (
+        "NO" if str(direction or "") == "buy_no" else ""
+    )
+    if native_side and side != native_side:
         return False
     try:
         edge_lcb = float(qkernel_execution_economics.get("edge_lcb"))
@@ -1444,10 +1449,12 @@ def _qkernel_execution_direction_admitted(
         from src.decision.family_decision_engine import _OOF_LIVE_RELIABILITY_BASES
     except Exception:  # noqa: BLE001
         return False
+    cell_key = str(qkernel_execution_economics.get("q_lcb_guard_cell_key") or "").strip()
     return (
         str(qkernel_execution_economics.get("q_lcb_guard_basis") or "") in _OOF_LIVE_RELIABILITY_BASES
         and qkernel_execution_economics.get("q_lcb_guard_abstained") is not True
-        and bool(str(qkernel_execution_economics.get("q_lcb_guard_cell_key") or "").strip())
+        and bool(cell_key)
+        and f"|{side}|" in cell_key
     )
 
 

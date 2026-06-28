@@ -857,6 +857,9 @@ def _overlay_proof(
     missing_reason=None,
     direction_law_ok=True,
     coherence_allows=True,
+    q_lcb_guard_basis="OOF_WILSON_95",
+    q_lcb_guard_abstained=False,
+    q_lcb_guard_cell_key=None,
 ):
     """Build a real reactor ``_CandidateProof`` and overlay the given spine economics."""
     from dataclasses import replace
@@ -889,9 +892,13 @@ def _overlay_proof(
     selected_decision = SimpleNamespace(
         economics=economics,
         route=selected_route,
-        q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
-        q_lcb_guard_cell_key="cell",
+        q_lcb_guard_basis=q_lcb_guard_basis,
+        q_lcb_guard_abstained=q_lcb_guard_abstained,
+        q_lcb_guard_cell_key=(
+            q_lcb_guard_cell_key
+            if q_lcb_guard_cell_key is not None
+            else f"high|L2_3|{selected_route.side}|test|qb1|coarse_global"
+        ),
         direction_law_ok=direction_law_ok,
         coherence_allows=coherence_allows,
     )
@@ -948,8 +955,8 @@ def test_overlay_rejects_direct_route_probability_authority_split():
     )
 
 
-def test_overlay_rejects_qkernel_selected_yes_without_direction_admission():
-    """Lucknow-class regression: qkernel cannot revive a YES rejected by live admission."""
+def test_overlay_rejects_qkernel_selected_yes_without_oof_direction_admission():
+    """A non-native YES needs the same side-aware OOF direction license as selection."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
@@ -964,9 +971,34 @@ def test_overlay_rejects_qkernel_selected_yes_without_direction_admission():
             missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
             direction_law_ok=False,
             coherence_allows=True,
+            q_lcb_guard_abstained=True,
+            q_lcb_guard_cell_key="",
         )
         is None
     )
+
+
+def test_overlay_accepts_side_aware_oof_licensed_yes_direction_override():
+    """Shanghai-class guard: a valid YES OOF license must not be lost at the bridge."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
+    )
+
+    new_proof = _overlay_proof(
+        q_posterior=0.06,
+        q_lcb_5pct=0.06,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+        direction_law_ok=False,
+        coherence_allows=True,
+        q_lcb_guard_cell_key="high|L2_3|YES|nonmodal|qb2|coarse_global",
+    )
+
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.qkernel_execution_economics["direction_law_ok"] is False
 
 
 def test_overlay_rejects_nonfinite_qkernel_execution_economics():
@@ -1032,7 +1064,7 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
             "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
         },
         direction="buy_yes",
-    ) is None
+    ) is not None
     assert era._valid_qkernel_execution_economics_payload(
         {
             **cert,

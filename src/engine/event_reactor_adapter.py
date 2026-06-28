@@ -1961,7 +1961,10 @@ def _qkernel_cert_direction_admitted(
     if cert.get("direction_law_ok") is True:
         return True
     native_side = _native_curve_side_for_direction(str(direction or ""))
-    if native_side != "NO":
+    side = str(cert.get("side") or "").strip().upper()
+    if side not in {"YES", "NO"}:
+        return False
+    if native_side is not None and side != native_side:
         return False
     try:
         edge_lcb = float(cert.get("edge_lcb"))
@@ -1974,10 +1977,12 @@ def _qkernel_cert_direction_admitted(
         from src.decision.family_decision_engine import _OOF_LIVE_RELIABILITY_BASES
     except Exception:
         return False
+    cell_key = str(cert.get("q_lcb_guard_cell_key") or "").strip()
     return (
         str(cert.get("q_lcb_guard_basis") or "") in _OOF_LIVE_RELIABILITY_BASES
         and cert.get("q_lcb_guard_abstained") is not True
-        and bool(str(cert.get("q_lcb_guard_cell_key") or "").strip())
+        and bool(cell_key)
+        and f"|{side}|" in cell_key
     )
 
 
