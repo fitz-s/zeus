@@ -382,6 +382,38 @@ def _table_exists_in_schema(conn: sqlite3.Connection, schema: str, table: str) -
     return row is not None
 
 
+def _main_database_filename(conn: sqlite3.Connection) -> str:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ""
+    for row in rows:
+        try:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+        except (IndexError, KeyError, TypeError):
+            continue
+        if str(name or "").strip() == "main":
+            return os.path.basename(str(path or "").strip())
+    return ""
+
+
+def _attach_world_for_trade_certificate_read(conn: sqlite3.Connection) -> str | None:
+    """Expose the canonical world certificate ledger to trade-main connections."""
+
+    if "world" in _attached_schema_names(conn):
+        return None
+    if _main_database_filename(conn) != "zeus_trades.db":
+        return None
+    try:
+        from src.state.db import ZEUS_WORLD_DB_PATH
+
+        conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+    except sqlite3.Error as exc:
+        return str(exc)
+    return None
+
+
 def _entry_control_pause_component(conn: sqlite3.Connection) -> dict:
     """Read the single durable entries-paused authority at the submit boundary.
 
@@ -812,6 +844,7 @@ def _entry_actionable_certificate_component(
             reason="actionable_certificate_quarantined",
             certificate_hash=certificate_hash,
         )
+    attach_error = _attach_world_for_trade_certificate_read(conn)
     matching_schema = ""
     payload_json: str | None = None
     table_seen = False
@@ -849,6 +882,14 @@ def _entry_actionable_certificate_component(
                 payload_json = None
             break
     if not table_seen:
+        if attach_error:
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="decision_certificate_world_attach_failed",
+                certificate_hash=certificate_hash,
+                error=attach_error,
+            )
         return _capability_component(
             "entry_actionable_certificate",
             allowed=False,
@@ -856,6 +897,14 @@ def _entry_actionable_certificate_component(
             certificate_hash=certificate_hash,
         )
     if not matching_schema:
+        if attach_error:
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="decision_certificate_world_attach_failed",
+                certificate_hash=certificate_hash,
+                error=attach_error,
+            )
         return _capability_component(
             "entry_actionable_certificate",
             allowed=False,

@@ -2,6 +2,7 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
+from src.state import db as state_db
 from src.execution.executor import _entry_actionable_certificate_component
 from src.state.decision_integrity_quarantine import (
     DECISION_CERTIFICATES_TABLE,
@@ -111,6 +112,65 @@ def test_entry_actionable_certificate_guard_allows_persisted_live_verified_row()
         ) VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)
         """,
         ("h1", json.dumps(_valid_actionable_payload())),
+    )
+    intent = SimpleNamespace(actionable_certificate_hash="h1")
+
+    component = _entry_actionable_certificate_component(conn, intent)
+
+    assert component["allowed"] is True
+    assert component["details"]["certificate_schema"] == "world"
+
+
+def test_entry_actionable_certificate_guard_attaches_world_from_trade_main(
+    tmp_path,
+    monkeypatch,
+):
+    world_path = tmp_path / "zeus-world.db"
+    trade_path = tmp_path / "zeus_trades.db"
+    world_conn = sqlite3.connect(world_path)
+    world_conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    world_conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_hash, certificate_type, mode, verifier_status, payload_json
+        ) VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)
+        """,
+        ("h1", json.dumps(_valid_actionable_payload())),
+    )
+    world_conn.commit()
+    world_conn.close()
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+    conn = sqlite3.connect(trade_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE decision_integrity_quarantine (
+            table_name TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            reason_code TEXT NOT NULL
+        )
+        """
     )
     intent = SimpleNamespace(actionable_certificate_hash="h1")
 
