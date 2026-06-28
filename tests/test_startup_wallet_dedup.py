@@ -36,7 +36,7 @@ The two other jobs of the gate are independently asserted:
   (4) the clob= test-injection path stays entirely independent of current().
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -52,9 +52,11 @@ def _reset_ledger_global():
     (The conftest autouse fixture already resets bankroll_provider's cache and
     stubs current(); we add the ledger-global reset on top.)
     """
+    bankroll_provider.reset_cache_for_tests()
     collateral_ledger.configure_global_ledger(None)
     yield
     collateral_ledger.configure_global_ledger(None)
+    bankroll_provider.reset_cache_for_tests()
 
 
 def _record(value=123.45):
@@ -65,6 +67,30 @@ def _record(value=123.45):
         authority="canonical",
         staleness_seconds=0.0,
         cached=True,  # warm cache hit — Site A already fetched
+    )
+
+
+def _install_trade_db_snapshot(*, value_usd: float, age_seconds: float = 0.0):
+    """Write a CHAIN collateral snapshot into the patched trade DB path.
+
+    _startup_wallet_check installs a new path-backed CollateralLedger, so this
+    test has to persist the snapshot instead of configuring an in-memory global.
+    """
+    from src.state import db as state_db
+
+    ledger = collateral_ledger.CollateralLedger(db_path=state_db._zeus_trade_db_path())
+    ledger.set_snapshot(
+        collateral_ledger.CollateralSnapshot(
+            pusd_balance_micro=int(value_usd * 1_000_000),
+            pusd_allowance_micro=int(value_usd * 1_000_000),
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+            authority_tier="CHAIN",
+        )
     )
 
 
@@ -126,6 +152,24 @@ def test_submit_fail_closed_but_daemon_continues_when_current_returns_none(monke
     main_mod._startup_wallet_check(clob=None)
     assert counter.calls == 1, "fail-closed path must still consult current()"
     assert bankroll_provider.cached() is None
+
+
+def test_current_none_warms_from_fresh_collateral_snapshot(monkeypatch):
+    """BOOT RECOVERY: wallet current() may be unavailable while the capital
+    sidecar has already persisted a fresh CHAIN snapshot. Startup must consume
+    that durable truth immediately, before boot recovery/allocator refresh runs.
+    """
+    _install_trade_db_snapshot(value_usd=1098.62)
+    counter = _CurrentCounter(returns_none=True)
+    monkeypatch.setattr(bankroll_provider, "current", counter)
+
+    main_mod._startup_wallet_check(clob=None)
+
+    assert counter.calls == 1, "startup still tries the bankroll provider first"
+    record = bankroll_provider.cached()
+    assert record is not None
+    assert record.value_usd == 1098.62
+    assert record.source == "collateral_ledger_snapshot"
 
 
 def test_injected_clob_does_not_touch_bankroll_provider(monkeypatch):

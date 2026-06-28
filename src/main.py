@@ -4700,6 +4700,7 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
     bankroll_provider.cached() and already fail closed when it is unavailable.
     """
     balance = None
+    bankroll_unavailable_detail: str | None = None
     if clob is not None:
         # TEST-INJECTION PATH: an explicit clob was supplied. Use it directly
         # and keep the same fail-closed semantics. Production never reaches here.
@@ -4739,16 +4740,13 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
                 rec = bankroll_record
         except Exception as exc:
             rec = None
-            logger.critical(
-                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider.current() raised; "
-                "continuing monitor/redecision while new submit remains fail-closed: %s",
-                exc,
+            bankroll_unavailable_detail = (
+                f"bankroll_provider.current() raised: {exc}"
             )
         if rec is None:
-            logger.critical(
-                "STARTUP_WALLET_UNAVAILABLE: bankroll_provider returned None at daemon "
-                "start; continuing monitor/redecision while new submit remains "
-                "fail-closed until a later bankroll warm succeeds."
+            bankroll_unavailable_detail = (
+                bankroll_unavailable_detail
+                or "bankroll_provider returned None at daemon start"
             )
         else:
             balance = rec.value_usd
@@ -4781,6 +4779,36 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
             "CollateralLedger global singleton install failed (preflight will fail-closed): %s",
             exc,
         )
+
+    if clob is None and balance is None:
+        try:
+            warm_rec = bankroll_provider.warm_from_collateral_snapshot()
+        except Exception as exc:
+            warm_rec = None
+            logger.warning(
+                "Startup collateral snapshot bankroll warm failed "
+                "(submit remains fail-closed until a later warm succeeds): %s",
+                exc,
+            )
+        if warm_rec is not None:
+            balance = warm_rec.value_usd
+            logger.info(
+                "Startup wallet check: $%.2f pUSD available "
+                "(source=%s cached=%s staleness=%.1fs)",
+                balance,
+                warm_rec.source,
+                warm_rec.cached,
+                warm_rec.staleness_seconds,
+            )
+        else:
+            logger.critical(
+                "STARTUP_WALLET_UNAVAILABLE: %s; no fresh collateral ledger "
+                "snapshot was available at daemon start. Continuing "
+                "monitor/redecision while new submit remains fail-closed until "
+                "a later bankroll warm succeeds.",
+                bankroll_unavailable_detail
+                or "wallet query failed before bankroll cache was populated",
+            )
 
 
 def _startup_data_health_check(conn):
@@ -6132,11 +6160,11 @@ def _emit_terminal_no_fill_redecision_continuations(
             event_type=REDECISION_EVENT_TYPE,
             restrict_to_families=families,
         )
-        emitted = EventWriter(world).write_many(
+        write_results = EventWriter(world).write_many(
             [_redecision_event_with_origin(event, "terminal_no_fill") for event in events]
         )
         world.commit()
-        return int(emitted)
+        return sum(1 for result in write_results if result.inserted)
     finally:
         emit_mutex.release()
         try:

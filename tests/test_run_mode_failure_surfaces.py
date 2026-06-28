@@ -1053,3 +1053,88 @@ def test_boot_auto_resolution_continuation_is_emitted_before_first_tick(monkeypa
     assert forecasts_ro.closed is True
     assert clear_calls == [families]
     assert emitted_calls == [families]
+
+
+def test_terminal_no_fill_redecision_counts_write_many_results(monkeypatch) -> None:
+    """EventWriter.write_many returns EventWriteResult rows, not an int.
+
+    The boot/periodic no-fill continuation bridge must count inserted results
+    instead of raising TypeError("int() ... not 'list'"), otherwise cancel/no-fill
+    recovery releases a family lock but fails to requeue the family for
+    redecision.
+    """
+    from types import SimpleNamespace
+
+    import src.events.event_writer as event_writer_mod
+    import src.events.triggers.forecast_snapshot_ready as trigger_mod
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        committed = False
+        closed = False
+
+        def commit(self) -> None:
+            self.committed = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeMutex:
+        acquired = False
+        released = False
+
+        def acquire(self) -> None:
+            self.acquired = True
+
+        def release(self) -> None:
+            self.released = True
+
+    world = FakeConn()
+    forecasts = FakeConn()
+    mutex = FakeMutex()
+
+    class FakeWriter:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def write_many(self, events):
+            assert len(events) == 2
+            return [
+                SimpleNamespace(inserted=True),
+                SimpleNamespace(inserted=False),
+            ]
+
+    class FakeTrigger:
+        def __init__(self, writer, *, live_eligibility_reader):
+            self.writer = writer
+            self.live_eligibility_reader = live_eligibility_reader
+
+        def build_committed_snapshot_events(self, **kwargs):
+            assert kwargs["restrict_to_families"] == {("Paris", "2026-06-20", "low")}
+            return [object(), object()]
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: world)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts)
+    monkeypatch.setattr(state_db, "world_write_mutex", lambda: mutex)
+    monkeypatch.setattr(
+        trigger_mod,
+        "executable_forecast_live_eligible_reader",
+        lambda conn: "reader",
+    )
+    monkeypatch.setattr(trigger_mod, "ForecastSnapshotReadyTrigger", FakeTrigger)
+    monkeypatch.setattr(event_writer_mod, "EventWriter", FakeWriter)
+    monkeypatch.setattr(main_module, "_redecision_event_with_origin", lambda event, origin: event)
+
+    emitted = main_module._emit_terminal_no_fill_redecision_continuations(
+        {("Paris", "2026-06-20", "low")},
+        decision_time=main_module.datetime.now(main_module.timezone.utc),
+        received_at=main_module.datetime.now(main_module.timezone.utc).isoformat(),
+    )
+
+    assert emitted == 1
+    assert world.committed is True
+    assert world.closed is True
+    assert forecasts.closed is True
+    assert mutex.acquired is True
+    assert mutex.released is True
