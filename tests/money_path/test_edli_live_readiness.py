@@ -328,6 +328,30 @@ def test_live_order_build_savepoint_retries_sqlite_lock_after_rollback(monkeypat
     assert [row[0] for row in conn.execute("SELECT value FROM writes")] == ["committed"]
 
 
+def test_live_order_build_savepoint_scopes_busy_timeout(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA busy_timeout = 1234")
+    conn.execute("CREATE TABLE writes (value TEXT)")
+    observed = {}
+    monkeypatch.setenv("ZEUS_LIVE_ORDER_BUILD_BUSY_TIMEOUT_MS", "8000")
+    monkeypatch.setenv("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(adapter._time, "sleep", lambda _delay: None)
+
+    def _build():
+        observed["inside"] = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        conn.execute("INSERT INTO writes(value) VALUES ('committed')")
+        return ("command-cert",)
+
+    result = adapter._run_live_order_build_savepoint(conn, _build)
+
+    assert result == ("command-cert",)
+    assert observed == {"inside": 8000}
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 1234
+    assert [row[0] for row in conn.execute("SELECT value FROM writes")] == ["committed"]
+
+
 def test_live_order_build_savepoint_does_not_retry_non_lock_operational_error(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
 

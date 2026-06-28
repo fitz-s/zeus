@@ -3195,29 +3195,36 @@ def _run_live_order_build_savepoint(
     build: Callable[[], tuple[DecisionCertificate, ...]],
 ) -> tuple[DecisionCertificate, ...]:
     retry_delays = _live_order_build_lock_retry_delays()
-    for attempt in range(1, len(retry_delays) + 2):
-        conn.execute("SAVEPOINT edli_live_order_build")
-        try:
-            result = build()
-        except sqlite3.OperationalError as exc:
-            _rollback_release_live_order_build_savepoint(conn)
-            if not _is_sqlite_lock_error(exc) or attempt > len(retry_delays):
+    saved_busy_timeout_ms = _sqlite_busy_timeout_ms(conn)
+    build_busy_timeout_ms = _live_order_build_busy_timeout_ms()
+    try:
+        _set_sqlite_busy_timeout_ms(conn, build_busy_timeout_ms)
+        for attempt in range(1, len(retry_delays) + 2):
+            conn.execute("SAVEPOINT edli_live_order_build")
+            try:
+                result = build()
+            except sqlite3.OperationalError as exc:
+                _rollback_release_live_order_build_savepoint(conn)
+                if not _is_sqlite_lock_error(exc) or attempt > len(retry_delays):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "live order certificate build hit sqlite lock; rolled back savepoint "
+                    "and retrying in %.1fs (attempt %d/%d, busy_timeout_ms=%d): %s",
+                    retry_delays[attempt - 1],
+                    attempt,
+                    len(retry_delays) + 1,
+                    build_busy_timeout_ms,
+                    exc,
+                )
+                _time.sleep(retry_delays[attempt - 1])
+                continue
+            except Exception:
+                _rollback_release_live_order_build_savepoint(conn)
                 raise
-            logging.getLogger(__name__).warning(
-                "live order certificate build hit sqlite lock; rolled back savepoint "
-                "and retrying in %.1fs (attempt %d/%d): %s",
-                retry_delays[attempt - 1],
-                attempt,
-                len(retry_delays) + 1,
-                exc,
-            )
-            _time.sleep(retry_delays[attempt - 1])
-            continue
-        except Exception:
-            _rollback_release_live_order_build_savepoint(conn)
-            raise
-        conn.execute("RELEASE SAVEPOINT edli_live_order_build")
-        return result
+            conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+            return result
+    finally:
+        _set_sqlite_busy_timeout_ms(conn, saved_busy_timeout_ms)
     raise RuntimeError("unreachable live order build retry state")
 
 
@@ -3254,8 +3261,31 @@ def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
     )
 
 
+def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int | None:
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+        return int(row[0]) if row is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _set_sqlite_busy_timeout_ms(conn: sqlite3.Connection, value: int | None) -> None:
+    if value is None:
+        return
+    conn.execute("PRAGMA busy_timeout = %d" % max(1, int(value)))
+
+
+def _live_order_build_busy_timeout_ms() -> int:
+    raw = os.environ.get("ZEUS_LIVE_ORDER_BUILD_BUSY_TIMEOUT_MS", "8000")
+    try:
+        timeout_ms = int(float(raw))
+    except (TypeError, ValueError):
+        timeout_ms = 8000
+    return max(250, min(timeout_ms, 20000))
+
+
 def _live_order_build_lock_retry_delays() -> tuple[float, ...]:
-    raw = os.environ.get("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.5,1.5")
+    raw = os.environ.get("ZEUS_LIVE_ORDER_BUILD_LOCK_RETRY_SECONDS", "0.25,0.75,1.5")
     delays: list[float] = []
     for item in raw.split(","):
         item = item.strip()
