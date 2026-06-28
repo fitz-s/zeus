@@ -2924,6 +2924,42 @@ class TestRecoveryResolutionTable:
             }
         ]
 
+    def test_terminal_no_fill_continuation_uses_snapshot_family_without_market_events(
+        self,
+        conn,
+        mock_client,
+    ):
+        conn.execute("DROP TABLE IF EXISTS market_events")
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            event_slug="highest-temperature-in-boston-on-june-23-2026",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        summary = reconcile_terminal_order_facts(conn, collect_continuations=True)
+
+        assert summary["advanced"] == 1
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-001",
+                "condition_id": "condition-test",
+                "token_id": "tok-001-no",
+                "city": "Boston",
+                "target_date": "2026-06-23",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "venue_terminal_no_fill",
+            }
+        ]
+
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
         conn,

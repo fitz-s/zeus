@@ -1362,6 +1362,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
             snap.no_token_id AS snapshot_no_token_id,
             snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id,
             snap.outcome_label AS snapshot_outcome_label,
+            snap.event_slug AS snapshot_event_slug,
             pc.city AS position_city,
             pc.target_date AS position_target_date,
             pc.temperature_metric AS position_temperature_metric
@@ -5547,6 +5548,14 @@ def _terminal_no_fill_continuation_from_row(row: dict) -> dict:
         or row.get("metric")
         or ""
     )
+    if not (city and target_date and metric in {"high", "low"}):
+        weather_identity = _weather_identity_from_snapshot_slug(row)
+        city = city or str(weather_identity.get("city") or "").strip()
+        target_date = target_date or str(weather_identity.get("target_date") or "").strip()
+        if metric not in {"high", "low"}:
+            metric = _canonical_temperature_metric_text(
+                weather_identity.get("temperature_metric") or ""
+            )
     if city and target_date and metric in {"high", "low"}:
         continuation.update(
             {
