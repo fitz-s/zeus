@@ -822,6 +822,119 @@ def test_stale_admitted_redecision_pending_is_superseded_for_fresh_screen():
     )
 
 
+def test_fresh_screen_supersedes_admitted_redecision_after_short_grace():
+    """A fresh screen should replace an admitted blocker once the short claim window passes."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    stale = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Istanbul|2026-06-29|high|run-stale",
+        source="cycle-stale",
+        observed_at="2026-06-28T10:00:00+00:00",
+        available_at="2026-06-28T10:00:00+00:00",
+        received_at="2026-06-28T10:00:00+00:00",
+        causal_snapshot_id="snap-stale",
+        payload=_ready_payload(
+            city="Istanbul",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-stale",
+            snapshot_id="snap-stale",
+        ),
+        priority=50,
+        created_at="2026-06-28T10:00:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+
+    admitted = {("Istanbul", "2026-06-29", "high")}
+    too_soon = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-28T10:01:14+00:00",
+        supersede_stale_admitted=True,
+    )
+    assert too_soon == 0
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        admitted,
+        decision_time="2026-06-28T10:01:16+00:00",
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        """
+        SELECT p.processing_status, p.last_error
+          FROM opportunity_events e
+          JOIN opportunity_event_processing p ON p.event_id = e.event_id
+         WHERE e.entity_key = ?
+        """,
+        (stale.entity_key,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
+    )
+
+
+def test_fresh_screen_supersedes_stale_processing_redecision_after_short_grace():
+    """A stale reactor claim must not block a fresh family screen indefinitely."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    decision_time = datetime(2026, 6, 28, 10, 2, tzinfo=timezone.utc)
+    processing = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Istanbul|2026-06-29|high|run-processing",
+        source="cycle-processing",
+        observed_at="2026-06-28T10:00:00+00:00",
+        available_at="2026-06-28T10:00:00+00:00",
+        received_at="2026-06-28T10:00:00+00:00",
+        causal_snapshot_id="snap-processing",
+        payload=_ready_payload(
+            city="Istanbul",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-processing",
+            snapshot_id="snap-processing",
+        ),
+        priority=50,
+        created_at="2026-06-28T10:00:00+00:00",
+    )
+    store.insert_or_ignore(processing)
+    assert store.claim(
+        processing.event_id,
+        claimed_at=(decision_time - timedelta(seconds=76)).isoformat(),
+    )
+
+    expired = main._edli_expire_unadmitted_redecision_pending(
+        world,
+        {("Istanbul", "2026-06-29", "high")},
+        decision_time=decision_time.isoformat(),
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (processing.event_id,),
+    ).fetchone()
+    assert expired == 1
+    assert tuple(row) == (
+        "expired",
+        "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed",
+    )
+
+
 def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
     """Cancel/reprice continuity must survive after the rest leaves the open-rest set."""
 
@@ -1683,6 +1796,18 @@ def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
 
     src = inspect.getsource(main._edli_event_reactor_cycle)
     assert src.index("_edli_prune_pending_working_set(") < src.index("_edli_pending_entity_keys(")
+
+
+def test_redecision_screen_opens_pending_snapshot_after_expiry_commit():
+    """The screen must not snapshot pending keys from a connection opened before expiry."""
+
+    src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
+    assert src.index("world_prune.commit()") < src.index(
+        "world_scan_ro = get_world_connection_read_only()"
+    )
+    assert src.index("world_scan_ro = get_world_connection_read_only()") < src.index(
+        "_edli_pending_entity_keys(world_scan_ro"
+    )
 
 
 def test_reactor_prune_archives_orphan_processing_rows():

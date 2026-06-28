@@ -1573,6 +1573,8 @@ COLLATERAL_HEARTBEAT_REFRESH_SECONDS = 30.0
 # under the lock-held job; no cross-thread contention beyond the advisory acquire.
 _edli_redecision_screen_lock = threading.Lock()
 _REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS = 20 * 60
+_REDECISION_PENDING_EXPIRY_GRACE_SECONDS = 300
+_REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS = 75
 _edli_redecision_acted_state: dict = {}
 
 
@@ -7042,8 +7044,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         )
         from src.state.db import world_write_mutex as _world_write_mutex
 
-        world_scan_ro = get_world_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
+        world_scan_ro = None
         try:
             world_prune = get_world_connection()
             prune_mutex = _world_write_mutex()
@@ -7069,6 +7071,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     world_prune.close()
                 except Exception:  # noqa: BLE001
                     pass
+            world_scan_ro = get_world_connection_read_only()
             pending = _edli_pending_entity_keys(world_scan_ro, event_types=(REDECISION_EVENT_TYPE,))
             pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
             emit_families = set(all_families) - pending_families
@@ -7095,10 +7098,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 forecasts_ro.close()
             except Exception:  # noqa: BLE001
                 pass
-            try:
-                world_scan_ro.close()
-            except Exception:  # noqa: BLE001
-                pass
+            if world_scan_ro is not None:
+                try:
+                    world_scan_ro.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         world = get_world_connection()
         emit_mutex = _world_write_mutex()
@@ -8261,6 +8265,7 @@ def _edli_expire_unadmitted_redecision_pending(
     *,
     decision_time: str,
     supersede_stale_admitted: bool = False,
+    claim_grace_seconds: float | None = None,
 ) -> int:
     """Expire redecision rows no longer backed by entry edge or rest reprice value.
 
@@ -8278,8 +8283,19 @@ def _edli_expire_unadmitted_redecision_pending(
         if decision_dt.tzinfo is None:
             decision_dt = decision_dt.replace(tzinfo=timezone.utc)
         decision_dt = decision_dt.astimezone(timezone.utc)
-        stale_processing_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
-        pending_admission_cutoff = (decision_dt - timedelta(seconds=300)).isoformat()
+        if claim_grace_seconds is None:
+            claim_grace_seconds = (
+                _REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS
+                if supersede_stale_admitted
+                else _REDECISION_PENDING_EXPIRY_GRACE_SECONDS
+            )
+        claim_grace_seconds = max(0.0, float(claim_grace_seconds))
+        stale_processing_cutoff = (
+            decision_dt - timedelta(seconds=claim_grace_seconds)
+        ).isoformat()
+        pending_admission_cutoff = (
+            decision_dt - timedelta(seconds=claim_grace_seconds)
+        ).isoformat()
     except Exception:  # noqa: BLE001
         decision_dt = datetime.now(timezone.utc)
         stale_processing_cutoff = ""
