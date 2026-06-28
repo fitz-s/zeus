@@ -40,7 +40,7 @@ import sqlite3
 import time
 from dataclasses import replace
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
@@ -7182,6 +7182,13 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
     sql = "WITH " + _canonical_order_truth_cte() + f"""
         SELECT
             cmd.*,
+            pc.phase AS position_phase,
+            pc.city AS position_city,
+            pc.target_date AS position_target_date,
+            pc.temperature_metric AS position_temperature_metric,
+            pc.strategy_key AS position_strategy_key,
+            pc.chain_shares AS position_chain_shares,
+            pc.shares AS position_shares,
             fact.fact_id AS order_fact_id,
             fact.state AS order_fact_state,
             fact.observed_at AS order_fact_observed_at,
@@ -7194,12 +7201,22 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
             ON fact.command_id = cmd.command_id
           JOIN position_current pc
             ON pc.position_id = cmd.position_id
-         WHERE cmd.intent_kind = 'ENTRY'
+         WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state IN ({state_placeholders})
            AND COALESCE(cmd.venue_order_id, '') != ''
-           AND pc.phase = 'pending_entry'
-           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+           AND (
+                (
+                    cmd.intent_kind = 'ENTRY'
+                    AND pc.phase = 'pending_entry'
+                    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+                    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                )
+                OR (
+                    cmd.intent_kind = 'EXIT'
+                    AND pc.phase = 'pending_exit'
+                    AND CAST(COALESCE(pc.chain_shares, pc.shares, '0') AS REAL) > 0
+                )
+           )
            AND fact.state IN ('LIVE', 'RESTING')
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
          ORDER BY cmd.updated_at, cmd.command_id
@@ -7209,6 +7226,116 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
         command_states,
     ).fetchall()
     return [_dict_row(row) for row in rows]
+
+
+def _phase_after_terminal_exit_no_fill(command: Mapping[str, object], *, observed_at: str) -> str:
+    city = str(command.get("position_city") or "").strip()
+    target_date = str(command.get("position_target_date") or "").strip()
+    try:
+        from src.config import runtime_cities_by_name
+        from src.strategy.market_phase import settlement_day_entry_utc
+
+        city_cfg = runtime_cities_by_name().get(city)
+        tz_name = str(getattr(city_cfg, "timezone", "") or "")
+        as_of = _parse_utc(observed_at)
+        day0_start = settlement_day_entry_utc(
+            target_local_date=date.fromisoformat(target_date),
+            city_timezone=tz_name,
+        )
+        return "day0_window" if as_of >= day0_start else "active"
+    except Exception:
+        return "day0_window"
+
+
+def _release_pending_exit_after_terminal_no_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    observed_at: str,
+    order_fact_id: int,
+    terminal_payload: Mapping[str, object],
+) -> bool:
+    if str(command.get("intent_kind") or "").upper() != "EXIT":
+        return False
+    position_id = str(command.get("position_id") or "").strip()
+    command_id = str(command.get("command_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    if not position_id or not command_id:
+        return False
+    current = conn.execute(
+        """
+        SELECT phase, strategy_key
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if current is None or str(current[0] or "") != "pending_exit":
+        return False
+    phase_after = _phase_after_terminal_exit_no_fill(command, observed_at=observed_at)
+    event_key = f"{position_id}:exit_terminal_no_fill:{command_id}"
+    existing = conn.execute(
+        "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
+        (event_key,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = ?,
+               order_id = NULL,
+               order_status = 'filled',
+               exit_reason = 'EXIT_ORDER_TERMINAL_NO_FILL_RELEASED',
+               updated_at = ?
+         WHERE position_id = ?
+           AND phase = 'pending_exit'
+        """,
+        (phase_after, observed_at, position_id),
+    )
+    if existing is not None:
+        return True
+    seq = _latest_position_sequence(conn, position_id) + 1
+    payload = {
+        "reason": "exit_order_terminal_no_fill_released_pending_exit",
+        "proof_class": "exit_point_order_terminal_no_fill_plus_open_trade_absence",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "venue_command_state": command.get("state"),
+        "venue_order_fact_id": order_fact_id,
+        "phase_before": "pending_exit",
+        "phase_after": phase_after,
+        "terminal_order_fact": dict(terminal_payload),
+    }
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_VOIDED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_key,
+            position_id,
+            seq,
+            observed_at,
+            "pending_exit",
+            phase_after,
+            str(command.get("position_strategy_key") or current[1] or "opening_inertia"),
+            str(command.get("decision_id") or ""),
+            str(command.get("snapshot_id") or ""),
+            venue_order_id,
+            command_id,
+            f"venue_command:{command_id}",
+            event_key,
+            "TERMINAL_NO_FILL",
+            "src.execution.command_recovery",
+            json.dumps(payload, sort_keys=True, default=str),
+            _latest_position_env(conn, position_id),
+        ),
+    )
+    return True
 
 
 def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
@@ -7266,16 +7393,37 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
             if matching_open_orders or matching_trades:
                 summary["stayed"] += 1
                 continue
-            _append_point_order_terminal_no_fill_fact(
+            observed_at = _now_iso()
+            order_fact_id, terminal_payload = _append_point_order_terminal_no_fill_fact(
                 conn,
                 command=row,
-                observed_at=_now_iso(),
+                observed_at=observed_at,
                 venue_status=venue_status,
                 point_order=point_order,
                 matching_open_orders=matching_open_orders,
                 matching_trades=matching_trades,
                 source_reason="acked_point_order_terminal_no_fill",
             )
+            if str(row.get("intent_kind") or "").upper() == "EXIT":
+                append_event(
+                    conn,
+                    command_id=command_id,
+                    event_type=CommandEventType.EXPIRED.value,
+                    occurred_at=observed_at,
+                    payload={
+                        "reason": "exit_point_order_terminal_no_fill",
+                        "venue_order_id": venue_order_id,
+                        "order_fact_id": order_fact_id,
+                        "proof_class": "exit_terminal_no_fill_recovery",
+                    },
+                )
+                _release_pending_exit_after_terminal_no_fill(
+                    conn,
+                    command=row,
+                    observed_at=observed_at,
+                    order_fact_id=order_fact_id,
+                    terminal_payload=terminal_payload,
+                )
             summary["advanced"] += 1
         except Exception as exc:
             logger.error(

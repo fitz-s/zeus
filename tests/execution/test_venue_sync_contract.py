@@ -759,6 +759,123 @@ def test_live_tick_scope_clears_terminal_point_order_zero_fill_pending_entry(mon
         check.close()
 
 
+def test_live_tick_scope_releases_terminal_point_order_zero_fill_pending_exit(monkeypatch, tmp_path):
+    """A terminal no-fill EXIT order must not strand a held position in pending_exit."""
+
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "recovery-live-tick-terminal-exit.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-entry", position_id="pos-001")
+    h._advance_to_acked(seed_conn, command_id="cmd-entry", venue_order_id="vord-entry")
+    h._seed_pending_entry_projection(
+        seed_conn,
+        command_id="cmd-entry",
+        order_id="vord-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase='pending_exit',
+               shares=10.0,
+               cost_basis_usd=5.0,
+               chain_shares=10.0,
+               chain_state='synced',
+               order_id='vord-exit',
+               order_status='sell_pending_confirmation',
+               target_date='2026-05-17',
+               updated_at='2026-05-18T00:00:00+00:00'
+         WHERE position_id='pos-001'
+        """
+    )
+    h._insert(
+        seed_conn,
+        command_id="cmd-exit",
+        position_id="pos-001",
+        intent_kind="EXIT",
+        side="SELL",
+    )
+    h._advance_to_acked(seed_conn, command_id="cmd-exit", venue_order_id="vord-exit")
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-exit",
+        order_id="vord-exit",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10",
+        source="REST",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={
+            "vord-exit": {
+                "orderID": "vord-exit",
+                "status": "CANCELED",
+                "original_size": "10",
+                "size_matched": "0",
+            }
+        },
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["terminal_point_orders"]["advanced"] == 1
+    for method, open_ids, open_labels in recorder.client_calls:
+        assert not open_ids, (
+            f"venue call {method} occurred while DB connections were open: {open_labels}"
+        )
+
+    check = sqlite3.connect(str(db_path))
+    check.row_factory = sqlite3.Row
+    try:
+        current = check.execute(
+            "SELECT phase, order_status, order_id, exit_reason "
+            "FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "order_status": "filled",
+            "order_id": None,
+            "exit_reason": "EXIT_ORDER_TERMINAL_NO_FILL_RELEASED",
+        }
+        command = check.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd-exit'"
+        ).fetchone()
+        assert command["state"] == "EXPIRED"
+        event = check.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, order_id
+              FROM position_events
+             WHERE position_id='pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(event) == {
+            "event_type": "EXIT_ORDER_VOIDED",
+            "phase_before": "pending_exit",
+            "phase_after": "day0_window",
+            "command_id": "cmd-exit",
+            "order_id": "vord-exit",
+        }
+    finally:
+        check.close()
+
+
 def test_no_connection_spans_more_than_one_pass(monkeypatch, tmp_path):
     """R2: every connection's open..close window contains at most one sub-pass.
 
