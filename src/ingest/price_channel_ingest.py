@@ -87,6 +87,7 @@ _edli_market_channel_thread: "threading.Thread | None" = None
 # process — the two processes write the snapshot table via the same single-writer
 # discipline, and the lock is per-process by construction.)
 _market_substrate_refresh_lock = threading.Lock()
+_rest_quote_seed_refresh_lock = threading.Lock()
 
 # Live-execution-mode constants (kept aligned with src/main.py) — needed by the
 # reconcile-runtime gate. Kept LOCAL here so the lane module never imports src.main.
@@ -163,6 +164,46 @@ def _edli_price_channel_trade_write_context_factory(*, owner: str):
         )
 
     return _factory
+
+
+def _rest_quote_refresh_backpressure_result(
+    *,
+    kind: str,
+    started_monotonic: float,
+    budget: float,
+    token_ids: int,
+    token_metadata: int,
+    attempted_tokens: int,
+    extra: dict | None = None,
+) -> dict:
+    elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+    result = {
+        f"{kind}_quote_refresh_events": 0,
+        f"{kind}_quote_refresh_attempted_tokens": 0,
+        "budget_seconds": budget,
+        "elapsed_seconds": elapsed_seconds,
+        "budget_exhausted": False,
+        "budget_skipped_tokens": max(0, int(attempted_tokens)),
+        "skipped": "price_channel_rest_quote_refresh_in_progress",
+        "backpressure": True,
+    }
+    if kind == "held":
+        result.update(
+            {
+                "held_priority_token_ids": int(token_ids),
+                "held_token_metadata": int(token_metadata),
+            }
+        )
+    else:
+        result.update(
+            {
+                "candidate_priority_token_ids": int(token_ids),
+                "candidate_token_metadata": int(token_metadata),
+            }
+        )
+    if extra:
+        result.update(extra)
+    return result
 
 
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
@@ -2173,13 +2214,26 @@ def _edli_refresh_held_position_quote_evidence(
         token_id for token_id in ordered_held_token_ids if token_id in token_metadata
     ]
 
+    rest_seed_acquired = _rest_quote_seed_refresh_lock.acquire(blocking=False)
+    if not rest_seed_acquired:
+        return _rest_quote_refresh_backpressure_result(
+            kind="held",
+            started_monotonic=started_monotonic,
+            budget=budget,
+            token_ids=len(held_token_ids),
+            token_metadata=len(token_metadata),
+            attempted_tokens=len(ordered_metadata_tokens),
+        )
+
     # The single ATTACHed connection preserves one world-event + trades.feasibility
     # commit path. Do not use the flocked context here: REST book
     # fetches happen inside seed_rest_books_in_chunks before each DB chunk write,
     # and holding cross-process trade/world writer flocks across those network
     # calls starves live redecision's executable snapshot refresh.
-    conn = get_world_connection_with_trades_required(write_class="live")
+    conn = None
     try:
+        conn = get_world_connection_with_trades_required(write_class="live")
+
         def _commit_atomic_cross_db() -> None:
             conn.commit()
 
@@ -2219,7 +2273,11 @@ def _edli_refresh_held_position_quote_evidence(
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
     finally:
-        conn.close()
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            _rest_quote_seed_refresh_lock.release()
 
 
 def _edli_refresh_candidate_priority_quote_evidence(
@@ -2299,8 +2357,28 @@ def _edli_refresh_candidate_priority_quote_evidence(
     # Same lock discipline as held-position refresh: one world-main connection
     # with trades attached, but no cross-process writer flock held across REST
     # fetches. Each seed chunk still commits on this single attached connection.
-    conn = get_world_connection_with_trades_required(write_class="live")
+    ordered_metadata_tokens = [
+        token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
+    ]
+    rest_seed_acquired = _rest_quote_seed_refresh_lock.acquire(blocking=False)
+    if not rest_seed_acquired:
+        return _rest_quote_refresh_backpressure_result(
+            kind="candidate",
+            started_monotonic=started_monotonic,
+            budget=budget,
+            token_ids=len(candidate_token_ids),
+            token_metadata=len(token_metadata),
+            attempted_tokens=len(ordered_metadata_tokens),
+            extra={
+                "open_rest_priority_token_ids": len(open_rest_token_ids),
+                "quote_priority_token_ids": len(priority_token_ids),
+            },
+        )
+
+    conn = None
     try:
+        conn = get_world_connection_with_trades_required(write_class="live")
+
         def _commit_atomic_cross_db() -> None:
             conn.commit()
 
@@ -2318,9 +2396,6 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 fetch_orderbook=clob.get_orderbook_snapshot,
                 fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
             )
-            ordered_metadata_tokens = [
-                token_id for token_id in ordered_candidate_token_ids if token_id in token_metadata
-            ]
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
@@ -2345,7 +2420,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
     finally:
-        conn.close()
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            _rest_quote_seed_refresh_lock.release()
 
 
 def _edli_held_quote_refresh_cycle() -> dict:

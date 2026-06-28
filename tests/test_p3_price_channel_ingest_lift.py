@@ -619,6 +619,68 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         check.close()
 
 
+def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda conn: ["yes-token", "no-token"],
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: list(token_ids),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES" if token_id == "yes-token" else "NO",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: (_ for _ in ()).throw(AssertionError("attached write DB must not open under backpressure")),
+    )
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
+    )
+
+    acquired = lane._rest_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local REST seed lock to be initially free"
+    try:
+        result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+    finally:
+        lane._rest_quote_seed_refresh_lock.release()
+
+    assert result["backpressure"] is True
+    assert result["skipped"] == "price_channel_rest_quote_refresh_in_progress"
+    assert result["held_priority_token_ids"] == 2
+    assert result["held_token_metadata"] == 2
+    assert result["held_quote_refresh_events"] == 0
+    assert result["held_quote_refresh_attempted_tokens"] == 0
+    assert result["budget_skipped_tokens"] == 2
+
+
 def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
     from src.data import polymarket_client
     from src.ingest.price_channel_ingest import _edli_refresh_candidate_priority_quote_evidence
@@ -722,6 +784,72 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         )
     finally:
         check.close()
+
+
+def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_candidate_priority_token_ids",
+        lambda conn, *, limit: ["no-token"],
+    )
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: ["yes-token"])
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: list(token_ids),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="YES" if token_id == "yes-token" else "NO",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: (_ for _ in ()).throw(AssertionError("attached write DB must not open under backpressure")),
+    )
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
+    )
+
+    acquired = lane._rest_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local REST seed lock to be initially free"
+    try:
+        result = lane._edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=10.0)
+    finally:
+        lane._rest_quote_seed_refresh_lock.release()
+
+    assert result["backpressure"] is True
+    assert result["skipped"] == "price_channel_rest_quote_refresh_in_progress"
+    assert result["candidate_priority_token_ids"] == 1
+    assert result["open_rest_priority_token_ids"] == 1
+    assert result["quote_priority_token_ids"] == 2
+    assert result["candidate_token_metadata"] == 2
+    assert result["candidate_quote_refresh_events"] == 0
+    assert result["candidate_quote_refresh_attempted_tokens"] == 0
+    assert result["budget_skipped_tokens"] == 2
 
 
 def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkeypatch, tmp_path):
