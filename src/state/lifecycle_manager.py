@@ -219,6 +219,12 @@ def enter_pending_exit_runtime_state(
         exit_state=exit_state,
         chain_state=chain_state,
     )
+    normalized_chain_state = _normalized_state(chain_state)
+    if (
+        current_phase == LifecyclePhase.QUARANTINED
+        and normalized_chain_state == "entry_authority_quarantined"
+    ):
+        return LifecyclePhase.PENDING_EXIT.value
     # Idempotency: positions that have already advanced past PENDING_EXIT
     # (economically_closed via market resolution, terminal phases, etc.) cannot
     # legally transition back to PENDING_EXIT — there is no remaining inventory
@@ -234,10 +240,7 @@ def enter_pending_exit_runtime_state(
     # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
     # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it
     # must be layered explicitly here as the originally-observed crash case.
-    if (
-        current_phase == LifecyclePhase.ECONOMICALLY_CLOSED
-        or is_terminal_state(current_phase)
-    ):
+    if current_phase == LifecyclePhase.ECONOMICALLY_CLOSED or is_terminal_state(current_phase):
         return current_phase.value
     fold_lifecycle_phase(current_phase, LifecyclePhase.PENDING_EXIT)
     return LifecyclePhase.PENDING_EXIT.value

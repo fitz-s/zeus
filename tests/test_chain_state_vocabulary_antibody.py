@@ -76,6 +76,23 @@ def test_chain_absent_confirmed_unattributed_round_trips_through_position():
     assert pos.chain_state == VenueVisibilityStatus.CHAIN_ABSENT_CONFIRMED_UNATTRIBUTED
 
 
+def test_entry_authority_quarantined_round_trips_through_position():
+    """Invalid entry authority is a loader-safe quarantine class with exposure.
+
+    The runtime may still hold CTF inventory for these rows. Enum coercion must
+    not kill portfolio loading before monitor/redecision can decide hold/exit.
+    """
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="t-entry-authority", market_id="m", city="Lucknow", cluster="India",
+        target_date="2026-06-28", bin_label="b", direction="buy_yes",
+        unit="C", temperature_metric="high",
+        chain_state="entry_authority_quarantined",
+    )
+    assert pos.chain_state == VenueVisibilityStatus.ENTRY_AUTHORITY_QUARANTINED
+
+
 def test_constant_mediated_chain_state_writers_are_declared_members():
     """The literal-only antibody above misses chain_state assigned via a named
     constant (e.g. `corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE`).

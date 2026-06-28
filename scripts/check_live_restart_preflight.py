@@ -1766,6 +1766,102 @@ def _entry_economics_component_missing_fields(component: dict[str, Any] | None) 
     return missing
 
 
+def _entry_actionable_certificate_hash(component: dict[str, Any] | None) -> str:
+    if not isinstance(component, dict):
+        return ""
+    details = component.get("details")
+    if not isinstance(details, dict):
+        return ""
+    return str(details.get("certificate_hash") or "").strip()
+
+
+def _strategy_min_entry_price(strategy_key: str | None) -> float:
+    try:
+        from src.strategy.strategy_profile import try_get
+
+        profile = try_get(str(strategy_key or "").strip())
+        return float(getattr(profile, "min_entry_price", 0.05) if profile is not None else 0.05)
+    except Exception:
+        return 0.05
+
+
+def _legacy_min_entry_revalidation(
+    *,
+    item: dict[str, Any],
+    economics: dict[str, Any] | None,
+    actionable: dict[str, Any] | None,
+    missing: list[str],
+) -> dict[str, Any] | None:
+    """Read-only proof for rows written before min_entry_price became durable.
+
+    New SUBMIT_REQUESTED events must carry min_entry_price in the entry_economics
+    component. This narrow path is only for already-durable rows whose sole missing
+    field is that newly promoted floor. It replays the same current live strategy
+    profile floor against the immutable submitted limit price and the verified
+    ActionableTradeCertificate payload.
+    """
+
+    if missing != ["entry_economics.details.min_entry_price"]:
+        return None
+    if not isinstance(economics, dict) or not isinstance(actionable, dict):
+        return None
+    if economics.get("allowed") is not True or actionable.get("allowed") is not True:
+        return None
+    details = economics.get("details")
+    if not isinstance(details, dict):
+        return None
+    certificate_hash = _entry_actionable_certificate_hash(actionable)
+    if not certificate_hash:
+        return None
+    try:
+        limit_price = float(details.get("limit_price"))
+    except (TypeError, ValueError):
+        return None
+    try:
+        cert_conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True, timeout=2.0)
+        cert_conn.row_factory = sqlite3.Row
+        cert_row = cert_conn.execute(
+            """
+            SELECT payload_json
+              FROM decision_certificates
+             WHERE certificate_hash = ?
+               AND certificate_type = 'ActionableTradeCertificate'
+               AND mode = 'LIVE'
+               AND verifier_status = 'VERIFIED'
+             LIMIT 1
+            """,
+            (certificate_hash,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        try:
+            cert_conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    if cert_row is None:
+        return None
+    try:
+        payload = json.loads(str(cert_row["payload_json"] or "{}"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    floor = _strategy_min_entry_price(strategy_key)
+    if limit_price <= floor + 1e-9:
+        return None
+    return {
+        "legacy_revalidation": "current_strategy_min_entry_price_from_verified_actionable_certificate",
+        "legacy_missing": list(missing),
+        "certificate_hash": certificate_hash,
+        "strategy_key": strategy_key,
+        "limit_price": limit_price,
+        "min_entry_price": floor,
+        "current_floor_pass": True,
+    }
+
+
 def _held_position_current_belief_evidence(
     row: sqlite3.Row,
     *,
@@ -2105,7 +2201,40 @@ def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
         }
         component = _entry_economics_component_from_submit(latest["submit_payload_json"])
         missing = _entry_economics_component_missing_fields(component)
+        actionable = _execution_capability_component_from_submit(
+            latest["submit_payload_json"],
+            "entry_actionable_certificate",
+        )
+        actionable_missing: list[str] = []
+        if actionable is None:
+            actionable_missing.append("entry_actionable_certificate")
+        elif actionable.get("allowed") is not True:
+            actionable_missing.append("entry_actionable_certificate.allowed")
+        missing = [*missing, *actionable_missing]
         if missing:
+            legacy_revalidation = _legacy_min_entry_revalidation(
+                item=command_item,
+                economics=component,
+                actionable=actionable,
+                missing=missing,
+            )
+            if legacy_revalidation is not None:
+                details = component.get("details") if isinstance(component, dict) else {}
+                covered.append(
+                    {
+                        **command_item,
+                        **legacy_revalidation,
+                        "entry_economics_reason": component.get("reason"),
+                        "entry_actionable_certificate_reason": actionable.get("reason"),
+                        "q_live": details.get("q_live") if isinstance(details, dict) else None,
+                        "q_lcb_5pct": details.get("q_lcb_5pct") if isinstance(details, dict) else None,
+                        "expected_profit_usd": details.get("expected_profit_usd")
+                        if isinstance(details, dict)
+                        else None,
+                        "submit_edge": details.get("submit_edge") if isinstance(details, dict) else None,
+                    }
+                )
+                continue
             redecision = _legacy_entry_missing_economics_redecision_evidence(
                 position,
                 now=now,
@@ -2184,8 +2313,21 @@ def _recent_entry_submit_economics_check() -> CheckResult:
                 "recent ENTRY submit provenance tables absent; no recent submit scan applied",
                 evidence,
             )
+        position_columns = _table_columns(conn, "main", "position_current")
+        position_direction_select = (
+            "pc.direction" if "direction" in position_columns else "NULL"
+        )
+        position_chain_state_select = (
+            "pc.chain_state" if "chain_state" in position_columns else "NULL"
+        )
+        position_shares_select = (
+            "pc.shares" if "shares" in position_columns else "NULL"
+        )
+        position_chain_shares_select = (
+            "pc.chain_shares" if "chain_shares" in position_columns else "NULL"
+        )
         rows = conn.execute(
-            """
+            f"""
             WITH latest_submit AS (
                 SELECT
                     vce.command_id,
@@ -2207,9 +2349,16 @@ def _recent_entry_submit_economics_check() -> CheckResult:
                 vc.price,
                 vc.size,
                 vc.created_at,
+                pc.phase AS position_phase,
+                {position_direction_select} AS position_direction,
+                {position_chain_state_select} AS position_chain_state,
+                {position_shares_select} AS position_shares,
+                {position_chain_shares_select} AS position_chain_shares,
                 ls.occurred_at AS submit_requested_at,
                 ls.payload_json AS submit_payload_json
               FROM venue_commands vc
+              LEFT JOIN position_current pc
+                ON pc.position_id = vc.position_id
               LEFT JOIN latest_submit ls
                 ON ls.command_id = vc.command_id
                AND ls.rn = 1
@@ -2232,6 +2381,11 @@ def _recent_entry_submit_economics_check() -> CheckResult:
             "venue_order_id": row["venue_order_id"],
             "price": row["price"],
             "size": row["size"],
+            "position_phase": row["position_phase"],
+            "position_direction": row["position_direction"],
+            "position_chain_state": row["position_chain_state"],
+            "position_shares": row["position_shares"],
+            "position_chain_shares": row["position_chain_shares"],
             "command_created_at": row["created_at"],
             "submit_requested_at": row["submit_requested_at"],
         }
@@ -2248,6 +2402,65 @@ def _recent_entry_submit_economics_check() -> CheckResult:
             actionable_missing.append("entry_actionable_certificate.allowed")
         missing = [*economics_missing, *actionable_missing]
         if missing:
+            try:
+                local_shares = float(row["position_shares"] or 0.0)
+            except (TypeError, ValueError):
+                local_shares = 0.0
+            try:
+                chain_shares = float(row["position_chain_shares"] or 0.0)
+            except (TypeError, ValueError):
+                chain_shares = 0.0
+            if (
+                str(row["position_phase"] or "") == "quarantined"
+                and str(row["position_chain_state"] or "") == "entry_authority_quarantined"
+                and str(row["position_direction"] or "") in {"buy_yes", "buy_no"}
+                and max(local_shares, chain_shares) > DUST_SHARE_LIMIT
+            ):
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "monitor_entry_authority_quarantined_exposure_redecision",
+                        "legacy_missing": missing,
+                    }
+                )
+                continue
+            if (
+                str(row["command_state"] or "").upper() in TERMINAL_VENUE_COMMAND_STATES
+                and str(row["command_state"] or "").upper() != "FILLED"
+                and local_shares <= DUST_SHARE_LIMIT
+                and chain_shares <= DUST_SHARE_LIMIT
+            ):
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "historical_terminal_entry_submit_without_current_exposure",
+                        "legacy_missing": missing,
+                    }
+                )
+                continue
+            legacy_revalidation = _legacy_min_entry_revalidation(
+                item=item,
+                economics=economics,
+                actionable=actionable,
+                missing=missing,
+            )
+            if legacy_revalidation is not None:
+                details = economics.get("details") if isinstance(economics, dict) else {}
+                covered.append(
+                    {
+                        **item,
+                        **legacy_revalidation,
+                        "entry_economics_reason": economics.get("reason"),
+                        "entry_actionable_certificate_reason": actionable.get("reason"),
+                        "q_live": details.get("q_live") if isinstance(details, dict) else None,
+                        "q_lcb_5pct": details.get("q_lcb_5pct") if isinstance(details, dict) else None,
+                        "expected_profit_usd": details.get("expected_profit_usd")
+                        if isinstance(details, dict)
+                        else None,
+                        "submit_edge": details.get("submit_edge") if isinstance(details, dict) else None,
+                    }
+                )
+                continue
             risky.append(
                 {
                     **item,

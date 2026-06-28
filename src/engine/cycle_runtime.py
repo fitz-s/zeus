@@ -2771,6 +2771,8 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
         return LifecyclePhase.DAY0_WINDOW.value
     if state == "pending_exit":
         return LifecyclePhase.PENDING_EXIT.value
+    if state == "quarantined":
+        return LifecyclePhase.QUARANTINED.value
     return LifecyclePhase.ACTIVE.value
 
 
@@ -3184,6 +3186,27 @@ def _requires_quarantine_monitor_resolution(pos) -> bool:
     return (
         _position_state_value(pos) == "quarantined"
         or _position_chain_state_value(pos) in {"quarantined", "quarantine_expired"}
+    )
+
+
+def _position_real_exposure_shares(pos) -> float:
+    for attr in ("chain_shares", "shares_filled", "shares"):
+        try:
+            value = float(getattr(pos, attr, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return value
+    return 0.0
+
+
+def _quarantined_position_can_redecision(pos) -> bool:
+    return (
+        _position_state_value(pos) == "quarantined"
+        and _position_chain_state_value(pos) == "entry_authority_quarantined"
+        and _position_direction_value(pos) in {"buy_yes", "buy_no"}
+        and _position_real_exposure_shares(pos) > 0.01
+        and not getattr(pos, "is_quarantine_placeholder", False)
     )
 
 
@@ -3878,24 +3901,29 @@ def execute_monitoring_phase(
             check_pending_retries(pos, conn=conn)
 
         if _requires_quarantine_monitor_resolution(pos):
-            if not pos.admin_exit_reason:
-                pos.admin_exit_reason = quarantine_resolution_reason(_position_chain_state_value(pos))
-                pos.exit_reason = pos.admin_exit_reason
-                pos.last_exit_at = deps._utcnow().isoformat() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc).isoformat()
-                portfolio_dirty = True
-                summary["quarantine_resolution_marked"] = summary.get("quarantine_resolution_marked", 0) + 1
-            artifact.add_monitor_result(
-                deps.MonitorResult(
-                    position_id=pos.trade_id,
-                    fresh_prob=None,
-                    fresh_edge=None,
-                    should_exit=False,
-                    exit_reason=pos.admin_exit_reason,
-                    neg_edge_count=pos.neg_edge_count,
+            if _quarantined_position_can_redecision(pos):
+                summary["quarantined_exposure_routed_to_redecision"] = (
+                    summary.get("quarantined_exposure_routed_to_redecision", 0) + 1
                 )
-            )
-            summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
-            continue
+            else:
+                if not pos.admin_exit_reason:
+                    pos.admin_exit_reason = quarantine_resolution_reason(_position_chain_state_value(pos))
+                    pos.exit_reason = pos.admin_exit_reason
+                    pos.last_exit_at = deps._utcnow().isoformat() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc).isoformat()
+                    portfolio_dirty = True
+                    summary["quarantine_resolution_marked"] = summary.get("quarantine_resolution_marked", 0) + 1
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=None,
+                        fresh_edge=None,
+                        should_exit=False,
+                        exit_reason=pos.admin_exit_reason,
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
+                summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
+                continue
 
         review_fact = _blocking_review_fact_for_position(portfolio, pos)
         if review_fact is not None:

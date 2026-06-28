@@ -142,11 +142,19 @@ def transition_phase(
         if not trade_id:
             return False
         current_row = conn.execute(
-            "SELECT phase FROM position_current WHERE position_id = ?",
+            "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
             (trade_id,),
         ).fetchone()
         current_phase = str(current_row[0] or "").strip().lower() if current_row is not None else ""
-        if is_terminal_state(current_phase) or current_phase == "economically_closed":
+        current_chain_state = str(current_row[1] or "").strip().lower() if current_row is not None else ""
+        entry_authority_quarantine_exit = (
+            current_phase == "quarantined"
+            and current_chain_state == "entry_authority_quarantined"
+        )
+        if (
+            current_phase == "economically_closed"
+            or (is_terminal_state(current_phase) and not entry_authority_quarantine_exit)
+        ):
             return False
         sequence_no_row = conn.execute(
             "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
@@ -157,7 +165,11 @@ def transition_phase(
         phase_before = phase_for_runtime_position(
             state=getattr(position, "pre_exit_state", "") or "holding",
         ).value
-        phase_after = fold_lifecycle_phase(phase_before, "pending_exit").value
+        phase_after = (
+            "pending_exit"
+            if entry_authority_quarantine_exit and phase_before == "quarantined"
+            else fold_lifecycle_phase(phase_before, "pending_exit").value
+        )
         projection_position = _copy.copy(position)
         if not any(
             getattr(projection_position, field, "")

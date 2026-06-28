@@ -79,6 +79,12 @@ class ChainState(str, Enum):
     # load_portfolio on 2026-06-22 (Tokyo/Seoul/Houston/Denver/Milan/...). The
     # antibody is now strengthened to resolve *_CHAIN_STATE constants too.
     CHAIN_ABSENT_CONFIRMED_UNATTRIBUTED = "chain_absent_confirmed_position_unattributed"
+    # Live-entry authority quarantine class: command_recovery has proven the
+    # entry's executable authority is missing/quarantined/invalid, but the
+    # position can still carry real CTF inventory. This value must round-trip
+    # through the runtime loader; monitor/exit policy, not enum coercion, owns
+    # whether the held exposure is reduced, sold, or held to settlement.
+    ENTRY_AUTHORITY_QUARANTINED = "entry_authority_quarantined"
 
 
 # Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.

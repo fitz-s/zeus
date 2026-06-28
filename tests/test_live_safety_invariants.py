@@ -2911,6 +2911,128 @@ def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(mon
     assert monitor_results[0].fresh_edge is None
 
 
+def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
+    """A real held position with bad entry proof must still be monitor-managed."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="entry-authority-quarantine-position",
+        direction="buy_no",
+        state="quarantined",
+        chain_state="entry_authority_quarantined",
+        shares=19.88,
+        chain_shares=19.88,
+        city="Lucknow",
+        target_date="2026-06-28",
+        token_id="yes-lucknow",
+        no_token_id="no-lucknow",
+        condition_id="condition-lucknow",
+        admin_exit_reason="invalid_entry_actionable_certificate_authority",
+        exit_reason="invalid_entry_actionable_certificate_authority",
+    )
+    portfolio = _make_portfolio(pos)
+
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.40, 0.42, 100.0, 100.0
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("no exit fill expected")
+
+    observed_refresh = []
+
+    def mock_refresh(conn, clob, position):
+        observed_refresh.append((
+            position.trade_id,
+            getattr(position.state, "value", position.state),
+            getattr(position.chain_state, "value", position.chain_state),
+        ))
+        position.last_monitor_prob = 0.62
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_market_price = 0.40
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.40
+        position.last_monitor_best_ask = 0.42
+        position.last_monitor_market_vig = 1.02
+        position.last_monitor_whale_toxicity = False
+        position.last_monitor_at = "2026-06-28T08:00:00+00:00"
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.40]),
+            p_posterior=0.62,
+            forward_edge=0.22,
+            alpha=0.0,
+            confidence_band_upper=0.05,
+            confidence_band_lower=-0.01,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snap-entry-authority-quarantine",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    observed_exit_contexts = []
+
+    def mock_evaluate_exit(self, exit_context):
+        observed_exit_contexts.append(exit_context)
+        return ExitDecision(
+            False,
+            "ENTRY_AUTHORITY_QUARANTINE_REDECISION_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["entry_authority_quarantine_redecision"],
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", mock_evaluate_exit)
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_entry_authority_quarantine_redecision"),
+            "cities_by_name": {"Lucknow": type("City", (), {"timezone": "Asia/Kolkata"})()},
+            "_utcnow": staticmethod(lambda: datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert observed_refresh == [(
+        "entry-authority-quarantine-position",
+        "quarantined",
+        "entry_authority_quarantined",
+    )]
+    assert observed_exit_contexts
+    assert observed_exit_contexts[0].position_state == "quarantined"
+    assert summary["quarantined_exposure_routed_to_redecision"] == 1
+    assert summary.get("monitor_skipped_quarantine_resolution", 0) == 0
+    assert summary["monitors"] == 1
+    assert len(monitor_results) == 1
+    assert monitor_results[0].fresh_prob == 0.62
+    assert monitor_results[0].fresh_edge == 0.22
+    assert monitor_results[0].should_exit is False
+    assert monitor_results[0].exit_reason == "ENTRY_AUTHORITY_QUARANTINE_REDECISION_HOLD"
+
+
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):
     """Invalid entry-proof review facts must stop automatic monitor/exit churn."""
     from src.engine import cycle_runtime

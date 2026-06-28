@@ -599,10 +599,10 @@ def build_monitor_refreshed_canonical_write(
     final_exit_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
-    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}:
         raise ValueError(
             "monitor refreshed canonical builder requires phase_after in "
-            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT}}, got {phase_after!r}"
+            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}}, got {phase_after!r}"
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after

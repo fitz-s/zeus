@@ -134,7 +134,13 @@ def _live_entry_submit_payload() -> dict[str, object]:
     }
 
 
-def _init_actionable_world_db(path, payload: dict, *, decision_time: datetime | None = None):
+def _init_actionable_world_db(
+    path,
+    payload: dict,
+    *,
+    decision_time: datetime | None = None,
+    certificate_hash: str = "hash-test",
+):
     conn = sqlite3.connect(path)
     conn.execute(
         """
@@ -157,7 +163,12 @@ def _init_actionable_world_db(path, payload: dict, *, decision_time: datetime | 
             verifier_status, decision_time, payload_json
         ) VALUES (?, ?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?, ?)
         """,
-        ("ActionableTradeCertificate:test", "hash-test", now.isoformat(), json.dumps(payload)),
+        (
+            "ActionableTradeCertificate:test",
+            certificate_hash,
+            now.isoformat(),
+            json.dumps(payload),
+        ),
     )
     conn.commit()
     conn.close()
@@ -1511,7 +1522,7 @@ def test_open_entry_submit_economics_allows_legacy_component_gap_with_current_re
     assert covered["restart_resolution"] == (
         "legacy_entry_missing_economics_covered_by_current_redecision"
     )
-    assert covered["legacy_missing"] == ["entry_economics"]
+    assert covered["legacy_missing"] == ["entry_economics", "entry_actionable_certificate"]
     assert covered["belief"]["held_side_prob"] == 0.82
     assert covered["execution_feasibility"]["latest_observed_at"] == now.isoformat()
 
@@ -1606,7 +1617,9 @@ def test_open_entry_submit_economics_allows_live_exposure_with_component(monkeyp
     assert result.evidence["covered"][0]["q_lcb_5pct"] == 0.72
 
 
-def test_recent_entry_submit_economics_blocks_voided_disaster_submit(monkeypatch, tmp_path):
+def test_recent_entry_submit_economics_covers_voided_terminal_disaster_submit(
+    monkeypatch, tmp_path
+):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
@@ -1633,15 +1646,101 @@ def test_recent_entry_submit_economics_blocks_voided_disaster_submit(monkeypatch
 
     result = preflight._recent_entry_submit_economics_check()
 
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["covered_count"] == 1
+    assert result.evidence["covered_sample"][0]["restart_resolution"] == (
+        "historical_terminal_entry_submit_without_current_exposure"
+    )
+
+
+def test_recent_entry_submit_economics_blocks_positive_share_disaster_submit(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={
+            "execution_capability": {
+                "allowed": True,
+                "components": [
+                    {"component": "cutover_guard", "allowed": True, "reason": "allowed"}
+                ],
+            }
+        },
+    )
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        "UPDATE position_current SET phase='quarantined', shares=20, chain_shares=20"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._recent_entry_submit_economics_check()
+
     assert result.ok is False
     assert result.evidence["risky_count"] == 1
-    assert result.evidence["risky"][0]["risk"] == "recent_entry_submit_missing_live_proof"
-    assert "entry_economics" in result.evidence["risky"][0]["missing"]
-    assert "entry_actionable_certificate" in result.evidence["risky"][0]["missing"]
-    assert (
-        result.evidence["restart_policy"]
-        == "fail_closed_recent_entry_submit_requires_current_economics_and_certificate_proof"
+    risky = result.evidence["risky"][0]
+    assert risky["risk"] == "recent_entry_submit_missing_live_proof"
+    assert "entry_economics" in risky["missing"]
+    assert "entry_actionable_certificate" in risky["missing"]
+
+
+def test_recent_entry_submit_economics_covers_entry_authority_quarantine_redecision(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={
+            "execution_capability": {
+                "allowed": True,
+                "components": [
+                    {"component": "cutover_guard", "allowed": True, "reason": "allowed"}
+                ],
+            }
+        },
     )
+    conn = sqlite3.connect(trade_db)
+    conn.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'entry_authority_quarantined',
+               shares = 20,
+               chain_shares = 20,
+               direction = 'buy_yes'
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._recent_entry_submit_economics_check()
+
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["covered_count"] == 1
+    covered = result.evidence["covered_sample"][0]
+    assert covered["restart_resolution"] == (
+        "monitor_entry_authority_quarantined_exposure_redecision"
+    )
+    assert covered["position_phase"] == "quarantined"
+    assert covered["position_chain_state"] == "entry_authority_quarantined"
 
 
 def test_recent_entry_submit_economics_allows_current_proof(monkeypatch, tmp_path):
@@ -1664,6 +1763,43 @@ def test_recent_entry_submit_economics_allows_current_proof(monkeypatch, tmp_pat
     assert result.evidence["checked_count"] == 1
     assert result.evidence["covered_count"] == 1
     assert result.evidence["covered_sample"][0]["q_lcb_5pct"] == 0.72
+
+
+def test_recent_entry_submit_economics_revalidates_legacy_min_entry_floor(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(forecast_db).close()
+    payload = json.loads(json.dumps(_live_entry_submit_payload()))
+    economics = payload["execution_capability"]["components"][1]["details"]
+    economics.pop("min_entry_price")
+    certificate_hash = "a" * 64
+    _init_actionable_world_db(
+        world_db,
+        {
+            "strategy_key": "opening_inertia",
+            "token_id": "token-1",
+            "direction": "buy_yes",
+        },
+        certificate_hash=certificate_hash,
+    )
+    _init_entry_provenance_trade_db(trade_db, submit_payload=payload)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._recent_entry_submit_economics_check()
+
+    assert result.ok is True
+    assert result.evidence["covered_count"] == 1
+    covered = result.evidence["covered_sample"][0]
+    assert covered["legacy_revalidation"] == (
+        "current_strategy_min_entry_price_from_verified_actionable_certificate"
+    )
+    assert covered["min_entry_price"] == 0.05
+    assert covered["limit_price"] == 0.5
 
 
 def test_execution_feasibility_allows_canonical_day0_without_quote_table(
