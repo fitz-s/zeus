@@ -304,6 +304,109 @@ def test_executable_price_reader_preserves_native_min_tick_size():
     assert quotes[("cid-1", "buy_yes")].tick_size == pytest.approx(0.001)
 
 
+def test_executable_price_reader_uses_fresh_feasibility_quote_when_snapshot_stale():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            orderbook_top_bid REAL,
+            orderbook_top_ask REAL,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            outcome_label TEXT,
+            min_tick_size TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, selected_outcome_token_id,
+            yes_token_id, no_token_id, outcome_label, min_tick_size,
+            enable_orderbook, active, closed, accepting_orders
+        ) VALUES ('stale-no', 'cid-1', 0.70, 0.71,
+                  '2026-06-01T12:00:00+00:00',
+                  '2026-06-01T11:59:00+00:00', 'no-1',
+                  'yes-1', 'no-1', 'NO', '0.001', 1, 1, 0, 1)
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            outcome_label TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            created_at TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            condition_id, token_id, outcome_label, direction, quote_seen_at,
+            created_at, best_bid_before, best_ask_before
+        ) VALUES ('cid-1', 'no-1', 'NO', 'buy_no',
+                  '2026-06-01T13:00:00+00:00',
+                  '2026-06-01T13:00:02+00:00', 0.74, 0.75)
+        """
+    )
+
+    asks = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
+    bids = cr.read_freshest_resting_best_bids(trade, condition_ids={"cid-1"})
+
+    assert asks[("cid-1", "buy_no")].price == pytest.approx(0.75)
+    assert asks[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
+    assert bids[("cid-1", "buy_no")].price == pytest.approx(0.74)
+    assert bids[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
+
+
+def test_feasibility_quote_overlay_rejects_crossed_books():
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            outcome_label TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            created_at TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            condition_id, token_id, outcome_label, direction, quote_seen_at,
+            created_at, best_bid_before, best_ask_before
+        ) VALUES ('cid-1', 'no-1', 'NO', 'buy_no',
+                  '2026-06-01T13:00:00+00:00',
+                  '2026-06-01T13:00:02+00:00', 0.80, 0.75)
+        """
+    )
+
+    assert cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"}) == {}
+    assert cr.read_freshest_resting_best_bids(trade, condition_ids={"cid-1"}) == {}
+
+
 # ---------------------------------------------------------------------------
 # R1 — entry: cached belief + open market + FRESH price, edge > min → enqueue
 # ---------------------------------------------------------------------------

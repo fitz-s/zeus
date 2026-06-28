@@ -77,6 +77,12 @@ BELIEF_REPRICE_DELTA: float = 3.0 * TICK_SIZE
 # Submit-side quote freshness bound. Resting GTC orders are not cancelled by age alone here;
 # the rest screen requires new evidence or book drift, and deadline ownership stays in execution.
 PRE_SUBMIT_MAX_QUOTE_AGE_MS: float = 1000.0
+# Price-channel held/candidate quote refresh writes execution_feasibility_evidence
+# every scheduler tick, while executable_market_snapshots only moves on substrate
+# refresh. Continuous redecision may consume the former as a live book witness,
+# but only under a short TTL so a quiet or failed sidecar cannot fabricate fresh
+# price from an old row.
+FEASIBILITY_QUOTE_FRESHNESS_SECONDS: float = 90.0
 # §4.5 moved-book pull: a resting maker quote whose limit is no longer within this many ticks of the
 # current best bid is on a stale book that has walked away — pull and re-quote at the fresh price.
 # One tick of tolerance: a quote exactly at best is fine; a quote a full tick or more off-best is
@@ -1326,12 +1332,14 @@ def read_freshest_executable_prices(
     exact. Crossed or non-finite books are skipped (no phantom edge)."""
     if not condition_ids:
         return {}
+    out: dict[tuple[str, str], PriceQuote] = {}
     try:
         cols = {row[1] for row in trade_conn.execute(
             "PRAGMA table_info(executable_market_snapshots)").fetchall()}
     except sqlite3.Error:
-        return {}
-    if not {
+        cols = set()
+    token_sides: dict[tuple[str, str], str] = {}
+    if {
         "condition_id",
         "orderbook_top_bid",
         "orderbook_top_ask",
@@ -1341,17 +1349,26 @@ def read_freshest_executable_prices(
         "yes_token_id",
         "no_token_id",
     }.issubset(cols):
-        return {}
-    rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
-    out: dict[tuple[str, str], PriceQuote] = {}
-    for cid, side_books in _side_books_by_condition(rows).items():
-        for side, book in side_books.items():
-            if 0.0 < book["ask"] < 1.0:
-                out[(cid, side)] = PriceQuote(
-                    price=book["ask"],
-                    freshness_deadline=str(book["freshness_deadline"]),
-                    tick_size=float(book.get("tick_size", TICK_SIZE)),
-                )
+        rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
+        token_sides = _condition_side_tokens(rows)
+        for cid, side_books in _side_books_by_condition(rows).items():
+            for side, book in side_books.items():
+                if 0.0 < book["ask"] < 1.0:
+                    _merge_price_quote(
+                        out,
+                        (cid, side),
+                        PriceQuote(
+                            price=book["ask"],
+                            freshness_deadline=str(book["freshness_deadline"]),
+                            tick_size=float(book.get("tick_size", TICK_SIZE)),
+                        ),
+                    )
+    for key, quote in _freshest_feasibility_quotes_by_condition(
+        trade_conn,
+        token_sides=token_sides,
+        quote_column="ask",
+    ).items():
+        _merge_price_quote(out, key, quote)
     return out
 
 
@@ -1369,12 +1386,14 @@ def read_freshest_resting_best_bids(
     """
     if not condition_ids:
         return {}
+    out: dict[tuple[str, str], PriceQuote] = {}
     try:
         cols = {row[1] for row in trade_conn.execute(
             "PRAGMA table_info(executable_market_snapshots)").fetchall()}
     except sqlite3.Error:
-        return {}
-    if not {
+        cols = set()
+    token_sides: dict[tuple[str, str], str] = {}
+    if {
         "condition_id",
         "orderbook_top_bid",
         "orderbook_top_ask",
@@ -1384,18 +1403,166 @@ def read_freshest_resting_best_bids(
         "yes_token_id",
         "no_token_id",
     }.issubset(cols):
-        return {}
-    rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
-    out: dict[tuple[str, str], PriceQuote] = {}
-    for cid, side_books in _side_books_by_condition(rows).items():
-        for side, book in side_books.items():
-            if 0.0 < book["bid"] < 1.0:
-                out[(cid, side)] = PriceQuote(
-                    price=book["bid"],
-                    freshness_deadline=str(book["freshness_deadline"]),
-                    tick_size=float(book.get("tick_size", TICK_SIZE)),
-                )
+        rows = _freshest_executable_price_rows_by_condition(trade_conn, condition_ids=condition_ids)
+        token_sides = _condition_side_tokens(rows)
+        for cid, side_books in _side_books_by_condition(rows).items():
+            for side, book in side_books.items():
+                if 0.0 < book["bid"] < 1.0:
+                    _merge_price_quote(
+                        out,
+                        (cid, side),
+                        PriceQuote(
+                            price=book["bid"],
+                            freshness_deadline=str(book["freshness_deadline"]),
+                            tick_size=float(book.get("tick_size", TICK_SIZE)),
+                        ),
+                    )
+    for key, quote in _freshest_feasibility_quotes_by_condition(
+        trade_conn,
+        token_sides=token_sides,
+        quote_column="bid",
+    ).items():
+        _merge_price_quote(out, key, quote)
     return out
+
+
+def _merge_price_quote(
+    quotes: dict[tuple[str, str], PriceQuote],
+    key: tuple[str, str],
+    quote: PriceQuote,
+) -> None:
+    existing = quotes.get(key)
+    if existing is None:
+        quotes[key] = quote
+        return
+    try:
+        existing_deadline = _parse(existing.freshness_deadline).astimezone(timezone.utc)
+        new_deadline = _parse(quote.freshness_deadline).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return
+    if new_deadline >= existing_deadline:
+        quotes[key] = quote
+
+
+def _freshest_feasibility_quotes_by_condition(
+    trade_conn: sqlite3.Connection,
+    *,
+    token_sides: dict[tuple[str, str], str],
+    quote_column: str,
+    ttl_seconds: float = FEASIBILITY_QUOTE_FRESHNESS_SECONDS,
+) -> dict[tuple[str, str], PriceQuote]:
+    if quote_column not in {"bid", "ask"} or not token_sides:
+        return {}
+    try:
+        cols = {row[1] for row in trade_conn.execute(
+            "PRAGMA table_info(execution_feasibility_evidence)").fetchall()}
+    except sqlite3.Error:
+        return {}
+    required = {
+        "condition_id",
+        "outcome_label",
+        "direction",
+        "quote_seen_at",
+        "created_at",
+        "best_bid_before",
+        "best_ask_before",
+    }
+    if not required.issubset(cols):
+        return {}
+    out: dict[tuple[str, str], PriceQuote] = {}
+    seen_tokens: set[str] = set()
+    for key, raw_token_id in sorted(token_sides.items()):
+        condition_id, expected_side = key
+        token_id = str(raw_token_id or "").strip()
+        if not condition_id or not token_id or token_id in seen_tokens:
+            continue
+        seen_tokens.add(token_id)
+        rows = trade_conn.execute(
+            """
+            SELECT condition_id,
+                   outcome_label,
+                   direction,
+                   quote_seen_at,
+                   created_at,
+                   best_bid_before,
+                   best_ask_before
+              FROM execution_feasibility_evidence
+             WHERE token_id = ?
+             ORDER BY created_at DESC
+             LIMIT 12
+            """,
+            (token_id,),
+        ).fetchall()
+        for row in rows:
+            row_condition_id = str(_row_cell(row, 0, "condition_id") or "").strip()
+            if row_condition_id != condition_id:
+                continue
+            side = _feasibility_row_side(row)
+            if side != expected_side:
+                continue
+            try:
+                bid = float(_row_cell(row, 5, "best_bid_before"))
+                ask = float(_row_cell(row, 6, "best_ask_before"))
+            except (TypeError, ValueError):
+                continue
+            if not _valid_book(bid, ask):
+                continue
+            seen_at = _parse_feasibility_quote_time(row)
+            if seen_at is None:
+                continue
+            deadline = seen_at + timedelta(seconds=max(0.0, float(ttl_seconds)))
+            price = ask if quote_column == "ask" else bid
+            _merge_price_quote(
+                out,
+                (condition_id, side),
+                PriceQuote(
+                    price=price,
+                    freshness_deadline=deadline.isoformat(),
+                    tick_size=TICK_SIZE,
+                ),
+            )
+    return out
+
+
+def _condition_side_tokens(rows: list[sqlite3.Row | tuple]) -> dict[tuple[str, str], str]:
+    out: dict[tuple[str, str], str] = {}
+    for row in rows:
+        condition_id = str(_row_cell(row, 0, "condition_id") or "").strip()
+        selected = str(_row_cell(row, 4, "selected_outcome_token_id") or "").strip()
+        side = _selected_side(row)
+        if not condition_id or side is None or not selected:
+            continue
+        out.setdefault((condition_id, side), selected)
+    return out
+
+
+def _feasibility_row_side(row: sqlite3.Row | tuple) -> str | None:
+    outcome = str(_row_cell(row, 1, "outcome_label") or "").strip().upper()
+    if outcome == "YES":
+        return "buy_yes"
+    if outcome == "NO":
+        return "buy_no"
+    direction = str(_row_cell(row, 2, "direction") or "").strip().lower()
+    if direction in {"buy_yes", "sell_yes"}:
+        return "buy_yes"
+    if direction in {"buy_no", "sell_no"}:
+        return "buy_no"
+    return None
+
+
+def _parse_feasibility_quote_time(row: sqlite3.Row | tuple) -> datetime | None:
+    for index, key in ((3, "quote_seen_at"), (4, "created_at")):
+        raw = str(_row_cell(row, index, key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = _parse(raw)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
 
 
 def _freshest_executable_price_rows_by_condition(
