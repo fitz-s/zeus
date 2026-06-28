@@ -18,6 +18,33 @@ import types
 from unittest.mock import MagicMock
 
 
+def test_presubmit_strategy_floor_errors_map_to_submit_abort_reasons():
+    from src.engine.event_reactor_adapter import _presubmit_strategy_floor_abort_reason
+    from src.events.live_order_aggregate import LiveOrderAggregateError
+
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
+    ) == (
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated entry price below strategy floor"
+    )
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated expected profit below strategy floor")
+    ) == (
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated expected profit below strategy floor"
+    )
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
+    ) == (
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR:"
+        "PreSubmitRevalidated submit edge density below strategy floor"
+    )
+    assert _presubmit_strategy_floor_abort_reason(
+        LiveOrderAggregateError("PreSubmitRevalidated requires q_lcb_5pct <= q_live")
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # P0-A: _selected_candidate_mode_fields_from_receipt
 # ---------------------------------------------------------------------------

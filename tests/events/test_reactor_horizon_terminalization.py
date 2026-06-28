@@ -43,6 +43,7 @@ from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
     _is_transient_money_path_reason,
+    _regret_bucket_for,
     _substrate_sidecar_owns_broad_refresh,
 )
 from src.state.db import init_schema
@@ -551,6 +552,17 @@ def test_known_transient_reason_classifies_without_log(caplog):
         )
         assert _is_transient_money_path_reason("SHIFT_BIN_EXIT_OLD_LEG_PENDING") is True
     assert not any("UNKNOWN money-path reason" in r.message for r in caplog.records)
+
+
+def test_registered_redecision_reasons_do_not_fall_into_unknown_bucket():
+    assert _regret_bucket_for("FILL_UP_NO_SUBMIT:BELIEF_NOT_STRENGTHENED") == "DESIGNED_GATE"
+    assert (
+        _regret_bucket_for(
+            "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated entry price below strategy floor"
+        )
+        == "DESIGNED_GATE"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -3162,18 +3162,26 @@ def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
 
 
 def _regret_bucket_for(reason: str) -> str:
-    if reason in {"FDR_REJECTED"}:
+    reason_text = str(reason or "")
+    if reason_text in {"FDR_REJECTED"}:
         return "FDR_REJECTED"
-    if reason in {"KELLY_TOO_SMALL"}:
+    if reason_text in {"KELLY_TOO_SMALL"}:
         return "KELLY_TOO_SMALL"
-    if "RISK" in reason:
+    try:
+        from src.contracts.rejection_reasons import classify_rejection_reason, lookup_rejection_reason
+
+        if lookup_rejection_reason(reason_text) is not None:
+            return classify_rejection_reason(reason_text).value
+    except Exception:
+        pass
+    if "RISK" in reason_text:
         return "RISK_CAP"
-    if "QUOTE" in reason or "SNAPSHOT" in reason:
+    if "QUOTE" in reason_text or "SNAPSHOT" in reason_text:
         return "QUOTE_UNAVAILABLE"
-    if "SOURCE" in reason or "DAY0_HARD_FACT" in reason:
+    if "SOURCE" in reason_text or "DAY0_HARD_FACT" in reason_text:
         return "SOURCE_WRONG"
-    if "FAMILY" in reason:
+    if "FAMILY" in reason_text:
         return "FAMILY_INCOMPLETE"
-    if "LEAK" in reason or "AVAILABLE_AT" in reason:
+    if "LEAK" in reason_text or "AVAILABLE_AT" in reason_text:
         return "LEAKAGE_BLOCKED"
     return "UNKNOWN_REVIEW_REQUIRED"

@@ -114,6 +114,21 @@ def test_registry_lookup_strips_detail_suffix():
         ("UNSUPPORTED_EDLI_LIVE_SCOPE:forecast_only", RejectionCategory.DESIGNED_GATE),
         ("EVENT_TYPE_OUT_OF_LIVE_SCOPE", RejectionCategory.DESIGNED_GATE),
         ("entry_cooldown:same_token_entry_cooling_down", RejectionCategory.DESIGNED_GATE),
+        (
+            "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated entry price below strategy floor",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
+            "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated expected profit below strategy floor",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
+            "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated submit edge density below strategy floor",
+            RejectionCategory.DESIGNED_GATE,
+        ),
         ("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:cost_basis_hash missing", RejectionCategory.ARTIFICIAL_SUSPECT),
         # The exception-leak class: NEVER classifies as honest.
         ("UNIQUE constraint failed: platt_models.x", RejectionCategory.ARTIFICIAL_SUSPECT),

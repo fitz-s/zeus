@@ -219,7 +219,7 @@ from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
 from src.events.forecast_completeness import ForecastCompletenessStatus
-from src.events.live_order_aggregate import LiveOrderAggregateLedger
+from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
 from src.events.opportunity_book import OpportunityBook, build_family_opportunity_book
 from src.events.opportunity_event import OpportunityEvent
@@ -3039,6 +3039,15 @@ def event_bound_live_adapter_from_trade_conn(
                         )
                 except Exception:  # noqa: BLE001 - preserve the original build failure.
                     pass
+            _strategy_floor_abort = _presubmit_strategy_floor_abort_reason(exc)
+            if _strategy_floor_abort is not None:
+                return dataclass_replace(
+                    no_submit_receipt,
+                    submitted=False,
+                    side_effect_status="NO_SUBMIT",
+                    reason=_strategy_floor_abort,
+                    proof_accepted=True,
+                )
             return dataclass_replace(
                 no_submit_receipt,
                 submitted=False,
@@ -5817,6 +5826,32 @@ class _SubmitAbortedModeFlipped(ValueError):
     submit boundary; the caller maps it to the first-class SUBMIT_ABORTED_MODE_FLIPPED
     receipt by matching :data:`_MODE_FLIPPED_ABORT_PREFIX`.
     """
+
+
+_PRESUBMIT_STRATEGY_FLOOR_ABORT_REASONS: tuple[tuple[str, str], ...] = (
+    (
+        "PreSubmitRevalidated entry price below strategy floor",
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
+    ),
+    (
+        "PreSubmitRevalidated expected profit below strategy floor",
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
+    ),
+    (
+        "PreSubmitRevalidated submit edge density below strategy floor",
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
+    ),
+)
+
+
+def _presubmit_strategy_floor_abort_reason(exc: BaseException) -> str | None:
+    if not isinstance(exc, LiveOrderAggregateError):
+        return None
+    message = str(exc)
+    for needle, reason_base in _PRESUBMIT_STRATEGY_FLOOR_ABORT_REASONS:
+        if needle in message:
+            return f"{reason_base}:{message}"
+    return None
 
 
 def _fresh_rest_then_cross_mode(

@@ -344,6 +344,27 @@ class RejectionReason(str, Enum):
         "Fresh-book mode witness diverged from the proven execution_mode_intent; "
         "fail-closed abort + re-rank (never an inline mode rebuild).",
     )
+    SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR = (
+        "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
+        RejectionCategory.DESIGNED_GATE,
+        "Pre-submit certificate replay found the chosen entry price below the "
+        "strategy floor. This is a no-side-effect submit abort for low-price "
+        "lottery dust, not a certificate build defect.",
+    )
+    SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR = (
+        "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
+        RejectionCategory.DESIGNED_GATE,
+        "Pre-submit certificate replay found the fee-adjusted expected profit "
+        "below the strategy floor. No order is posted; the next event re-decides "
+        "from fresh price and belief evidence.",
+    )
+    SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR = (
+        "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
+        RejectionCategory.DESIGNED_GATE,
+        "Pre-submit certificate replay found submit edge density below the "
+        "strategy floor. This rejects capital-inefficient micro-edge orders without "
+        "misclassifying the decision as a system build failure.",
+    )
     FILL_UP_PRESUBMIT_REREAD_ABORT = (
         "FILL_UP_PRESUBMIT_REREAD_ABORT",
         RejectionCategory.DESIGNED_GATE,
