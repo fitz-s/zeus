@@ -1361,7 +1361,10 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
             snap.yes_token_id AS snapshot_yes_token_id,
             snap.no_token_id AS snapshot_no_token_id,
             snap.selected_outcome_token_id AS snapshot_selected_outcome_token_id,
-            snap.outcome_label AS snapshot_outcome_label
+            snap.outcome_label AS snapshot_outcome_label,
+            pc.city AS position_city,
+            pc.target_date AS position_target_date,
+            pc.temperature_metric AS position_temperature_metric
           FROM venue_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
@@ -5511,7 +5514,7 @@ def _terminal_no_fill_continuation_from_row(row: dict) -> dict:
         or row.get("snapshot_selected_outcome_token_id")
         or ""
     ).strip()
-    return {
+    continuation = {
         "command_id": str(row.get("command_id") or ""),
         "position_id": str(row.get("position_id") or ""),
         "venue_order_id": str(
@@ -5523,6 +5526,28 @@ def _terminal_no_fill_continuation_from_row(row: dict) -> dict:
         "token_id": token_id,
         "reason": "venue_terminal_no_fill",
     }
+    city = str(row.get("position_city") or row.get("city") or "").strip()
+    target_date = str(
+        row.get("position_target_date")
+        or row.get("target_date")
+        or ""
+    ).strip()
+    metric = _canonical_temperature_metric_text(
+        row.get("position_temperature_metric")
+        or row.get("temperature_metric")
+        or row.get("metric")
+        or ""
+    )
+    if city and target_date and metric in {"high", "low"}:
+        continuation.update(
+            {
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": metric,
+                "metric": metric,
+            }
+        )
+    return continuation
 
 
 def _ensure_entry_projection_is_pending_zero_exposure(

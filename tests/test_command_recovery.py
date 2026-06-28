@@ -2916,6 +2916,10 @@ class TestRecoveryResolutionTable:
                 "venue_order_id": "ord-001",
                 "condition_id": "condition-test",
                 "token_id": "tok-001-no",
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "temperature_metric": "high",
+                "metric": "high",
                 "reason": "venue_terminal_no_fill",
             }
         ]
