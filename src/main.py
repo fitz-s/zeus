@@ -7763,6 +7763,7 @@ def _edli_refresh_continuous_money_path_families(
         mark_money_path_substrate_priority(
             reason="continuous_redecision_confirm_refresh",
             ttl_seconds=35.0,
+            families=clean_families,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug(
@@ -9939,6 +9940,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             mark_money_path_substrate_priority(
                 reason="decision_triggered_targeted_refresh",
                 ttl_seconds=max(call_budget_s + 15.0, 20.0),
+                families=[(city, target_date, metric)],
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("decision family refresh: priority marker write failed: %r", exc)
