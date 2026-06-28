@@ -10559,23 +10559,11 @@ def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> di
     return summary
 
 
-def _reconcile_edli_post_submit_unknown_absence(
-    conn: sqlite3.Connection,
-    client,
-) -> dict:
-    """Release EDLI post-submit unknowns only after authenticated venue absence.
-
-    This covers the no-venue-command gap: the live-order aggregate reached
-    SubmitUnknown/PENDING_RECONCILE, but no venue_commands row was ever persisted
-    for the execution_command_id. Local absence is not enough. We require complete
-    account open-order and trade reads and refuse if either mentions the token.
-    """
-
-    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+def _edli_post_submit_unknown_absence_candidates(conn: sqlite3.Connection) -> list[dict]:
     events_ref = _edli_live_order_events_ref(conn)
     projection_ref = _edli_live_order_projection_ref(conn)
     if not events_ref or not projection_ref:
-        return summary
+        return []
     rows = conn.execute(
         f"""
         SELECT proj.aggregate_id,
@@ -10611,17 +10599,17 @@ def _reconcile_edli_post_submit_unknown_absence(
         ORDER BY unknown.occurred_at
         """
     ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _apply_edli_post_submit_unknown_absence(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    open_read,
+    trade_read,
+) -> dict:
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     if not rows:
-        return summary
-    try:
-        open_read = _client_read_items(client, "get_open_orders")
-        trade_read = _client_read_items(client, "get_trades")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "recovery: EDLI post-submit unknown absence read unavailable: %s",
-            exc,
-        )
-        summary["stayed"] += len(rows)
         return summary
     open_orders = [_raw_payload(item) for item in open_read.items]
     trades = [_raw_payload(item) for item in trade_read.items]
@@ -10635,7 +10623,7 @@ def _reconcile_edli_post_submit_unknown_absence(
         return summary
 
     for row in rows:
-        record = _dict_row(row)
+        record = dict(row)
         aggregate_id = str(record.get("aggregate_id") or "")
         execution_command_id = str(record.get("execution_command_id") or "")
         token_id = str(record.get("token_id") or "")
@@ -10711,6 +10699,33 @@ def _reconcile_edli_post_submit_unknown_absence(
             )
             summary["errors"] += 1
     return summary
+
+
+def _reconcile_edli_post_submit_unknown_absence(
+    conn: sqlite3.Connection,
+    client,
+) -> dict:
+    """Release EDLI post-submit unknowns only after authenticated venue absence.
+
+    This covers the no-venue-command gap: the live-order aggregate reached
+    SubmitUnknown/PENDING_RECONCILE, but no venue_commands row was ever persisted
+    for the execution_command_id. Local absence is not enough. We require complete
+    account open-order and trade reads and refuse if either mentions the token.
+    """
+
+    rows = _edli_post_submit_unknown_absence_candidates(conn)
+    if not rows:
+        return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    try:
+        open_read = _client_read_items(client, "get_open_orders")
+        trade_read = _client_read_items(client, "get_trades")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "recovery: EDLI post-submit unknown absence read unavailable: %s",
+            exc,
+        )
+        return {"scanned": 0, "advanced": 0, "stayed": len(rows), "errors": 0}
+    return _apply_edli_post_submit_unknown_absence(conn, rows, open_read, trade_read)
 
 
 def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
@@ -12814,6 +12829,52 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             lambda: run_db_only_pass(_apply, conn_factory=conn_factory, label=f"recovery.{label}"),
         )
 
+    def _post_submit_unknown_absence_fast_pass():
+        """Release no-command post-submit unknowns before the broad venue snapshot.
+
+        This pass is intentionally ahead of capture_venue_read_snapshot(). The
+        aggregate it fixes has no venue_commands row, so the broad priming set
+        has no order id to look up and can spend minutes on unrelated historical
+        order reads while the live duplicate lock remains active. The only venue
+        evidence this release needs is complete account open-order + trade
+        absence, read with no DB connection in scope.
+        """
+
+        def _snapshot(conn):
+            return _edli_post_submit_unknown_absence_candidates(conn)
+
+        def _network(rows):
+            if not rows:
+                return rows, None, None
+            open_read = _client_read_items(client, "get_open_orders")
+            trade_read = _client_read_items(client, "get_trades")
+            return rows, open_read, trade_read
+
+        def _apply(conn, payload):
+            rows, open_read, trade_read = payload
+            if not rows:
+                ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+            else:
+                ps = _apply_edli_post_submit_unknown_absence(
+                    conn,
+                    rows,
+                    open_read,
+                    trade_read,
+                )
+            _accumulate(summary, "edli_post_submit_unknown_absence_fast", ps)
+            return ps
+
+        return _run_pass_with_lock_retry(
+            "edli_post_submit_unknown_absence_fast",
+            lambda: run_three_phase(
+                _snapshot,
+                _network,
+                _apply,
+                conn_factory=conn_factory,
+                label="recovery.edli_post_submit_unknown_absence_fast",
+            ),
+        )
+
     if scope == "boot_fast":
         # Boot recovery must not perform account-wide or per-order venue reads.
         # Live evidence 2026-06-28 showed the pre-scheduler "boot_fast" path
@@ -12886,6 +12947,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["venue_snapshot_deferred"] = True
         summary["deferred_full_sweep"] = True
         return
+
+    if scope == "live_tick":
+        _post_submit_unknown_absence_fast_pass()
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:

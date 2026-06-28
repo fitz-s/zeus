@@ -29,6 +29,7 @@ reconciliation semantics.
 from __future__ import annotations
 
 import ast
+import json
 import sqlite3
 from pathlib import Path
 
@@ -93,6 +94,7 @@ class _RecordingClient:
         self._orders = orders or {}
         self._open_orders = list(open_orders or [])
         self._trades = list(trades or [])
+        self.venue_reads_are_complete = True
 
     def get_order(self, order_id):
         self._recorder.on_client_call("get_order")
@@ -226,6 +228,148 @@ def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_
     assert "recorded_maker_fill_economics" in summary
 
 
+def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    """No-command EDLI unknowns must not wait behind historical venue reads."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-tick-post-submit-unknown.db"
+    aggregate_id = "event-fast:intent-fast:token-fast"
+    execution_command_id = "edli_exec_cmd:event-fast:intent-fast:token-fast:buy_no"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert_edli_live_order_event(
+        seed_conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-fast",
+            "final_intent_id": "intent-fast",
+            "condition_id": "condition-fast",
+            "token_id": "token-fast",
+            "direction": "buy_no",
+        },
+        occurred_at="2026-04-26T00:01:00+00:00",
+    )
+    h._insert_edli_live_order_event(
+        seed_conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="VenueSubmitAttempted",
+        payload={
+            "event_id": "event-fast",
+            "final_intent_id": "intent-fast",
+            "execution_command_id": execution_command_id,
+            "idempotency_key": "idem-fast",
+        },
+        occurred_at="2026-04-26T00:02:00+00:00",
+    )
+    h._insert_edli_live_order_event(
+        seed_conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-fast",
+            "final_intent_id": "intent-fast",
+            "execution_command_id": execution_command_id,
+            "execution_receipt_hash": "receipt-fast",
+            "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:deployment_freshness_mismatch",
+            "submit_status": "POST_SUBMIT_UNKNOWN",
+            "reconciliation_followup_required": True,
+            "side_effect_known": False,
+            "venue_call_started": True,
+        },
+        occurred_at="2026-04-26T00:03:00+00:00",
+    )
+    seed_conn.execute(
+        """
+        INSERT INTO edli_live_order_projection (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, 'event-fast', 'intent-fast', 'PENDING_RECONCILE',
+                  3, 'SubmitUnknown', 'hash-fast', 1, NULL,
+                  '2026-04-26T00:03:00+00:00', 1)
+        """,
+        (aggregate_id,),
+    )
+    seed_conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+            max_orders_per_day, reserved_notional_usd, order_count,
+            reservation_status, final_intent_id, execution_command_id,
+            created_at, schema_version
+        ) VALUES ('cap-fast', 'event-fast', '2026-04-26T00:02:00+00:00',
+                  'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                  'intent-fast', ?, '2026-04-26T00:02:00+00:00', 1)
+        """,
+        (execution_command_id,),
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(recorder, open_orders=[], trades=[])
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    def _block_broad_snapshot(*args, **kwargs):
+        raise RuntimeError("broad snapshot blocked")
+
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _block_broad_snapshot)
+
+    with pytest.raises(RuntimeError, match="broad snapshot blocked"):
+        command_recovery.reconcile_unresolved_commands(
+            conn=None,
+            client=client,
+            scope="live_tick",
+        )
+
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    projection = verify.execute(
+        """
+        SELECT current_state, pending_reconcile
+        FROM edli_live_order_projection
+        WHERE aggregate_id = ?
+        """,
+        (aggregate_id,),
+    ).fetchone()
+    cap = verify.execute(
+        "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-fast'"
+    ).fetchone()
+    reconcile_payload = verify.execute(
+        """
+        SELECT payload_json
+        FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_type = 'Reconciled'
+        ORDER BY event_sequence DESC
+        LIMIT 1
+        """,
+        (aggregate_id,),
+    ).fetchone()
+
+    assert projection["current_state"] == "CAP_TRANSITIONED"
+    assert bool(projection["pending_reconcile"]) is False
+    assert cap["reservation_status"] == "RELEASED"
+    assert json.loads(reconcile_payload["payload_json"])["required_predicates"][
+        "no_venue_command"
+    ] is True
+    for method, open_ids, open_labels in recorder.client_calls:
+        assert not open_ids, (
+            f"venue call {method} occurred while {len(open_ids)} DB connection(s) "
+            f"were open: {open_labels}"
+        )
+
+
 def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path):
     """Boot recovery must clear submit locks without blocking scheduler start on
     historical maker-fill economics or partial-remainder maintenance.
@@ -259,7 +403,7 @@ def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path
 
     assert summary["scope"] == "boot_fast"
     assert summary["deferred_full_sweep"] is True
-    assert summary["scanned"] == 1
+    assert recorder.client_calls == []
     assert "partial_remainders" not in summary
     assert "recorded_maker_fill_economics" not in summary
 
