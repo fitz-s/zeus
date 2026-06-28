@@ -230,6 +230,89 @@ def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_
     assert "recorded_maker_fill_economics" in summary
 
 
+def test_live_tick_scope_projects_acked_entry_order_before_full_sweep(monkeypatch, tmp_path):
+    """ACKED live entry orders must enter position_current on the high-cadence lane."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-live-entry-projection.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(
+        seed_conn,
+        command_id="cmd-live-projection",
+        position_id="pos-live-projection",
+        decision_id="dec-live-projection",
+        token_id="tok-yes",
+        no_token_id="tok-no",
+        selected_token_id="tok-no",
+        outcome_label="NO",
+        size=13.45,
+        price=0.74,
+    )
+    h._advance_to_acked(
+        seed_conn,
+        command_id="cmd-live-projection",
+        venue_order_id="vord-live-projection",
+    )
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-live-projection",
+        order_id="vord-live-projection",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="13.45",
+        source="REST",
+    )
+    h._insert_decision_log_trade_case_for_recovery(
+        seed_conn,
+        decision_id="dec-live-projection",
+        trade_id="pos-live-projection",
+        token_id="tok-yes",
+        no_token_id="tok-no",
+        direction="buy_no",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-live-projection": {"orderID": "vord-live-projection", "status": "LIVE"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["scope"] == "live_tick"
+    assert summary["live_entry_projection_repair"]["advanced"] == 1
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    try:
+        current = verify.execute(
+            """
+            SELECT phase, direction, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-live-projection'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_entry",
+            "direction": "buy_no",
+            "order_id": "vord-live-projection",
+            "order_status": "pending",
+        }
+    finally:
+        verify.close()
+
+
 def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot(
     monkeypatch,
     tmp_path,

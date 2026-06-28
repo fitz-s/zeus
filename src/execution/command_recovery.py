@@ -12922,6 +12922,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "edli_acknowledged_venue_command_sync",
         )
         _db_pass(
+            "live_entry_projection_repair",
+            reconcile_live_entry_projection_repairs,
+            "live_entry_projection_repair",
+        )
+        _db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
@@ -13096,6 +13101,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,
                  "edli_acknowledged_venue_command_sync")
+        _db_pass("live_entry_projection_repair",
+                 reconcile_live_entry_projection_repairs,
+                 "live_entry_projection_repair")
         _db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
