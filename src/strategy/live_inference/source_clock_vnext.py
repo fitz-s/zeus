@@ -516,7 +516,8 @@ def admission_calibration_gap(*, q_point: float, realized_hit: bool | int) -> fl
 def sparse_settlement_source_weights(
     observations: Sequence[SourceWeightObservation],
     *,
-    temperature: float = 0.05,
+    softmax_temperature: float = 0.05,
+    temperature: float | None = None,
 ) -> tuple[WeightedSource, ...]:
     """Build nonnegative source weights from settlement-graded scores.
 
@@ -526,8 +527,10 @@ def sparse_settlement_source_weights(
     remains, which callers must treat as fail-closed.
     """
 
-    if temperature <= 0.0 or not math.isfinite(float(temperature)):
-        raise ValueError("temperature must be finite and positive")
+    if temperature is not None:
+        softmax_temperature = temperature
+    if softmax_temperature <= 0.0 or not math.isfinite(float(softmax_temperature)):
+        raise ValueError("softmax_temperature must be finite and positive")
 
     best_by_family: dict[str, SourceWeightObservation] = {}
     for obs in observations:
@@ -550,7 +553,7 @@ def sparse_settlement_source_weights(
 
     losses = [float(obs.settlement_logloss) for obs in kept]
     best_loss = min(losses)
-    logits = [-(loss - best_loss) / float(temperature) for loss in losses]
+    logits = [-(loss - best_loss) / float(softmax_temperature) for loss in losses]
     max_logit = max(logits)
     weights_raw = [math.exp(logit - max_logit) for logit in logits]
     total = sum(weights_raw)

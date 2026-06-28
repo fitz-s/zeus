@@ -3555,6 +3555,10 @@ def monitor_probability_refresh(
     # Return the stored entry-time posterior as the value carrier but with
     # is_fresh=False so refresh_position records NaN current_p_posterior and
     # the exit organ treats belief as unavailable (never a stale-as-fresh).
+    _posterior_provenance = pos.selected_method or pos.entry_method
+    if not _posterior_provenance:
+        _append_monitor_validation(pos, "stored_entry_probability_provenance_missing")
+        return float("nan"), pos, False
     return pos.p_posterior, pos, False
 
 

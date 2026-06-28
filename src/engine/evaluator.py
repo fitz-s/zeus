@@ -1356,6 +1356,16 @@ def _expected_profit_usd_for_edge(edge: BinEdge, *, notional_usd: float, price: 
         edge_per_share = 0.0
     if edge_per_share <= 0.0:
         try:
+            selected_method = str(edge.selected_method or "")
+        except AttributeError:
+            selected_method = ""
+        try:
+            entry_method = str(edge.entry_method or selected_method)
+        except AttributeError:
+            entry_method = selected_method
+        if not (selected_method or entry_method):
+            return 0.0
+        try:
             edge_per_share = float(edge.p_posterior) - float(price)
         except (TypeError, ValueError):
             edge_per_share = 0.0
@@ -2544,6 +2554,13 @@ def _apply_edli_live_family_before_selection(
     event_type = str(context.get("event_type") or "")
     payload = _edli_payload(context)
     causal_snapshot_id = str(context.get("causal_snapshot_id") or "")
+    analysis.selected_method = str(
+        context.get("selected_method") or context.get("entry_method") or event_type
+    )
+    analysis.entry_method = analysis.selected_method
+    _posterior_provenance = analysis.selected_method or analysis.entry_method
+    if not _posterior_provenance:
+        raise ValueError("EDLI_PROBABILITY_PROVENANCE_MISSING")
     probabilities = np.asarray(analysis.p_posterior, dtype=float)
     factor = "event_prior"
     if event_type == "FORECAST_SNAPSHOT_READY":

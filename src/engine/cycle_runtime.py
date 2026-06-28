@@ -3180,6 +3180,30 @@ def _position_direction_value(pos) -> str:
     return _semantic_value(getattr(pos, "direction", ""))
 
 
+def _requires_quarantine_monitor_resolution(pos) -> bool:
+    return (
+        _position_state_value(pos) == "quarantined"
+        or _position_chain_state_value(pos) in {"quarantined", "quarantine_expired"}
+    )
+
+
+def _monitoring_phase_positions(portfolio) -> list:
+    """Open positions plus quarantine rows that need explicit monitor receipts."""
+
+    out = []
+    seen: set[int] = set()
+    for pos in list(get_open_positions(portfolio)):
+        out.append(pos)
+        seen.add(id(pos))
+    for pos in list(getattr(portfolio, "positions", []) or []):
+        if id(pos) in seen:
+            continue
+        if _requires_quarantine_monitor_resolution(pos):
+            out.append(pos)
+            seen.add(id(pos))
+    return out
+
+
 def _market_info_value(info, *keys):
     if isinstance(info, dict):
         for key in keys:
@@ -3777,7 +3801,7 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    for pos in list(get_open_positions(portfolio)):
+    for pos in _monitoring_phase_positions(portfolio):
         if pos.state == "pending_tracked":
             continue
         state_value = _position_state_value(pos)
@@ -3853,10 +3877,7 @@ def execute_monitoring_phase(
         if run_exit_preflight:
             check_pending_retries(pos, conn=conn)
 
-        if (
-            _position_state_value(pos) == "quarantined"
-            or _position_chain_state_value(pos) in {"quarantined", "quarantine_expired"}
-        ):
+        if _requires_quarantine_monitor_resolution(pos):
             if not pos.admin_exit_reason:
                 pos.admin_exit_reason = quarantine_resolution_reason(_position_chain_state_value(pos))
                 pos.exit_reason = pos.admin_exit_reason

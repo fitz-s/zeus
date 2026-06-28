@@ -14665,6 +14665,11 @@ def _canonical_probability_and_fdr_proof(
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
     from src.config import edge_n_bootstrap
 
+    analysis.selected_method = str(payload.get("_edli_q_source") or "event_bound_market_analysis")
+    analysis.entry_method = analysis.selected_method
+    _posterior_provenance = analysis.selected_method or analysis.entry_method
+    if not _posterior_provenance:
+        raise ValueError("EVENT_BOUND_PROBABILITY_PROVENANCE_MISSING")
     hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=edge_n_bootstrap())
     hypothesis_by_label_direction = {
         (hypothesis.range_label, hypothesis.direction): hypothesis

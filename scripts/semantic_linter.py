@@ -329,12 +329,16 @@ def _check_calibration_pairs_select(py_file: Path, content: str) -> list[str]:
 
     violations = []
     pattern = re.compile(r'FROM\s+calibration_pairs\b', re.IGNORECASE)
-    for lineno, line in enumerate(content.splitlines(), 1):
-        # Strip Python inline comments (#) and SQL inline comments (--)
-        stripped = line.split("#")[0].split("--")[0]
-        if pattern.search(stripped):
+    source_lines = content.splitlines()
+    for start_lineno, _end_lineno, sql in _sql_call_literal_args(content):
+        normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+        normalized_sql = "\n".join(
+            line.split("--")[0] for line in normalized_sql.splitlines()
+        )
+        if pattern.search(normalized_sql):
+            line = source_lines[start_lineno - 1] if start_lineno <= len(source_lines) else ""
             violations.append(
-                f"{py_file}:{lineno}:\n"
+                f"{py_file}:{start_lineno}:\n"
                 "  [ERROR] K2_struct: direct FROM calibration_pairs query outside allowlist.\n"
                 "  Use src/calibration/store.py query functions instead.\n"
                 f"  Line: {line.rstrip()}\n"

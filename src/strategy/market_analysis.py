@@ -233,6 +233,8 @@ class MarketAnalysis:
         self._alpha = alpha
         self._posterior_mode = posterior_mode
         self._allow_legacy_quote_prior = allow_legacy_quote_prior
+        self.selected_method = str(getattr(posterior_mode, "value", posterior_mode))
+        self.entry_method = self.selected_method
         self.p_posterior = self._compute_posterior(self.p_cal)
         self.vig = None if self.p_market is None else float(self.p_market.sum())
         raw_member_maxes = _finite_member_extrema(member_maxes)
@@ -970,6 +972,9 @@ class MarketAnalysis:
             raise ValueError("buy_yes bootstrap requires executable YES-side market prices")
         if not self.is_executable_bin(bin_idx):
             raise ValueError(f"buy_yes bootstrap requires executable support index {bin_idx}")
+        _posterior_provenance = self.selected_method or self.entry_method
+        if not _posterior_provenance:
+            raise ValueError("buy_yes bootstrap requires posterior provenance")
         cache_key = ("yes", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]
@@ -1083,6 +1088,9 @@ class MarketAnalysis:
         """Double bootstrap CI for buy_no direction from complement samples."""
         if not self.supports_buy_no_edges(bin_idx):
             raise ValueError(f"buy_no bootstrap requires executable NO-side market price for bin index {bin_idx}")
+        _posterior_provenance = self.selected_method or self.entry_method
+        if not _posterior_provenance:
+            raise ValueError("buy_no bootstrap requires posterior provenance")
         cache_key = ("no", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]

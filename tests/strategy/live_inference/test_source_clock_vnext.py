@@ -195,7 +195,7 @@ def test_sparse_weights_family_dedup_and_stale_zero_weight() -> None:
                 stale=True,
             ),
         ],
-        temperature=0.10,
+        softmax_temperature=0.10,
     )
 
     by_source = {w.source_id: w for w in weights}

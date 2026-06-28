@@ -81,18 +81,23 @@ def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
     assert _has_quarantined_positions(PortfolioState(positions=[synced])) is False
 
     green_gate = {"entry": {"allow_submit": True}}
-    assert _discovery_gates_allow_entries(
-        RiskLevel.GREEN,
-        green_gate,
-        green_gate,
-        has_quarantine=False,
-    ) is True
-    assert _discovery_gates_allow_entries(
-        RiskLevel.GREEN,
-        green_gate,
-        green_gate,
-        has_quarantine=True,
-    ) is False
+    all_clear = {
+        "risk_level": RiskLevel.GREEN,
+        "heartbeat_status": green_gate,
+        "ws_gap_status": green_gate,
+        "cutover_summary": green_gate,
+        "governor_status": green_gate,
+        "current_posture": "NORMAL",
+        "chain_ready": True,
+        "has_quarantine": False,
+        "force_exit": False,
+        "entry_bankroll": 1000.0,
+        "exposure_gate_hit": False,
+        "entries_paused": False,
+        "block_registry": type("ClearRegistry", (), {"is_clear": lambda self, stage: True})(),
+    }
+    assert _discovery_gates_allow_entries(**all_clear) is True
+    assert _discovery_gates_allow_entries(**{**all_clear, "has_quarantine": True}) is False
 
 
 def test_structural_linter_gate():

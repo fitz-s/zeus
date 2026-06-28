@@ -62,6 +62,7 @@ def _fetch_rows(
     *,
     start: str,
     end: str,
+    temperature_metric: str = "high",
     authority_filter: str = "VERIFIED",
 ) -> list[CalibrationEvalRow]:
     rows = conn.execute(
@@ -70,10 +71,12 @@ def _fetch_rows(
             pair_id, city, target_date, range_label, p_raw, outcome, lead_days,
             season, cluster, forecast_available_at
         FROM calibration_pairs
-        WHERE target_date >= ? AND target_date <= ? AND authority = ?
+        WHERE target_date >= ? AND target_date <= ?
+          AND temperature_metric = ?
+          AND authority = ?
         ORDER BY cluster, season, target_date, city, pair_id
         """,
-        (start, end, authority_filter),
+        (start, end, temperature_metric, authority_filter),
     ).fetchall()
     return [
         CalibrationEvalRow(
@@ -147,6 +150,7 @@ def evaluate_blocked_oos_calibration(
     train_end: str,
     test_start: str,
     test_end: str,
+    temperature_metric: str = "high",
     run_id: str | None = None,
     model_name: str = "extended_platt",
     model_artifact_id: str = "blocked_oos",
@@ -164,8 +168,18 @@ def evaluate_blocked_oos_calibration(
         test_start=test_start,
         test_end=test_end,
     )
-    train_rows = _fetch_rows(conn, start=train_start, end=train_end)
-    test_rows = _fetch_rows(conn, start=test_start, end=test_end)
+    train_rows = _fetch_rows(
+        conn,
+        start=train_start,
+        end=train_end,
+        temperature_metric=temperature_metric,
+    )
+    test_rows = _fetch_rows(
+        conn,
+        start=test_start,
+        end=test_end,
+        temperature_metric=temperature_metric,
+    )
 
     by_bucket: dict[str, list[CalibrationEvalRow]] = {}
     for row in train_rows:
