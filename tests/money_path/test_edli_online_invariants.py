@@ -233,6 +233,14 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
     assert "decision_time=process_pending_decision_time" in source
     assert "_edli_positive_int_or_unbounded" in source
+    live_adapter_call = source[
+        source.index("event_bound_live_adapter_from_trade_conn(") :
+        source.index(
+            "replacement_forecast_runtime_flags=replacement_forecast_runtime_flags",
+            source.index("event_bound_live_adapter_from_trade_conn("),
+        )
+    ]
+    assert "live_cap_conn=conn" not in live_adapter_call
     # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle —
     # and its scheduler-health fill-authority string "user_channel_or_reconcile_only" —
     # was lifted out of src.main into src.ingest.price_channel_ingest. The reactor (which

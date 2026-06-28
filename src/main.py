@@ -5710,7 +5710,6 @@ def _edli_event_reactor_cycle() -> None:
                 portfolio_state_provider=_portfolio_state_provider,
                 real_order_submit_enabled=real_submit_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
-                live_cap_conn=conn,
                 replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
                 replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
                 replacement_forecast_world_tables=replacement_forecast_world_tables,
