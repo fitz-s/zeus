@@ -629,25 +629,32 @@ def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
         def __init__(self):
             self.authority_calls = 0
             self.observation_calls = 0
+            self.authority_conns = []
+            self.observation_conns = []
 
-        def scan_authority_rows(self, **_kwargs):
+        def scan_authority_rows(self, **kwargs):
             self.authority_calls += 1
+            self.authority_conns.append(kwargs["observation_conn"])
             if self.authority_calls == 1:
                 raise sqlite3.OperationalError("database is locked")
             return ["authority"]
 
-        def scan_observation_instants_rows(self, **_kwargs):
+        def scan_observation_instants_rows(self, **kwargs):
             self.observation_calls += 1
+            self.observation_conns.append(kwargs["observation_conn"])
             return ["observation"]
 
     trigger = Trigger()
     sleeps = []
+    world_conn = object()
+    trade_conn = object()
     monkeypatch.setenv("ZEUS_DAY0_EMIT_LOCK_RETRY_SECONDS", "0.01")
     monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
 
     authority, observation = main_module._edli_scan_day0_with_lock_retry(
         trigger=trigger,
-        trade_conn=object(),
+        world_conn=world_conn,
+        trade_conn=trade_conn,
         decision_time=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
         received_at="2026-06-19T12:00:00+00:00",
         limit=10,
@@ -657,6 +664,8 @@ def test_day0_emit_scanner_retries_sqlite_lock(monkeypatch):
     assert observation == ["observation"]
     assert trigger.authority_calls == 2
     assert trigger.observation_calls == 1
+    assert trigger.authority_conns == [trade_conn, trade_conn]
+    assert trigger.observation_conns == [world_conn]
     assert sleeps == [0.01]
 
 

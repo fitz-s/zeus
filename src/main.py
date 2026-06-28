@@ -8177,6 +8177,7 @@ def _edli_emit_day0_extreme_events(
         )
         authority_results, observation_results = _edli_scan_day0_with_lock_retry(
             trigger=trigger,
+            world_conn=world_conn,
             trade_conn=trade_conn,
             decision_time=decision_time,
             received_at=received_at,
@@ -8208,6 +8209,7 @@ def _edli_emit_day0_extreme_events(
 def _edli_scan_day0_with_lock_retry(
     *,
     trigger,
+    world_conn,
     trade_conn,
     decision_time: datetime,
     received_at: str,
@@ -8226,7 +8228,7 @@ def _edli_scan_day0_with_lock_retry(
                 limit=limit,
             )
             observation_results = trigger.scan_observation_instants_rows(
-                observation_conn=trade_conn,
+                observation_conn=world_conn,
                 settlement_semantics=_edli_day0_settlement_semantics,
                 decision_time=decision_time,
                 received_at=received_at,
