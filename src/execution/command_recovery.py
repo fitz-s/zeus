@@ -1808,6 +1808,111 @@ def _point_order_transaction_hashes(point_order: dict | None) -> tuple[str, ...]
     return ()
 
 
+def _trade_payload(value: object) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    raw = getattr(value, "raw", None)
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        return dict(value)  # type: ignore[arg-type]
+    except Exception:
+        return {}
+
+
+def _client_trade_payloads(client) -> list[dict]:
+    get_trades = getattr(client, "get_trades", None)
+    if not callable(get_trades):
+        ensure_adapter = getattr(client, "_ensure_v2_adapter", None)
+        if callable(ensure_adapter):
+            try:
+                get_trades = getattr(ensure_adapter(), "get_trades", None)
+            except Exception:
+                get_trades = None
+    if not callable(get_trades):
+        return []
+    raw_trades = get_trades() or []
+    return [_trade_payload(item) for item in raw_trades]
+
+
+def _maker_order_payloads(trade_payload: Mapping[str, object]) -> tuple[dict, ...]:
+    raw_orders = trade_payload.get("maker_orders")
+    if not isinstance(raw_orders, Sequence) or isinstance(raw_orders, (str, bytes)):
+        return ()
+    orders: list[dict] = []
+    for raw in raw_orders:
+        if isinstance(raw, Mapping):
+            orders.append(dict(raw))
+    return tuple(orders)
+
+
+def _point_order_from_maker_trade_payloads(
+    trade_payloads: Sequence[Mapping[str, object]],
+    *,
+    order_id: str,
+) -> dict | None:
+    total = Decimal("0")
+    weighted_price = Decimal("0")
+    trade_ids: list[str] = []
+    tx_hashes: list[str] = []
+    raw_matches: list[dict] = []
+    last_status = "MATCHED"
+    asset_id = ""
+    outcome = ""
+    market = ""
+    for trade in trade_payloads:
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+        tx_hash = str(trade.get("transaction_hash") or trade.get("transactionHash") or "").strip()
+        last_status = str(trade.get("status") or last_status or "MATCHED").upper()
+        for maker_order in _maker_order_payloads(trade):
+            maker_order_id = str(
+                maker_order.get("order_id")
+                or maker_order.get("orderID")
+                or maker_order.get("id")
+                or ""
+            ).strip()
+            if maker_order_id.lower() != order_id.lower():
+                continue
+            matched_amount = _positive_decimal_or_none(
+                maker_order.get("matched_amount")
+                or maker_order.get("matchedAmount")
+                or maker_order.get("size_matched")
+                or maker_order.get("matched_size")
+            )
+            price = _positive_decimal_or_none(maker_order.get("price") or trade.get("price"))
+            if matched_amount is None or price is None:
+                continue
+            total += matched_amount
+            weighted_price += matched_amount * price
+            if trade_id:
+                trade_ids.append(trade_id)
+            if tx_hash:
+                tx_hashes.append(tx_hash)
+            asset_id = str(maker_order.get("asset_id") or maker_order.get("token_id") or asset_id)
+            outcome = str(maker_order.get("outcome") or outcome)
+            market = str(trade.get("market") or market)
+            raw_matches.append({"trade": dict(trade), "maker_order": maker_order})
+    if total <= 0 or not raw_matches:
+        return None
+    average_price = weighted_price / total
+    return {
+        "id": order_id,
+        "orderID": order_id,
+        "status": "MATCHED" if last_status in {"CONFIRMED", "MATCHED", "MINED"} else last_status,
+        "size_matched": _decimal_text(total),
+        "matched_size": _decimal_text(total),
+        "price": _decimal_text(average_price),
+        "tradeIDs": list(dict.fromkeys(trade_ids)),
+        "transactionsHashes": list(dict.fromkeys(tx_hashes)),
+        "asset_id": asset_id,
+        "outcome": outcome,
+        "market": market,
+        "source": "account_trades_maker_orders",
+        "matched_maker_order_count": len(raw_matches),
+        "matched_maker_orders": raw_matches,
+    }
+
+
 def _point_order_matched_size(
     point_order: dict | None,
     *,
@@ -5574,6 +5679,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
     get_order = getattr(client, "get_order", None)
     if not callable(get_order):
         return summary
+    trade_payloads_cache: list[dict] | None = None
     for row in _latest_matched_order_fact_candidates(conn):
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
@@ -5597,9 +5703,30 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 )
                 summary["errors"] += 1
                 continue
-            if point_order is None:
-                summary["stayed"] += 1
-                continue
+            point_status = str(_first_present(point_order, "status", "state") or "").upper()
+            point_matched_size = _point_order_matched_size(
+                point_order,
+                fallback=row.get("order_fact_matched_size") or row.get("size") or "0",
+                side=row.get("side"),
+            )
+            point_trade_ids = _point_order_trade_ids(point_order)
+            if (
+                point_order is None
+                or point_status in {"", "UNKNOWN", "NOT_FOUND"}
+                or not _positive_decimal_or_none(point_matched_size)
+                or not point_trade_ids
+            ):
+                if trade_payloads_cache is None:
+                    trade_payloads_cache = _client_trade_payloads(client)
+                trade_point_order = _point_order_from_maker_trade_payloads(
+                    trade_payloads_cache,
+                    order_id=order_id,
+                )
+                if trade_point_order is not None:
+                    point_order = trade_point_order
+                elif point_order is None:
+                    summary["stayed"] += 1
+                    continue
             matched_size = _point_order_matched_size(
                 point_order,
                 fallback=row.get("order_fact_matched_size") or row.get("size") or "0",

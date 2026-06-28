@@ -3483,6 +3483,106 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["entry_price"])) == Decimal("0.34")
         assert current["order_status"] == "filled"
 
+    def test_acked_unknown_point_order_recovers_from_maker_trade_facts(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=10.58, price=0.67)
+        _advance_to_acked(conn, venue_order_id="ord-maker-fill")
+        _seed_pending_entry_projection(conn, order_id="ord-maker-fill")
+        _append_order_fact(
+            conn,
+            order_id="ord-maker-fill",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10.58",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-maker-fill",
+            "status": "UNKNOWN",
+        }
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-maker-a",
+                "status": "CONFIRMED",
+                "market": "market-1",
+                "transaction_hash": "0xhash-a",
+                "maker_orders": [
+                    {
+                        "order_id": "ord-maker-fill",
+                        "matched_amount": "4.48",
+                        "price": "0.67",
+                        "asset_id": "token-no-1",
+                        "outcome": "No",
+                        "side": "BUY",
+                    }
+                ],
+            },
+            {
+                "id": "trade-maker-b",
+                "status": "CONFIRMED",
+                "market": "market-1",
+                "transaction_hash": "0xhash-b",
+                "maker_orders": [
+                    {
+                        "order_id": "ord-maker-fill",
+                        "matched_amount": "6.10",
+                        "price": "0.67",
+                        "asset_id": "token-no-1",
+                        "outcome": "No",
+                        "side": "BUY",
+                    }
+                ],
+            },
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "10.58",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-maker-a",
+            "state": "MATCHED",
+            "filled_size": "10.58",
+            "fill_price": "0.67",
+            "tx_hash": "0xhash-a",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, entry_price, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("10.58")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("7.0886")
+        assert Decimal(str(current["entry_price"])) == Decimal("0.67")
+        assert current["order_status"] == "filled"
+
     def test_exit_point_order_matched_uses_sell_making_amount_as_share_size(
         self,
         conn,
