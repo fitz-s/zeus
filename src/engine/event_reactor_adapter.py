@@ -5693,6 +5693,8 @@ def _event_submission_receipt_from_typed_receipt_payload(
         candidate_bin_id=raw_receipt.get("candidate_bin_id"),
         qkernel_execution_economics=raw_receipt.get("qkernel_execution_economics"),
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
+        min_expected_profit_usd=_optional_float(raw_receipt.get("min_expected_profit_usd")),
+        min_submit_edge_density=_optional_float(raw_receipt.get("min_submit_edge_density")),
         same_bin_yes_posterior=_optional_float(raw_receipt.get("same_bin_yes_posterior")),
         settlement_coverage_status=(
             str(raw_receipt["settlement_coverage_status"])

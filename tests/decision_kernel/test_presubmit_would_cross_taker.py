@@ -61,6 +61,8 @@ def _qkernel_economics_for(payload: dict) -> dict:
         "side": side,
         "payoff_q_point": payload.get("q_live", 0.70),
         "payoff_q_lcb": payload.get("q_lcb_5pct", 0.60),
+        "direction_law_ok": True,
+        "coherence_allows": True,
     }
 
 

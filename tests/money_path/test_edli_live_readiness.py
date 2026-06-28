@@ -1452,6 +1452,82 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
         )
 
 
+def test_raw_event_bound_receipt_hydrates_live_quality_floors():
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    raw_receipt = {
+        "schema": "edli_event_bound_no_submit_v1",
+        "side_effect_status": "NO_SUBMIT",
+        "submitted": False,
+        "proof_accepted": True,
+        "event_id": event.event_id,
+        "causal_snapshot_id": event.causal_snapshot_id,
+        "condition_id": "condition-1",
+        "token_id": "yes-1",
+        "candidate_id": "candidate-1",
+        "executable_snapshot_id": "exec-1",
+        "family_id": "family-1",
+        "direction": "buy_yes",
+        "strategy_key": "center_buy",
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "c_fee_adjusted": 0.4,
+        "c_cost_95pct": 0.45,
+        "p_fill_lcb": 0.1,
+        "trade_score": 0.2,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+    }
+
+    receipt = adapter._event_submission_receipt_from_typed_receipt_payload(raw_receipt, event)
+
+    assert receipt.min_expected_profit_usd == pytest.approx(0.05)
+    assert receipt.min_submit_edge_density == pytest.approx(0.02)
+
+
+def test_live_execution_command_preserves_quality_floors_to_pre_submit():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    qkernel_cert = _qkernel_execution_cert(
+        bin_id="bin-1",
+        candidate_id="DIRECT_YES:bin-1",
+        route_id="DIRECT_YES:bin-1@proof",
+        payoff_q_point=0.7,
+        payoff_q_lcb=0.6,
+        cost=0.4,
+    )
+    accepted = replace(
+        _accepted_receipt(event),
+        selection_authority_applied="qkernel_spine",
+        candidate_bin_id="bin-1",
+        qkernel_execution_economics=qkernel_cert,
+        opportunity_book=_opportunity_book_with_qkernel_cert(qkernel_cert),
+    )
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+
+    certificates = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+    pre_submit = next(cert for cert in certificates if cert.certificate_type == claims.PRE_SUBMIT_REVALIDATION)
+
+    assert pre_submit.payload["min_expected_profit_usd"] == pytest.approx(0.05)
+    assert pre_submit.payload["min_submit_edge_density"] == pytest.approx(0.02)
+
+
 def test_live_execution_command_blocks_identity_fallback_calibration():
     from dataclasses import replace
 
@@ -1526,18 +1602,7 @@ def test_actionable_payload_persists_live_authority_provenance():
     payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
 
     assert payload["q_source"] == "emos"
-    assert payload["opportunity_book"] == {
-        "selected_candidate_id": "candidate-1",
-        "actual_receipt_selected_candidate_id": "candidate-1",
-        "candidates": [
-            {
-                "candidate_id": "candidate-1",
-                "condition_id": "condition-1",
-                "token_id": "yes-1",
-                "direction": "buy_yes",
-            }
-        ],
-    }
+    assert payload["opportunity_book"] == receipt.opportunity_book
     assert payload["strategy_key"] == "center_buy"
 
 
@@ -1545,7 +1610,11 @@ def test_actionable_payload_persists_qkernel_execution_economics():
     from src.engine import event_reactor_adapter as adapter
 
     event = _forecast_event()
-    qkernel_cert = _qkernel_execution_cert()
+    qkernel_cert = _qkernel_execution_cert(
+        payoff_q_point=0.7,
+        payoff_q_lcb=0.6,
+        cost=0.4,
+    )
     receipt = replace(
         _accepted_receipt(event),
         q_source="qkernel_spine",
@@ -3047,6 +3116,11 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         )
     from src.events.reactor import EventSubmissionReceipt
 
+    qkernel_cert = _qkernel_execution_cert(
+        payoff_q_point=0.7,
+        payoff_q_lcb=0.6,
+        cost=0.4,
+    )
     return EventSubmissionReceipt(
         submitted=False,
         proof_accepted=True,
@@ -3071,6 +3145,8 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         c_cost_95pct=0.45,
         p_fill_lcb=0.1,
         trade_score=0.2,
+        min_expected_profit_usd=0.05,
+        min_submit_edge_density=0.02,
         trade_score_positive=True,
         fdr_pass=True,
         fdr_family_id="family-1",
@@ -3084,21 +3160,13 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
         q_source="emos",
+        selection_authority_applied="qkernel_spine",
+        candidate_bin_id="bin-1",
+        qkernel_execution_economics=qkernel_cert,
         execution_mode_intent=execution_mode_intent,
         rest_then_cross_policy=rest_then_cross_policy,
         maker_limit_price=maker_limit_price,
-        opportunity_book={
-            "selected_candidate_id": "candidate-1",
-            "actual_receipt_selected_candidate_id": "candidate-1",
-            "candidates": [
-                {
-                    "candidate_id": "candidate-1",
-                    "condition_id": "condition-1",
-                    "token_id": "yes-1",
-                    "direction": "buy_yes",
-                }
-            ],
-        },
+        opportunity_book=_opportunity_book_with_qkernel_cert(qkernel_cert),
         decision_proof_bundle=object(),
     )
 
