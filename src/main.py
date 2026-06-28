@@ -2932,7 +2932,13 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     snapshot_reserve_s: float,
     cached_topology_count: int,
 ) -> float:
-    del refresh_budget_s, cached_topology_count
+    pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    if cached_topology_count > 0:
+        cached_gamma_s = max(
+            0.1,
+            float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "1.0")),
+        )
+        return min(pre_capture_deadline, refresh_deadline - refresh_budget_s + cached_gamma_s)
     return refresh_deadline - snapshot_reserve_s
 
 
@@ -3651,9 +3657,15 @@ def _refresh_pending_family_snapshots(
                         # window; 1.5s left it at 3.5s — 0.27s short, the same miss
                         # class that pinned families at the FDR gate on 2026-06-10.
                         # Relation enforced by tests/test_time_semantics_relations.py.
+                        grace_env = (
+                            "ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_DRAIN_GRACE_SECONDS"
+                            if cached_topology_markets
+                            else "ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS"
+                        )
+                        grace_default = "0.0" if cached_topology_markets else "2.0"
                         grace_s = max(
                             0.0,
-                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "2.0")),
+                            float(os.environ.get(grace_env, grace_default)),
                         )
                         # Cap the grace at the absolute refresh deadline so draining
                         # near-complete fetches never overruns the cycle's total

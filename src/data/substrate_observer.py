@@ -543,8 +543,8 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
     if cached_topology_count > 0:
         cached_gamma_s = max(
-            3.0,
-            float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "3.0")),
+            0.1,
+            float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "1.0")),
         )
         return min(pre_capture_deadline, refresh_deadline - refresh_budget_s + cached_gamma_s)
     return pre_capture_deadline
@@ -1370,9 +1370,15 @@ def _refresh_pending_family_snapshots(
                         _submit_gamma_jobs(executor)
 
                     if pending_futures:
+                        grace_env = (
+                            "ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_DRAIN_GRACE_SECONDS"
+                            if cached_topology_markets
+                            else "ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS"
+                        )
+                        grace_default = "0.0" if cached_topology_markets else "2.0"
                         grace_s = max(
                             0.0,
-                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "2.0")),
+                            float(os.environ.get(grace_env, grace_default)),
                         )
                         grace_deadline = min(time.monotonic() + grace_s, refresh_deadline)
                         while pending_futures:
