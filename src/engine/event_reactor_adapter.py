@@ -6226,10 +6226,10 @@ def _build_live_execution_command_certificates(
     _assert_event_bound_receipt_live_authority(receipt)
     proof_bundle = receipt.decision_proof_bundle
     decision_time = _live_certificate_decision_time_from_proof_bundle(decision_time, proof_bundle)
-    compile_result = DecisionCompiler().compile_no_submit(
+    compile_result = DecisionCompiler().compile_authority_graph(
         event,
         decision_time=decision_time,
-        mode="NO_SUBMIT",
+        mode="LIVE",
         proof_bundle=proof_bundle,
     )
     if compile_result.status != "VERIFIED":
@@ -6247,13 +6247,9 @@ def _build_live_execution_command_certificates(
             if detail:
                 reason = f"{reason}:{detail}"
         else:
-            reason = "NO_SUBMIT_CERTIFICATE_REJECTED"
+            reason = "LIVE_AUTHORITY_GRAPH_REJECTED"
         raise ValueError(reason)
-    base_certs = tuple(
-        cert
-        for cert in compile_result.certificates
-        if cert.certificate_type not in {claims.NO_SUBMIT_DECISION, claims.NO_SUBMIT_MODE}
-    )
+    base_certs = tuple(compile_result.certificates)
     _assert_event_bound_calibration_live_admitted(_required_cert(base_certs, claims.CALIBRATION))
     executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
     live_cap = _build_live_cap_certificate_from_ledger(
