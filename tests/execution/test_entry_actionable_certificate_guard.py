@@ -1,9 +1,12 @@
 import json
 import sqlite3
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from src.contracts import Direction, ExecutionIntent
+from src.contracts.slippage_bps import SlippageBps
 from src.state import db as state_db
-from src.execution.executor import _entry_actionable_certificate_component
+from src.execution.executor import _entry_actionable_certificate_component, _live_order
 from src.state.decision_integrity_quarantine import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
@@ -93,6 +96,44 @@ def _insert_actionable(conn: sqlite3.Connection, *, payload: dict | None = None)
     )
 
 
+def _submit_intent(**overrides) -> ExecutionIntent:
+    payload = {
+        "direction": Direction("buy_yes"),
+        "target_size_usd": 9.0,
+        "limit_price": 0.4,
+        "toxicity_budget": 0.05,
+        "max_slippage": SlippageBps(value_bps=0.0, direction="zero"),
+        "is_sandbox": False,
+        "market_id": "market-1",
+        "token_id": "yes-1",
+        "timeout_seconds": 60,
+        "executable_snapshot_id": "exec-1",
+        "executable_snapshot_min_tick_size": "0.01",
+        "executable_snapshot_min_order_size": "0.01",
+        "executable_snapshot_neg_risk": False,
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "expected_edge": 0.2,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.7,
+            "payoff_q_lcb": 0.6,
+            "cost": 0.4,
+            "edge_lcb": 0.2,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+        },
+        "actionable_certificate_hash": "h1",
+    }
+    payload.update(overrides)
+    return ExecutionIntent(**payload)
+
+
 def test_entry_actionable_certificate_guard_requires_live_verified_row():
     conn = _conn_with_world_cert_table()
     intent = SimpleNamespace(actionable_certificate_hash="h1")
@@ -119,6 +160,82 @@ def test_entry_actionable_certificate_guard_allows_persisted_live_verified_row()
 
     assert component["allowed"] is True
     assert component["details"]["certificate_schema"] == "world"
+
+
+def test_entry_actionable_certificate_guard_rejects_intent_payload_mismatch():
+    conn = _conn_with_world_cert_table()
+    _insert_actionable(conn)
+    intent = _submit_intent(token_id="other-token")
+
+    component = _entry_actionable_certificate_component(conn, intent)
+
+    assert component["allowed"] is False
+    assert component["reason"] == "actionable_certificate_fails_current_verifier"
+    assert "token_mismatch" in component["details"]["verification_error"]
+
+
+def test_entry_actionable_certificate_guard_binds_edli_execution_identity():
+    conn = _conn_with_world_cert_table()
+    _insert_actionable(conn)
+    intent = _submit_intent()
+
+    component = _entry_actionable_certificate_component(
+        conn,
+        intent,
+        decision_id="edli_exec_cmd:event-1:intent-1:yes-1:buy_yes",
+    )
+
+    assert component["allowed"] is True
+
+
+def test_entry_actionable_certificate_guard_rejects_edli_identity_mismatch():
+    conn = _conn_with_world_cert_table()
+    _insert_actionable(conn)
+    intent = _submit_intent()
+
+    component = _entry_actionable_certificate_component(
+        conn,
+        intent,
+        decision_id="edli_exec_cmd:event-1:intent-1:other-token:buy_yes",
+    )
+
+    assert component["allowed"] is False
+    assert component["reason"] == "actionable_certificate_fails_current_verifier"
+    assert "edli_token_mismatch" in component["details"]["verification_error"]
+
+
+def test_live_entry_rejects_synthetic_decision_id_before_command_persist(
+    monkeypatch,
+    tmp_path,
+):
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.row_factory = sqlite3.Row
+    state_db.init_schema(conn)
+    monkeypatch.setattr(
+        "src.execution.executor._assert_cutover_allows_submit",
+        lambda _intent_kind: {"component": "cutover", "allowed": True},
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._assert_risk_allocator_allows_submit",
+        lambda _intent: {"component": "risk_allocator", "allowed": True},
+    )
+
+    with patch(
+        "src.data.polymarket_client.PolymarketClient",
+        side_effect=AssertionError("venue client must not be constructed"),
+    ):
+        result = _live_order(
+            "trade-synthetic-decision",
+            _submit_intent(),
+            shares=10.0,
+            conn=conn,
+            decision_id="",
+        )
+
+    assert result.status == "rejected"
+    assert result.command_state == "REJECTED"
+    assert "missing_durable_live_entry_decision_id" in (result.reason or "")
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
 
 def test_entry_actionable_certificate_guard_attaches_world_from_trade_main(

@@ -827,6 +827,8 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
 def _entry_actionable_certificate_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
+    *,
+    decision_id: str = "",
 ) -> dict:
     """Require the live actionable certificate to be persisted and currently valid."""
 
@@ -926,6 +928,13 @@ def _entry_actionable_certificate_component(
         if not isinstance(payload, dict):
             raise ValueError("payload_json is not an object")
         _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        mismatch_reason = _actionable_certificate_intent_mismatch_reason(
+            payload,
+            intent,
+            decision_id=decision_id,
+        )
+        if mismatch_reason:
+            raise ValueError(mismatch_reason)
     except Exception as exc:  # noqa: BLE001
         return _capability_component(
             "entry_actionable_certificate",
@@ -940,6 +949,92 @@ def _entry_actionable_certificate_component(
         certificate_hash=certificate_hash,
         certificate_schema=matching_schema,
     )
+
+
+def _direction_value(value: object) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip()
+
+
+def _float_values_match(left: object, right: object, *, tolerance: float = 1e-9) -> bool:
+    parsed_left = _float_field(left)
+    parsed_right = _float_field(right)
+    if parsed_left is None or parsed_right is None:
+        return False
+    return abs(parsed_left - parsed_right) <= tolerance
+
+
+def _actionable_certificate_intent_mismatch_reason(
+    payload: Mapping[str, Any],
+    intent: ExecutionIntent,
+    *,
+    decision_id: str = "",
+) -> str:
+    """Ensure the durable actionable certificate authorizes this exact submit."""
+
+    token_id = str(getattr(intent, "token_id", "") or "").strip()
+    if token_id and str(payload.get("token_id") or "").strip() != token_id:
+        return "actionable_certificate_token_mismatch"
+
+    direction = _direction_value(getattr(intent, "direction", ""))
+    if direction and str(payload.get("direction") or "").strip() != direction:
+        return "actionable_certificate_direction_mismatch"
+
+    snapshot_id = str(getattr(intent, "executable_snapshot_id", "") or "").strip()
+    payload_snapshot_id = str(payload.get("executable_snapshot_id") or "").strip()
+    if snapshot_id and payload_snapshot_id and payload_snapshot_id != snapshot_id:
+        return "actionable_certificate_snapshot_mismatch"
+
+    for field_name in ("q_live", "q_lcb_5pct"):
+        intent_value = getattr(intent, field_name, None)
+        if intent_value is not None and not _float_values_match(payload.get(field_name), intent_value):
+            return f"actionable_certificate_{field_name}_mismatch"
+
+    intent_economics = getattr(intent, "qkernel_execution_economics", None)
+    payload_economics = payload.get("qkernel_execution_economics")
+    if isinstance(intent_economics, Mapping):
+        if not isinstance(payload_economics, Mapping):
+            return "actionable_certificate_qkernel_economics_missing"
+        for key in (
+            "source",
+            "side",
+            "direction_law_ok",
+            "coherence_allows",
+        ):
+            if payload_economics.get(key) != intent_economics.get(key):
+                return f"actionable_certificate_qkernel_{key}_mismatch"
+        for key in (
+            "cost",
+            "edge_lcb",
+            "optimal_delta_u",
+            "false_edge_rate",
+            "payoff_q_point",
+            "payoff_q_lcb",
+        ):
+            if key in intent_economics and not _float_values_match(
+                payload_economics.get(key),
+                intent_economics.get(key),
+            ):
+                return f"actionable_certificate_qkernel_{key}_mismatch"
+
+    decision_text = str(decision_id or "").strip()
+    if decision_text.startswith("edli_exec_cmd:"):
+        parts = decision_text.split(":")
+        if len(parts) < 5:
+            return "actionable_certificate_edli_decision_id_malformed"
+        event_id = parts[1]
+        command_direction = parts[-1]
+        command_token = parts[-2]
+        final_intent_id = ":".join(parts[2:-2])
+        if str(payload.get("event_id") or "").strip() != event_id:
+            return "actionable_certificate_edli_event_mismatch"
+        if str(payload.get("final_intent_id") or "").strip() != final_intent_id:
+            return "actionable_certificate_edli_final_intent_mismatch"
+        if token_id and command_token != token_id:
+            return "actionable_certificate_edli_token_mismatch"
+        if direction and command_direction != direction:
+            return "actionable_certificate_edli_direction_mismatch"
+    return ""
 
 
 def _decision_certificate_is_quarantined(
@@ -4683,6 +4778,17 @@ def _live_order(
             effective_decision_id,
         )
     try:  # outer: ensures conn is closed when _own_conn (HIGH fix)
+        if not decision_id or effective_decision_id.startswith("entry:"):
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason="entry_decision_identity:missing_durable_live_entry_decision_id",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         corrected_identity_component = _corrected_entry_identity_component(conn, intent)
         if not corrected_identity_component.get("allowed"):
             reason = str(
@@ -4784,6 +4890,7 @@ def _live_order(
         actionable_certificate_component = _entry_actionable_certificate_component(
             conn,
             intent,
+            decision_id=effective_decision_id,
         )
         if not actionable_certificate_component.get("allowed"):
             reason = str(
