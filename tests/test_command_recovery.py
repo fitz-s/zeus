@@ -7584,6 +7584,189 @@ class TestRecoveryResolutionTable:
         ]
         assert event_types == ["SubmitUnknown", "Reconciled", "CapTransitioned"]
 
+    def test_edli_post_submit_unknown_without_command_releases_on_authenticated_absence(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-2:intent-2:token-2:token-2:buy_no"
+        aggregate_id = "event-2:intent-2:token-2"
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "condition_id": "condition-2",
+                "token_id": "token-2",
+                "direction": "buy_no",
+                "city": "Ankara",
+                "target_date": "2026-06-29",
+                "metric": "high",
+            },
+            occurred_at="2026-04-26T00:01:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="VenueSubmitAttempted",
+            payload={
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "execution_command_id": execution_command_id,
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+            occurred_at="2026-04-26T00:02:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="SubmitUnknown",
+            payload={
+                "event_id": "event-2",
+                "final_intent_id": "intent-2",
+                "execution_command_id": execution_command_id,
+                "execution_receipt_hash": "receipt-hash-2",
+                "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:[gate_runtime] BLOCKED deployment_freshness_mismatch",
+                "submit_status": "POST_SUBMIT_UNKNOWN",
+                "reconciliation_followup_required": True,
+                "side_effect_known": False,
+                "venue_call_started": True,
+            },
+            occurred_at="2026-04-26T00:03:00+00:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-2', 'intent-2', 'PENDING_RECONCILE',
+                      3, 'SubmitUnknown', 'hash-3', 1, NULL,
+                      '2026-04-26T00:03:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-2', 'event-2', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                      'intent-2', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_post_submit_unknown_absence"]["advanced"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "CAP_TRANSITIONED"
+        assert bool(projection["pending_reconcile"]) is False
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-2'").fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+
+    def test_edli_post_submit_unknown_without_command_stays_when_venue_exposure_matches(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-3:intent-3:token-3:token-3:buy_no"
+        aggregate_id = "event-3:intent-3:token-3"
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": "event-3",
+                "final_intent_id": "intent-3",
+                "condition_id": "condition-3",
+                "token_id": "token-3",
+                "direction": "buy_no",
+            },
+            occurred_at="2026-04-26T00:01:00+00:00",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="SubmitUnknown",
+            payload={
+                "event_id": "event-3",
+                "final_intent_id": "intent-3",
+                "execution_command_id": execution_command_id,
+                "execution_receipt_hash": "receipt-hash-3",
+                "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:timeout",
+                "submit_status": "POST_SUBMIT_UNKNOWN",
+                "reconciliation_followup_required": True,
+                "side_effect_known": False,
+                "venue_call_started": True,
+            },
+            occurred_at="2026-04-26T00:03:00+00:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-3', 'intent-3', 'PENDING_RECONCILE',
+                      2, 'SubmitUnknown', 'hash-3', 1, NULL,
+                      '2026-04-26T00:03:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-3', 'event-3', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                      'intent-3', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+        mock_client.get_open_orders.return_value = [{"id": "order-3", "asset_id": "token-3"}]
+        mock_client.get_trades.return_value = []
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_post_submit_unknown_absence"]["advanced"] == 0
+        assert summary["edli_post_submit_unknown_absence"]["stayed"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "PENDING_RECONCILE"
+        assert bool(projection["pending_reconcile"]) is True
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-3'").fetchone()
+        assert cap["reservation_status"] == "RESERVED"
+
     def test_partial_confirmed_fill_absent_from_open_orders_expires_remainder_without_voiding_fill(
         self,
         conn,

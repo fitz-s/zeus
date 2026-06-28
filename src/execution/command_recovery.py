@@ -10559,6 +10559,160 @@ def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> di
     return summary
 
 
+def _reconcile_edli_post_submit_unknown_absence(
+    conn: sqlite3.Connection,
+    client,
+) -> dict:
+    """Release EDLI post-submit unknowns only after authenticated venue absence.
+
+    This covers the no-venue-command gap: the live-order aggregate reached
+    SubmitUnknown/PENDING_RECONCILE, but no venue_commands row was ever persisted
+    for the execution_command_id. Local absence is not enough. We require complete
+    account open-order and trade reads and refuse if either mentions the token.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    if not events_ref or not projection_ref:
+        return summary
+    rows = conn.execute(
+        f"""
+        SELECT proj.aggregate_id,
+               json_extract(plan.payload_json, '$.token_id') AS token_id,
+               json_extract(unknown.payload_json, '$.execution_command_id') AS execution_command_id,
+               json_extract(unknown.payload_json, '$.reason_code') AS reason_code
+        FROM {projection_ref} proj
+        JOIN {events_ref} unknown
+          ON unknown.aggregate_id = proj.aggregate_id
+         AND unknown.event_type = 'SubmitUnknown'
+        JOIN {events_ref} plan
+          ON plan.aggregate_id = proj.aggregate_id
+         AND plan.event_type = 'SubmitPlanBuilt'
+        WHERE proj.pending_reconcile = 1
+          AND COALESCE(proj.venue_order_id, '') = ''
+          AND json_extract(unknown.payload_json, '$.venue_call_started') = 1
+          AND COALESCE(json_extract(unknown.payload_json, '$.side_effect_known'), 0) = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM {events_ref} unsafe
+              WHERE unsafe.aggregate_id = proj.aggregate_id
+                AND unsafe.event_type IN (
+                    'VenueSubmitAcknowledged',
+                    'UserOrderObserved',
+                    'UserTradeObserved'
+                )
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM venue_commands cmd
+              WHERE cmd.decision_id = json_extract(unknown.payload_json, '$.execution_command_id')
+          )
+        ORDER BY unknown.occurred_at
+        """
+    ).fetchall()
+    if not rows:
+        return summary
+    try:
+        open_read = _client_read_items(client, "get_open_orders")
+        trade_read = _client_read_items(client, "get_trades")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "recovery: EDLI post-submit unknown absence read unavailable: %s",
+            exc,
+        )
+        summary["stayed"] += len(rows)
+        return summary
+    open_orders = [_raw_payload(item) for item in open_read.items]
+    trades = [_raw_payload(item) for item in trade_read.items]
+    if not (open_read.query_complete and trade_read.query_complete):
+        logger.warning(
+            "recovery: EDLI post-submit unknown absence read incomplete; leaving %d "
+            "pending aggregates fail-closed",
+            len(rows),
+        )
+        summary["stayed"] += len(rows)
+        return summary
+
+    for row in rows:
+        record = _dict_row(row)
+        aggregate_id = str(record.get("aggregate_id") or "")
+        execution_command_id = str(record.get("execution_command_id") or "")
+        token_id = str(record.get("token_id") or "")
+        summary["scanned"] += 1
+        if not aggregate_id or not execution_command_id or not token_id:
+            summary["stayed"] += 1
+            continue
+        matching_open = [raw for raw in open_orders if _raw_mentions_token(raw, token_id)]
+        matching_trades = [raw for raw in trades if _raw_mentions_token(raw, token_id)]
+        if matching_open or matching_trades:
+            logger.warning(
+                "recovery: EDLI post-submit unknown aggregate=%s refused absence "
+                "release; matching_open=%d matching_trades=%d",
+                aggregate_id,
+                len(matching_open),
+                len(matching_trades),
+            )
+            summary["stayed"] += 1
+            continue
+        sp_name = "sp_edli_post_submit_unknown_absence"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            advanced = _reconcile_edli_pending_no_order_if_proven(
+                conn,
+                execution_command_id=execution_command_id,
+                occurred_at=_now_iso(),
+                reason="edli_post_submit_unknown_authenticated_absence",
+                proof_class="authenticated_clob_absence_no_command_no_order",
+                command_id=None,
+                required_predicates={
+                    "pending_reconcile": True,
+                    "venue_call_started": True,
+                    "side_effect_known": False,
+                    "no_projection_venue_order_id": True,
+                    "no_venue_command": True,
+                    "no_ack_or_user_order_or_trade_event": True,
+                    "open_orders_query_complete": True,
+                    "trades_query_complete": True,
+                    "matching_open_order_count": len(matching_open),
+                    "matching_trade_count": len(matching_trades),
+                    "reason_code": str(record.get("reason_code") or ""),
+                    "open_order_count": len(open_orders),
+                    "trade_count": len(trades),
+                    "matching_open_orders": [
+                        _summarize_venue_match(raw) for raw in matching_open[:10]
+                    ],
+                    "matching_trades": [
+                        _summarize_venue_match(raw) for raw in matching_trades[:10]
+                    ],
+                    "pagination_scope": {
+                        "open_orders": open_read.pagination_scope,
+                        "trades": trade_read.pagination_scope,
+                    },
+                },
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            if advanced:
+                summary["advanced"] += 1
+                logger.warning(
+                    "recovery: EDLI post-submit unknown aggregate=%s released by "
+                    "authenticated venue absence",
+                    aggregate_id,
+                )
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:  # noqa: BLE001
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: EDLI post-submit unknown absence failed for aggregate=%s: %s",
+                aggregate_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
     if not _table_exists(conn, "decision_log"):
         return None
@@ -12284,6 +12438,15 @@ def _reconcile_passes_inline(
         summary["stayed"] += matched_summary["stayed"]
         summary["errors"] += matched_summary["errors"]
 
+        edli_post_submit_absence_summary = _reconcile_edli_post_submit_unknown_absence(
+            conn,
+            client,
+        )
+        summary["edli_post_submit_unknown_absence"] = edli_post_submit_absence_summary
+        summary["advanced"] += edli_post_submit_absence_summary["advanced"]
+        summary["stayed"] += edli_post_submit_absence_summary["stayed"]
+        summary["errors"] += edli_post_submit_absence_summary["errors"]
+
         completed_partial_summary = reconcile_completed_partial_order_facts(conn)
         summary["completed_partial_order_facts"] = completed_partial_summary
         summary["advanced"] += completed_partial_summary["advanced"]
@@ -12836,6 +12999,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _client_pass("matched_order_facts",
                      reconcile_matched_order_facts,
                      "matched_order_facts")
+        _client_pass(
+            "edli_post_submit_unknown_absence",
+            _reconcile_edli_post_submit_unknown_absence,
+            "edli_post_submit_unknown_absence",
+        )
         _db_pass("cancel_ack_terminal_no_fill_facts",
                  reconcile_cancel_ack_terminal_no_fill_facts,
                  "cancel_ack_terminal_no_fill_facts")
@@ -12890,6 +13058,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     _db_pass("stale_terminal_no_fill_findings",
              reconcile_stale_terminal_no_fill_findings, "stale_terminal_no_fill_findings")
     _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
+    _client_pass(
+        "edli_post_submit_unknown_absence",
+        _reconcile_edli_post_submit_unknown_absence,
+        "edli_post_submit_unknown_absence",
+    )
     _db_pass("completed_partial_order_facts",
              reconcile_completed_partial_order_facts, "completed_partial_order_facts")
     _db_pass("matched_cancel_review_required_entries",
