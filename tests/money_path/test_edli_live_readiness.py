@@ -80,6 +80,30 @@ def test_live_canary_groundwork_has_live_cap_schema_and_verifiers():
     assert LiveCapLedger.__name__ == "LiveCapLedger"
 
 
+def test_event_bound_executable_neg_risk_is_true_monotonic():
+    """Regression: live receipt/actionable true must not fight old snapshot false."""
+    from src.engine.event_reactor_adapter import _event_bound_executable_snapshot_neg_risk
+
+    snapshot_false = SimpleNamespace(neg_risk=False)
+    snapshot_true = SimpleNamespace(neg_risk=True)
+
+    assert _event_bound_executable_snapshot_neg_risk(
+        raw_receipt={"neg_risk": True},
+        selected_snapshot_row={"neg_risk": 0},
+        hydrated_snapshot=snapshot_false,
+    ) is True
+    assert _event_bound_executable_snapshot_neg_risk(
+        raw_receipt={"neg_risk": False},
+        selected_snapshot_row={"neg_risk": 0},
+        hydrated_snapshot=snapshot_true,
+    ) is True
+    assert _event_bound_executable_snapshot_neg_risk(
+        raw_receipt={},
+        selected_snapshot_row={"neg_risk": 0},
+        hydrated_snapshot=snapshot_false,
+    ) is False
+
+
 def test_live_adapter_builds_actionable_final_intent_command_and_submit_disabled_receipt(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event

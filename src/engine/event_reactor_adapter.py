@@ -8521,6 +8521,28 @@ def _require_snapshot_hash(snapshot: object) -> str:
     return h
 
 
+def _event_bound_executable_snapshot_neg_risk(
+    *,
+    raw_receipt: dict[str, Any],
+    selected_snapshot_row: dict[str, Any],
+    hydrated_snapshot: object,
+) -> bool:
+    """Return the executable snapshot neg-risk bit used by live certificates.
+
+    Live evidence can carry neg-risk through two surfaces: the elected snapshot
+    row/hydrated snapshot and the already-bound receipt/actionable path. A true
+    flag is monotonic: if any live input proves a condition is neg-risk, the
+    executable parent must carry true so downstream certificates do not fight
+    themselves. We never use receipt false to downgrade a snapshot true to false;
+    that still trips the verifier against final_intent and fails closed.
+    """
+
+    raw_value = _optional_bool(raw_receipt.get("neg_risk"))
+    row_value = _optional_bool(selected_snapshot_row.get("neg_risk"))
+    snapshot_value = bool(getattr(hydrated_snapshot, "neg_risk", False))
+    return raw_value is True or row_value is True or snapshot_value is True
+
+
 def _require_cost_basis(
     snapshot: object,
     *,
@@ -8666,6 +8688,11 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         or forecast_payload.get("source_id")
     )
     source_truth_source_run_id = payload.get("source_run_id") or forecast_payload.get("source_run_id")
+    executable_snapshot_neg_risk = _event_bound_executable_snapshot_neg_risk(
+        raw_receipt=raw_receipt,
+        selected_snapshot_row=selected_snapshot_row,
+        hydrated_snapshot=_hydrated_snapshot,
+    )
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -8816,7 +8843,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "fee_details_hash": _hash_jsonish(selected_snapshot_row.get("fee_details_json") or selected_snapshot_row.get("fee_details")),
                 "min_tick_size": str(_hydrated_snapshot.min_tick_size),
                 "min_order_size": str(_hydrated_snapshot.min_order_size),
-                "neg_risk": bool(_hydrated_snapshot.neg_risk),
+                "neg_risk": executable_snapshot_neg_risk,
                 "captured_at": selected_snapshot_row.get("captured_at"),
                 "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
                 "active": selected_snapshot_row.get("active"),
