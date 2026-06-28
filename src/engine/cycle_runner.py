@@ -395,22 +395,20 @@ def _discovery_gates_allow_entries(
     )
 
 
-# P0.3 (INV-27): observability-only surfacing of positions in execution-unsafe
-# states. Operator decision 2026-04-26: surface warnings, do NOT block entries.
-# K4 (P1+) will replace these heuristics with command-truth integration.
+# P0.3 (INV-27): surface pending execution-truth holes that are not already
+# represented by a canonical entry gate. Quarantine is intentionally excluded:
+# _has_quarantined_positions() is the live entry blocker for that state.
 _PENDING_STATE_PREFIX = "pending_"
-_QUARANTINED_STATE_VALUES = frozenset({"quarantined", "quarantine_expired"})
 
 
 def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
-    """Scan portfolio for positions in execution-unsafe states.
+    """Scan portfolio for pending positions with unknown command authority.
 
     Returns a list of warning dicts. Each warning carries enough identity
-    (trade_id, state) for an operator to investigate; we do not block entries.
+    (trade_id, state) for an operator to investigate. It is not a duplicate
+    quarantine surface; quarantine already blocks via _has_quarantined_positions.
 
-    Detection rules (P0 conservative — pre-K4):
-    - Position in any quarantined state with empty `order_id`
-      → "quarantine_without_order_authority"
+    Detection rule:
     - Position in any pending_* state with empty `order_id`
       → "pending_state_missing_order_id"
 
@@ -423,14 +421,7 @@ def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
         state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
         order_id = str(getattr(pos, "order_id", "") or "").strip()
         trade_id = getattr(pos, "trade_id", "") or ""
-        if state_val in _QUARANTINED_STATE_VALUES and not order_id:
-            warnings.append({
-                "type": "quarantine_without_order_authority",
-                "trade_id": trade_id,
-                "state": state_val,
-                "reason": "Position is quarantined without order_id; no venue command authority to verify state.",
-            })
-        elif state_val.startswith(_PENDING_STATE_PREFIX) and not order_id:
+        if state_val.startswith(_PENDING_STATE_PREFIX) and not order_id:
             warnings.append({
                 "type": "pending_state_missing_order_id",
                 "trade_id": trade_id,

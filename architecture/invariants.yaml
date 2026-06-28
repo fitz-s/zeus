@@ -546,11 +546,11 @@ invariants:
 
   - id: INV-27
     zones: [K2_runtime]
-    statement: Cycle summary must surface execution-truth warnings for portfolio positions in execution-unsafe states (quarantined without order_id, pending_* without order_id). Surfacing is observability-only and does NOT block entries.
-    why: Without explicit operator visibility into execution-truth gaps, positions in unsafe states (quarantined without command authority, pending without order_id) silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Surfacing must not block entries (operator decision 2026-04-26) so entry-decision logic remains driven by risk_level / posture / quarantine, not by surface-warning side effects.
+    statement: Cycle summary must surface execution-truth warnings for pending_* positions without order_id. Quarantined positions must not be duplicated as warnings because they are already covered by the canonical quarantine entry blocker.
+    why: Without explicit operator visibility into pending command-truth gaps, pending positions without order_id silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Quarantine remains a real entry blocker through _has_quarantined_positions instead of a duplicate observability warning.
     enforced_by:
       tests:
-        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_surfaces_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_uses_canonical_entry_gate_not_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
