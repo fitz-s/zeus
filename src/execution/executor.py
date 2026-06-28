@@ -3410,6 +3410,7 @@ def _legacy_entry_intent_from_final(
         q_live=intent.q_live,
         q_lcb_5pct=intent.q_lcb_5pct,
         expected_edge=intent.expected_edge,
+        min_entry_price=intent.min_entry_price,
         min_expected_profit_usd=intent.min_expected_profit_usd,
         min_submit_edge_density=intent.min_submit_edge_density,
         qkernel_execution_economics=intent.qkernel_execution_economics,

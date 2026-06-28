@@ -1015,6 +1015,7 @@ class TestLiveOrderCommandSplit:
             q_live=0.99,
             q_lcb_5pct=0.95,
             expected_edge=0.07,
+            min_entry_price=0.05,
             min_expected_profit_usd=0.05,
             min_submit_edge_density=0.02,
             qkernel_execution_economics={
@@ -1040,6 +1041,9 @@ class TestLiveOrderCommandSplit:
 
         assert legacy_intent.decision_source_context is context
         assert legacy_intent.token_id == "tok-pre-submit-audit"
+        assert legacy_intent.min_entry_price == pytest.approx(0.05)
+        assert legacy_intent.min_expected_profit_usd == pytest.approx(0.05)
+        assert legacy_intent.min_submit_edge_density == pytest.approx(0.02)
 
     @pytest.mark.parametrize(
         ("context", "expected_reason"),
