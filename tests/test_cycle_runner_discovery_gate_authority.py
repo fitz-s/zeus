@@ -56,6 +56,7 @@ def test_gate_signature_is_kwargs_only():
         "chain_ready",
         "exposure_gate_hit",
         "has_quarantine",
+        "freshness_allows_entries",
         "risk_level",
         "heartbeat_status",
         "ws_gap_status",
@@ -108,6 +109,7 @@ def _ok_kwargs() -> dict:
         chain_ready=True,
         has_quarantine=False,
         force_exit=False,
+        freshness_allows_entries=True,
         entry_bankroll=1000.0,
         exposure_gate_hit=False,
         entries_paused=False,
@@ -179,6 +181,13 @@ def test_gate_blocks_on_force_exit():
     """T-force-exit: force_exit=True → gate returns False."""
     kwargs = _ok_kwargs()
     kwargs["force_exit"] = True
+    assert _discovery_gates_allow_entries(**kwargs) is False
+
+
+def test_gate_blocks_on_degraded_freshness():
+    """T-freshness: degraded/unknown forecast freshness → gate returns False."""
+    kwargs = _ok_kwargs()
+    kwargs["freshness_allows_entries"] = False
     assert _discovery_gates_allow_entries(**kwargs) is False
 
 

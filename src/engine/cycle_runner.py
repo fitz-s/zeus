@@ -29,7 +29,7 @@ from src.control.block_adapters._base import RegistryDeps
 # S-4 fix (architect audit 2026-04-30, recovery 2026-05-01): module-level import
 # so test monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", ...) takes effect.
 # Per-cycle freshness consumer wired into run_cycle() top to short-circuit DAY0_CAPTURE
-# and tag OPENING_HUNT degraded_data when source_health.json shows stale upstreams.
+# and block OPENING_HUNT entries when source_health.json shows stale upstreams.
 from src.control.freshness_gate import evaluate_freshness_mid_run
 from src.data.market_scanner import (
     capture_executable_market_snapshot,
@@ -359,6 +359,7 @@ def _discovery_gates_allow_entries(
     chain_ready: bool,
     has_quarantine: bool,
     force_exit: bool,
+    freshness_allows_entries: bool,
     entry_bankroll,
     exposure_gate_hit: bool,
     entries_paused: bool,
@@ -379,6 +380,8 @@ def _discovery_gates_allow_entries(
       intentional: a broken safety registry is itself a blocking condition.
     - block_registry.is_clear(BlockStage.DISCOVERY) is False → blocked.
     - Status dicts missing the "entry" key default to not allowing submit.
+    - Degraded/unknown forecast freshness blocks entries while monitor/exit
+      lanes continue; it is not an observability-only tag.
     """
     if block_registry is None or not block_registry.is_clear(BlockStage.DISCOVERY):
         return False
@@ -386,6 +389,7 @@ def _discovery_gates_allow_entries(
         chain_ready
         and not has_quarantine
         and not force_exit
+        and freshness_allows_entries
         and not entries_paused
         and current_posture == "NORMAL"
         and entry_bankroll is not None
@@ -614,12 +618,13 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # tests can monkeypatch it. Four branches per design §3.1 + imminent extension:
     #   FRESH    → fall through (normal cycle)
     #   STALE w/ day0_capture_disabled + DAY0_CAPTURE or IMMINENT_OPEN_CAPTURE → short-circuit
-    #   STALE w/ ensemble_disabled + DiscoveryMode.OPENING_HUNT     → tag degraded_data, continue
+    #   STALE w/ ensemble_disabled + DiscoveryMode.OPENING_HUNT     → block entries, continue monitor/exits
     # The DAY0 short-circuit returns the summary BEFORE any IO so the trading stack
-    # never touches stale upstream data. OPENING_HUNT continues with the flag set
-    # so downstream entry decisions can be tagged in decision_log.
+    # never touches stale upstream data. OPENING_HUNT continues only for
+    # monitor/exit/reconciliation; discovery is blocked by the central gate.
     # IMMINENT_OPEN_CAPTURE is fail-closed like DAY0_CAPTURE: markets close within
     # 24h so there is no time to recover from a bad trade on stale signals.
+    freshness_allows_entries = True
     try:
         _freshness_verdict = evaluate_freshness_mid_run(STATE_DIR)
     except Exception as exc:
@@ -644,7 +649,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
             summary["freshness_gate_error"] = repr(exc)
             return summary
         summary["degraded_data"] = True
+        summary["freshness_entry_blocked"] = True
         summary["freshness_gate_error"] = repr(exc)
+        freshness_allows_entries = False
         _freshness_verdict = None
     if _freshness_verdict is not None:
         # P3 cycle-axis freshness short-circuit (PLAN_v3 §6.P3 — explicitly
@@ -663,7 +670,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
             return summary
         if _freshness_verdict.ensemble_disabled and mode == DiscoveryMode.OPENING_HUNT:
             summary["degraded_data"] = True
+            summary["freshness_entry_blocked"] = True
             summary["stale_sources"] = list(_freshness_verdict.stale_sources)
+            freshness_allows_entries = False
 
     artifact = CycleArtifact(mode=mode.value, started_at=summary["started_at"], summary=summary)
 
@@ -979,6 +988,8 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
+    elif not freshness_allows_entries:
+        entries_blocked_reason = "freshness_degraded"
     elif risk_level in (RiskLevel.YELLOW, RiskLevel.ORANGE, RiskLevel.RED, RiskLevel.DATA_DEGRADED):
         # Phase 9A R-BT: DATA_DEGRADED from DT#6 (portfolio_loader_degraded) must
         # populate entries_blocked_reason so operators see a reason code in
@@ -1080,6 +1091,7 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         chain_ready=chain_ready,
         has_quarantine=has_quarantine,
         force_exit=force_exit,
+        freshness_allows_entries=freshness_allows_entries,
         entry_bankroll=entry_bankroll,
         exposure_gate_hit=exposure_gate_hit,
         entries_paused=entries_paused,

@@ -91,6 +91,7 @@ def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
         "chain_ready": True,
         "has_quarantine": False,
         "force_exit": False,
+        "freshness_allows_entries": True,
         "entry_bankroll": 1000.0,
         "exposure_gate_hit": False,
         "entries_paused": False,
