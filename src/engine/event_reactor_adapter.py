@@ -1959,32 +1959,15 @@ def _qkernel_cert_direction_admitted(
 ) -> bool:
     """Mirror FamilyDecisionEngine._direction_admitted for serialized certs."""
 
-    if cert.get("direction_law_ok") is True:
-        return True
+    if cert.get("direction_law_ok") is not True:
+        return False
     native_side = _native_curve_side_for_direction(str(direction or ""))
     side = str(cert.get("side") or "").strip().upper()
     if side not in {"YES", "NO"}:
         return False
     if native_side is not None and side != native_side:
         return False
-    try:
-        edge_lcb = float(cert.get("edge_lcb"))
-        optimal_delta_u = float(cert.get("optimal_delta_u"))
-    except (TypeError, ValueError):
-        return False
-    if edge_lcb <= 0.0 or optimal_delta_u <= 0.0:
-        return False
-    try:
-        from src.decision.family_decision_engine import _OOF_LIVE_RELIABILITY_BASES
-    except Exception:
-        return False
-    cell_key = str(cert.get("q_lcb_guard_cell_key") or "").strip()
-    return (
-        str(cert.get("q_lcb_guard_basis") or "") in _OOF_LIVE_RELIABILITY_BASES
-        and cert.get("q_lcb_guard_abstained") is not True
-        and bool(cell_key)
-        and f"|{side}|" in cell_key
-    )
+    return True
 
 
 def _selected_opportunity_book_candidate(

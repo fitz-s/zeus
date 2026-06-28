@@ -498,15 +498,14 @@ def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
 
     * ``YES_i`` is structurally clean when ``i`` IS the forecast bin — buying the forecast
       bin, the ONE bin the predictive distribution most favors. A non-forecast YES is not
-      structurally direction-law-clean; it needs the later side-aware empirical OOF
-      admission license before it can become live-selectable.
+      structurally direction-law-clean and cannot become live-selectable through empirical
+      reliability evidence.
     * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
       wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
 
     This function stays purely structural: ``point_q`` and empirical reliability
-    are not read here. Empirical OOF reliability is applied later by
-    ``FamilyDecisionEngine._direction_admitted`` so the receipt can distinguish
-    the structural direction flag from an evidence-licensed admission.
+    are not read here. Empirical OOF reliability may affect q_lcb/coherence evidence, but
+    it does not authorize a structurally illegal live route.
     """
     if route.side == "YES":
         return route.bin_id == forecast_bin
@@ -758,25 +757,24 @@ class FamilyDecisionEngine:
 
         # --- the market-coherence report over the candidate bins (spec 891) ------
         # A large model/market logit gap is not automatically a live-money incident.
-        # When the same qkernel candidate has side-aware OOF reliability evidence, did not
-        # abstain, and still has positive guarded edge and positive guarded ΔU, that cell is
-        # the receipt-carrying model-superiority license the coherence module was designed
-        # to consume. INERT/missing/error guard states license nothing, preserving the Tokyo
-        # tick-floor block.
-        empirical_license_bins = frozenset(
+        # Side-aware OOF reliability evidence can support market-coherence acceptance for a
+        # structurally legal candidate. It cannot override the direction law for non-modal
+        # YES or modal NO routes.
+        empirical_reliability_bins = frozenset(
             d.route.bin_id
             for d in guarded
-            if self._has_side_aware_oof_direction_license(d)
+            if d.direction_law_ok
+            and self._has_side_aware_oof_reliability_evidence(d)
             and d.economics.edge_lcb > 0.0
             and d.economics.optimal_delta_u > 0.0
         )
 
-        def _empirical_or_injected_license(case_key: str, bin_id: str) -> bool:
+        def _empirical_or_injected_reliability(case_key: str, bin_id: str) -> bool:
             if licensed_model_superiority is not None and licensed_model_superiority(
                 case_key, bin_id
             ):
                 return True
-            return bin_id in empirical_license_bins
+            return bin_id in empirical_reliability_bins
 
         candidate_bin_ids = sorted({d.route.bin_id for d in guarded})
         coherence = assess_market_coherence(
@@ -784,7 +782,7 @@ class FamilyDecisionEngine:
             family_book=family_book,
             candidate_bin_ids=candidate_bin_ids,
             case_key=case.family_id,
-            licensed_model_superiority=_empirical_or_injected_license,
+            licensed_model_superiority=_empirical_or_injected_reliability,
             min_depth=self._min_depth,
             max_spread=self._max_spread,
             depth_reference_size=self._depth_reference_size,
@@ -1015,7 +1013,7 @@ class FamilyDecisionEngine:
         )
 
     # ------------------------------------------------ portfolio comparison
-    def _has_side_aware_oof_direction_license(self, d: CandidateDecision) -> bool:
+    def _has_side_aware_oof_reliability_evidence(self, d: CandidateDecision) -> bool:
         cell_key = str(d.q_lcb_guard_cell_key or "").strip()
         side = str(d.route.side or "").strip().upper()
         return (
@@ -1027,13 +1025,7 @@ class FamilyDecisionEngine:
         )
 
     def _direction_admitted(self, d: CandidateDecision) -> bool:
-        if d.direction_law_ok:
-            return True
-        return (
-            self._has_side_aware_oof_direction_license(d)
-            and d.economics.edge_lcb > 0.0
-            and d.economics.optimal_delta_u > 0.0
-        )
+        return d.direction_law_ok is True
 
     def _utility_density(self, d: CandidateDecision) -> float:
         try:
@@ -1454,10 +1446,8 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # Direction law is structural. The admission predicate may also accept a
-        # candidate with active side-aware OOF evidence for the exact claim; that
-        # empirical license is separate from the raw direction flag and remains
-        # visible on the receipt.
+        # Direction law is structural. Reliability evidence can support q_lcb and
+        # market-coherence, but cannot make a structurally illegal route live-selectable.
         after_direction = [d for d in after_executable if self._direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW
@@ -1472,11 +1462,8 @@ class FamilyDecisionEngine:
             if d.economics.edge_lcb > 0.0 and d.economics.optimal_delta_u > 0.0
         ]
         # The live pass is a final structural re-proof (executable route, direction-law
-        # proof present, coherence accepted, the vector edge/ΔU). The direction-law proof
-        # passed here MUST be the SAME `_direction_admitted` predicate used by
-        # after_direction above — passing the bare `d.direction_law_ok` re-zeroes the
-        # edge-gated NO-on-modal harvest (live_candidate_passes hard-requires
-        # direction_law_proof_present=True). Every other vector gate still applies.
+        # proof present, coherence accepted, vector edge/ΔU). The direction-law proof
+        # passed here is intentionally the same structural predicate used above.
         survivors = [
             d
             for d in edge_survivors

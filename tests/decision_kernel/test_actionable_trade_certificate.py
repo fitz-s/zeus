@@ -104,7 +104,7 @@ def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_accepts_side_aware_oof_direction_license_for_yes():
+def test_actionable_rejects_oof_reliability_direction_override_for_yes():
     parents, action = actionable_graph(
         action_payload={
             "qkernel_execution_economics": {
@@ -125,7 +125,8 @@ def test_actionable_accepts_side_aware_oof_direction_license_for_yes():
         }
     )
 
-    verify_actionable_trade(action, parents)
+    with pytest.raises(CertificateVerificationError, match="qkernel direction admission"):
+        verify_actionable_trade(action, parents)
 
 
 def test_actionable_rejects_execution_command_id_present():

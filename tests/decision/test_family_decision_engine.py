@@ -1454,33 +1454,27 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
 
 
 # ===========================================================================
-# SPEC RED-on-revert #4: direction-law override requires side-aware OOF evidence.
+# SPEC RED-on-revert #4: OOF reliability cannot override structural direction law.
 # ===========================================================================
 
-def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
-    """A candidate cannot bypass direction law on edge alone.
+def test_oof_reliability_does_not_override_direction_law_for_yes_or_no():
+    """A candidate cannot bypass direction law with edge or OOF reliability evidence.
 
-    The prior relaxation admitted only one side with edge_lcb>0 when an OOF guard
-    licensed them, while a positive-edge YES with the same guard burden still died at
-    direction-law admission. That recreated an all-NO live bias. The override now requires
-    an active, non-abstaining side-aware OOF verdict for the exact claim, and applies that
-    burden symmetrically to YES and NO.
+    OOF/Wilson cells are q_lcb reliability evidence. They may support a legal candidate's
+    conservative probability/coherence proof, but they must not turn a structurally illegal
+    modal NO or non-modal YES into a live-selectable route.
     """
     case = _case()
     space = _outcome_space(case)
     # The modal bin for members tightly around 25C is b25 (confirmed by
     # test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it).
-    # A NO on b25 is direction-law-ILLEGAL (d.direction_law_ok = False) but must be
-    # admitted when edge_lcb > 0.0 (the favorite-longshot relaxation).
+    # A NO on b25 is direction-law-ILLEGAL (d.direction_law_ok = False).
     modal_bin_id = "b25"
 
-    # Build a NO-on-modal route: side="NO", bin_id=b25, cost=0.72 (a realistic
-    # favorite-NO ask; the favorite-NO loses edge at cost>=0.79 per settlement evidence).
+    # Build a NO-on-modal route: side="NO", bin_id=b25, cost=0.72.
     no_on_modal_route = _hand_route(space, side="NO", bin_id=modal_bin_id, cost=0.72)
 
-    # Build the economics: edge_lcb=0.08 (>0 so the relaxation fires AND the edge gate
-    # passes), delta_u_at_min=0.001 (>0 so live_candidate_passes passes the ΔU-at-min
-    # check), optimal_delta_u=0.05 (>0 so the ΔU gate passes).
+    # Positive economics prove the direction-law gate, not edge, blocks this route.
     no_on_modal_economics = CandidateEconomics(
         candidate_id=no_on_modal_route.candidate_id,
         point_ev=0.09,          # edge_lcb + small spread
@@ -1492,7 +1486,6 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
         cost=no_on_modal_route.route_cost.avg_cost,
         route_id=no_on_modal_route.route_cost.route_id,
     )
-    # direction_law_ok=False — this is the key: NO-on-modal is direction-law-ILLEGAL.
     no_on_modal_cand = CandidateDecision(
         route=no_on_modal_route,
         economics=no_on_modal_economics,
@@ -1522,22 +1515,12 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
     assert reason == NO_TRADE_NO_DIRECTION_LAW
 
     selected, reason = engine._select([licensed_no_on_modal_cand])
-    assert reason is None
-    assert selected is not None
-    assert selected.route.side == "NO"
-    assert selected.route.bin_id == modal_bin_id
-    # The critical invariant: admitted DESPITE direction_law_ok being False only because an
-    # active side-aware OOF verdict licensed the NO complement claim.
-    assert selected.direction_law_ok is False, (
-        "expected direction_law_ok=False on the selected candidate — the test proves the "
-        "admission is via the side-aware OOF license, not bare direction-law legality"
-    )
+    assert selected is None
+    assert reason == NO_TRADE_NO_DIRECTION_LAW
 
-    # ---- Confirm the same license burden applies to YES ------------------------
+    # ---- Confirm the same structural burden applies to YES ---------------------
     # A YES-on-non-modal (direction_law_ok=False, side="YES") with edge_lcb>0 must
-    # NOT be admitted on edge alone, but must be admitted when the exact YES cell has
-    # active OOF_WILSON_95 evidence. This is the live-log failure mode where YES
-    # candidates had positive edge/Delta-U but were stamped dlok=0 adm=0.
+    # NOT be admitted on edge alone or on an active OOF_WILSON_95 reliability cell.
     non_modal_bin_id = "b24"
     yes_on_non_modal_route = _hand_route(space, side="YES", bin_id=non_modal_bin_id, cost=0.30)
     yes_on_non_modal_economics = CandidateEconomics(
@@ -1579,16 +1562,10 @@ def test_direction_override_requires_side_aware_oof_license_for_yes_and_no():
     )
 
     selected3, reason3 = engine._select([licensed_yes_on_non_modal_cand])
-    assert reason3 is None
-    assert selected3 is not None
-    assert selected3.route.side == "YES"
-    assert selected3.route.bin_id == non_modal_bin_id
-    assert selected3.direction_law_ok is False, (
-        "expected direction_law_ok=False on the selected candidate — the test proves the "
-        "admission is via the side-aware YES OOF license, not bare direction-law legality"
-    )
+    assert selected3 is None
+    assert reason3 == NO_TRADE_NO_DIRECTION_LAW
     assert engine._direction_admitted(yes_on_non_modal_cand) is False
-    assert engine._direction_admitted(licensed_yes_on_non_modal_cand) is True
+    assert engine._direction_admitted(licensed_yes_on_non_modal_cand) is False
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):
@@ -1672,6 +1649,7 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
         q_dot_payoff=0.50,
         cost=route.route_cost.avg_cost,
         route_id=route.route_cost.route_id,
+        payoff_q_lcb=0.50,
     )
     candidate = CandidateDecision(
         route=route,
@@ -1725,7 +1703,7 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
     guarded_economics = guarded[0].economics
     assert guarded[0].q_lcb_guard_basis == "OOF_WILSON_95"
     assert guarded[0].q_lcb_guard_abstained is False
-    assert guarded_economics.edge_lcb == pytest.approx(0.19)
+    assert 0.0 < guarded_economics.edge_lcb < economics.edge_lcb
     assert guarded_economics.delta_u_at_min > 0.0
     assert guarded_economics.optimal_delta_u > 0.0
     assert guarded_economics.optimal_stake_usd > Decimal("0")
@@ -1733,4 +1711,4 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
     selected, reason = engine._select(guarded)
     assert reason is None
     assert selected is not None
-    assert selected.economics.edge_lcb == pytest.approx(0.19)
+    assert selected.economics.edge_lcb == pytest.approx(guarded_economics.edge_lcb)

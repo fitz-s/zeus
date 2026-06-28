@@ -967,8 +967,8 @@ def test_overlay_collapses_direct_route_probability_authority_split():
     )
 
 
-def test_overlay_rejects_qkernel_selected_yes_without_oof_direction_admission():
-    """A non-native YES needs the same side-aware OOF direction license as selection."""
+def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
+    """A non-native YES cannot become live through qkernel overlay without direction law."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
@@ -990,27 +990,26 @@ def test_overlay_rejects_qkernel_selected_yes_without_oof_direction_admission():
     )
 
 
-def test_overlay_accepts_side_aware_oof_licensed_yes_direction_override():
-    """Shanghai-class guard: a valid YES OOF license must not be lost at the bridge."""
+def test_overlay_rejects_oof_reliability_direction_override():
+    """OOF reliability cannot turn a structurally illegal route into a live proof."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.01, q_dot_payoff=0.06, point_ev=0.05, side="YES"
     )
 
-    new_proof = _overlay_proof(
-        q_posterior=0.06,
-        q_lcb_5pct=0.06,
-        economics=economics,
-        direction="buy_yes",
-        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
-        direction_law_ok=False,
-        coherence_allows=True,
-        q_lcb_guard_cell_key="high|L2_3|YES|nonmodal|qb2|coarse_global",
+    assert (
+        _overlay_proof(
+            q_posterior=0.06,
+            q_lcb_5pct=0.06,
+            economics=economics,
+            direction="buy_yes",
+            missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            direction_law_ok=False,
+            coherence_allows=True,
+            q_lcb_guard_cell_key="high|L2_3|YES|nonmodal|qb2|coarse_global",
+        )
+        is None
     )
-
-    assert new_proof is not None
-    assert new_proof.missing_reason is None
-    assert new_proof.qkernel_execution_economics["direction_law_ok"] is False
 
 
 def test_overlay_rejects_nonfinite_qkernel_execution_economics():
@@ -1112,7 +1111,7 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
             "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
         },
         direction="buy_yes",
-    ) is not None
+    ) is None
     assert era._valid_qkernel_execution_economics_payload(
         {
             **cert,
@@ -1125,7 +1124,7 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
             "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb2|coarse_global",
         },
         direction="buy_no",
-    ) is not None
+    ) is None
     assert era._valid_qkernel_execution_economics_payload(
         {**cert, "direction_law_ok": True, "coherence_allows": False},
         direction="buy_yes",

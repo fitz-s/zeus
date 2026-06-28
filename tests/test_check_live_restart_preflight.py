@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-20; last_reused=2026-06-20
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-06-28
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -119,6 +119,55 @@ def _init_actionable_world_db(path, payload: dict, *, decision_time: datetime | 
         ) VALUES (?, ?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?, ?)
         """,
         ("ActionableTradeCertificate:test", "hash-test", now.isoformat(), json.dumps(payload)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _init_entry_command_trade_db(
+    path,
+    *,
+    event_id: str,
+    token_id: str = "yes-1",
+    state: str = "ACKED",
+):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL,
+            envelope_id TEXT NOT NULL,
+            position_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            market_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            size REAL NOT NULL,
+            price REAL NOT NULL,
+            venue_order_id TEXT,
+            state TEXT NOT NULL,
+            last_event_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            review_required_reason TEXT
+        )
+        """
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size, price,
+            venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, 'snap-1', 'env-1', 'pos-1', ?, 'idem-1', 'ENTRY',
+                  'market-1', ?, 'BUY', 1.0, 0.4, 'venue-1', ?, NULL, ?, ?, NULL)
+        """,
+        ("cmd-1", f"edli_exec_cmd:{event_id}", token_id, state, now, now),
     )
     conn.commit()
     conn.close()
@@ -467,7 +516,7 @@ def test_posterior_summary_blocks_expired_source_cycle(monkeypatch, tmp_path):
     assert result.evidence["latest_live_source_cycle_age_hours"] > 30.0
 
 
-def test_live_actionable_certificate_semantics_blocks_lucknow_style_qkernel_mismatch(
+def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_mismatch(
     monkeypatch, tmp_path
 ):
     world_db = tmp_path / "zeus-world.db"
@@ -502,10 +551,57 @@ def test_live_actionable_certificate_semantics_blocks_lucknow_style_qkernel_mism
 
     result = preflight._live_actionable_certificate_semantics_check()
 
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["historical_risky_count"] == 1
+    assert result.evidence["historical_risky"][0]["city"] == "Lucknow"
+    assert "payoff_q_point exceeds" in result.evidence["historical_risky"][0]["reason"]
+
+
+def test_live_actionable_certificate_semantics_blocks_referenced_qkernel_mismatch(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    payload = {
+        **_valid_actionable_payload(),
+        "event_id": "event-1",
+        "token_id": "yes-1",
+        "city": "Lucknow",
+        "target_date": "2026-06-28",
+        "temperature_metric": "high",
+        "bin_label": "Will the highest temperature in Lucknow be 35°C or below on June 28?",
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "side": "YES",
+            "payoff_q_point": 0.7,
+            "payoff_q_lcb": 0.6,
+            "cost": 0.4,
+            "edge_lcb": 0.2,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": False,
+            "q_lcb_guard_basis": "OOF_WILSON_95",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
+            "coherence_allows": True,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    _init_entry_command_trade_db(trade_db, event_id="event-1", token_id="yes-1")
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
     assert result.ok is False
     assert result.evidence["risky_count"] == 1
+    assert result.evidence["historical_risky_count"] == 0
+    assert result.evidence["restart_relevant_entry_command_count"] == 1
     assert result.evidence["risky"][0]["city"] == "Lucknow"
-    assert "payoff_q_point exceeds" in result.evidence["risky"][0]["reason"]
+    assert "qkernel direction admission" in result.evidence["risky"][0]["reason"]
 
 
 def test_live_actionable_certificate_semantics_accepts_current_qkernel_payload(

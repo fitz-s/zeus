@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-06-28
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-28
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -790,7 +790,14 @@ def _edli_live_order_presubmit_shape_check() -> CheckResult:
 
 
 def _live_actionable_certificate_semantics_check() -> CheckResult:
-    """Re-verify recent LIVE ActionableTradeCertificate rows with current money law."""
+    """Re-verify LIVE ActionableTradeCertificate rows with current money law.
+
+    Historical certificates are immutable receipts. A verifier hotfix can make old rows
+    fail current money law, and that is important audit evidence, but it is restart-blocking
+    only when a currently restart-relevant entry command still references the certificate's
+    event/token. Open positive-share positions are checked again by
+    _open_entry_actionable_certificate_authority_check.
+    """
 
     evidence: dict[str, Any] = {
         "world_db": str(WORLD_DB),
@@ -827,6 +834,15 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         reason_code=REASON_INVALID_LIVE_ACTIONABLE,
     )
     evidence["quarantined_count"] = len(quarantined_hashes)
+    restart_relevant_commands = _restart_relevant_entry_command_index()
+    evidence["restart_relevant_entry_command_count"] = sum(
+        len(items) for items in restart_relevant_commands.values()
+    )
+    evidence["restart_relevant_entry_commands"] = [
+        item
+        for items in restart_relevant_commands.values()
+        for item in items[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    ][:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
     try:
         conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
@@ -868,58 +884,135 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             pass
 
     risky: list[dict[str, Any]] = []
+    historical_risky: list[dict[str, Any]] = []
     risky_count = 0
+    historical_risky_count = 0
     quarantined_risky_count = 0
     checked = 0
     for row in rows:
         checked += 1
+        payload: dict[str, Any] = {}
         try:
             payload = json.loads(str(row["payload_json"] or "{}"))
             if not isinstance(payload, dict):
                 raise CertificateVerificationError("actionable payload must be object")
             _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
         except Exception as exc:  # noqa: BLE001
-            if str(row["certificate_hash"] or "") in quarantined_hashes:
+            cert_hash = str(row["certificate_hash"] or "")
+            restart_relevant = _payload_matches_restart_relevant_entry_command(
+                payload,
+                restart_relevant_commands,
+            )
+            if cert_hash in quarantined_hashes and not restart_relevant:
                 quarantined_risky_count += 1
                 continue
-            risky_count += 1
             sample = {
                 "certificate_id": row["certificate_id"],
-                "certificate_hash": row["certificate_hash"],
+                "certificate_hash": cert_hash,
                 "decision_time": row["decision_time"],
                 "risk": "live_actionable_certificate_fails_current_verifier",
                 "reason": str(exc),
+                "restart_relevant": restart_relevant,
+                "quarantined": cert_hash in quarantined_hashes,
             }
-            try:
-                payload = json.loads(str(row["payload_json"] or "{}"))
-                if isinstance(payload, dict):
-                    sample.update(
-                        {
-                            "city": payload.get("city"),
-                            "target_date": payload.get("target_date"),
-                            "temperature_metric": payload.get("temperature_metric"),
-                            "direction": payload.get("direction"),
-                            "bin_label": payload.get("bin_label"),
-                            "q_live": payload.get("q_live"),
-                            "q_lcb_5pct": payload.get("q_lcb_5pct"),
-                        }
-                    )
-            except Exception:
-                pass
-            if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
-                risky.append(sample)
+            if isinstance(payload, dict):
+                sample.update(
+                    {
+                        "event_id": payload.get("event_id"),
+                        "city": payload.get("city"),
+                        "target_date": payload.get("target_date"),
+                        "temperature_metric": payload.get("temperature_metric"),
+                        "direction": payload.get("direction"),
+                        "bin_label": payload.get("bin_label"),
+                        "token_id": payload.get("token_id"),
+                        "q_live": payload.get("q_live"),
+                        "q_lcb_5pct": payload.get("q_lcb_5pct"),
+                    }
+                )
+            if restart_relevant:
+                risky_count += 1
+                sample["matched_restart_commands"] = restart_relevant_commands.get(
+                    str(payload.get("event_id") or ""),
+                    [],
+                )[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+                if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                    risky.append(sample)
+            else:
+                historical_risky_count += 1
+                if len(historical_risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                    historical_risky.append(sample)
     evidence["checked_count"] = checked
     evidence["risky_count"] = risky_count
+    evidence["historical_risky_count"] = historical_risky_count
     evidence["quarantined_risky_count"] = quarantined_risky_count
     evidence["risky"] = risky
+    evidence["historical_risky"] = historical_risky
     return CheckResult(
         "live_actionable_certificate_semantics",
         not risky,
-        "recent live actionable certificates verify under current qkernel money law"
+        "restart-relevant actionable certificates verify under current qkernel money law"
         if not risky
-        else "recent live actionable certificates fail current qkernel money law",
+        else "restart-relevant actionable certificates fail current qkernel money law",
         evidence,
     )
+
+
+def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
+    """Current nonterminal ENTRY commands keyed by EDLI event id."""
+
+    if not TRADE_DB.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True, timeout=1)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "venue_commands"):
+            return {}
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        rows = conn.execute(
+            f"""
+            SELECT command_id, position_id, decision_id, token_id, state, venue_order_id,
+                   created_at, updated_at
+              FROM venue_commands
+             WHERE UPPER(COALESCE(intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(side, '')) = 'BUY'
+               AND UPPER(COALESCE(state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(venue_order_id, '') != ''
+             ORDER BY datetime(updated_at) DESC, command_id DESC
+            """,
+            tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    index: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        event_id = _edli_event_id_from_decision_id(row["decision_id"])
+        if not event_id:
+            continue
+        item = dict(row)
+        item["event_id"] = event_id
+        index.setdefault(event_id, []).append(item)
+    return index
+
+
+def _payload_matches_restart_relevant_entry_command(
+    payload: dict[str, Any],
+    command_index: dict[str, list[dict[str, Any]]],
+) -> bool:
+    event_id = str(payload.get("event_id") or "").strip()
+    if not event_id:
+        return False
+    commands = command_index.get(event_id)
+    if not commands:
+        return False
+    token_id = str(payload.get("token_id") or "").strip()
+    if not token_id:
+        return True
+    return any(str(command.get("token_id") or "").strip() == token_id for command in commands)
 
 
 def _live_money_certificate_parent_mode_check() -> CheckResult:

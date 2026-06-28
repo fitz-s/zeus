@@ -1485,8 +1485,8 @@ def _qkernel_execution_direction_admitted(
 ) -> bool:
     """Mirror the live family selector's structural direction admission."""
 
-    if qkernel_execution_economics.get("direction_law_ok") is True:
-        return True
+    if qkernel_execution_economics.get("direction_law_ok") is not True:
+        return False
     side = str(qkernel_execution_economics.get("side") or "").upper()
     if side not in {"YES", "NO"}:
         return False
@@ -1495,24 +1495,7 @@ def _qkernel_execution_direction_admitted(
     )
     if native_side and side != native_side:
         return False
-    try:
-        edge_lcb = float(qkernel_execution_economics.get("edge_lcb"))
-        optimal_delta_u = float(qkernel_execution_economics.get("optimal_delta_u"))
-    except (TypeError, ValueError):
-        return False
-    if edge_lcb <= 0.0 or optimal_delta_u <= 0.0:
-        return False
-    try:
-        from src.decision.family_decision_engine import _OOF_LIVE_RELIABILITY_BASES
-    except Exception:  # noqa: BLE001
-        return False
-    cell_key = str(qkernel_execution_economics.get("q_lcb_guard_cell_key") or "").strip()
-    return (
-        str(qkernel_execution_economics.get("q_lcb_guard_basis") or "") in _OOF_LIVE_RELIABILITY_BASES
-        and qkernel_execution_economics.get("q_lcb_guard_abstained") is not True
-        and bool(cell_key)
-        and f"|{side}|" in cell_key
-    )
+    return True
 
 
 def _candidate_qkernel_execution_economics_payload(
