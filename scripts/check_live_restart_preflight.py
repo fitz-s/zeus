@@ -295,6 +295,61 @@ def _live_trading_python_executable() -> str:
     return sys.executable
 
 
+def _live_trading_plist_env_value(key: str) -> tuple[str | None, str | None]:
+    """Read one non-secret launchd environment value from the live-trading plist."""
+
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST_PATH.read_bytes())
+    except Exception as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+    env = payload.get("EnvironmentVariables")
+    if not isinstance(env, dict):
+        return None, "EnvironmentVariables missing or not a dictionary"
+    value = env.get(key)
+    return (str(value).strip() if value is not None else None), None
+
+
+def _clob_signature_type_config_check(*, required: bool) -> CheckResult:
+    """Verify live submit boots with an explicit Polymarket CLOB V2 signature type."""
+
+    key = "POLYMARKET_CLOB_V2_SIGNATURE_TYPE"
+    value, error = _live_trading_plist_env_value(key)
+    evidence: dict[str, Any] = {
+        "plist_path": str(LIVE_TRADING_PLIST_PATH),
+        "required": required,
+        "present": bool(value),
+        "allowed_values": ["0", "1", "2", "3"],
+    }
+    if value:
+        evidence["configured_value"] = value
+    if error:
+        evidence["plist_error"] = error
+
+    if not required:
+        return CheckResult(
+            "clob_signature_type_config",
+            True,
+            "explicit CLOB V2 signature type is not required while live submit is not armed",
+            evidence,
+        )
+    if not value:
+        return CheckResult(
+            "clob_signature_type_config",
+            False,
+            "live submit requires explicit POLYMARKET_CLOB_V2_SIGNATURE_TYPE in the live-trading LaunchAgent",
+            evidence,
+        )
+    ok = value in {"0", "1", "2", "3"}
+    return CheckResult(
+        "clob_signature_type_config",
+        ok,
+        "live-trading LaunchAgent has an explicit supported CLOB V2 signature type"
+        if ok
+        else "live-trading LaunchAgent has an unsupported CLOB V2 signature type",
+        evidence,
+    )
+
+
 def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
     flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
     enabled = flags.get("qkernel_spine_enabled")
@@ -3937,9 +3992,11 @@ def _latest_monitor_projection_evidence(
 
     Non-Day0 held positions may refresh belief through the canonical replacement
     read-through path before the durable forecast_posteriors row is re-materialized.
-    Day0 positions are stricter: only the observation remaining-window or absorbing
-    hard-fact monitor lanes count, never a forecast posterior stamped during the
-    settlement day.
+    Day0 positions are stricter, but the live monitor has a defined fallback when
+    the Day0 observation source is temporarily unavailable: a fresh replacement
+    posterior is acceptable only when the same monitor receipt explicitly records
+    ``day0_observation_unavailable:replacement_posterior_fresh``. A bare forecast
+    posterior does not satisfy a Day0 monitor belief.
     """
 
     now = datetime.now(timezone.utc)
@@ -3974,16 +4031,24 @@ def _latest_monitor_projection_evidence(
     validations_raw = payload.get("applied_validations") if isinstance(payload, dict) else None
     validations = [str(item) for item in validations_raw] if isinstance(validations_raw, list) else []
     if day0_required:
-        accepted = any(
+        accepted_day0_observation = any(
             item == "day0_observation_remaining_window"
             or item == "day0_absorbing_hard_fact"
             or item.startswith("belief_source=day0_observation_remaining_window")
             or item.startswith("belief_source=day0_absorbing_hard_fact")
             for item in validations
         )
-        if not accepted:
+        accepted_replacement_fallback = (
+            "day0_observation_unavailable:replacement_posterior_fresh" in validations
+            and any(item.startswith("belief_source=forecast_posteriors") for item in validations)
+        )
+        if not (accepted_day0_observation or accepted_replacement_fallback):
             return None
-        source = "day0_monitor_observation_authority"
+        source = (
+            "day0_monitor_observation_authority"
+            if accepted_day0_observation
+            else "day0_monitor_replacement_fallback"
+        )
     else:
         accepted = any(
             item == "replacement_posterior"
@@ -4004,6 +4069,7 @@ def _latest_monitor_projection_evidence(
             if item == "replacement_posterior"
             or item == "day0_observation_remaining_window"
             or item == "day0_absorbing_hard_fact"
+            or item == "day0_observation_unavailable:replacement_posterior_fresh"
             or item.startswith("belief_source=")
         ][:6],
         "max_age_seconds": MONITOR_PROJECTION_MAX_AGE_SECONDS,
@@ -4207,6 +4273,7 @@ def evaluate() -> dict[str, Any]:
                 "real_submit_effective": real_submit_effective,
             },
         ),
+        _clob_signature_type_config_check(required=real_submit_effective),
         _qkernel_spine_cutover_check(cfg),
         _src_main_boot_guard_check(),
         _family_portfolio_single_leg_check(),

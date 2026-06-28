@@ -2275,6 +2275,61 @@ def test_live_trading_launchagent_installed_accepts_src_main_plist(monkeypatch, 
     assert result.ok is True
 
 
+def _write_live_plist_with_env(path: Path, env: dict[str, str]) -> None:
+    env_xml = b"".join(
+        f"<key>{key}</key><string>{value}</string>".encode()
+        for key, value in sorted(env.items())
+    )
+    path.write_bytes(
+        b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+        b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+        b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+        b"""<plist version="1.0"><dict>"""
+        b"""<key>Label</key><string>com.zeus.live-trading</string>"""
+        b"""<key>ProgramArguments</key><array>"""
+        b"""<string>/usr/bin/python3</string><string>-m</string><string>src.main</string>"""
+        b"""</array><key>EnvironmentVariables</key><dict>"""
+        + env_xml
+        + b"""</dict></dict></plist>\n"""
+    )
+
+
+def test_clob_signature_type_config_blocks_missing_when_submit_armed(monkeypatch, tmp_path):
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    _write_live_plist_with_env(plist, {})
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+
+    result = preflight._clob_signature_type_config_check(required=True)
+
+    assert result.ok is False
+    assert result.name == "clob_signature_type_config"
+    assert result.evidence["present"] is False
+    assert "POLYMARKET_CLOB_V2_SIGNATURE_TYPE" in result.detail
+
+
+def test_clob_signature_type_config_blocks_unsupported_value(monkeypatch, tmp_path):
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    _write_live_plist_with_env(plist, {"POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "9"})
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+
+    result = preflight._clob_signature_type_config_check(required=True)
+
+    assert result.ok is False
+    assert result.evidence["configured_value"] == "9"
+    assert "unsupported" in result.detail
+
+
+def test_clob_signature_type_config_accepts_explicit_supported_value(monkeypatch, tmp_path):
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    _write_live_plist_with_env(plist, {"POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "2"})
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+
+    result = preflight._clob_signature_type_config_check(required=True)
+
+    assert result.ok is True
+    assert result.evidence["configured_value"] == "2"
+
+
 def test_import_time_db_paths_follow_live_plist_primary_root(tmp_path):
     home = tmp_path / "home"
     launch_agents = home / "Library" / "LaunchAgents"
@@ -3205,6 +3260,82 @@ def test_active_position_day0_monitor_projection_covers_stale_forecast_belief(mo
     assert covered["position_id"] == "active-day0-pos"
     assert covered["freshness_basis"] == "active_day0_monitor_projection"
     assert covered["monitor_projection"]["source"] == "day0_monitor_observation_authority"
+
+
+def test_day0_observation_unavailable_replacement_fallback_covers_held_belief(
+    monkeypatch, tmp_path
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    label = "Will the highest temperature in Manila be 32°C on June 29?"
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'day0-fallback-pos', 'day0_window', 'Manila', '2026-06-29', 'high',
+            ?, 'buy_no', 18.14, 18.14, 'filled', NULL, 0, NULL,
+            0.91, 1, 0.77, 1, ?
+        )
+        """,
+        (label, datetime.now(timezone.utc).isoformat()),
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'day0-fallback-pos', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "applied_validations": [
+                        "day0_observation_unavailable:replacement_posterior_fresh",
+                        "belief_source=forecast_posteriors;basis=source_cycle_time;fresh",
+                    ]
+                }
+            ),
+        ),
+    )
+    stale = datetime.now(timezone.utc) - timedelta(hours=72)
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Manila', '2026-06-29', 'high', ?, ?, ?, 'live')
+        """,
+        (
+            stale.isoformat(),
+            stale.isoformat(),
+            json.dumps({label: 0.09}),
+        ),
+    )
+    trade.commit()
+    forecasts.commit()
+    trade.row_factory = sqlite3.Row
+    rows = trade.execute("SELECT * FROM position_current").fetchall()
+    trade.close()
+    forecasts.close()
+
+    result = preflight._belief_check(rows)
+
+    assert result.ok is True
+    covered = result.evidence["covered"][0]
+    assert covered["position_id"] == "day0-fallback-pos"
+    assert covered["freshness_basis"] == "day0_monitor_projection"
+    assert covered["monitor_projection"]["source"] == "day0_monitor_replacement_fallback"
 
 
 def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
