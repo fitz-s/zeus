@@ -19,7 +19,7 @@ predictive inputs threaded on the payload.
 Asserts:
   (a) the decision is produced by ``family_decision_engine`` (the spine) — the result
       carries ``decided_by_spine`` and a ``FamilyDecision`` whose ``receipt_hash`` is
-      the spine receipt anchor; the selection is the spine's ``argmax optimal_delta_u``,
+      the spine receipt anchor; the selection is the spine's ROI-frontier objective,
       NOT the legacy scalar selector.
   (b) a no-trade returns a TYPED ``no_trade_reason`` (the spine's own vocabulary or a
       bridge typed reason).
@@ -57,7 +57,7 @@ def _fast_band_draws(monkeypatch):
     """Lower the joint-q band draw count for a fast, deterministic smoke.
 
     The band draw count only sets the Monte-Carlo resolution of the robust edge lower
-    bound; it never changes the selection LOGIC (direction/coherence/edge/argmax-ΔU). A
+    bound; it never changes the selection LOGIC (direction/coherence/edge/ROI-frontier). A
     smaller count keeps the smoke quick. Production uses the engine default (4000).
     """
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
@@ -307,7 +307,7 @@ def test_duplicate_bin_side_proofs_use_one_canonical_proof_for_size_route_and_re
 # ===========================================================================
 def test_decision_is_produced_by_the_spine_not_the_legacy_selector():
     """The spine computes the decision: the result is a SpineDecisionResult whose
-    FamilyDecision carries the spine receipt_hash (the spine's argmax-ΔU pipeline ran),
+    FamilyDecision carries the spine receipt_hash (the spine's ROI-frontier pipeline ran),
     and a selected trade returns a well-formed submission-pipeline proof.
 
     Family is built so the spine should find a +edge trade: an UNDERPRICED YES on the

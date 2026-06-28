@@ -1115,10 +1115,11 @@ def decide_family_via_spine(
             # the negrisk ask-ladder. This preserves the maker buy_no edge class (resting
             # bid into an empty NO ask) the ask-ladder taker cost would discard.
             route_set_builder=_proof_native_direct_route_set_builder(proofs, candidate_bin_id),
-            # Live money ranks admissible native legs by total robust log-utility. Utility
-            # density remains an opt-in research/tie-break objective, but cannot silently
-            # become the live selector if FamilyDecisionEngine defaults drift.
-            selection_objective="total_delta_u",
+            # Live money ranks admissible native legs by ROI frontier: lower-bound edge
+            # per capital with an absolute usefulness floor, then robust log-utility. This
+            # preserves NO when it is truly best, but stops low-ROI large NO legs from
+            # suppressing capital-efficient YES.
+            selection_objective="roi_frontier",
             **_engine_kwargs,
         )
         captured_at_utc = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=timezone.utc)

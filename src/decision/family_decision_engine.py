@@ -9,7 +9,7 @@
 #   no_trade PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE) -> joint_q -> joint_q_band ->
 #   family_book -> market_implied_q -> coherence -> routes -> payoff candidates ->
 #   filter [direction_law_ok, coherence_allows, edge_lcb>0 & optimal_delta_u>0] ->
-#   selected = max robust utility) and the Stage 8 block lines 1166-1184.
+#   selected = max ROI-frontier candidate) and the Stage 8 block lines 1166-1184.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD — no live edits; reactor wiring is Wave 5. The scalar robust_trade_score
 #   is telemetry only — it CANNOT select. This is the ONLY decision authority; it
@@ -67,19 +67,20 @@ THE PIPELINE (spec decide() lines 876-901; the order is the contract):
     candidates = [c for c in candidates if coherence_allows(c)]
     candidates = [c for c in candidates if c.edge_lcb > 0 and c.optimal_delta_u > 0]
 
-    selected   = max(candidates, key=lambda c: c.optimal_delta_u)
+    selected   = max(candidates, key=lambda c: c.roi_frontier)
     return FamilyDecision(...)
 
 THE THREE CORRECTED TRANSFORMATIONS THIS ORCHESTRATOR PRESERVES (operator law — make the
 bad output mathematically impossible; NO gate/cap/clamp/haircut that catches a bad value
 and leaves a broken transform in place):
 
-  1. SELECTION IS ROBUST UTILITY OVER THE SURVIVORS, NEVER A SCALAR TRADE
+  1. SELECTION IS ROI-FRONTIER OVER THE SURVIVORS, NEVER A SCALAR TRADE
      SCORE (operator Shanghai correction over spec lines 900-903, 1184). The candidate filter chain is
      ``direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)``,
-     and the survivor with the maximum ``optimal_delta_u`` is selected. Utility density
-     remains a secondary ordering signal, so capital efficiency breaks ties without
-     dominating absolute robust log-growth. The scalar
+     and live qkernel selects on an ROI frontier: guarded edge per dollar first, after
+     excluding dust candidates with no meaningful lower-bound profit, with robust log-growth
+     as the secondary tie-breaker. ``total_delta_u`` remains an explicit research objective,
+     but it is not the live default. The scalar
      ``robust_trade_score`` (``scalar_trade_score`` from payoff_vector) is computed for
      EVERY candidate as TELEMETRY on the receipt, but it is never one of the filter
      conditions and never the argmax key. There is no code path where the scalar reaches
@@ -221,6 +222,7 @@ NO_TRADE_NO_EXECUTABLE_ROUTE = "NO_EXECUTABLE_ROUTE_CANDIDATE"
 NO_TRADE_NO_DIRECTION_LAW = "NO_DIRECTION_LAW_CANDIDATE"
 NO_TRADE_MARKET_INCOHERENT = "MARKET_INCOHERENT_BLOCK_LIVE"
 NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
+NO_TRADE_NO_ROI_FRONTIER_CANDIDATE = "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 # q_lcb empirical reliability guard (single-serving-rule flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
 NO_TRADE_QLCB_RELIABILITY_ABSTAIN = "QLCB_RELIABILITY_GUARD_ABSTAIN"
@@ -233,6 +235,8 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
         "OOF_WILSON_95_POOLED_TAIL",
     }
 )
+_ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
+_ROI_FRONTIER_MIN_STAKE_USD = 5.0
 
 
 class FamilyDecisionError(ValueError):
@@ -406,8 +410,8 @@ class FamilyDecision:
       path). Its ``status`` is the calibration-incident contract.
     * ``candidates`` — the ``CandidateEconomics`` for EVERY enumerated candidate (passing or
       not), so the decision is fully auditable. Empty on the ineligible path.
-    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (maximum total robust
-      utility over the survivors), or ``None`` for a no-trade.
+    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (live default:
+      ROI-frontier over the survivors), or ``None`` for a no-trade.
     * ``no_trade_reason`` — the reason the survivor set was empty (``None`` when a trade was
       selected). Names the first gate that emptied it.
     * ``receipt_hash`` — a deterministic hash over the whole decision tuple (the receipt
@@ -565,10 +569,10 @@ class FamilyDecisionEngine:
         min_depth: float = 1.0,
         max_spread: float = 0.10,
         selection_objective: Literal[
-            "utility_density", "total_delta_u"
-        ] = "total_delta_u",
+            "roi_frontier", "utility_density", "total_delta_u"
+        ] = "roi_frontier",
     ) -> None:
-        if selection_objective not in {"utility_density", "total_delta_u"}:
+        if selection_objective not in {"roi_frontier", "utility_density", "total_delta_u"}:
             raise ValueError(f"unknown selection_objective: {selection_objective!r}")
         self._fresh_model_reader = fresh_model_reader
         self._day0_reader = day0_reader
@@ -1036,6 +1040,75 @@ class FamilyDecisionEngine:
         stake = max(stake, 1e-9)
         return float(d.economics.optimal_delta_u) / stake
 
+    def _edge_roi_lcb(self, d: CandidateDecision) -> float:
+        try:
+            cost = float(d.economics.cost.value)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+        if not (np.isfinite(cost) and cost > 0.0):
+            return float("-inf")
+        return float(d.economics.edge_lcb) / cost
+
+    def _profit_lcb_usd(self, d: CandidateDecision) -> float:
+        try:
+            stake = float(d.economics.optimal_stake_usd)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+        roi = self._edge_roi_lcb(d)
+        if not (np.isfinite(stake) and stake > 0.0 and np.isfinite(roi)):
+            return float("-inf")
+        return stake * roi
+
+    def _roi_frontier_useful(self, d: CandidateDecision) -> bool:
+        try:
+            stake = float(d.economics.optimal_stake_usd)
+        except Exception:  # noqa: BLE001
+            stake = 0.0
+        return (
+            np.isfinite(stake)
+            and stake >= _ROI_FRONTIER_MIN_STAKE_USD
+            and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
+        )
+
+    def _roi_frontier_key(self, d: CandidateDecision) -> tuple[float, float, float, float, float]:
+        return (
+            self._edge_roi_lcb(d),
+            self._profit_lcb_usd(d),
+            self._utility_density(d),
+            float(d.economics.optimal_delta_u),
+            -float(d.economics.cost.value),
+        )
+
+    def _roi_frontier_candidates(
+        self, survivors: Sequence[CandidateDecision]
+    ) -> list[CandidateDecision]:
+        useful = [d for d in survivors if self._roi_frontier_useful(d)]
+        if not useful:
+            return []
+        frontier: list[CandidateDecision] = []
+        for candidate in useful:
+            dominated = False
+            c_roi = self._edge_roi_lcb(candidate)
+            c_profit = self._profit_lcb_usd(candidate)
+            c_du = float(candidate.economics.optimal_delta_u)
+            for other in useful:
+                if other is candidate:
+                    continue
+                o_roi = self._edge_roi_lcb(other)
+                o_profit = self._profit_lcb_usd(other)
+                o_du = float(other.economics.optimal_delta_u)
+                if (
+                    o_roi >= c_roi
+                    and o_profit >= c_profit
+                    and o_du >= c_du
+                    and (o_roi > c_roi or o_profit > c_profit or o_du > c_du)
+                ):
+                    dominated = True
+                    break
+            if not dominated:
+                frontier.append(candidate)
+        return frontier
+
     def _live_selectable_candidate(self, d: CandidateDecision) -> bool:
         return (
             d.route.route_cost.executable
@@ -1436,9 +1509,9 @@ class FamilyDecisionEngine:
                (the executable-route + native-side + coherence preconditions of the live
                 pass are already true here, so live_candidate_passes is a re-proof)
 
-        The default live objective selects the survivor with the MAX ``optimal_delta_u``.
-        Terminal/research callers may explicitly request ``utility_density`` for
-        capital-efficiency-first studies. The scalar
+        The default live objective selects on an ROI frontier: lower-bound edge per cost
+        with absolute lower-bound profit and stake floors, then robust utility. Research
+        callers may explicitly request ``total_delta_u`` or ``utility_density``. The scalar
         ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
         returned ``no_trade_reason`` names the FIRST filter that emptied it (so the no-trade
         is auditable to its cause).
@@ -1516,16 +1589,22 @@ class FamilyDecisionEngine:
                 pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
-        # SELECT: live defaults to the highest total robust utility over the survivors.
-        # Utility density remains a secondary ordering signal, so capital efficiency
-        # breaks ties without making tiny low-absolute-utility legs dominate the family.
-        # Terminal/research callers can explicitly request density first. The scalar trade
-        # score is NOT a key in either objective.
-        if self._selection_objective == "total_delta_u":
+        # SELECT: live defaults to an ROI frontier so capital-efficient YES can beat a
+        # larger but lower-return NO without banning either side. Dust candidates that
+        # cannot clear a small absolute lower-bound profit/stake floor do not win by
+        # ratio alone. Research callers can explicitly request total utility or density.
+        # The scalar trade score is NOT a key in any objective.
+        if self._selection_objective == "roi_frontier":
+            roi_frontier = self._roi_frontier_candidates(survivors)
+            if not roi_frontier:
+                return None, NO_TRADE_NO_ROI_FRONTIER_CANDIDATE
+            selected = max(roi_frontier, key=self._roi_frontier_key)
+        elif self._selection_objective == "total_delta_u":
             selected = max(
                 survivors,
                 key=lambda d: (
                     d.economics.optimal_delta_u,
+                    self._edge_roi_lcb(d),
                     self._utility_density(d),
                     d.economics.edge_lcb,
                     -float(d.economics.cost.value),

@@ -727,8 +727,8 @@ def test_decide_filters_direction_then_coherence_then_edge_then_total_utility(mo
     assert yes_b24 and yes_b24[0].direction_law_ok is True
 
 
-def test_select_uses_total_delta_u_not_scalar_trade_score(monkeypatch):
-    """The engine's default selection key is total robust utility, NOT scalar score.
+def test_select_total_delta_u_objective_uses_utility_not_scalar_trade_score(monkeypatch):
+    """The explicit total-utility objective is robust utility, NOT scalar score.
 
     This is the isolated RED-on-revert for the selection KEY. We hand-build two passing
     candidate decisions (both direction-law-legal, coherent, executable, positive edge,
@@ -755,6 +755,7 @@ def test_select_uses_total_delta_u_not_scalar_trade_score(monkeypatch):
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+        selection_objective="total_delta_u",
     )
     selected, reason = engine._select([win, lose])
 
@@ -768,8 +769,8 @@ def test_select_uses_total_delta_u_not_scalar_trade_score(monkeypatch):
     assert float(selected.economics.optimal_delta_u) > float(lose.economics.optimal_delta_u)
 
 
-def test_select_prefers_total_utility_over_density_by_default(monkeypatch):
-    """A lower-total-utility cheap route must not beat a higher-total-utility route."""
+def test_select_prefers_roi_frontier_by_default(monkeypatch):
+    """Live default is ROI-frontier, so capital-efficient YES can beat larger NO."""
     case = _case()
     space = _outcome_space(case)
     high_cost_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -799,7 +800,32 @@ def test_select_prefers_total_utility_over_density_by_default(monkeypatch):
     selected, reason = engine._select([high_cost, low_cost])
 
     assert reason is None
-    assert selected is high_cost
+    assert selected is low_cost
+
+
+def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
+    """A tiny high-ratio candidate must not become a filler live order."""
+    case = _case()
+    space = _outcome_space(case)
+    dust_route = _hand_route(space, side="YES", bin_id="b25", cost=0.005)
+    dust = _hand_decision(
+        dust_route,
+        edge_lcb=0.005,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.001,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("1.50"),
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([dust])
+
+    assert selected is None
+    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 
 
 def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
@@ -1037,6 +1063,12 @@ def test_select_utility_density_objective_is_explicit_non_default(monkeypatch):
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
+    total_engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+        selection_objective="total_delta_u",
+    )
     density_engine = FamilyDecisionEngine(
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
         day0_reader=_Day0Reader(_no_obs()),
@@ -1045,11 +1077,14 @@ def test_select_utility_density_objective_is_explicit_non_default(monkeypatch):
     )
 
     default_selected, default_reason = default_engine._select([high_total, high_density])
+    total_selected, total_reason = total_engine._select([high_total, high_density])
     density_selected, density_reason = density_engine._select([high_total, high_density])
 
     assert default_reason is None
+    assert total_reason is None
     assert density_reason is None
-    assert default_selected is high_total
+    assert default_selected is high_density
+    assert total_selected is high_total
     assert density_selected is high_density
 
 
