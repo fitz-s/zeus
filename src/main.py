@@ -9767,6 +9767,7 @@ def _edli_prewarm_pre_submit_jit_client() -> bool:
         return False
 
 
+@_scheduler_job("edli_presubmit_jit_keepalive")
 def _edli_pre_submit_jit_keepalive_tick() -> None:
     """Keepalive pinger: keep the submit-time JIT CLOB connection warm across reactor
     cycles (keepalive_expiry=90s > 60s cycle) so an edge-positive submit candidate
