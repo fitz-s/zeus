@@ -67,6 +67,20 @@ def _deployed_shape_conn() -> sqlite3.Connection:
         """
     )
     _create_day0_nowcast_runs(conn)
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            market_slug TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            outcome TEXT
+        )
+        """
+    )
     # bin pair is added via ALTER in init_schema_forecasts; the writer references them.
     for _alter in (
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_grid_id TEXT",
@@ -104,6 +118,7 @@ def _bind_store_to_conn(monkeypatch, conn: sqlite3.Connection) -> None:
     real_read = day0_nowcast_store.read_latest_platt_fit
     real_write = day0_nowcast_store.write_nowcast_run
     real_ensure = day0_nowcast_store.ensure_identity_platt_fit
+    real_resolve = day0_nowcast_store.resolve_market_slug_for_position_identity
 
     def _read_bound(*, fit_artifact_id: str = "hpf_v1", **_kw):
         return real_read(fit_artifact_id=fit_artifact_id, conn=conn)
@@ -115,14 +130,36 @@ def _bind_store_to_conn(monkeypatch, conn: sqlite3.Connection) -> None:
     def _ensure_bound(*, fit_artifact_id: str = "hpf_v1", **_kw):
         return real_ensure(fit_artifact_id=fit_artifact_id, conn=conn)
 
+    def _resolve_bound(**kw):
+        kw["conn"] = conn
+        return real_resolve(**kw)
+
     monkeypatch.setattr(day0_nowcast_store, "read_latest_platt_fit", _read_bound)
     monkeypatch.setattr(day0_nowcast_store, "write_nowcast_run", _write_bound)
     monkeypatch.setattr(day0_nowcast_store, "ensure_identity_platt_fit", _ensure_bound)
+    monkeypatch.setattr(day0_nowcast_store, "resolve_market_slug_for_position_identity", _resolve_bound)
 
 
-def _call_lane(conn: sqlite3.Connection, *, obs_avail: str | None) -> None:
+def _call_lane(
+    conn: sqlite3.Connection,
+    *,
+    obs_avail: str | None,
+    market_slug: str | None = "boston-2026-06-15-high",
+    token_id: str | None = None,
+    condition_id: str | None = None,
+    bin_label: str = "Will the highest temperature in Boston be 20°C on June 15?",
+) -> None:
     """Drive the REAL _maybe_write_day0_nowcast with minimal stand-ins."""
-    position = types.SimpleNamespace(market_slug="boston-2026-06-15-high", trade_id="t-1")
+    position = types.SimpleNamespace(
+        market_slug=market_slug,
+        trade_id="t-1",
+        token_id=token_id,
+        condition_id=condition_id,
+        market_id=condition_id,
+        city="Boston",
+        target_date="2026-06-15",
+        bin_label=bin_label,
+    )
     temporal_context = types.SimpleNamespace(daypart="afternoon")
     temperature_metric = types.SimpleNamespace(temperature_metric="high")
     from datetime import date
@@ -202,6 +239,78 @@ def test_lane_auto_bootstraps_identity_fit_when_missing(monkeypatch) -> None:
     run_n = conn.execute("SELECT COUNT(*) FROM day0_nowcast_runs").fetchone()[0]
     assert fit_n == 1
     assert run_n == 1
+    conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# SQL position compatibility: market_slug is JSON-only, so live SQL positions
+# must resolve through canonical market_events instead of silently skipping.
+# --------------------------------------------------------------------------- #
+def test_lane_resolves_missing_position_market_slug_from_market_events_token(monkeypatch) -> None:
+    conn = _deployed_shape_conn()
+    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
+    conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric,
+            condition_id, token_id, range_label, outcome
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            "highest-temperature-in-boston-on-june-15-2026",
+            "Boston",
+            "2026-06-15",
+            "high",
+            "0xcond",
+            "yes-token",
+            "Will the highest temperature in Boston be 20°C on June 15?",
+            "Will the highest temperature in Boston be 20°C on June 15?",
+        ),
+    )
+    conn.commit()
+
+    _bind_store_to_conn(monkeypatch, conn)
+    _call_lane(conn, obs_avail="2026-06-15T13:45:01+00:00", market_slug=None, token_id="yes-token")
+
+    row = conn.execute("SELECT market_slug FROM day0_nowcast_runs").fetchone()
+    assert row["market_slug"] == "highest-temperature-in-boston-on-june-15-2026"
+    conn.close()
+
+
+def test_lane_resolves_missing_position_market_slug_from_condition_bridge(monkeypatch) -> None:
+    conn = _deployed_shape_conn()
+    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
+    conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric,
+            condition_id, token_id, range_label, outcome
+        ) VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            "highest-temperature-in-boston-on-june-15-2026",
+            "Boston",
+            "2026-06-15",
+            "high",
+            "0xcond",
+            "yes-token",
+            "Will the highest temperature in Boston be 20°C on June 15?",
+            "Will the highest temperature in Boston be 20°C on June 15?",
+        ),
+    )
+    conn.commit()
+
+    _bind_store_to_conn(monkeypatch, conn)
+    _call_lane(
+        conn,
+        obs_avail="2026-06-15T13:45:01+00:00",
+        market_slug=None,
+        token_id=None,
+        condition_id="0xcond",
+    )
+
+    row = conn.execute("SELECT market_slug FROM day0_nowcast_runs").fetchone()
+    assert row["market_slug"] == "highest-temperature-in-boston-on-june-15-2026"
     conn.close()
 
 

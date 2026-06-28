@@ -41,6 +41,110 @@ IDENTITY_FIT_RUN_ID = "hpf_v1_identity_conservative_v1"
 IDENTITY_FIT_ARTIFACT_ID = "hpf_v1"
 
 
+def _clean_identity_part(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _unique_market_slug_from_rows(rows: list[sqlite3.Row] | list[tuple]) -> Optional[str]:
+    slugs = sorted(
+        {
+            _clean_identity_part(row[0])
+            for row in rows
+            if len(row) >= 1 and _clean_identity_part(row[0])
+        }
+    )
+    if len(slugs) == 1:
+        return slugs[0]
+    return None
+
+
+def resolve_market_slug_for_position_identity(
+    *,
+    token_id: object = None,
+    condition_id: object = None,
+    market_id: object = None,
+    city: object = None,
+    target_date: object = None,
+    temperature_metric: object = None,
+    bin_label: object = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[str]:
+    """Resolve a persisted position to its canonical market_events.market_slug.
+
+    ``Position.market_slug`` is JSON-only, while live SQL positions are loaded
+    from ``position_current``. Day0 nowcast writes need the canonical forecast
+    market slug, so recover it from the forecast-class market registry using
+    exact identities only. Returns ``None`` unless one unique slug is proven.
+    """
+    from src.state.db import get_forecasts_connection_read_only
+
+    token = _clean_identity_part(token_id)
+    condition = _clean_identity_part(condition_id) or _clean_identity_part(market_id)
+    city_s = _clean_identity_part(city)
+    target_s = _clean_identity_part(target_date)
+    metric_s = _clean_identity_part(temperature_metric)
+    label_s = _clean_identity_part(bin_label)
+
+    own_conn = conn is None
+    if own_conn:
+        conn = get_forecasts_connection_read_only()
+
+    def _filters() -> tuple[str, list[str]]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if city_s:
+            clauses.append("city = ?")
+            params.append(city_s)
+        if target_s:
+            clauses.append("target_date = ?")
+            params.append(target_s)
+        if metric_s:
+            clauses.append("temperature_metric = ?")
+            params.append(metric_s)
+        return (" AND ".join(clauses), params)
+
+    def _lookup(where: str, params: list[str]) -> Optional[str]:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT market_slug
+              FROM market_events
+             WHERE market_slug IS NOT NULL
+               AND market_slug != ''
+               AND {where}
+             ORDER BY market_slug
+             LIMIT 2
+            """,
+            params,
+        ).fetchall()
+        return _unique_market_slug_from_rows(rows)
+
+    try:
+        extra_sql, extra_params = _filters()
+        suffix = f" AND {extra_sql}" if extra_sql else ""
+        if token:
+            slug = _lookup("token_id = ?" + suffix, [token, *extra_params])
+            if slug:
+                return slug
+        if condition:
+            slug = _lookup("condition_id = ?" + suffix, [condition, *extra_params])
+            if slug:
+                return slug
+        if label_s and city_s and target_s and metric_s:
+            return _lookup(
+                """
+                city = ? AND target_date = ? AND temperature_metric = ?
+                AND (range_label = ? OR outcome = ?)
+                """,
+                [city_s, target_s, metric_s, label_s, label_s],
+            )
+        return None
+    finally:
+        if own_conn and conn is not None:
+            conn.close()
+
+
 def build_identity_platt_fit():
     """Documented conservative Day0 horizon fit used to bootstrap live logging.
 

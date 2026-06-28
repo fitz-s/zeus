@@ -2814,7 +2814,7 @@ def _maybe_write_day0_nowcast(
     observation_time: "str | None",
     observation_available_at: "str | None" = None,
 ) -> None:
-    """Attempt a day0_nowcast_runs write if position carries a market_slug and
+    """Attempt a day0_nowcast_runs write for a canonical market slug when
     hours_remaining <= 6.  Fail-soft: any write error is logged as WARNING
     and swallowed so the monitor loop is never interrupted.
 
@@ -2826,8 +2826,8 @@ def _maybe_write_day0_nowcast(
         Default None keeps every existing call signature valid.
 
     Guards:
-      - position.market_slug must be non-empty (positions from v1-vintage
-        positions.json default to None and are silently skipped).
+      - position.market_slug must be present or uniquely resolvable from
+        forecast-class market_events using exact persisted position identities.
       - hours_remaining must be <= 6 (G8c: within the terminal nowcast window).
       - temporal_context must be non-None (daypart requires it).
       - observation_time must be non-empty.
@@ -2837,21 +2837,52 @@ def _maybe_write_day0_nowcast(
     Phase 2 T5 GREEN: calls write_nowcast_run with live fit_run_id from
     day0_horizon_platt_fits.
     """
-    if not getattr(position, "market_slug", None):
-        return
+    market_slug = str(getattr(position, "market_slug", None) or "").strip()
     if hours_remaining > 6:
         return
     if temporal_context is None:
         return
     if not observation_time:
         return
+    _metric_str = (
+        temperature_metric.temperature_metric
+        if hasattr(temperature_metric, "temperature_metric")
+        else str(temperature_metric)
+    )
 
     try:
         from src.state.day0_nowcast_store import (  # noqa: PLC0415
             ensure_identity_platt_fit,
             read_latest_platt_fit,
+            resolve_market_slug_for_position_identity,
             write_nowcast_run,
         )
+
+        if not market_slug:
+            market_slug = (
+                resolve_market_slug_for_position_identity(
+                    token_id=getattr(position, "token_id", None),
+                    condition_id=getattr(position, "condition_id", None),
+                    market_id=getattr(position, "market_id", None),
+                    city=getattr(position, "city", None),
+                    target_date=getattr(position, "target_date", None),
+                    temperature_metric=_metric_str,
+                    bin_label=getattr(position, "bin_label", None),
+                )
+                or ""
+            )
+            if not market_slug:
+                logger.debug(
+                    "T5 nowcast: no unique canonical market_slug for %s "
+                    "token_id=%s condition_id=%s city=%s target_date=%s metric=%s",
+                    getattr(position, "trade_id", "?"),
+                    getattr(position, "token_id", None),
+                    getattr(position, "condition_id", None),
+                    getattr(position, "city", None),
+                    getattr(position, "target_date", None),
+                    _metric_str,
+                )
+                return
 
         fit = read_latest_platt_fit()
         if fit is None:
@@ -2859,15 +2890,9 @@ def _maybe_write_day0_nowcast(
             if fit is None:
                 logger.debug(
                     "T5 nowcast: no platt fit available yet for %s — skipping write",
-                    position.market_slug,
+                    market_slug,
                 )
                 return
-
-        _metric_str = (
-            temperature_metric.temperature_metric
-            if hasattr(temperature_metric, "temperature_metric")
-            else str(temperature_metric)
-        )
 
         # ThePath P1 ITEM 1: thread the honest obs-availability clock. The live
         # observation_client stamps observation_available_at = now()-at-fetch.
@@ -2877,7 +2902,7 @@ def _maybe_write_day0_nowcast(
         _obs_provenance = "live_fetch" if _obs_avail else "UNVERIFIED"
 
         write_nowcast_run(
-            market_slug=position.market_slug,
+            market_slug=market_slug,
             temperature_metric=_metric_str,
             target_date=target_d.isoformat(),
             observation_time=observation_time,
@@ -2893,7 +2918,7 @@ def _maybe_write_day0_nowcast(
         logger.debug(
             "T5 nowcast write OK: %s market_slug=%s hours_remaining=%.1f daypart=%s fit_run_id=%s",
             getattr(position, "trade_id", "?"),
-            position.market_slug,
+            market_slug,
             hours_remaining,
             temporal_context.daypart,
             fit.fit_run_id,
@@ -2901,13 +2926,13 @@ def _maybe_write_day0_nowcast(
         _record_nowcast_write_success()
     except Exception as exc:  # noqa: BLE001
         _record_nowcast_write_failure(
-            market_slug=str(getattr(position, "market_slug", "?") or "?"),
+            market_slug=market_slug or str(getattr(position, "market_slug", "?") or "?"),
             trade_id=str(getattr(position, "trade_id", "?") or "?"),
         )
         logger.warning(
             "T5 nowcast write FAILED (non-fatal) for %s market_slug=%s: %s",
             getattr(position, "trade_id", "?"),
-            getattr(position, "market_slug", "?"),
+            market_slug or getattr(position, "market_slug", "?"),
             exc,
             exc_info=True,
         )
