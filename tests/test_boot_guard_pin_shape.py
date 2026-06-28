@@ -37,6 +37,18 @@ def _cfg(model_keys=None, frozen_as_of=None):
     return {"calibration": {"pin": pin}}
 
 
+def _replacement_qkernel_cfg(*, frozen_as_of: str) -> dict:
+    cfg = _cfg(frozen_as_of=frozen_as_of)
+    cfg["edli"] = {
+        "live_execution_mode": "edli_live",
+        "reactor_mode": "live",
+        "replacement_0_1_bayes_precision_fusion_enabled": True,
+        "replacement_0_1_fused_q_shape_enabled": True,
+    }
+    cfg["feature_flags"] = {"qkernel_spine_enabled": True}
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # W0-T2-A/B/C — assert_calibration_pin_shape_is_dict
 # ---------------------------------------------------------------------------
@@ -76,13 +88,25 @@ def _iso(days_ago: int) -> str:
 
 
 def test_frozen_stale_25_days_raises():
-    """W0-T2-D: frozen_as_of 25 days ago → FATAL RuntimeError."""
+    """W0-T2-D: frozen_as_of 25 days ago still kills legacy Platt-live boot."""
     from src.main import assert_frozen_as_of_not_stale
     now = datetime.now(tz=timezone.utc)
     frozen = (now - timedelta(days=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
     cfg = _cfg(frozen_as_of=frozen)
     with pytest.raises(RuntimeError, match="FROZEN_AS_OF_STALE"):
         assert_frozen_as_of_not_stale(cfg, now=now)
+
+
+def test_frozen_stale_25_days_nonfatal_for_replacement_qkernel_live(caplog):
+    """The live replacement qkernel path is not blocked by stale legacy Platt pin."""
+    from src.main import assert_frozen_as_of_not_stale
+
+    now = datetime.now(tz=timezone.utc)
+    frozen = (now - timedelta(days=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cfg = _replacement_qkernel_cfg(frozen_as_of=frozen)
+    with caplog.at_level(logging.WARNING):
+        assert_frozen_as_of_not_stale(cfg, now=now)
+    assert any("replacement_0_1/qkernel" in r.message for r in caplog.records)
 
 
 def test_frozen_stale_15_days_warns_not_raises(caplog):

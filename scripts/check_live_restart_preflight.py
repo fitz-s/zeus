@@ -278,6 +278,64 @@ def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
     )
 
 
+def _src_main_boot_guard_check() -> CheckResult:
+    command = [
+        sys.executable,
+        "-m",
+        "src.main",
+        "--validate-boot",
+        "--settings-path",
+        str(SETTINGS_PATH),
+    ]
+    evidence: dict[str, Any] = {
+        "command": command,
+        "cwd": str(ROOT),
+        "settings_path": str(SETTINGS_PATH),
+    }
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        evidence["timeout_seconds"] = exc.timeout
+        evidence["stdout_tail"] = (exc.stdout or "")[-2000:] if isinstance(exc.stdout, str) else ""
+        evidence["stderr_tail"] = (exc.stderr or "")[-2000:] if isinstance(exc.stderr, str) else ""
+        return CheckResult(
+            "src_main_boot_guards",
+            False,
+            "src.main --validate-boot timed out before restart",
+            evidence,
+        )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "src_main_boot_guards",
+            False,
+            "src.main --validate-boot could not run",
+            evidence,
+        )
+    evidence.update(
+        {
+            "returncode": proc.returncode,
+            "stdout_tail": proc.stdout[-4000:],
+            "stderr_tail": proc.stderr[-4000:],
+        }
+    )
+    ok = proc.returncode == 0
+    return CheckResult(
+        "src_main_boot_guards",
+        ok,
+        "src.main boot guards pass"
+        if ok
+        else "src.main boot guards fail; restart would crash before scheduler",
+        evidence,
+    )
+
+
 def _family_portfolio_single_leg_check() -> CheckResult:
     try:
         from src.strategy.family_exclusive_dedup import (
@@ -3278,6 +3336,7 @@ def evaluate() -> dict[str, Any]:
             },
         ),
         _qkernel_spine_cutover_check(cfg),
+        _src_main_boot_guard_check(),
         _family_portfolio_single_leg_check(),
         _qlcb_reliability_artifact_check(),
         _forecast_sidecar_health(),

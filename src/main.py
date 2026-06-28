@@ -386,7 +386,8 @@ def assert_frozen_as_of_not_stale(
     calling datetime.now() at import.
 
     WARN threshold: 10 days.
-    FATAL threshold: 21 days (unless ZEUS_FREEZE_GUARD_DISABLE=1).
+    FATAL threshold: 21 days (unless ZEUS_FREEZE_GUARD_DISABLE=1 or the
+    current live probability authority is the replacement qkernel path).
     """
     from datetime import datetime, timezone  # safe re-import: stdlib already loaded
     frozen_str: str | None = (
@@ -408,6 +409,14 @@ def assert_frozen_as_of_not_stale(
         return
     age_days = (now - frozen_dt).total_seconds() / 86400.0
     if age_days > 21:
+        if _replacement_qkernel_live_probability_authority_enabled(cfg):
+            logger.warning(
+                "FROZEN_AS_OF_STALE: calibration pin is %.0f days old (>21d threshold), "
+                "but current live probability authority is replacement_0_1/qkernel; "
+                "legacy Platt pin staleness is non-fatal for daemon boot",
+                age_days,
+            )
+            return
         if os.environ.get("ZEUS_FREEZE_GUARD_DISABLE", "0") == "1":
             logger.warning(
                 "FROZEN_AS_OF_STALE: calibration pin is %.0f days old (>21d threshold); "
@@ -425,6 +434,27 @@ def assert_frozen_as_of_not_stale(
             "Consider refreshing calibration.pin.frozen_as_of.",
             age_days,
         )
+
+
+def _replacement_qkernel_live_probability_authority_enabled(cfg: dict) -> bool:
+    """Return True when live entry probability is served by replacement qkernel.
+
+    The calibration pin guards the legacy Platt/ENS calibration generation.  It
+    must remain fatal when that legacy path is the live probability authority.
+    When the live money path is explicitly the replacement_0_1 qkernel spine,
+    a stale Platt pin is stale calibration inventory, not a daemon-start
+    blocker; the replacement posterior freshness gates own live readiness.
+    """
+
+    edli = cfg.get("edli") if isinstance(cfg.get("edli"), dict) else {}
+    flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
+    return (
+        bool(flags.get("qkernel_spine_enabled", False))
+        and str(edli.get("live_execution_mode") or "") == "edli_live"
+        and str(edli.get("reactor_mode") or "") == "live"
+        and bool(edli.get("replacement_0_1_bayes_precision_fusion_enabled", False))
+        and bool(edli.get("replacement_0_1_fused_q_shape_enabled", False))
+    )
 
 
 def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
@@ -519,7 +549,11 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     # Guard 2: frozen_as_of staleness
     try:
         assert_frozen_as_of_not_stale(raw_cfg, now=datetime.now(tz=timezone.utc))
-        results.append(("frozen_as_of_staleness", True, "frozen_as_of absent or within 21d — OK"))
+        results.append((
+            "frozen_as_of_staleness",
+            True,
+            "frozen_as_of absent, within 21d, or non-fatal under replacement qkernel authority — OK",
+        ))
     except RuntimeError as exc:
         results.append(("frozen_as_of_staleness", False, str(exc)))
     except Exception as exc:  # pragma: no cover
@@ -553,13 +587,14 @@ def _run_schema_guards() -> list:
       world_db_schema    — assert_schema_current + canonical table presence
       forecasts_db_schema — assert_schema_current_forecasts + live-required schema presence
       world_registry     — assert_db_matches_registry(WORLD)
-      forecasts_registry — assert_db_matches_registry(FORECASTS)
+      trade_registry     — assert_db_matches_registry(TRADE)
     """
     import sqlite3 as _sqlite3
 
     from src.state.db import (
         ZEUS_WORLD_DB_PATH,
         ZEUS_FORECASTS_DB_PATH,
+        _zeus_trade_db_path,
         assert_schema_current,
         assert_schema_current_forecasts,
     )
@@ -611,18 +646,20 @@ def _run_schema_guards() -> list:
     except Exception as exc:
         results.append(("world_registry", False, str(exc)))
 
-    # Forecasts registry
+    # Trade registry. Keep --validate-boot aligned with the real src.main boot
+    # path: world/trade registry are enforced there; forecasts registry is not.
     try:
-        if not ZEUS_FORECASTS_DB_PATH.exists():
-            raise FileNotFoundError(f"{ZEUS_FORECASTS_DB_PATH} does not exist")
-        conn = _ro_conn(ZEUS_FORECASTS_DB_PATH)
+        trade_db_path = _zeus_trade_db_path()
+        if not trade_db_path.exists():
+            raise FileNotFoundError(f"{trade_db_path} does not exist")
+        conn = _ro_conn(trade_db_path)
         try:
-            assert_db_matches_registry(conn, DBIdentity.FORECASTS)
-            results.append(("forecasts_registry", True, "forecasts table-set matches registry — OK"))
+            assert_db_matches_registry(conn, DBIdentity.TRADE)
+            results.append(("trade_registry", True, "trade table-set matches registry — OK"))
         finally:
             conn.close()
     except Exception as exc:
-        results.append(("forecasts_registry", False, str(exc)))
+        results.append(("trade_registry", False, str(exc)))
 
     return results
 

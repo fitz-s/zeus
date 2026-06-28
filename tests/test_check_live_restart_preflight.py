@@ -310,6 +310,16 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "FORECAST_LIVE_HEARTBEAT_PATH", forecast_live_heartbeat)
     monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", live_plist)
     monkeypatch.setattr(
+        preflight,
+        "_src_main_boot_guard_check",
+        lambda: preflight.CheckResult(
+            "src_main_boot_guards",
+            True,
+            "src.main boot guards pass",
+            {"test_stub": True},
+        ),
+    )
+    monkeypatch.setattr(
         guard_mod,
         "_QLCB_OOF_RELIABILITY_PATH",
         str(state_dir / "qlcb_oof_reliability.json"),
@@ -320,6 +330,46 @@ def _patch_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
     monkeypatch.setattr(preflight, "_git_head", lambda: "testsha")
     return trade_db, forecast_db, state_dir
+
+
+def test_src_main_boot_guard_check_blocks_failed_validate_boot(monkeypatch):
+    calls = []
+
+    def _fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "FAIL frozen_as_of_staleness: FROZEN_AS_OF_STALE\n",
+            "",
+        )
+
+    monkeypatch.setattr(preflight.subprocess, "run", _fake_run)
+
+    result = preflight._src_main_boot_guard_check()
+
+    assert result.ok is False
+    assert "restart would crash" in result.detail
+    assert result.evidence["returncode"] == 1
+    assert "FAIL frozen_as_of_staleness" in result.evidence["stdout_tail"]
+    assert calls
+
+
+def test_src_main_boot_guard_check_passes_validate_boot(monkeypatch):
+    def _fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "zeus --validate-boot: ALL PASS (exit 0)\n",
+            "",
+        )
+
+    monkeypatch.setattr(preflight.subprocess, "run", _fake_run)
+
+    result = preflight._src_main_boot_guard_check()
+
+    assert result.ok is True
+    assert result.evidence["returncode"] == 0
 
 
 def test_posterior_summary_uses_source_cycle_freshness_not_computed_age(
