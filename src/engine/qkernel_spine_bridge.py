@@ -1613,6 +1613,21 @@ def _candidate_qkernel_execution_economics_payload(
                     "q_lcb_guard_basis": candidate_decision.q_lcb_guard_basis,
                     "q_lcb_guard_abstained": bool(candidate_decision.q_lcb_guard_abstained),
                     "q_lcb_guard_cell_key": candidate_decision.q_lcb_guard_cell_key,
+                    "selection_guard_basis": getattr(
+                        candidate_decision, "selection_guard_basis", ""
+                    ),
+                    "selection_guard_abstained": bool(
+                        getattr(candidate_decision, "selection_guard_abstained", False)
+                    ),
+                    "selection_guard_cell_key": getattr(
+                        candidate_decision, "selection_guard_cell_key", ""
+                    ),
+                    "selection_guard_n": int(
+                        getattr(candidate_decision, "selection_guard_n", 0) or 0
+                    ),
+                    "selection_guard_q_safe": getattr(
+                        candidate_decision, "selection_guard_q_safe", None
+                    ),
                     "direction_law_ok": bool(
                         getattr(candidate_decision, "direction_law_ok", False)
                     ),

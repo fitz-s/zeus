@@ -139,6 +139,7 @@ def test_selection_calibrator_preserves_genuine_edge_buy_yes():
     bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
     key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
     art = _artifact({key: {"n": 200, "hit_rate": 0.46}})
+    art["_meta"]["armed_sides"] = ["YES", "NO"]
 
     v = sc.apply_selection_calibrator(
         raw_side_prob=raw_yes_prob,
@@ -150,6 +151,7 @@ def test_selection_calibrator_preserves_genuine_edge_buy_yes():
     )
     assert v.trade is True
     assert v.abstained is False
+    assert v.basis == "SELECTION_BETA_95"
     # The lower bound clears the 0.30 cost -> genuine edge survives.
     assert v.q_safe - 0.30 > 0.0
     assert v.q_safe <= raw_yes_prob + 1e-9  # still a lower bound

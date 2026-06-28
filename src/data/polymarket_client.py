@@ -250,7 +250,15 @@ resolve_polymarket_credentials = _resolve_credentials
 
 
 def _resolve_clob_v2_signature_type() -> int:
-    raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
+    raw = os.environ.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE")
+    if raw is None:
+        if _real_order_submit_enabled():
+            raise RuntimeError(
+                "POLYMARKET_CLOB_V2_SIGNATURE_TYPE is required when "
+                "edli.real_order_submit_enabled=true; live submit must not rely on "
+                "the historical implicit POLY_GNOSIS_SAFE signature_type=2 default."
+            )
+        raw = "2"
     try:
         signature_type = int(raw)
     except ValueError as exc:
@@ -262,6 +270,24 @@ def _resolve_clob_v2_signature_type() -> int:
             f"Invalid POLYMARKET_CLOB_V2_SIGNATURE_TYPE={raw!r}; expected 0, 1, 2, or 3"
         )
     return signature_type
+
+
+def _real_order_submit_enabled() -> bool:
+    """Return the live submit arming flag from strict settings.
+
+    This is intentionally fail-closed: if the config cannot be read, a caller about to
+    construct the authenticated CLOB adapter must not assume submit is disabled and fall
+    back to an implicit signature mode.
+    """
+
+    try:
+        from src.config import Settings
+
+        return bool(Settings()["edli"]["real_order_submit_enabled"])
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Cannot determine edli.real_order_submit_enabled for CLOB signature preflight"
+        ) from exc
 
 
 def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:

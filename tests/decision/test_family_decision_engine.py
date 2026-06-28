@@ -41,6 +41,7 @@ from __future__ import annotations
 import inspect
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Mapping, Optional, Sequence
 
 import numpy as np
@@ -139,6 +140,25 @@ def _isolate_qlcb_reliability_artifact(monkeypatch, tmp_path):
     guard_mod.reset_reliability_cache()
     yield
     guard_mod.reset_reliability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _selection_calibrator_identity(monkeypatch):
+    """Keep qkernel tests independent from generated live selection artifacts."""
+
+    def _identity(**kwargs):
+        raw = float(kwargs["raw_side_prob"])
+        return SimpleNamespace(
+            q_safe=raw,
+            trade=True,
+            abstained=False,
+            cell_key="test|SIDE_NOT_ARMED",
+            L_g=float("nan"),
+            n_g=0,
+            basis="SIDE_NOT_ARMED",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _identity)
 
 
 def _resolution(metric: str = "high") -> EventResolution:
@@ -1759,3 +1779,160 @@ def test_licensed_qlcb_deflation_recomputes_delta_u_and_stake(monkeypatch):
     assert reason is None
     assert selected is not None
     assert selected.economics.edge_lcb == pytest.approx(guarded_economics.edge_lcb)
+
+
+def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
+    """Selection-aware guard feeds qkernel economics before choosing the ROI frontier."""
+
+    case = _case()
+    space = _outcome_space(case)
+    toxic_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.10,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.50,
+        optimal_stake_usd=Decimal("20"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.08,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+
+    def _selection_verdict(**kwargs):
+        side = kwargs["side"]
+        if side == "NO":
+            return SimpleNamespace(
+                q_safe=0.0,
+                trade=False,
+                abstained=True,
+                cell_key="NO|L1|nonmodal|0.85",
+                L_g=0.0,
+                n_g=12,
+                basis="EB_THIN_SELECTED",
+            )
+        return SimpleNamespace(
+            q_safe=float(kwargs["raw_side_prob"]),
+            trade=True,
+            abstained=False,
+            cell_key="YES|SIDE_NOT_ARMED",
+            L_g=float("nan"),
+            n_g=0,
+            basis="SIDE_NOT_ARMED",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(toxic_no, center_yes),
+        case=case,
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "NO"): _no_sizing(space, "b24", q_point=0.85, q_lcb=0.84, price="0.79"),
+            ("b25", "YES"): _yes_sizing(space, "b25", q_point=0.50, q_lcb=0.35, price="0.27"),
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    blocked_no = next(d for d in guarded if d.route.side == "NO")
+    passed_yes = next(d for d in guarded if d.route.side == "YES")
+    assert blocked_no.selection_guard_basis == "EB_THIN_SELECTED"
+    assert blocked_no.selection_guard_abstained is True
+    assert blocked_no.economics.edge_lcb < 0.0
+    assert blocked_no.economics.optimal_delta_u <= 0.0
+    assert passed_yes.selection_guard_basis == "SIDE_NOT_ARMED"
+
+    selected, reason = engine._select(guarded)
+    assert reason is None
+    assert selected is passed_yes
+
+
+def test_selection_calibrator_deflation_recomputes_qkernel_stake(monkeypatch):
+    """A licensed selection bound lowers payoff_q_lcb and recomputes ROI inputs."""
+
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="NO", bin_id="b24", cost=0.40)
+    economics = CandidateEconomics(
+        candidate_id=route.candidate_id,
+        point_ev=0.30,
+        edge_lcb=0.25,
+        delta_u_at_min=0.001,
+        optimal_stake_usd=Decimal("25"),
+        optimal_delta_u=0.15,
+        q_dot_payoff=0.70,
+        cost=route.route_cost.avg_cost,
+        route_id=route.route_cost.route_id,
+        payoff_q_lcb=0.65,
+    )
+    candidate = CandidateDecision(
+        route=route,
+        economics=economics,
+        direction_law_ok=True,
+        coherence_allows=True,
+        robust_trade_score=0.20,
+    )
+
+    def _licensed_selection(**kwargs):
+        assert kwargs["raw_side_prob"] == pytest.approx(0.70)
+        assert kwargs["admission_margin"] == pytest.approx(0.40)
+        return SimpleNamespace(
+            q_safe=0.50,
+            trade=True,
+            abstained=False,
+            cell_key="NO|L1|nonmodal|0.70",
+            L_g=0.50,
+            n_g=80,
+            basis="SELECTION_EB_BETA",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _licensed_selection)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(candidate,),
+        case=case,
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "NO"): _no_sizing(space, "b24", q_point=0.70, q_lcb=0.65, price="0.40")
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    guarded_candidate = guarded[0]
+    assert guarded_candidate.selection_guard_basis == "SELECTION_EB_BETA"
+    assert guarded_candidate.selection_guard_abstained is False
+    assert guarded_candidate.selection_guard_n == 80
+    assert guarded_candidate.selection_guard_q_safe == pytest.approx(0.50)
+    assert guarded_candidate.economics.payoff_q_lcb == pytest.approx(0.50)
+    assert guarded_candidate.economics.edge_lcb == pytest.approx(0.10)
+    assert guarded_candidate.economics.optimal_stake_usd != Decimal("25")

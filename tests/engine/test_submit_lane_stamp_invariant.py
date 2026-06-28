@@ -290,6 +290,64 @@ def test_persist_boundary_raises_on_live_stamped_full_pass_no_submit():
         reactor._assert_no_submit_lane_invariant(receipt)
 
 
+def test_persist_boundary_allows_live_typed_submit_abort_no_submit():
+    """A live-lane submit recapture abort is a typed no-side-effect terminal, not dark."""
+    conn, store = _store()
+    event = _forecast_event()
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE,
+        reason=(
+            "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated expected profit below strategy floor"
+        ),
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+
+    reactor._assert_no_submit_lane_invariant(receipt)
+
+
+def test_armed_live_daemon_books_typed_submit_abort_no_submit():
+    """Profit-floor recapture aborts should not dead-letter the redecision lane."""
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE,
+        reason=(
+            "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
+            "PreSubmitRevalidated expected profit below strategy floor"
+        ),
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+
+    result = reactor.process_pending(decision_time=_DECISION_TIME)
+
+    assert result.dead_lettered == 0
+    assert result.retried == 0
+    assert result.proof_accepted == 1
+    rows = _no_submit_rows(conn, event.event_id)
+    assert len(rows) == 1
+    assert "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR" in rows[0][0]
+
+
 def test_armed_live_daemon_never_silently_books_live_stamped_full_pass_no_submit():
     """Invariant end-to-end: a proof_accepted NO_SUBMIT receipt stamped LIVE on an armed
     live daemon is the silent-kill signature. The persist boundary raises; the reactor's

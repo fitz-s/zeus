@@ -648,6 +648,16 @@ class LiveLaneDarkInvariantError(RuntimeError):
     """
 
 
+_LIVE_LANE_TYPED_NO_SUBMIT_ABORT_REASONS: frozenset[str] = frozenset({
+    "SUBMIT_ABORTED_BELOW_MIN_ORDER",
+    "SUBMIT_ABORTED_EDGE_REVERSED",
+    "SUBMIT_ABORTED_FAMILY_REVERSED",
+    "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
+    "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
+    "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
+})
+
+
 @dataclass
 class ReactorConfig:
     reactor_mode: str = "live_no_submit"
@@ -2169,6 +2179,9 @@ class OpportunityEventReactor:
             and receipt.side_effect_status == "NO_SUBMIT"
             and receipt.submit_lane == "LIVE"
         ):
+            reason_base = _money_path_reason_base(str(receipt.reason or ""))
+            if reason_base in _LIVE_LANE_TYPED_NO_SUBMIT_ABORT_REASONS:
+                return
             raise LiveLaneDarkInvariantError(
                 "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT: a proof_accepted NO_SUBMIT receipt "
                 f"stamped submit_lane=LIVE reached the persist boundary on an armed live "

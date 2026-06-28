@@ -205,6 +205,7 @@ from src.decision.qlcb_reliability_guard import apply_guard as _apply_qlcb_guard
 from src.decision.qlcb_reliability_guard import (
     precision_class_for_city as _qlcb_precision_class_for_city,
 )
+from src.decision.selection_calibrator import apply_selection_calibrator
 from src.probability.joint_q import JointQ, build_joint_q
 from src.probability.joint_q_band import JointQBand, build_joint_q_band
 from src.probability.outcome_space import OutcomeSpace
@@ -346,6 +347,10 @@ class CandidateDecision:
     * ``q_lcb_guard_basis`` / ``q_lcb_guard_abstained`` — the side-aware OOF reliability
       verdict applied to this candidate. A NO-on-modal direction relaxation can only use
       an active OOF verdict, never an inert/missing evidence path.
+    * ``selection_guard_basis`` / ``selection_guard_abstained`` — the selection-aware
+      settlement calibrator verdict applied before live selection. This guard keys on
+      the raw side probability that admission selected on, then only lowers the payoff
+      qLCB consumed by edge/DeltaU/ROI.
     """
 
     route: CandidateRoute
@@ -356,6 +361,11 @@ class CandidateDecision:
     q_lcb_guard_basis: str = ""
     q_lcb_guard_abstained: bool = False
     q_lcb_guard_cell_key: str = ""
+    selection_guard_basis: str = ""
+    selection_guard_abstained: bool = False
+    selection_guard_cell_key: str = ""
+    selection_guard_n: int = 0
+    selection_guard_q_safe: float | None = None
 
 
 @dataclass(frozen=True)
@@ -745,6 +755,23 @@ class FamilyDecisionEngine:
         # absent -> scored is byte-identical (no abstain). Moves no μ.
         guarded = self._apply_qlcb_reliability_guard(
             scored=pre_coherence_scored,
+            case=case,
+            joint_q=joint_q,
+            band=band,
+            forecast_bin=forecast_bin,
+            matrix=matrix,
+            exposure=portfolio,
+            sizing_candidates=sizing_candidates,
+            max_stake_usd=max_stake_usd,
+        )
+
+        # --- (6c) selection-aware settlement guard --------------------------------
+        # The OOF q_lcb guard is price-blind; the selection calibrator is keyed on the
+        # raw side probability that admission selected on, so it catches the adverse
+        # selection that made high-confidence NO entries lose after settlement. It runs
+        # before coherence/selection so live ranking sees guarded edge, stake, and DeltaU.
+        guarded = self._apply_selection_calibrator_guard(
+            scored=guarded,
             case=case,
             joint_q=joint_q,
             band=band,
@@ -1530,6 +1557,130 @@ class FamilyDecisionEngine:
                         q_lcb_guard_basis="QLCB_RELIABILITY_GUARD_ERROR",
                         q_lcb_guard_abstained=True,
                         q_lcb_guard_cell_key="ERROR",
+                    )
+                )
+        return tuple(out)
+
+    # ------------------------------------------- selection-aware settlement guard
+    def _apply_selection_calibrator_guard(
+        self,
+        *,
+        scored: tuple[CandidateDecision, ...],
+        case: ForecastCase,
+        joint_q: JointQ,
+        band: JointQBand,
+        forecast_bin: str,
+        matrix: FamilyPayoffMatrix,
+        exposure: PortfolioExposureVector,
+        sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
+        max_stake_usd: Optional[Decimal],
+    ) -> tuple[CandidateDecision, ...]:
+        """Apply the selection-aware settlement lower bound before qkernel selection.
+
+        This is the qkernel-side counterpart of the submit-time selection-curse check:
+        each native YES/NO candidate is calibrated on the raw side probability that
+        admission selected on (``q_dot_payoff`` for the candidate payoff). The guard never
+        raises probability and never moves the forecast center; it only lowers the
+        candidate-local ``payoff_q_lcb`` used by edge, robust DeltaU, stake, and ROI.
+
+        Active armed cells that are missing/thin/stale are live-money abstains. Unarmed
+        sides pass through with ``SIDE_NOT_ARMED`` so legacy NO-only artifacts do not
+        pretend to calibrate YES.
+        """
+        lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
+
+        def _blocked_economics(econ: CandidateEconomics, *, edge_lcb: float) -> CandidateEconomics:
+            return replace(
+                econ,
+                edge_lcb=float(edge_lcb),
+                delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
+                optimal_stake_usd=Decimal("0"),
+                optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
+            )
+
+        def _recomputed_guarded_economics(
+            d: CandidateDecision,
+            *,
+            q_safe: float,
+        ) -> CandidateEconomics:
+            sizing = sizing_candidates.get((d.route.bin_id, d.route.side))
+            if sizing is None or not sizing.is_tradeable:
+                return _blocked_economics(
+                    d.economics,
+                    edge_lcb=float(q_safe) - float(d.economics.cost.value),
+                )
+            return compute_candidate_economics(
+                d.route,
+                joint_q=joint_q,
+                band=band,
+                sizing_candidate=sizing,
+                matrix=matrix,
+                exposure=exposure,
+                max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=float(q_safe),
+            )
+
+        out: list[CandidateDecision] = []
+        for d in scored:
+            try:
+                econ = d.economics
+                cost = float(econ.cost.value)
+                prior_lcb = (
+                    float(econ.payoff_q_lcb)
+                    if econ.payoff_q_lcb is not None
+                    else float(econ.edge_lcb) + cost
+                )
+                raw_side_prob = float(econ.q_dot_payoff)
+                if not (
+                    math.isfinite(cost)
+                    and math.isfinite(prior_lcb)
+                    and math.isfinite(raw_side_prob)
+                    and 0.0 <= prior_lcb <= 1.0
+                    and 0.0 <= raw_side_prob <= 1.0
+                ):
+                    raise FamilyDecisionError("SELECTION_GUARD_INPUT_MISSING")
+                bin_class = "modal" if d.route.bin_id == forecast_bin else "nonmodal"
+                verdict = apply_selection_calibrator(
+                    raw_side_prob=raw_side_prob,
+                    side=d.route.side,
+                    lead_days=lead_days,
+                    bin_class=bin_class,
+                    admission_margin=cost,
+                )
+                q_safe = float(min(prior_lcb, float(verdict.q_safe)))
+                guard_fields = {
+                    "selection_guard_basis": str(verdict.basis),
+                    "selection_guard_abstained": bool(verdict.abstained or not verdict.trade),
+                    "selection_guard_cell_key": str(verdict.cell_key),
+                    "selection_guard_n": int(getattr(verdict, "n_g", 0) or 0),
+                    "selection_guard_q_safe": float(q_safe),
+                }
+                if not verdict.trade:
+                    new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
+                    out.append(replace(d, economics=new_econ, **guard_fields))
+                    continue
+                guarded_edge = q_safe - cost
+                if guarded_edge < float(econ.edge_lcb):
+                    new_econ = _recomputed_guarded_economics(d, q_safe=q_safe)
+                    out.append(replace(d, economics=new_econ, **guard_fields))
+                else:
+                    out.append(replace(d, **guard_fields))
+            except Exception:  # noqa: BLE001 — active selection guard faults fail closed.
+                econ = d.economics
+                try:
+                    cost = float(econ.cost.value)
+                except Exception:  # noqa: BLE001
+                    cost = 1.0
+                new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
+                out.append(
+                    replace(
+                        d,
+                        economics=new_econ,
+                        selection_guard_basis="SELECTION_CALIBRATOR_GUARD_ERROR",
+                        selection_guard_abstained=True,
+                        selection_guard_cell_key="ERROR",
+                        selection_guard_n=0,
+                        selection_guard_q_safe=0.0,
                     )
                 )
         return tuple(out)
