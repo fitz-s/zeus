@@ -154,6 +154,7 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
         raise CertificateVerificationError("expected ActionableTradeCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("actionable trade must use LIVE mode")
+    _require_live_parent_modes("actionable trade", parent_tuple)
     _verify_actionable_payload(cert)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.ACTIONABLE_REQUIRED_TYPES - parent_types
@@ -180,6 +181,7 @@ def verify_execution_command(cert: DecisionCertificate, parents: Iterable[Decisi
         raise CertificateVerificationError("expected ExecutionCommandCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("execution command must use LIVE mode")
+    _require_live_parent_modes("execution command", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTION_COMMAND_REQUIRED_TYPES - parent_types
     if missing:
@@ -194,6 +196,7 @@ def verify_final_intent(cert: DecisionCertificate, parents: Iterable[DecisionCer
         raise CertificateVerificationError("expected FinalIntentCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("final intent must use LIVE mode")
+    _require_live_parent_modes("final intent", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.FINAL_INTENT_REQUIRED_TYPES - parent_types
     if missing:
@@ -208,6 +211,7 @@ def verify_executor_expressibility(cert: DecisionCertificate, parents: Iterable[
         raise CertificateVerificationError("expected ExecutorExpressibilityCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("executor expressibility must use LIVE mode")
+    _require_live_parent_modes("executor expressibility", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTOR_EXPRESSIBILITY_REQUIRED_TYPES - parent_types
     if missing:
@@ -222,6 +226,7 @@ def verify_execution_receipt(cert: DecisionCertificate, parents: Iterable[Decisi
         raise CertificateVerificationError("expected ExecutionReceiptCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("execution receipt must use LIVE mode")
+    _require_live_parent_modes("execution receipt", parent_tuple)
     parent_types = {parent.certificate_type for parent in parent_tuple}
     missing = claims.EXECUTION_RECEIPT_REQUIRED_TYPES - parent_types
     if missing:
@@ -236,6 +241,7 @@ def verify_live_cap_transition(cert: DecisionCertificate, parents: Iterable[Deci
         raise CertificateVerificationError("expected LiveCapTransitionCertificate")
     if cert.header.mode != "LIVE":
         raise CertificateVerificationError("live cap transition must use LIVE mode")
+    _require_live_parent_modes("live cap transition", parent_tuple)
     _verify_live_cap_transition_payload(cert, parent_tuple)
 
 
@@ -264,6 +270,18 @@ def _verify_parent_edges(cert: DecisionCertificate, parents: tuple[DecisionCerti
             raise CertificateVerificationError(f"missing parent for role {edge.role}")
         if parent.certificate_type != edge.certificate_type:
             raise CertificateVerificationError(f"parent type mismatch for role {edge.role}")
+
+
+def _require_live_parent_modes(scope: str, parents: tuple[DecisionCertificate, ...]) -> None:
+    non_live = sorted(
+        f"{parent.certificate_type}:{parent.header.mode}"
+        for parent in parents
+        if parent.header.mode != "LIVE"
+    )
+    if non_live:
+        raise CertificateVerificationError(
+            f"{scope} requires LIVE parent certificates: {', '.join(non_live)}"
+        )
 
 
 def _verify_time_filtration(cert: DecisionCertificate) -> None:

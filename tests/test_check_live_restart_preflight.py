@@ -426,6 +426,144 @@ def test_live_actionable_certificate_semantics_accepts_current_qkernel_payload(
     assert result.evidence["risky_count"] == 0
 
 
+def test_live_money_certificate_parent_modes_blocks_no_submit_parent(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(world_db)
+    conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE decision_certificate_edges (
+            child_certificate_id TEXT NOT NULL,
+            parent_role TEXT NOT NULL,
+            parent_certificate_hash TEXT NOT NULL,
+            parent_certificate_type TEXT NOT NULL,
+            required INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificates VALUES (
+            'exec-command-1', 'child-hash', 'ExecutionCommandCertificate',
+            'LIVE', 'VERIFIED', ?, '{}'
+        )
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificates VALUES (
+            'pre-submit-1', 'parent-hash', 'PreSubmitRevalidationCertificate',
+            'NO_SUBMIT', 'VERIFIED', ?, '{}'
+        )
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificate_edges VALUES (
+            'exec-command-1', 'pre_submit_revalidation', 'parent-hash',
+            'PreSubmitRevalidationCertificate', 1, ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._live_money_certificate_parent_mode_check()
+
+    assert result.ok is False
+    assert result.evidence["risky_count"] == 1
+    assert result.evidence["risky"][0]["child_certificate_type"] == "ExecutionCommandCertificate"
+    assert "PreSubmitRevalidationCertificate:NO_SUBMIT" in result.evidence["risky"][0]["bad_parent_modes"]
+
+
+def test_live_money_certificate_parent_modes_accepts_live_parent(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(world_db)
+    conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE decision_certificate_edges (
+            child_certificate_id TEXT NOT NULL,
+            parent_role TEXT NOT NULL,
+            parent_certificate_hash TEXT NOT NULL,
+            parent_certificate_type TEXT NOT NULL,
+            required INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificates VALUES (
+            'exec-command-1', 'child-hash', 'ExecutionCommandCertificate',
+            'LIVE', 'VERIFIED', ?, '{}'
+        )
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificates VALUES (
+            'pre-submit-1', 'parent-hash', 'PreSubmitRevalidationCertificate',
+            'LIVE', 'VERIFIED', ?, '{}'
+        )
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificate_edges VALUES (
+            'exec-command-1', 'pre_submit_revalidation', 'parent-hash',
+            'PreSubmitRevalidationCertificate', 1, ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+
+    result = preflight._live_money_certificate_parent_mode_check()
+
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+
+
 def test_live_actionable_certificate_semantics_excludes_quarantined_invalid_rows(
     monkeypatch, tmp_path
 ):

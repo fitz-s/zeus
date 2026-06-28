@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quarantine LIVE ActionableTradeCertificate rows that fail current verifier law.
+"""Quarantine invalid LIVE money-path certificate rows.
 
 Default mode is dry-run.  ``--apply`` writes non-destructive rows to
 trade.decision_integrity_quarantine so immutable historical certificates remain
@@ -20,6 +20,7 @@ if str(_REPO_ROOT) not in sys.path:
 from src.state.db import ZEUS_WORLD_DB_PATH, _zeus_trade_db_path  # noqa: E402
 from src.state.decision_integrity_quarantine import (  # noqa: E402
     quarantine_invalid_live_actionable_certificates,
+    quarantine_invalid_live_money_parent_modes,
 )
 
 
@@ -81,7 +82,12 @@ def main() -> int:
                     ON decision_integrity_quarantine(reason_code, recorded_at)
                 """
             )
-        result = quarantine_invalid_live_actionable_certificates(
+        actionable_result = quarantine_invalid_live_actionable_certificates(
+            conn,
+            dry_run=dry_run,
+            lookback_hours=lookback_hours,
+        )
+        parent_mode_result = quarantine_invalid_live_money_parent_modes(
             conn,
             dry_run=dry_run,
             lookback_hours=lookback_hours,
@@ -92,19 +98,33 @@ def main() -> int:
         conn.close()
 
     mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"[{mode}] quarantine_invalid_live_actionable_certificates")
+    print(f"[{mode}] quarantine_invalid_live_money_certificates")
     print(f"  world DB       : {world_db}")
     print(f"  trade DB       : {trade_db}")
     print(f"  lookback_hours : {lookback_hours if lookback_hours is not None else 'all'}")
-    for key in (
-        "checked_count",
-        "candidates_found",
-        "newly_quarantined",
-        "already_quarantined",
+    for label, result in (
+        ("actionable_payload", actionable_result),
+        ("parent_modes", parent_mode_result),
     ):
-        print(f"  {key:19}: {result.get(key, 0)}")
-    if "error" in result:
-        print(f"  ERROR: {result['error']}", file=sys.stderr)
+        print(f"  [{label}]")
+        for key in (
+            "checked_count",
+            "candidates_found",
+            "newly_quarantined",
+            "already_quarantined",
+        ):
+            print(f"    {key:19}: {result.get(key, 0)}")
+    errors = [
+        (label, result["error"])
+        for label, result in (
+            ("actionable_payload", actionable_result),
+            ("parent_modes", parent_mode_result),
+        )
+        if "error" in result
+    ]
+    if errors:
+        for label, error in errors:
+            print(f"  ERROR[{label}]: {error}", file=sys.stderr)
         return 1
     if dry_run:
         print("  (dry-run: no rows written; pass --apply to commit)")

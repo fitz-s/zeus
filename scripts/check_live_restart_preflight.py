@@ -91,6 +91,15 @@ COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
 LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
 LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
+LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
+    "ActionableTradeCertificate",
+    "FinalIntentCertificate",
+    "ExecutorExpressibilityCertificate",
+    "PreSubmitRevalidationCertificate",
+    "ExecutionCommandCertificate",
+    "ExecutionReceiptCertificate",
+    "LiveCapTransitionCertificate",
+)
 SIDECAR_HEARTBEATS = (
     ("substrate_observer_daemon", "daemon-heartbeat-substrate-observer.json"),
     ("price_channel_daemon", "daemon-heartbeat-price-channel-ingest.json"),
@@ -778,6 +787,140 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         "recent live actionable certificates verify under current qkernel money law"
         if not risky
         else "recent live actionable certificates fail current qkernel money law",
+        evidence,
+    )
+
+
+def _live_money_certificate_parent_mode_check() -> CheckResult:
+    """Block restart when a LIVE money-boundary certificate has non-LIVE parents."""
+
+    evidence: dict[str, Any] = {
+        "world_db": str(WORLD_DB),
+        "lookback_hours": LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS,
+        "certificate_types": list(LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES),
+    }
+    if not WORLD_DB.exists():
+        return CheckResult(
+            "live_money_certificate_parent_modes",
+            True,
+            "world DB absent; no money-boundary certificate ancestry to inspect",
+            evidence,
+        )
+    since = datetime.now(timezone.utc) - timedelta(
+        hours=LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS
+    )
+    try:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_PARENT_MODE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_money_certificate_parent_modes",
+            False,
+            "could not load money certificate quarantine constants",
+            evidence,
+        )
+    quarantined_hashes = _decision_certificate_quarantine_hashes(
+        table_name=DECISION_CERTIFICATES_TABLE,
+        reason_code=REASON_INVALID_LIVE_PARENT_MODE,
+    )
+    evidence["quarantined_count"] = len(quarantined_hashes)
+    placeholders = ",".join("?" for _ in LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES)
+    params = (*LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES, since.isoformat())
+    try:
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if not _table_exists(conn, "main", "decision_certificates"):
+            return CheckResult(
+                "live_money_certificate_parent_modes",
+                True,
+                "decision_certificates table absent",
+                evidence,
+            )
+        if not _table_exists(conn, "main", "decision_certificate_edges"):
+            live_count = int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                      FROM decision_certificates
+                     WHERE certificate_type IN ({placeholders})
+                       AND mode = 'LIVE'
+                       AND verifier_status = 'VERIFIED'
+                       AND datetime(decision_time) >= datetime(?)
+                    """,
+                    params,
+                ).fetchone()[0]
+                or 0
+            )
+            evidence["live_money_certificate_count"] = live_count
+            return CheckResult(
+                "live_money_certificate_parent_modes",
+                live_count == 0,
+                "decision_certificate_edges table absent and no recent live money certificates exist"
+                if live_count == 0
+                else "recent live money certificates exist but ancestry edge table is absent",
+                evidence,
+            )
+        rows = conn.execute(
+            f"""
+            SELECT
+                child.certificate_id AS child_certificate_id,
+                child.certificate_hash AS child_certificate_hash,
+                child.certificate_type AS child_certificate_type,
+                child.decision_time AS child_decision_time,
+                COUNT(*) AS bad_parent_count,
+                GROUP_CONCAT(
+                    edge.parent_role || '=' || edge.parent_certificate_type || ':' || COALESCE(parent.mode, 'MISSING'),
+                    ','
+                ) AS bad_parent_modes
+              FROM decision_certificates child
+              JOIN decision_certificate_edges edge
+                ON edge.child_certificate_id = child.certificate_id
+              LEFT JOIN decision_certificates parent
+                ON parent.certificate_hash = edge.parent_certificate_hash
+             WHERE child.certificate_type IN ({placeholders})
+               AND child.mode = 'LIVE'
+               AND child.verifier_status = 'VERIFIED'
+               AND datetime(child.decision_time) >= datetime(?)
+               AND COALESCE(parent.mode, '') != 'LIVE'
+             GROUP BY
+                child.certificate_id,
+                child.certificate_hash,
+                child.certificate_type,
+                child.decision_time
+             ORDER BY datetime(child.decision_time) DESC, child.certificate_id DESC
+            """,
+            params,
+        ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_money_certificate_parent_modes",
+            False,
+            "could not inspect live money certificate ancestry",
+            evidence,
+        )
+    finally:
+        try:
+            conn.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+    risky = [
+        dict(row)
+        for row in rows
+        if str(row["child_certificate_hash"] or "") not in quarantined_hashes
+    ]
+    evidence["risky_count"] = len(risky)
+    evidence["quarantined_risky_count"] = len(rows) - len(risky)
+    evidence["risky"] = risky[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    return CheckResult(
+        "live_money_certificate_parent_modes",
+        not risky,
+        "recent live money-boundary certificates have LIVE parent ancestry"
+        if not risky
+        else "recent live money-boundary certificates include non-LIVE or missing parent ancestry",
         evidence,
     )
 
@@ -3095,6 +3238,7 @@ def evaluate() -> dict[str, Any]:
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
         _live_actionable_certificate_semantics_check(),
+        _live_money_certificate_parent_mode_check(),
         _open_entry_actionable_certificate_authority_check(rows),
         _position_current_projection_integrity_check(projection_rows),
         _open_entry_submit_economics_check(rows),

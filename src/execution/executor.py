@@ -899,25 +899,29 @@ def _decision_certificate_is_quarantined(
         from src.state.decision_integrity_quarantine import (
             DECISION_CERTIFICATES_TABLE,
             REASON_INVALID_LIVE_ACTIONABLE,
+            REASON_INVALID_LIVE_PARENT_MODE,
         )
     except Exception:
         DECISION_CERTIFICATES_TABLE = "decision_certificates"
         REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+        REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
+    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
     for schema in _attached_schema_names(conn):
         try:
             if not _table_exists_in_schema(conn, schema, "decision_integrity_quarantine"):
                 continue
             schema_sql = _quote_sql_identifier(schema)
+            placeholders = ",".join("?" for _ in reason_codes)
             row = conn.execute(
                 f"""
                 SELECT 1
                   FROM {schema_sql}.decision_integrity_quarantine
                  WHERE table_name = ?
                    AND row_id = ?
-                   AND reason_code = ?
+                   AND reason_code IN ({placeholders})
                  LIMIT 1
                 """,
-                (DECISION_CERTIFICATES_TABLE, certificate_hash, REASON_INVALID_LIVE_ACTIONABLE),
+                (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
             ).fetchone()
         except sqlite3.Error:
             continue

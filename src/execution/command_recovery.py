@@ -2631,20 +2631,24 @@ def _decision_certificate_is_quarantined(
         from src.state.decision_integrity_quarantine import (
             DECISION_CERTIFICATES_TABLE,
             REASON_INVALID_LIVE_ACTIONABLE,
+            REASON_INVALID_LIVE_PARENT_MODE,
         )
     except Exception:  # pragma: no cover - import fallback for degraded recovery shells
         DECISION_CERTIFICATES_TABLE = "decision_certificates"
         REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+        REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
+    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
+    placeholders = ",".join("?" for _ in reason_codes)
     row = conn.execute(
         f"""
         SELECT 1
           FROM {q_ref}
          WHERE table_name = ?
            AND row_id = ?
-           AND reason_code = ?
+           AND reason_code IN ({placeholders})
          LIMIT 1
         """,
-        (DECISION_CERTIFICATES_TABLE, certificate_hash, REASON_INVALID_LIVE_ACTIONABLE),
+        (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
     ).fetchone()
     return row is not None
 

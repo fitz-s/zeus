@@ -512,6 +512,7 @@ def _build_cert(
     parents: Iterable[DecisionCertificate],
 ) -> DecisionCertificate:
     parent_tuple = tuple(parents)
+    _require_live_parent_certificates(certificate_type, parent_tuple)
     return build_certificate(
         certificate_type=certificate_type,
         semantic_key=semantic_key,
@@ -532,6 +533,22 @@ def _build_cert(
         algorithm_id="edli.event_bound_execution_certificate_builder",
         algorithm_version="v1",
     )
+
+
+def _require_live_parent_certificates(
+    certificate_type: str,
+    parents: tuple[DecisionCertificate, ...],
+) -> None:
+    non_live = sorted(
+        f"{parent.certificate_type}:{parent.header.mode}"
+        for parent in parents
+        if parent.header.mode != "LIVE"
+    )
+    if non_live:
+        raise ValueError(
+            f"{certificate_type} LIVE certificate requires LIVE parent certificates: "
+            f"{', '.join(non_live)}"
+        )
 
 
 class _OrderSpec:

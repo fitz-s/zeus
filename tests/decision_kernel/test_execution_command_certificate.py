@@ -41,6 +41,13 @@ def test_execution_command_requires_live_mode():
         verify_execution_command(command, parents)
 
 
+def test_execution_command_rejects_no_submit_parent_certificate():
+    parents, command = execution_graph(parent_modes={claims.PRE_SUBMIT_REVALIDATION: "NO_SUBMIT"})
+
+    with pytest.raises(CertificateVerificationError, match="requires LIVE parent certificates"):
+        verify_execution_command(command, parents)
+
+
 def test_execution_command_requires_actionable_parent():
     parents, command = execution_graph(drop_parent=claims.ACTIONABLE_TRADE)
 
@@ -209,6 +216,13 @@ def test_final_intent_requires_actionable_parent():
 
     with pytest.raises(CertificateVerificationError, match="ActionableTradeCertificate"):
         verify_final_intent(final_intent, ())
+
+
+def test_final_intent_rejects_no_submit_parent_certificate():
+    parents, final_intent = final_intent_graph(parent_modes={claims.ACTIONABLE_TRADE: "NO_SUBMIT"})
+
+    with pytest.raises(CertificateVerificationError, match="requires LIVE parent certificates"):
+        verify_final_intent(final_intent, parents)
 
 
 def test_final_intent_matches_actionable_event_token_condition_direction():
@@ -411,6 +425,33 @@ def test_execution_command_builder_preserves_event_token_condition_direction():
     assert command.payload["condition_id"] == actionable.payload["condition_id"]
     assert command.payload["direction"] == actionable.payload["direction"]
     verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
+
+
+def test_final_intent_builder_rejects_no_submit_parent_certificate():
+    with pytest.raises(ValueError, match="requires LIVE parent certificates"):
+        builder_chain(parent_modes={claims.QUOTE_FEASIBILITY: "NO_SUBMIT"})
+
+
+def test_execution_command_builder_rejects_no_submit_parent_certificate():
+    actionable, final_intent, expressibility, live_cap = builder_chain()
+    live_pre_submit = _pre_submit_cert(final_intent, live_cap)
+    no_submit_pre_submit = _cert(
+        claims.PRE_SUBMIT_REVALIDATION,
+        "pre-submit:event-1:intent-1:no-submit",
+        live_pre_submit.payload,
+        mode="NO_SUBMIT",
+        parents=(final_intent, live_cap),
+    )
+
+    with pytest.raises(ValueError, match="requires LIVE parent certificates"):
+        build_execution_command_certificate_from_final_intent(
+            actionable_cert=actionable,
+            final_intent_cert=final_intent,
+            executor_expressibility_cert=expressibility,
+            live_cap_cert=live_cap,
+            pre_submit_revalidation_cert=no_submit_pre_submit,
+            decision_time=NOW,
+        )
 
 
 def test_execution_command_builder_deterministic_idempotency_key():
@@ -619,15 +660,18 @@ def test_ledger_rejects_execution_command_with_generic_verifier_only_path():
 def execution_graph(
     *,
     mode: str = "LIVE",
+    parent_modes: dict[str, str] | None = None,
     actionable_payload: dict | None = None,
     live_cap_payload: dict | None = None,
     command_payload: dict | None = None,
     drop_parent: str | None = None,
 ):
+    parent_modes = parent_modes or {}
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
         {**_actionable_payload(), **(actionable_payload or {})},
+        mode=parent_modes.get(claims.ACTIONABLE_TRADE, "LIVE"),
     )
     final_intent = _cert(
         claims.FINAL_INTENT,
@@ -639,11 +683,13 @@ def execution_graph(
             "token_id": "yes-1",
             "condition_id": "condition-1",
         },
+        mode=parent_modes.get(claims.FINAL_INTENT, "LIVE"),
     )
     expressibility = _cert(
         claims.EXECUTOR_EXPRESSIBILITY,
         "executor-expressibility:intent-1",
         {"passed": True, "strategy_key": "center_buy"},
+        mode=parent_modes.get(claims.EXECUTOR_EXPRESSIBILITY, "LIVE"),
     )
     live_cap = _cert(
         claims.LIVE_CAP,
@@ -655,9 +701,18 @@ def execution_graph(
             "max_notional_usd": 5.0,
             **(live_cap_payload or {}),
         },
+        mode=parent_modes.get(claims.LIVE_CAP, "LIVE"),
     )
     payload = {**_command_payload(actionable), **(command_payload or {})}
     pre_submit = _pre_submit_cert(final_intent, live_cap, payload)
+    if pre_submit_mode := parent_modes.get(claims.PRE_SUBMIT_REVALIDATION):
+        pre_submit = _cert(
+            claims.PRE_SUBMIT_REVALIDATION,
+            "pre-submit:event-1:intent-1:parent-mode",
+            pre_submit.payload,
+            mode=pre_submit_mode,
+            parents=(final_intent, live_cap),
+        )
     parents = tuple(
         parent
         for parent in (actionable, final_intent, expressibility, live_cap, pre_submit)
@@ -667,8 +722,19 @@ def execution_graph(
     return parents, command
 
 
-def final_intent_graph(*, final_payload: dict | None = None, drop_parent: str | None = None):
-    actionable = _cert(claims.ACTIONABLE_TRADE, "actionable:event-1", _actionable_payload())
+def final_intent_graph(
+    *,
+    final_payload: dict | None = None,
+    parent_modes: dict[str, str] | None = None,
+    drop_parent: str | None = None,
+):
+    parent_modes = parent_modes or {}
+    actionable = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:event-1",
+        _actionable_payload(),
+        mode=parent_modes.get(claims.ACTIONABLE_TRADE, "LIVE"),
+    )
     parents = tuple(parent for parent in (actionable,) if parent.certificate_type != drop_parent)
     payload = {**_final_intent_payload(actionable), **(final_payload or {})}
     final_intent = _cert(claims.FINAL_INTENT, "final-intent:intent-1", payload, parents=parents)
@@ -699,7 +765,9 @@ def executor_expressibility_graph(
 def builder_chain(
     final_payload: dict | None = None,
     actionable_payload: dict | None = None,
+    parent_modes: dict[str, str] | None = None,
 ):
+    parent_modes = parent_modes or {}
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
@@ -709,6 +777,7 @@ def builder_chain(
             "neg_risk": False,
             **(actionable_payload or {}),
         },
+        mode=parent_modes.get(claims.ACTIONABLE_TRADE, "LIVE"),
     )
     forecast = _cert(
         claims.FORECAST_AUTHORITY,
@@ -734,6 +803,7 @@ def builder_chain(
             "zeus_submit_intent_time": NOW.isoformat(),
             "venue_ack_time": NOW.isoformat(),
         },
+        mode=parent_modes.get(claims.FORECAST_AUTHORITY, "LIVE"),
     )
     quote = _cert(
         claims.QUOTE_FEASIBILITY,
@@ -751,6 +821,7 @@ def builder_chain(
             "neg_risk": False,
             "fill_claim": False,
         },
+        mode=parent_modes.get(claims.QUOTE_FEASIBILITY, "LIVE"),
     )
     cost = _cert(
         claims.COST_MODEL,
@@ -765,6 +836,7 @@ def builder_chain(
             "forbidden_cost_source": False,
             "execution_price_type": "ExecutionPrice",
         },
+        mode=parent_modes.get(claims.COST_MODEL, "LIVE"),
     )
     executable = _cert(
         claims.EXECUTABLE_SNAPSHOT,
@@ -775,6 +847,7 @@ def builder_chain(
             "token_id": "yes-1",
             "neg_risk": False,
         },
+        mode=parent_modes.get(claims.EXECUTABLE_SNAPSHOT, "LIVE"),
     )
     final_intent = build_final_intent_certificate_from_actionable(
         actionable_cert=actionable,

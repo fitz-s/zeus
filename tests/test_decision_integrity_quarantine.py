@@ -29,10 +29,12 @@ import pytest
 from src.state.decision_integrity_quarantine import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
+    REASON_INVALID_LIVE_PARENT_MODE,
     REASON_NON_CONTRIBUTING,
     TARGET_TABLE,
     quarantine_decisions_for_noncontributing_forecast,
     quarantine_invalid_live_actionable_certificates,
+    quarantine_invalid_live_money_parent_modes,
 )
 from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 
@@ -344,3 +346,82 @@ def test_invalid_live_actionable_quarantine_tags_bad_verified_cert(mem_db):
         (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
     ).fetchone()
     assert row[0] == "hash-1"
+
+
+def test_invalid_live_money_parent_mode_quarantine_tags_mixed_mode_child(mem_db):
+    conn = mem_db
+    conn.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE decision_certificate_edges (
+            child_certificate_id TEXT NOT NULL,
+            parent_role TEXT NOT NULL,
+            parent_certificate_hash TEXT NOT NULL,
+            parent_certificate_type TEXT NOT NULL,
+            required INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO decision_certificates VALUES (
+            'exec-command-1', 'child-hash', 'ExecutionCommandCertificate',
+            'LIVE', 'VERIFIED', ?, '{}'
+        )
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificates VALUES (
+            'pre-submit-1', 'parent-hash', 'PreSubmitRevalidationCertificate',
+            'NO_SUBMIT', 'VERIFIED', ?, '{}'
+        )
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificate_edges VALUES (
+            'exec-command-1', 'pre_submit_revalidation', 'parent-hash',
+            'PreSubmitRevalidationCertificate', 1, ?
+        )
+        """,
+        (now,),
+    )
+    conn.commit()
+
+    dry = quarantine_invalid_live_money_parent_modes(conn, dry_run=True)
+    applied = quarantine_invalid_live_money_parent_modes(conn)
+    applied_again = quarantine_invalid_live_money_parent_modes(conn)
+
+    assert dry["candidates_found"] == 1
+    assert applied["newly_quarantined"] == 1
+    assert applied_again["newly_quarantined"] == 0
+    row = conn.execute(
+        """
+        SELECT row_id, meta_json
+          FROM decision_integrity_quarantine
+         WHERE table_name = ?
+           AND reason_code = ?
+        """,
+        (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_PARENT_MODE),
+    ).fetchone()
+    assert row["row_id"] == "child-hash"
+    meta = json.loads(row["meta_json"])
+    assert meta["certificate_type"] == "ExecutionCommandCertificate"
+    assert meta["bad_parent_count"] == 1
