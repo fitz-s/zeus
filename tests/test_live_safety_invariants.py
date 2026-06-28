@@ -2759,7 +2759,7 @@ def test_collateral_check_blocks_underfunded_sell():
 # ---- Test 8: Quarantine expires after 48h ----
 
 def test_quarantine_expires_after_48h():
-    """Quarantined positions become exit-eligible after 48 hours."""
+    """Quarantined positions become admin-resolution-eligible after 48 hours."""
     past_time = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()
     pos = _make_position(
         chain_state="quarantined",

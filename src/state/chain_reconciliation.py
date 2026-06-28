@@ -1649,7 +1649,8 @@ def quarantine_resolution_reason(chain_state: str) -> str:
 def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     """Expire quarantined positions after 48 hours.
 
-    Expired positions become eligible for exit evaluation.
+    Expired positions remain non-entry-block-cleared, but become eligible for
+    explicit monitor/admin resolution with QUARANTINE_EXPIRED_REVIEW_REQUIRED.
     Returns: number of positions expired.
     """
     now = datetime.now(timezone.utc)
@@ -1659,9 +1660,9 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
         if pos.chain_state != "quarantined":
             continue
         if not pos.quarantined_at:
-            # No timestamp at all — treat as maximally stale, force expiry
+            # No timestamp at all — treat as maximally stale, force admin review.
             logger.warning(
-                "QUARANTINE MISSING TIMESTAMP: %s — forcing exit evaluation",
+                "QUARANTINE MISSING TIMESTAMP: %s — forcing admin resolution",
                 pos.trade_id,
             )
             pos.chain_state = "quarantine_expired"
@@ -1674,7 +1675,7 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
             )
         except ValueError:
             logger.warning(
-                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing exit evaluation",
+                "QUARANTINE BAD TIMESTAMP: %s quarantined_at=%r — forcing admin resolution",
                 pos.trade_id, pos.quarantined_at,
             )
             pos.chain_state = "quarantine_expired"
@@ -1684,7 +1685,7 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
         hours_quarantined = (now - quarantined_dt).total_seconds() / 3600
         if hours_quarantined > QUARANTINE_TIMEOUT_HOURS:
             logger.warning(
-                "QUARANTINE EXPIRED: %s held for %.0fh — forcing exit evaluation",
+                "QUARANTINE EXPIRED: %s held for %.0fh — forcing admin resolution",
                 pos.trade_id, hours_quarantined,
             )
             pos.chain_state = "quarantine_expired"
