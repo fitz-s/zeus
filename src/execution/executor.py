@@ -190,6 +190,9 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
+_ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS = 60
+_ENTRY_TERMINAL_NO_FILL_REPRICE_EPSILON = Decimal("0.001")
+_ENTRY_TERMINAL_NO_FILL_RESIZE_FRACTION = Decimal("0.01")
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -208,6 +211,14 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        quoted = _quote_sql_identifier(table)
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({quoted})")}
+    except sqlite3.Error:
+        return set()
 
 
 def _entry_has_positive_trade_fact(
@@ -1114,6 +1125,8 @@ def _entry_same_token_cooldown_component(
     *,
     token_id: str,
     candidate_position_id: str,
+    limit_price: float | None = None,
+    shares: float | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Throttle repeated ENTRY attempts for a top-ranked token."""
@@ -1131,9 +1144,12 @@ def _entry_same_token_cooldown_component(
             "allowed": True,
             "reason": "missing_venue_commands_table",
         }
+    command_columns = _table_column_names(conn, "venue_commands")
+    has_price_size = "price" in command_columns and "size" in command_columns
+    select_price_size = ", price, size" if has_price_size else ""
     rows = conn.execute(
-        """
-        SELECT command_id, position_id, state, created_at, updated_at
+        f"""
+        SELECT command_id, position_id, state, created_at, updated_at{select_price_size}
         FROM venue_commands
         WHERE intent_kind = 'ENTRY'
           AND side = 'BUY'
@@ -1155,7 +1171,11 @@ def _entry_same_token_cooldown_component(
     state = ""
     created_at = ""
     updated_at = ""
-    terminal_no_fill_row: tuple[str, str, str, object, object] | None = None
+    prior_price: object | None = None
+    prior_size: object | None = None
+    terminal_no_fill_row: tuple[
+        str, str, str, object, object, object | None, object | None
+    ] | None = None
     for row in rows:
         if isinstance(row, sqlite3.Row):
             command_id = str(row["command_id"])
@@ -1163,20 +1183,34 @@ def _entry_same_token_cooldown_component(
             state = str(row["state"])
             created_at = row["created_at"]
             updated_at = row["updated_at"]
+            row_price = row["price"] if has_price_size else None
+            row_size = row["size"] if has_price_size else None
         else:
             command_id = str(row[0])
             position_id = str(row[1])
             state = str(row[2])
             created_at = row[3]
             updated_at = row[4]
+            row_price = row[5] if has_price_size else None
+            row_size = row[6] if has_price_size else None
         if _entry_terminal_command_has_no_fill_exposure(
             conn,
             command_id=command_id,
             state=state,
         ):
             if terminal_no_fill_row is None:
-                terminal_no_fill_row = (command_id, position_id, state, created_at, updated_at)
+                terminal_no_fill_row = (
+                    command_id,
+                    position_id,
+                    state,
+                    created_at,
+                    updated_at,
+                    row_price,
+                    row_size,
+                )
             continue
+        prior_price = row_price
+        prior_size = row_size
         break
     else:
         if terminal_no_fill_row is None:
@@ -1186,7 +1220,15 @@ def _entry_same_token_cooldown_component(
                 "reason": "allowed_no_blocking_prior_entries",
                 "token_id": token,
             }
-        command_id, position_id, state, created_at, updated_at = terminal_no_fill_row
+        (
+            command_id,
+            position_id,
+            state,
+            created_at,
+            updated_at,
+            prior_price,
+            prior_size,
+        ) = terminal_no_fill_row
     last_seen = _parse_sqlite_timestamp(updated_at) or _parse_sqlite_timestamp(created_at)
     if last_seen is None:
         return {
@@ -1201,13 +1243,51 @@ def _entry_same_token_cooldown_component(
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
     age_seconds = (now_utc.astimezone(timezone.utc) - last_seen).total_seconds()
+    terminal_no_fill = _entry_terminal_command_has_no_fill_exposure(
+        conn,
+        command_id=command_id,
+        state=state,
+    )
+    if terminal_no_fill and _terminal_no_fill_repriced_or_resized(
+        prior_price=prior_price,
+        prior_size=prior_size,
+        limit_price=limit_price,
+        shares=shares,
+    ):
+        rebid_remaining = _ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS - age_seconds
+        if rebid_remaining <= 0:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": True,
+                "reason": "allowed_terminal_no_fill_repriced",
+                "rebid_cooldown_seconds": _ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS,
+                "age_seconds": int(age_seconds),
+                "existing_command_id": command_id,
+                "existing_command_state": state,
+                "existing_price": str(prior_price or ""),
+                "existing_size": str(prior_size or ""),
+                "candidate_price": str(limit_price or ""),
+                "candidate_shares": str(shares or ""),
+            }
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": False,
+            "reason": "same_token_terminal_no_fill_reprice_cooling_down",
+            "rebid_cooldown_seconds": _ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS,
+            "remaining_seconds": int(rebid_remaining),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
+        }
+
     remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
     if remaining_seconds > 0:
-        terminal_no_fill = _entry_terminal_command_has_no_fill_exposure(
-            conn,
-            command_id=command_id,
-            state=state,
-        )
         return {
             "component": "entry_same_token_cooldown",
             "allowed": False,
@@ -1223,6 +1303,10 @@ def _entry_same_token_cooldown_component(
             "existing_command_state": state,
             "existing_updated_at": str(updated_at or ""),
             "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
         }
     return {
         "component": "entry_same_token_cooldown",
@@ -1233,6 +1317,35 @@ def _entry_same_token_cooldown_component(
         "existing_command_id": command_id,
         "existing_command_state": state,
     }
+
+
+def _terminal_no_fill_repriced_or_resized(
+    *,
+    prior_price: object | None,
+    prior_size: object | None,
+    limit_price: float | None,
+    shares: float | None,
+) -> bool:
+    try:
+        previous_price = Decimal(str(prior_price))
+        candidate_price = Decimal(str(limit_price))
+    except (InvalidOperation, TypeError, ValueError):
+        previous_price = None
+        candidate_price = None
+    if previous_price is not None and candidate_price is not None:
+        if abs(candidate_price - previous_price) >= _ENTRY_TERMINAL_NO_FILL_REPRICE_EPSILON:
+            return True
+
+    try:
+        previous_size = Decimal(str(prior_size))
+        candidate_size = Decimal(str(shares))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    min_delta = max(
+        Decimal("0.01"),
+        abs(previous_size) * _ENTRY_TERMINAL_NO_FILL_RESIZE_FRACTION,
+    )
+    return abs(candidate_size - previous_size) >= min_delta
 
 
 def _entry_duplicate_same_token_component(
@@ -5139,6 +5252,8 @@ def _live_order(
             conn,
             token_id=intent.token_id,
             candidate_position_id=trade_id,
+            limit_price=intent.limit_price,
+            shares=shares,
         )
         if not cooldown_component.get("allowed"):
             reason = str(
