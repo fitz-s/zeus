@@ -88,9 +88,11 @@ class _RecordingClient:
     _NETWORK = ("get_order", "get_open_orders", "get_trades",
                 "find_order_by_idempotency_key", "get_clob_market_info")
 
-    def __init__(self, recorder: _Recorder, *, orders=None):
+    def __init__(self, recorder: _Recorder, *, orders=None, open_orders=None, trades=None):
         self._recorder = recorder
         self._orders = orders or {}
+        self._open_orders = list(open_orders or [])
+        self._trades = list(trades or [])
 
     def get_order(self, order_id):
         self._recorder.on_client_call("get_order")
@@ -98,11 +100,11 @@ class _RecordingClient:
 
     def get_open_orders(self):
         self._recorder.on_client_call("get_open_orders")
-        return []
+        return list(self._open_orders)
 
     def get_trades(self):
         self._recorder.on_client_call("get_trades")
-        return []
+        return list(self._trades)
 
     def find_order_by_idempotency_key(self, key):
         self._recorder.on_client_call("find_order_by_idempotency_key")
@@ -819,9 +821,7 @@ def test_live_tick_scope_releases_terminal_point_order_zero_fill_pending_exit(mo
         orders={
             "vord-exit": {
                 "orderID": "vord-exit",
-                "status": "CANCELED",
-                "original_size": "10",
-                "size_matched": "0",
+                "status": "UNKNOWN",
             }
         },
     )
@@ -871,6 +871,153 @@ def test_live_tick_scope_releases_terminal_point_order_zero_fill_pending_exit(mo
             "phase_after": "day0_window",
             "command_id": "cmd-exit",
             "order_id": "vord-exit",
+        }
+    finally:
+        check.close()
+
+
+def test_live_tick_scope_closes_pending_exit_from_unknown_point_confirmed_maker_trade(monkeypatch, tmp_path):
+    """A point-order UNKNOWN response is not no-fill when user trades prove our maker leg filled."""
+
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "recovery-live-tick-terminal-exit-confirmed-trade.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-entry", position_id="pos-001")
+    h._advance_to_acked(seed_conn, command_id="cmd-entry", venue_order_id="vord-entry")
+    h._seed_pending_entry_projection(
+        seed_conn,
+        command_id="cmd-entry",
+        order_id="vord-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase='pending_exit',
+               shares=10.0,
+               cost_basis_usd=5.0,
+               chain_shares=10.0,
+               chain_state='synced',
+               order_id='vord-exit',
+               order_status='sell_pending_confirmation',
+               target_date='2026-05-17',
+               updated_at='2026-05-18T00:00:00+00:00'
+         WHERE position_id='pos-001'
+        """
+    )
+    h._insert(
+        seed_conn,
+        command_id="cmd-exit",
+        position_id="pos-001",
+        intent_kind="EXIT",
+        side="SELL",
+        size=10.0,
+        price=0.49,
+        token_id="tok-001",
+    )
+    h._advance_to_acked(seed_conn, command_id="cmd-exit", venue_order_id="vord-exit")
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-exit",
+        order_id="vord-exit",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="10",
+        source="REST",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={
+            "vord-exit": {
+                "orderID": "vord-exit",
+                "status": "UNKNOWN",
+            }
+        },
+        trades=[
+            {
+                "id": "trade-exit-001",
+                "status": "CONFIRMED",
+                "market": "condition-test",
+                "asset_id": "tok-yes",
+                "side": "SELL",
+                "price": "0.50",
+                "size": "50",
+                "match_time": "2026-05-18T00:01:00+00:00",
+                "maker_orders": [
+                    {
+                        "order_id": "vord-exit",
+                        "asset_id": "tok-001",
+                        "side": "SELL",
+                        "price": "0.49",
+                        "matched_amount": "10",
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["terminal_point_orders"]["advanced"] == 1
+    for method, open_ids, open_labels in recorder.client_calls:
+        assert not open_ids, (
+            f"venue call {method} occurred while DB connections were open: {open_labels}"
+        )
+
+    check = sqlite3.connect(str(db_path))
+    check.row_factory = sqlite3.Row
+    try:
+        command = check.execute(
+            "SELECT state FROM venue_commands WHERE command_id='cmd-exit'"
+        ).fetchone()
+        assert command["state"] == "FILLED"
+        current = check.execute(
+            "SELECT phase, order_status, exit_price FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert current["phase"] == "economically_closed"
+        assert current["order_status"] == "sell_filled"
+        assert current["exit_price"] == pytest.approx(0.49)
+        trade_fact = check.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id='cmd-exit'
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-exit-001",
+            "venue_order_id": "vord-exit",
+            "state": "CONFIRMED",
+            "filled_size": "10",
+            "fill_price": "0.49",
+        }
+        order_fact = check.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id='cmd-exit'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "10",
         }
     finally:
         check.close()

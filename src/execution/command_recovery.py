@@ -39,7 +39,7 @@ import re
 import sqlite3
 import time
 from dataclasses import replace
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -7368,18 +7368,81 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                 str((point_order or {}).get("status") or (point_order or {}).get("state") or "NOT_FOUND")
                 .upper()
             )
+            point_order_no_live_record = _point_order_no_live_record(
+                point_order,
+                expected_order_id=venue_order_id,
+            )
             fact_state = _terminal_fact_state_for_venue_status(
                 venue_status,
                 venue_resp_present=point_order is not None,
             )
-            if fact_state is None:
+            if (
+                fact_state is None
+                and not (
+                    str(row.get("intent_kind") or "").upper() == "EXIT"
+                    and point_order_no_live_record
+                )
+            ):
                 summary["stayed"] += 1
+                continue
+            intent_kind = str(row.get("intent_kind") or "").upper()
+            matching_open_orders = _matching_open_orders_for_command(client, row, open_orders=open_orders)
+            matching_trades = _matching_trades_for_command(client, row, trades=trades)
+            confirmed_trade = None
+            if (
+                intent_kind == "EXIT"
+                and point_order_no_live_record
+                and not matching_open_orders
+                and _fill_trade_fact_count(conn, command_id) == 0
+            ):
+                confirmed_trade = _confirmed_trade_for_order_id_from_items(trades, venue_order_id)
+            if confirmed_trade is not None:
+                observed_at = _now_iso()
+                _append_confirmed_trade_fill(
+                    conn,
+                    command=row,
+                    point_order=point_order
+                    or {
+                        "orderID": venue_order_id,
+                        "status": "UNKNOWN",
+                    },
+                    trade=confirmed_trade,
+                    observed_at=observed_at,
+                    reason="acked_point_order_no_live_record_confirmed_fill",
+                    proof_class="acked_point_order_no_live_record_confirmed_trade",
+                    required_predicates={
+                        "acked_command": True,
+                        "exit_intent": True,
+                        "point_order_no_live_record": True,
+                        "no_matching_open_order": True,
+                        "confirmed_trade_matches_venue_order_id": True,
+                        "positive_trade_fact": True,
+                        "no_existing_fill_trade_fact": True,
+                    },
+                    source_function="command_recovery.reconcile_terminal_point_orders",
+                    source_reason="acked_point_order_no_live_record_confirmed_fill",
+                )
+                summary["advanced"] += 1
                 continue
             no_fill_proven, no_fill_reason = _terminal_point_order_zero_fill_proven(
                 conn,
                 command_id=command_id,
                 point_order=point_order,
             )
+            source_reason = "acked_point_order_terminal_no_fill"
+            venue_resp_present_for_terminal_state = None
+            if (
+                not no_fill_proven
+                and intent_kind == "EXIT"
+                and point_order_no_live_record
+                and not matching_open_orders
+                and not matching_trades
+                and _fill_trade_fact_count(conn, command_id) == 0
+            ):
+                no_fill_proven = True
+                no_fill_reason = "exit_point_order_no_live_record_terminal_no_fill"
+                source_reason = no_fill_reason
+                venue_resp_present_for_terminal_state = False
             if not no_fill_proven:
                 logger.info(
                     "recovery: terminal point-order candidate %s stayed; no zero-fill proof (%s)",
@@ -7388,8 +7451,6 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                 )
                 summary["stayed"] += 1
                 continue
-            matching_open_orders = _matching_open_orders_for_command(client, row, open_orders=open_orders)
-            matching_trades = _matching_trades_for_command(client, row, trades=trades)
             if matching_open_orders or matching_trades:
                 summary["stayed"] += 1
                 continue
@@ -7402,9 +7463,10 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                 point_order=point_order,
                 matching_open_orders=matching_open_orders,
                 matching_trades=matching_trades,
-                source_reason="acked_point_order_terminal_no_fill",
+                source_reason=source_reason,
+                venue_resp_present_for_terminal_state=venue_resp_present_for_terminal_state,
             )
-            if str(row.get("intent_kind") or "").upper() == "EXIT":
+            if intent_kind == "EXIT":
                 append_event(
                     conn,
                     command_id=command_id,
@@ -7796,16 +7858,10 @@ def _trade_matches_venue_order_id(raw: dict, venue_order_id: str) -> bool:
     return False
 
 
-def _confirmed_trade_for_order_id(client, venue_order_id: str) -> dict | None:
-    try:
-        trades = _client_read_items(client, "get_trades").items
-    except Exception as exc:
-        logger.warning(
-            "recovery: cancel-unknown trade lookup unavailable for order %s: %s",
-            venue_order_id,
-            exc,
-        )
-        return None
+def _confirmed_trade_for_order_id_from_items(
+    trades: Sequence[object],
+    venue_order_id: str,
+) -> dict | None:
     for item in trades:
         raw = _raw_payload(item)
         if not _trade_matches_venue_order_id(raw, venue_order_id):
@@ -7821,6 +7877,19 @@ def _confirmed_trade_for_order_id(client, venue_order_id: str) -> dict | None:
             continue
         return raw
     return None
+
+
+def _confirmed_trade_for_order_id(client, venue_order_id: str) -> dict | None:
+    try:
+        trades = _client_read_items(client, "get_trades").items
+    except Exception as exc:
+        logger.warning(
+            "recovery: confirmed-trade lookup unavailable for order %s: %s",
+            venue_order_id,
+            exc,
+        )
+        return None
+    return _confirmed_trade_for_order_id_from_items(trades, venue_order_id)
 
 
 def _selected_maker_order_for_trade(trade: dict, venue_order_id: str) -> dict | None:
@@ -7862,13 +7931,18 @@ def _confirmed_trade_command_leg(trade: dict, venue_order_id: str) -> tuple[str,
     return str(trade.get("size") or trade.get("matched_amount") or ""), str(trade.get("price") or "")
 
 
-def _append_cancel_unknown_confirmed_trade_fill(
+def _append_confirmed_trade_fill(
     conn: sqlite3.Connection,
     *,
     command: dict,
     point_order: dict,
     trade: dict,
     observed_at: str,
+    reason: str,
+    proof_class: str,
+    required_predicates: dict,
+    source_function: str,
+    source_reason: str,
 ) -> None:
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
@@ -7885,14 +7959,14 @@ def _append_cancel_unknown_confirmed_trade_fill(
     event_type = _matched_event_type(command, matched_size, venue_status=venue_status)
     payload = {
         "schema_version": 1,
-        "reason": "review_cleared_confirmed_fill",
+        "reason": reason,
         "command_id": command_id,
         "decision_id": str(command.get("decision_id") or ""),
         "venue_order_id": venue_order_id,
         "trade_id": trade_id,
         "filled_size": filled_size,
         "fill_price": fill_price,
-        "proof_class": "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+        "proof_class": proof_class,
         "venue_order_proof": {
             "source": "authenticated_clob_point_order_read",
             "observed_at": observed_at,
@@ -7907,16 +7981,11 @@ def _append_cancel_unknown_confirmed_trade_fill(
             "trade_status": str(trade.get("status") or trade.get("state") or ""),
             "trade": trade,
         },
-        "required_predicates": {
-            "latest_event_is_cancel_replace_blocked": True,
-            "semantic_cancel_status_cancel_unknown": True,
-            "requires_m5_reconcile": True,
-            "positive_trade_fact": True,
-        },
+        "required_predicates": required_predicates,
         "source_proof": {
             "source_commit": "runtime",
-            "source_function": "command_recovery._review_required_cancel_unknown_live_order_recovery",
-            "source_reason": "cancel_unknown_confirmed_trade_fill",
+            "source_function": source_function,
+            "source_reason": source_reason,
         },
         "reviewed_by": "command_recovery",
         "cleared_at": observed_at,
@@ -7979,6 +8048,33 @@ def _append_cancel_unknown_confirmed_trade_fill(
             observed_at=observed_at,
             event_type=event_type,
         )
+
+
+def _append_cancel_unknown_confirmed_trade_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    point_order: dict,
+    trade: dict,
+    observed_at: str,
+) -> None:
+    _append_confirmed_trade_fill(
+        conn,
+        command=command,
+        point_order=point_order,
+        trade=trade,
+        observed_at=observed_at,
+        reason="review_cleared_confirmed_fill",
+        proof_class="cancel_unknown_confirmed_trade_with_positive_trade_fact",
+        required_predicates={
+            "latest_event_is_cancel_replace_blocked": True,
+            "semantic_cancel_status_cancel_unknown": True,
+            "requires_m5_reconcile": True,
+            "positive_trade_fact": True,
+        },
+        source_function="command_recovery._review_required_cancel_unknown_live_order_recovery",
+        source_reason="cancel_unknown_confirmed_trade_fill",
+    )
 
 
 def _review_required_cancel_unknown_live_order_recovery(
