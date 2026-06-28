@@ -426,6 +426,57 @@ def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
     assert "not required" in detail
 
 
+def test_deploy_live_bootstraps_when_service_not_loaded(monkeypatch, tmp_path):
+    dl = _load("deploy_live_bootstrap_unloaded", "deploy_live.py")
+    label = "com.zeus.live-trading"
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_text("plist")
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        calls.append(cmd)
+        if cmd[:2] == ["launchctl", "print"]:
+            return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+    monkeypatch.setattr(dl, "LIVE_TRADING_PLIST", plist)
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._launch_or_restart_label(label)
+
+    assert ok is True
+    assert "bootstrapped" in detail
+    assert calls[-1] == ["launchctl", "bootstrap", dl.GUI_DOMAIN, str(plist)]
+
+
+def test_deploy_live_kickstarts_when_service_loaded(monkeypatch):
+    dl = _load("deploy_live_kickstart_loaded", "deploy_live.py")
+    label = "com.zeus.live-trading"
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        calls.append(cmd)
+        if cmd[:2] == ["launchctl", "print"]:
+            return subprocess.CompletedProcess(cmd, 0, "state = running", "")
+        if cmd[:2] == ["launchctl", "kickstart"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._launch_or_restart_label(label)
+
+    assert ok is True
+    assert "kickstarted" in detail
+    assert calls[-1] == ["launchctl", "kickstart", "-k", f"{dl.GUI_DOMAIN}/{label}"]
+
+
 def test_deploy_live_unknown_daemon_rejected(capsys):
     dl = _load("deploy_live_smoke3", "deploy_live.py")
     rc = dl.main(["restart", "no-such-daemon"])

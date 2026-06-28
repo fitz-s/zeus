@@ -22,7 +22,7 @@ COMMANDS
         runtime files (src/ config/), and each daemon's pid + uptime.
 
     deploy_live.py restart <daemon|all>
-        Kickstart one daemon (short label, e.g. "live-trading") or all of
+        Start one daemon (short label, e.g. "live-trading") or all of
         them. REFUSES when the live checkout's src/ or config/ has
         uncommitted changes, OR when HEAD != origin/<branch> (unpushed) —
         printing exactly what is dirty / unpushed. Pass --allow-dirty to
@@ -30,9 +30,11 @@ COMMANDS
         restarts still require scripts/check_live_restart_preflight.py to pass.
 
 SAFETY
-    Read-mostly: the only state-changing action is `launchctl kickstart`,
-    and only after the clean-tree gate passes (or --allow-dirty is given) and
-    the live-money restart preflight passes for trading-daemon restarts.
+    Read-mostly: the only state-changing action is `launchctl kickstart` for
+    an already-loaded daemon, or `launchctl bootstrap` when the service is not
+    loaded but its active plist exists. Both happen only after the clean-tree
+    gate passes (or --allow-dirty is given) and the live-money restart
+    preflight passes for trading-daemon restarts.
     `status` never changes anything.
 
 END-STATE (documented, NOT implemented here)
@@ -61,6 +63,7 @@ from pathlib import Path
 LIVE_TRADING_PLIST = (
     Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
 )
+LAUNCHAGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 
 
 def _resolve_live_repo() -> str:
@@ -180,6 +183,51 @@ def daemon_pid_uptime(label: str) -> tuple[str, str]:
     return "-", "-"
 
 
+def _plist_path_for_label(label: str) -> Path:
+    if label == "com.zeus.live-trading":
+        return LIVE_TRADING_PLIST
+    return LAUNCHAGENTS_DIR / f"{label}.plist"
+
+
+def _launchctl_service_loaded(label: str) -> bool:
+    try:
+        res = subprocess.run(
+            ["launchctl", "print", f"{GUI_DOMAIN}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
+def _launch_or_restart_label(label: str) -> tuple[bool, str]:
+    if _launchctl_service_loaded(label):
+        kick = subprocess.run(
+            ["launchctl", "kickstart", "-k", f"{GUI_DOMAIN}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+        )
+        if kick.returncode == 0:
+            return True, f"kickstarted {label}"
+        return False, f"FAILED kickstart {label}: rc={kick.returncode} {kick.stderr.strip()}"
+
+    plist = _plist_path_for_label(label)
+    if not plist.exists():
+        return False, f"FAILED bootstrap {label}: active plist missing at {plist}"
+    boot = subprocess.run(
+        ["launchctl", "bootstrap", GUI_DOMAIN, str(plist)],
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+    )
+    if boot.returncode == 0:
+        return True, f"bootstrapped {label} from {plist}"
+    return False, f"FAILED bootstrap {label}: rc={boot.returncode} {boot.stderr.strip()}"
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     branch = current_branch()
     unpushed, push_detail = unpushed_state(branch)
@@ -285,16 +333,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
 
     rc_all = 0
     for label in labels:
-        kick = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"{GUI_DOMAIN}/{label}"],
-            capture_output=True, text=True, timeout=20.0,
-        )
-        if kick.returncode == 0:
-            print(f"kickstarted {label}")
+        ok, detail = _launch_or_restart_label(label)
+        if ok:
+            print(detail)
         else:
             rc_all = 1
-            print(f"FAILED kickstart {label}: rc={kick.returncode} {kick.stderr.strip()}",
-                  file=sys.stderr)
+            print(detail, file=sys.stderr)
     return rc_all
 
 
@@ -305,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     p_status = sub.add_parser("status", help="show HEAD/dirty/push state + daemon pids")
     p_status.set_defaults(func=cmd_status)
 
-    p_restart = sub.add_parser("restart", help="kickstart a daemon (gated on clean live tree)")
+    p_restart = sub.add_parser("restart", help="bootstrap or kickstart a daemon (gated on clean live tree)")
     p_restart.add_argument("daemon", help="short daemon label or 'all'")
     p_restart.add_argument("--allow-dirty", action="store_true",
                            help="bypass the clean-tree gate (loud warning)")
