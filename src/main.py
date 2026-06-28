@@ -10096,6 +10096,16 @@ def _edli_reactor_family_snapshot_refresher():
         )
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
             return False
+        try:
+            from src.data.substrate_priority import mark_money_path_substrate_priority
+
+            mark_money_path_substrate_priority(
+                reason="reactor_blocked_family_refresh",
+                ttl_seconds=45.0,
+                families=[family],
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reactor family refresh priority marker write failed: %r", exc)
         logger.info(
             "reactor family refresh delegated to substrate-observer sidecar via pending event: %s/%s/%s",
             family[0], family[1], family[2],

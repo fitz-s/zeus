@@ -1011,11 +1011,53 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
         lambda *a, **k: calls.append(1),
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     substrate_observer._edli_market_substrate_warm_cycle()
 
     assert calls == []
+
+
+def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(monkeypatch):
+    """A reactor-blocked family marker must be serviced before broad pending backlog."""
+
+    calls: list[dict] = []
+    marker_families = [("Shanghai", "2026-06-28", "high")]
+    claim_families = [("Tokyo", "2026-06-28", "low")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls
+    assert calls[0]["extra_priority_families"] == marker_families + claim_families
+    assert calls[0]["include_pending_families"] is False
 
 
 def test_market_discovery_cycle_yields_to_money_path_priority(monkeypatch):

@@ -306,6 +306,29 @@ def test_reactor_refresher_delegates_to_sidecar_pending_family_refresh(monkeypat
     assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is False
 
 
+def test_reactor_refresher_marks_sidecar_priority_family(monkeypatch) -> None:
+    """Gate-level blocks must become explicit sidecar priority work, not plain backlog."""
+
+    import src.main as main
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.data.substrate_priority.mark_money_path_substrate_priority",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    refresher = main._edli_reactor_family_snapshot_refresher()
+
+    assert refresher(city="Auckland", target_date="2026-06-20", metric="low") is False
+    assert calls == [
+        {
+            "reason": "reactor_blocked_family_refresh",
+            "ttl_seconds": 45.0,
+            "families": [("Auckland", "2026-06-20", "low")],
+        }
+    ]
+
+
 def test_reactor_market_absence_provider_reads_gamma_empty_backoff(monkeypatch) -> None:
     """The reactor terminalizes no-listed-market blocks only from Gamma-empty proof.
 

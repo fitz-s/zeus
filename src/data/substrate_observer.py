@@ -59,7 +59,10 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from src.config import settings
-from src.data.substrate_priority import money_path_substrate_priority_active
+from src.data.substrate_priority import (
+    money_path_substrate_priority_active,
+    money_path_substrate_priority_families,
+)
 
 logger = logging.getLogger("zeus.substrate_observer")
 
@@ -1850,7 +1853,11 @@ def _edli_market_substrate_warm_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled"):
         return
-    if money_path_substrate_priority_active():
+    priority_marker_active = money_path_substrate_priority_active()
+    priority_marker_families = (
+        money_path_substrate_priority_families() if priority_marker_active else []
+    )
+    if priority_marker_active and not priority_marker_families:
         logger.info(
             "EDLI market-substrate warm skipped: live-money targeted substrate "
             "refresh has priority"
@@ -1917,10 +1924,13 @@ def _edli_market_substrate_warm_cycle() -> None:
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
+        priority_families = list(priority_marker_families) + list(claim_priority_families)
+        priority_only = bool(priority_marker_families)
         summary = _refresh_pending_family_snapshots(
             conn,
             forecasts_conn,
-            extra_priority_families=claim_priority_families,
+            extra_priority_families=priority_families,
+            include_pending_families=not priority_only,
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
         )
