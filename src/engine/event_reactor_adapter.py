@@ -7074,6 +7074,14 @@ def _actionable_payload_from_receipt(
     # so the fresh-mode witness subordinates its EV-override leg to the policy.
     if getattr(receipt, "rest_then_cross_policy", None) is not None:
         proof_mode_fields["rest_then_cross_policy"] = str(receipt.rest_then_cross_policy)
+    qkernel_execution_economics = None
+    if receipt.qkernel_execution_economics is not None:
+        qkernel_cert = _valid_qkernel_execution_economics_payload(
+            receipt.qkernel_execution_economics,
+            direction=str(receipt.direction or ""),
+        )
+        if qkernel_cert is not None:
+            qkernel_execution_economics = _json_finite(dict(qkernel_cert))
     return {
         "event_id": receipt.event_id,
         "event_type": event.event_type if event is not None else None,
@@ -7094,7 +7102,7 @@ def _actionable_payload_from_receipt(
         # B3 identity key: the reactor bin_id hash so the taker-quality proof matches the
         # qkernel cert to THIS selected leg across the two candidate_id namespaces.
         "candidate_bin_id": receipt.candidate_bin_id,
-        "qkernel_execution_economics": _json_finite(receipt.qkernel_execution_economics),
+        "qkernel_execution_economics": qkernel_execution_economics,
         "opportunity_book": _json_finite(receipt.opportunity_book),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,

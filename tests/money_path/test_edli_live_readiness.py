@@ -1709,6 +1709,36 @@ def test_actionable_payload_persists_qkernel_execution_economics():
     assert payload["qkernel_execution_economics"] == qkernel_cert
 
 
+def test_actionable_payload_drops_nonfinite_qkernel_economics_before_cert_boundary():
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    bad_cert = _qkernel_execution_cert(
+        payoff_q_point=float("nan"),
+        payoff_q_lcb=0.6,
+        cost=0.4,
+    )
+    receipt = replace(
+        _accepted_receipt(event),
+        q_source="replacement_0_1",
+        qkernel_execution_economics=bad_cert,
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 15.39,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+
+    assert payload["selection_authority_applied"] == "qkernel_spine"
+    assert payload["qkernel_execution_economics"] is None
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED"):
+        adapter._assert_live_entry_submit_authority(payload)
+
+
 @pytest.mark.parametrize(
     "bad_cert",
     [
