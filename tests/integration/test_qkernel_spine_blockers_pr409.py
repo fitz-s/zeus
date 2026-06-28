@@ -1151,13 +1151,12 @@ def test_qkernel_direct_route_receipt_probability_must_match_monitor_belief():
     ) is True
 
 
-def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
-    """A spine-positive selected proof must not remain a legacy-rejected loser.
+def test_overlay_refuses_structural_direction_law_rejected_candidate():
+    """A spine-positive route must not revive a structurally illegal leg.
 
-    Shanghai-style regressions had qkernel choose the center YES, but the proof
-    still carried a pre-spine direction/capital veto. CandidateEvaluation.admitted
-    requires missing_reason is None, so the opportunity book serialized the live
-    qkernel winner as a rejected loser.
+    qkernel may replace scalar economics and admission vetoes; it must not clear a
+    reactor direction-law rejection. Live Cape/Shenzhen-style regressions selected a
+    leg whose proof still said ``DIRECTION_LAW_BIN_FORECAST_MISMATCH``.
     """
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20, side="YES"
@@ -1170,6 +1169,23 @@ def test_overlay_clears_legacy_missing_reason_for_qkernel_selected_candidate():
         missing_reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH:legacy-pre-spine",
     )
 
+    assert new_proof is None
+
+
+def test_overlay_clears_scalar_admission_missing_reason_for_qkernel_selected_candidate():
+    """A spine-positive selected proof may clear stale scalar admission vetoes."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.32,
+        q_lcb_5pct=0.32,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy-pre-spine",
+    )
+
+    assert new_proof is not None
     assert new_proof.missing_reason is None
     assert new_proof.passed_prefilter is True
     assert new_proof.trade_score == pytest.approx(0.05)
@@ -1467,15 +1483,13 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypat
     assert center_yes[0].economics.optimal_delta_u > 0.0
 
 
-def test_qkernel_scope_rescores_legacy_distance_direction_law_rejections():
-    """The spine must not inherit the old distance-threshold direction law.
+def test_qkernel_scope_does_not_rescore_structural_direction_law_rejections():
+    """The spine must not revive a reactor structural direction-law rejection.
 
-    Regression: the reactor stamped ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` before the
-    qkernel call, and ``honor_admission_rejections=False`` still treated that reason as
-    unrecoverable. Live logs then showed positive-edge YES candidates with ``dlok=0
-    adm=0``. The qkernel owns the forecast-family direction law now, so legacy
-    distance-law rejections enter the spine and are judged by the settlement/q/OOF
-    family law there.
+    The reactor has one live structural direction law. qkernel can rescore stale scalar
+    capital/FDR-style vetoes, but if a proof already carries
+    ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` it must not become an executable direct
+    route through side-aware OOF evidence.
     """
     from dataclasses import replace
 
@@ -1515,4 +1529,30 @@ def test_qkernel_scope_rescores_legacy_distance_direction_law_rejections():
     assert any(
         proof.direction == "buy_yes" and proof.candidate.bin.label == "20C"
         for proof in qkernel_scoped
+    )
+
+    res = _drive(
+        family,
+        qkernel_scoped,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+    )
+    blocked_bin_id = era._candidate_bin_id(
+        next(
+            proof
+            for proof in qkernel_scoped
+            if proof.direction == "buy_no" and proof.candidate.bin.label == "21C"
+        )
+    )
+
+    assert res.decision is not None
+    assert all(
+        not (
+            decision.route.side == "NO"
+            and decision.route.bin_id == blocked_bin_id
+        )
+        for decision in res.decision.candidate_decisions
+    )
+    assert res.selected_proof is None or not (
+        res.selected_proof.direction == "buy_no"
+        and res.selected_proof.candidate.bin.label == "21C"
     )
