@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Created: 2026-06-21
 # Last audited: 2026-06-21
-# Authority basis: docs/evidence/live_order_pathology/2026-06-21_escalation_cross_fix.md
-#   (GAP 4 escalation-cross re-rest race) + 2026-06-21_captured_ev_deciding_analysis.md.
+# Authority basis: live_order_pathology GAP 4 rest-then-cross re-rest race
+#   evidence + 2026-06-21_captured_ev_deciding_analysis.md.
 """Read-only audit: which live families would now CROSS vs HOLD/REST under the
-GAP-4 escalation-cross re-rest fix.
+GAP-4 rest-then-cross re-rest fix.
 
 WHY
 ---
@@ -46,7 +46,7 @@ Run against the PRIMARY checkout's live DB (operator directive: paths follow
 main):
 
     ZEUS_PRIMARY_ROOT=/Users/leofitz/zeus \
-      /Users/leofitz/zeus/.venv/bin/python3 scripts/audit_escalation_cross_rerest.py
+      /Users/leofitz/zeus/.venv/bin/python3 scripts/audit_rest_then_cross_rerest.py
 
 Optional: ``--hours N`` (default 24) bounds the ENTRY-command lookback;
 ``--json`` prints machine-readable rows.
@@ -219,7 +219,7 @@ def main() -> int:
     if args.json:
         print(json.dumps({"now": now.isoformat(), "results": results}, indent=2))
     else:
-        print(f"escalation-cross re-rest audit (read-only) @ {now.isoformat()}")
+        print(f"rest-then-cross re-rest audit (read-only) @ {now.isoformat()}")
         print(f"  DB: {db_path}")
         print(f"  families scanned (last {args.hours}h ENTRY cmds): {len(results)}")
         print(f"  WOULD_CROSS (reach armed-cross lane, still FIX-B gated): {len(would_cross)}")

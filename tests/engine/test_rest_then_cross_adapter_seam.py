@@ -1,10 +1,10 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-21 (GAP-4 escalation-cross re-rest race fix:
-#   added TestEscalationCrossRerestRace — a post-escalation serial re-rest must
+# Last reused or audited: 2026-06-21 (GAP-4 rest-then-cross re-rest race fix:
+#   added TestRestThenCrossRerestRace — a post-escalation serial re-rest must
 #   not shadow the armed cross; double-submit safety preserved via the executor
 #   dedup backstop)
 # Authority basis: docs/archive/2026-Q2/operations_historical/consolidated_systemic_overhaul_2026-06-11.md K4.0
-#   + docs/evidence/live_order_pathology/2026-06-21_escalation_cross_fix.md
+#   + live_order_pathology GAP-4 rest-then-cross re-rest evidence
 """K4.0 adapter-seam relationship tests for REST-THEN-CROSS.
 
 Pins the two seams the policy crosses:
@@ -219,7 +219,7 @@ class TestFamilyRestState:
         )
 
 
-class TestEscalationCrossRerestRace:
+class TestRestThenCrossRerestRace:
     """GAP 4 ROOT FIX (2026-06-21): a just-posted re-rest must NOT shadow an
     armed escalation from a PRIOR cancelled-unfilled rest of the SAME family.
 

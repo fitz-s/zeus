@@ -16,7 +16,6 @@ import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 
-from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 from src.events.opportunity_event import OpportunityEvent
 
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
@@ -1964,11 +1963,6 @@ def _claim_tier_for_event(
     *,
     day0_is_tradeable: bool,
 ) -> int:
-    if (
-        event.event_type == "FORECAST_SNAPSHOT_READY"
-        and str(event.source or "").startswith(ESCALATION_CROSS_SOURCE_PREFIX)
-    ):
-        return 0
     if event.event_type == "EDLI_REDECISION_PENDING":
         return 0
     if event.event_type == "DAY0_EXTREME_UPDATED" and day0_is_tradeable:

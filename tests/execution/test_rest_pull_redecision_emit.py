@@ -1,27 +1,20 @@
 # Created: 2026-06-16
 # Last audited: 2026-06-16
-# Authority basis: docs/evidence/qkernel_rebuild/redecide_block_2026-06-16.md §FIX —
-#   the caller half: _maker_rest_escalation_cycle harvests confirmed-cancelled rests,
-#   recovers each family from VENUE TRUTH (token_id -> condition_id via
-#   executable_market_snapshots -> (city,target_date,metric) via market_events), and
-#   emits ONE escalation-origin FORECAST_SNAPSHOT_READY per family (Tier-0 lane).
-#   Phase 2: event_type changed from EDLI_REDECISION_PENDING (dormant, hard-blocked at
-#   6+ dispatch sites) to FORECAST_SNAPSHOT_READY with source='escalation_cross-*'.
-#   The Tier-0 tier clause keys on FSR + escalation_cross- source.
+# Authority basis: maker rest cancellation must continue through the same live
+#   redecision event type as price and terminal-no-fill management. The caller
+#   half harvests confirmed-cancelled rests, recovers each family from venue
+#   truth, and emits one EDLI_REDECISION_PENDING per family.
 """Caller-side tests for the escalation re-decision emit.
 
 Covers the two helpers added in src/main.py:
   - _escalation_families_from_cancelled: the venue-truth family recovery.
-  - _emit_escalation_cross_redecisions: routes the recovered families through the
-    EXISTING FSR re-emit machinery with the escalation source + FORECAST_SNAPSHOT_READY
-    type, under the world-write mutex, WITHOUT already_pending_keys.
+  - _emit_rest_pull_redecisions: routes the recovered families through the
+    standard live redecision lane with redecision_origin='rest_pull'.
 """
 from __future__ import annotations
 
 import sqlite3
 from types import SimpleNamespace
-
-from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
 
 
 def _trade_conn_with_snapshot(token_to_cond: dict[str, str]) -> sqlite3.Connection:
@@ -257,24 +250,54 @@ def test_open_rest_screen_keeps_active_local_commands_with_open_venue_fact():
     assert rests[0].side == "buy_no"
 
 
-def test_emit_routes_through_fsr_machinery_with_escalation_source(monkeypatch):
-    """The emit must call scan_committed_snapshots with:
-      - event_type='FORECAST_SNAPSHOT_READY'  (Phase 2: FSR path, not dormant EDLI type)
-      - source prefixed 'escalation_cross-'
+def test_emit_routes_through_standard_live_redecision(monkeypatch):
+    """The emit must build FSR-shaped payloads as standard live redecisions:
+      - event_type='EDLI_REDECISION_PENDING'
+      - source uses the normal cycle-* redecision source
       - restrict_to_families == the recovered set
-      - NO already_pending_keys (the pending FSR is exactly what's stuck; we jump it).
+      - payload origin is rest_pull, not a source-prefix scheduling authority.
     """
     import src.main as m
+    from src.events.opportunity_event import make_opportunity_event
 
     captured: dict = {}
+    written_payloads: list[dict] = []
 
     class _FakeTrigger:
         def __init__(self, *a, **k):
             pass
 
-        def scan_committed_snapshots(self, **kwargs):
+        def build_committed_snapshot_events(self, **kwargs):
             captured.update(kwargs)
-            return ["evt-1"]  # one emitted event
+            return [
+                make_opportunity_event(
+                    event_type=kwargs["event_type"],
+                    entity_key="Moscow|2026-06-17|high|snap-1",
+                    source=kwargs["source"],
+                    observed_at="2026-06-16T11:00:00+00:00",
+                    available_at="2026-06-16T11:00:00+00:00",
+                    received_at="2026-06-16T12:00:00+00:00",
+                    causal_snapshot_id="snap-1",
+                    payload={
+                        "city": "Moscow",
+                        "target_date": "2026-06-17",
+                        "metric": "high",
+                        "snapshot_id": "snap-1",
+                    },
+                    priority=50,
+                )
+            ]
+
+    class _FakeWriter:
+        def __init__(self, _conn):
+            pass
+
+        def write_many(self, events):
+            import json
+
+            for event in events:
+                written_payloads.append(json.loads(event.payload_json))
+            return [SimpleNamespace(inserted=True) for _ in events]
 
     # Stub the heavy collaborators so the test stays in-memory and offline.
     import src.events.triggers.forecast_snapshot_ready as fsr_mod
@@ -283,6 +306,9 @@ def test_emit_routes_through_fsr_machinery_with_escalation_source(monkeypatch):
     monkeypatch.setattr(
         fsr_mod, "executable_forecast_live_eligible_reader", lambda conn: (lambda *a, **k: True)
     )
+    import src.events.event_writer as writer_mod
+
+    monkeypatch.setattr(writer_mod, "EventWriter", _FakeWriter)
 
     class _NoopConn:
         def execute(self, *a, **k):
@@ -318,15 +344,22 @@ def test_emit_routes_through_fsr_machinery_with_escalation_source(monkeypatch):
     m._reset_edli_redecision_cycle_index()
     families = {("Moscow", "2026-06-17", "high")}
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
-    n = m._emit_escalation_cross_redecisions(
+    n = m._emit_rest_pull_redecisions(
         families, decision_time=now, received_at=now.isoformat()
     )
     assert n == 1
-    assert captured["event_type"] == "FORECAST_SNAPSHOT_READY"
-    assert captured["source"].startswith(ESCALATION_CROSS_SOURCE_PREFIX)
+    assert captured["event_type"] == "EDLI_REDECISION_PENDING"
+    assert captured["source"].startswith("cycle-TOK-")
     assert captured["restrict_to_families"] == families
-    # CRITICAL: already_pending_keys must NOT be passed (the jump-the-queue contract).
-    assert "already_pending_keys" not in captured or captured["already_pending_keys"] is None
+    assert written_payloads == [
+        {
+            "city": "Moscow",
+            "target_date": "2026-06-17",
+            "metric": "high",
+            "snapshot_id": "snap-1",
+            "redecision_origin": "rest_pull",
+        }
+    ]
 
 
 def test_emit_noop_on_empty_families(monkeypatch):
@@ -335,6 +368,6 @@ def test_emit_noop_on_empty_families(monkeypatch):
 
     now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
     # Must short-circuit BEFORE touching any DB/mutex.
-    assert m._emit_escalation_cross_redecisions(
+    assert m._emit_rest_pull_redecisions(
         set(), decision_time=now, received_at=now.isoformat()
     ) == 0

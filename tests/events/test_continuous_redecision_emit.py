@@ -640,7 +640,7 @@ def test_unadmitted_redecision_pending_is_expired():
     stale = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
         entity_key="San Francisco|2026-06-17|high|run-stale",
-        source="escalation_cross-stale",
+        source="cycle-stale",
         observed_at="2026-06-17T15:00:00+00:00",
         available_at="2026-06-17T15:00:00+00:00",
         received_at="2026-06-17T15:00:00+00:00",

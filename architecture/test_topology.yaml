@@ -686,7 +686,7 @@ test_trust_policy:
     tests/test_live_order_ack_durability.py: {created: "2026-05-19", last_used: "2026-05-19"}
     # 2026-06-20 B6 live-submit observability: end-to-end canary chain (submit→ACK→crash→reconcile, no dupe).
     tests/execution/test_live_submit_canary_chain.py: {created: "2026-06-20", last_used: "2026-06-20"}
-    tests/execution/test_escalation_redecision_emit.py: {created: "2026-06-16", last_used: "2026-06-26", note: "Escalation redecision family recovery and emit routing antibodies; extended 2026-06-26 to prove cancelled-rest token->condition recovery reads executable_market_snapshot_latest without append scans when latest rows exist."}
+    tests/execution/test_rest_pull_redecision_emit.py: {created: "2026-06-16", last_used: "2026-06-28", note: "Rest-pull redecision family recovery and standard EDLI_REDECISION_PENDING emit routing antibodies; proves cancelled-rest token->condition recovery reads executable_market_snapshot_latest without append scans when latest rows exist."}
     # 2026-06-20 B6 live-submit observability: armed_live + no submit receipts → infrastructure_level RED.
     tests/observability/test_status_red_on_armed_live_no_submit_receipts.py: {created: "2026-06-20", last_used: "2026-06-20"}
     # PR #219 — autonomous USDC.e → pUSD post-redeem wrap (Confirm Deposit automation).

@@ -2221,27 +2221,6 @@ def _edli_next_redecision_source() -> str:
     return f"cycle-{_edli_redecision_boot_token}-{n}"
 
 
-def _edli_next_escalation_cross_source() -> str:
-    """Return the next ESCALATION-cross re-decision emit source.
-
-    Format ``escalation_cross-{TOKEN}-{N}`` — same restart-/within-process-unique
-    scheme as ``_edli_next_redecision_source`` (shared boot token + monotonic N) so
-    each escalation re-decision gets a distinct idempotency_key and does NOT dedup
-    against the consumed FSR or the continuous ``cycle-*`` re-emit. The
-    ``escalation_cross-`` PREFIX is the discriminator the claim-tier authority
-    (``src.events.event_priority.claim_tier_expr_sql``) keys off to rank these
-    re-decisions at Tier 0 — below the 49-deep per-city round-robin (redecide-block
-    fix 2026-06-16). N has no internal hyphens, so ``split('-')[-1]`` stays an int
-    for the fairness-cursor parse in scan_committed_snapshots.
-    """
-    from src.events.event_priority import ESCALATION_CROSS_SOURCE_PREFIX
-
-    global _edli_redecision_cycle_index
-    n = _edli_redecision_cycle_index
-    _edli_redecision_cycle_index = n + 1
-    return f"{ESCALATION_CROSS_SOURCE_PREFIX}{_edli_redecision_boot_token}-{n}"
-
-
 def _reset_edli_redecision_cycle_index() -> None:
     """Test hook: reset the monotonic redecision cycle counter to 0."""
     global _edli_redecision_cycle_index
@@ -4982,13 +4961,14 @@ def _clear_redecision_acted_state_for_families(
     return removed
 
 
-def _emit_terminal_no_fill_redecision_continuations(
+def _emit_live_redecision_events_for_families(
     families: set[tuple[str, str, str]],
     *,
     decision_time: datetime,
     received_at: str,
+    origin: str,
 ) -> int:
-    """Emit standard continuous redecision rows after no-fill terminal recovery."""
+    """Emit standard live redecision rows for already-live order management work."""
 
     if not families:
         return 0
@@ -5023,7 +5003,7 @@ def _emit_terminal_no_fill_redecision_continuations(
             restrict_to_families=families,
         )
         write_results = EventWriter(world).write_many(
-            [_redecision_event_with_origin(event, "terminal_no_fill") for event in events]
+            [_redecision_event_with_origin(event, origin) for event in events]
         )
         world.commit()
         return sum(1 for result in write_results if result.inserted)
@@ -5037,6 +5017,22 @@ def _emit_terminal_no_fill_redecision_continuations(
             world.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _emit_terminal_no_fill_redecision_continuations(
+    families: set[tuple[str, str, str]],
+    *,
+    decision_time: datetime,
+    received_at: str,
+) -> int:
+    """Emit standard continuous redecision rows after no-fill terminal recovery."""
+
+    return _emit_live_redecision_events_for_families(
+        families,
+        decision_time=decision_time,
+        received_at=received_at,
+        origin="terminal_no_fill",
+    )
 
 
 def _terminal_no_fill_continuation_families(
@@ -5126,73 +5122,26 @@ def _emit_command_recovery_redecision_continuations(
         )
 
 
-def _emit_escalation_cross_redecisions(
+def _emit_rest_pull_redecisions(
     families: set[tuple[str, str, str]],
     *,
     decision_time: datetime,
     received_at: str,
 ) -> int:
-    """Emit ONE escalation-origin EDLI_REDECISION_PENDING per just-cancelled, ARMED
-    family so the reactor re-decides it on the NEXT cycle (it jumps the 49-deep
-    per-city round-robin via its Tier-0 claim, redecide-block fix 2026-06-16).
+    """Emit one standard redecision per pulled maker rest family.
 
-    Routed through the EXISTING FSR re-emit machinery (``scan_committed_snapshots``
-    with ``restrict_to_families``), so the payload is the identical committed-snapshot
-    FSR shape the forecast-decision pipeline already binds — only the trigger label
-    (EDLI_REDECISION_PENDING) and the ``escalation_cross-`` source differ. The world
-    DB event-write runs under the world-write mutex (mirrors ``_edli_emit_*`` and the
-    continuous-redecision screen), so the WAL write lock is released by COMMIT before
-    any other writer interleaves.
-
-    ``already_pending_keys`` is DELIBERATELY NOT passed: a pending FSR for this family
-    is exactly what is stuck behind the round-robin, so the escalation re-decision
-    must be emitted regardless of it (the Tier-0 lane is what un-starves it). The
-    phase/strictly-past floors inside scan_committed_snapshots still apply
-    (fail-closed: a phase-closed family emits zero — the cross cannot happen anyway).
+    This is live order management, not a second forecast lane. A pulled rest has
+    either finished as terminal no-fill or is about to leave the open-rest screen,
+    so continuity must be a durable ``EDLI_REDECISION_PENDING`` row that the normal
+    reactor path consumes on the next cycle.
     """
-    if not families:
-        return 0
-    from src.events.event_writer import EventWriter
-    from src.events.triggers.forecast_snapshot_ready import (
-        ForecastSnapshotReadyTrigger,
-        executable_forecast_live_eligible_reader,
-    )
-    from src.state.db import (
-        get_forecasts_connection_read_only,
-        get_world_connection,
-        world_write_mutex as _world_write_mutex,
-    )
 
-    world = get_world_connection()
-    forecasts_ro = get_forecasts_connection_read_only()
-    emit_mutex = _world_write_mutex()
-    emit_mutex.acquire()
-    try:
-        trig = ForecastSnapshotReadyTrigger(
-            EventWriter(world),
-            live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
-        )
-        emitted = trig.scan_committed_snapshots(
-            forecasts_conn=forecasts_ro,
-            decision_time=decision_time,
-            received_at=received_at,
-            limit=None,
-            source=_edli_next_escalation_cross_source(),
-            event_type="FORECAST_SNAPSHOT_READY",
-            restrict_to_families=families,
-        )
-        world.commit()
-        return len(emitted)
-    finally:
-        emit_mutex.release()
-        try:
-            forecasts_ro.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            world.close()
-        except Exception:  # noqa: BLE001
-            pass
+    return _emit_live_redecision_events_for_families(
+        families,
+        decision_time=decision_time,
+        received_at=received_at,
+        origin="rest_pull",
+    )
 
 
 @_scheduler_job("maker_rest_escalation")
@@ -5283,17 +5232,17 @@ def _maker_rest_escalation_cycle() -> None:
                     forecasts_ro.close()
                 except Exception:  # noqa: BLE001
                     pass
-            emitted = _emit_escalation_cross_redecisions(
+            emitted = _emit_rest_pull_redecisions(
                 families, decision_time=now, received_at=now.isoformat()
             )
             logger.info(
-                "maker_rest_escalation: escalation re-decision emit "
+                "maker_rest_escalation: rest-pull re-decision emit "
                 "cancelled=%d families_resolved=%d events_emitted=%d",
                 len(cancelled_entries), len(families), emitted,
             )
         except Exception as _redecide_exc:  # noqa: BLE001 — fail-closed: never crash the cancel job
             logger.warning(
-                "maker_rest_escalation: escalation re-decision emit failed "
+                "maker_rest_escalation: rest-pull re-decision emit failed "
                 "(non-fatal; family will wait for the round-robin): %r",
                 _redecide_exc,
             )
