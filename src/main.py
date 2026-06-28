@@ -112,7 +112,10 @@ _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 # DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
 # (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
-SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 15000
+# Snapshot refresh runs inside a bounded scheduler cycle. A busy write lease must
+# fail fast so the next family/cycle can advance instead of spending the whole
+# redecision budget waiting on one locked trade DB.
+SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 1000
 SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 3000
 
 

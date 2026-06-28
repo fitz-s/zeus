@@ -77,7 +77,10 @@ _SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
-SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 15000
+# The sidecar has a short freshness budget. Under contention, waiting 15s on a
+# single trade write lease starves the continuous refresh lane; skip quickly and
+# let the next cycle continue scanning.
+SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 1000
 SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 3000
 
 
@@ -147,8 +150,8 @@ def _background_warm_refresh_budget_seconds() -> float:
     # Keep the sidecar well under the 20s cadence so money-path targeted refresh
     # has lock windows between broad background warm ticks.
     background_cap = max(
-        12.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "12.0")),
+        6.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "6.0")),
     )
     return min(configured, background_cap)
 
@@ -159,8 +162,8 @@ def _background_warm_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
         float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0")),
     )
     background_cap = max(
-        4.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "4.0")),
+        3.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "3.0")),
     )
     return min(configured, background_cap, max(0.1, refresh_budget_s - 0.1))
 
