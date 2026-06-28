@@ -4,15 +4,39 @@ from __future__ import annotations
 # Last reused/audited: 2026-06-07
 # Authority basis: Operator request — family-bin selector must choose the best sibling opportunity, not the arrival-triggered token.
 
-from dataclasses import replace
+import pytest
 
+from src.decision import selection_calibrator as sc
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.opportunity_book import build_family_opportunity_book
 from src.events.opportunity_selector import select_best_family_candidate
 
 
+@pytest.fixture(autouse=True)
+def _isolate_selection_curse_bound(monkeypatch):
+    monkeypatch.setattr("src.decision.selection_curse_bound_loader.load_bound", lambda: None)
+
+
+def _selection_artifact(*, direction: str, raw_side_prob: float, hit_rate: float = 0.99):
+    side = "NO" if str(direction).lower() == "buy_no" else "YES"
+    key = sc.cell_key(
+        side=side,
+        lead_days=1.0,
+        bin_class="nonmodal",
+        raw_side_prob=raw_side_prob,
+    )
+    return {
+        "_meta": {
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+        },
+        "cells": {key: {"n": 10000, "hit_rate": hit_rate}},
+    }
+
+
 def _evaluation(**overrides):
-    base = CandidateEvaluation(
+    base = dict(
         candidate_id="cand-expensive",
         family_id="family-1",
         condition_id="condition-expensive",
@@ -31,7 +55,15 @@ def _evaluation(**overrides):
         low_volume_usd=10.0,
         same_bin_yes_posterior=0.10,
     )
-    return replace(base, **overrides)
+    base.update(overrides)
+    base.setdefault(
+        "selection_calibrator_artifact",
+        _selection_artifact(
+            direction=str(base["direction"]),
+            raw_side_prob=float(base["q_posterior"]),
+        ),
+    )
+    return CandidateEvaluation(**base)
 
 
 def test_selector_prefers_lcb_kelly_growth_over_modal_adjacent_no():
@@ -119,7 +151,7 @@ def test_selector_allows_low_win_rate_positive_ev_when_capital_efficient():
 
     result = select_best_family_candidate((low_win_rate_lottery, stable_win_rate_edge))
 
-    assert result.selected in {low_win_rate_lottery, stable_win_rate_edge}
+    assert result.selected is low_win_rate_lottery or result.selected is stable_win_rate_edge
     assert not result.loser_reasons.get("cand-low-win-rate", "").startswith("ADMISSION_WIN_RATE_FLOOR:")
 
 

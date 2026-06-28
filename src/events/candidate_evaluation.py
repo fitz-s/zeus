@@ -168,10 +168,15 @@ class CandidateEvaluation:
 
     @property
     def _raw_side_prob(self) -> float:
-        """The RAW point probability of THIS candidate's side (q_posterior is the YES-in-bin belief;
-        NO raw prob = 1 - q_posterior). Used to resolve the calibrator cell."""
+        """The RAW point probability of THIS candidate's executable side.
+
+        ``q_posterior`` on ``CandidateEvaluation`` is already side-native:
+        buy_yes carries P(YES), buy_no carries P(NO). Do not flip buy_no here;
+        the selector/calibrator cell must see the same side probability that
+        live_lcb_consistency and q_lcb admission compare against.
+        """
         q = max(0.0, min(1.0, float(self.q_posterior)))
-        return (1.0 - q) if str(self.direction or "").lower() == "buy_no" else q
+        return q
 
     @property
     def calibrated_admission_q_lcb(self) -> float:

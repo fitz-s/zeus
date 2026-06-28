@@ -545,7 +545,7 @@ def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position
     assert result["existing_position_id"] == "active-position"
 
 
-def test_executor_cooldown_allows_cancelled_entry_without_fill(mem_db):
+def test_executor_cooldown_blocks_recent_cancelled_entry_without_fill(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -579,8 +579,9 @@ def test_executor_cooldown_allows_cancelled_entry_without_fill(mem_db):
         now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
     )
 
-    assert result["allowed"] is True
-    assert result["reason"] == "allowed_terminal_no_fill_prior_entries"
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_cooling_down"
+    assert result["remaining_seconds"] == _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - 60
 
 
 def test_executor_cooldown_still_blocks_when_active_command_exists(mem_db):

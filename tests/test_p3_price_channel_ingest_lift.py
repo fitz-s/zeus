@@ -54,6 +54,14 @@ _LIFTED_PRODUCERS = (
 )
 
 
+def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    assert pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT >= 45.0
+    assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS >= 15000
+    assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
+
+
 # ---------------------------------------------------------------------------
 # Shared AST helpers
 # ---------------------------------------------------------------------------

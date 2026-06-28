@@ -1155,6 +1155,7 @@ def _entry_same_token_cooldown_component(
     state = ""
     created_at = ""
     updated_at = ""
+    terminal_no_fill_row: tuple[str, str, str, object, object] | None = None
     for row in rows:
         if isinstance(row, sqlite3.Row):
             command_id = str(row["command_id"])
@@ -1173,15 +1174,19 @@ def _entry_same_token_cooldown_component(
             command_id=command_id,
             state=state,
         ):
+            if terminal_no_fill_row is None:
+                terminal_no_fill_row = (command_id, position_id, state, created_at, updated_at)
             continue
         break
     else:
-        return {
-            "component": "entry_same_token_cooldown",
-            "allowed": True,
-            "reason": "allowed_terminal_no_fill_prior_entries",
-            "token_id": token,
-        }
+        if terminal_no_fill_row is None:
+            return {
+                "component": "entry_same_token_cooldown",
+                "allowed": True,
+                "reason": "allowed_no_blocking_prior_entries",
+                "token_id": token,
+            }
+        command_id, position_id, state, created_at, updated_at = terminal_no_fill_row
     last_seen = _parse_sqlite_timestamp(updated_at) or _parse_sqlite_timestamp(created_at)
     if last_seen is None:
         return {
@@ -1198,10 +1203,19 @@ def _entry_same_token_cooldown_component(
     age_seconds = (now_utc.astimezone(timezone.utc) - last_seen).total_seconds()
     remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
     if remaining_seconds > 0:
+        terminal_no_fill = _entry_terminal_command_has_no_fill_exposure(
+            conn,
+            command_id=command_id,
+            state=state,
+        )
         return {
             "component": "entry_same_token_cooldown",
             "allowed": False,
-            "reason": "same_token_entry_cooling_down",
+            "reason": (
+                "same_token_terminal_no_fill_cooling_down"
+                if terminal_no_fill
+                else "same_token_entry_cooling_down"
+            ),
             "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
             "remaining_seconds": int(remaining_seconds),
             "existing_command_id": command_id,

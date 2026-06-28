@@ -69,6 +69,39 @@ def _clean_state(monkeypatch):
     _reset_wu_memo_for_tests()
 
 
+def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
+    from src.engine import cycle_runtime
+    from src.state.portfolio import QUARANTINE_SENTINEL, Position
+
+    day0 = Position(
+        trade_id="day0-pos", market_id="m", city="Tokyo", cluster="asia",
+        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
+        state="day0_window", shares=1.0,
+    )
+    quarantined_partial = Position(
+        trade_id="q-pos", market_id="m", city="Lucknow", cluster="asia",
+        target_date="2026-06-10", bin_label="35C or below", direction="buy_yes",
+        state="quarantined", chain_state="entry_authority_quarantined",
+        shares_filled=20.0, filled_cost_basis_usd=1.20,
+    )
+    quarantined_placeholder = Position(
+        trade_id="q-placeholder", market_id="m", city=QUARANTINE_SENTINEL,
+        cluster="unknown", target_date="2026-06-10", bin_label="UNKNOWN",
+        direction="buy_yes", state="quarantined",
+        chain_state="entry_authority_quarantined", shares_filled=20.0,
+    )
+    quarantined_no_exposure = Position(
+        trade_id="q-empty", market_id="m", city="Tokyo", cluster="asia",
+        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
+        state="quarantined", chain_state="entry_authority_quarantined",
+    )
+
+    assert cycle_runtime._day0_hard_fact_position_eligible(day0) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_partial) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_placeholder) is False
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_no_exposure) is False
+
+
 def _tokyo():
     # settlement-faithful, empirical threshold 1.0 (config/wu_metar_divergence.json)
     return SimpleNamespace(

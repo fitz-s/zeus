@@ -770,7 +770,7 @@ def test_select_total_delta_u_objective_uses_utility_not_scalar_trade_score(monk
 
 
 def test_select_prefers_roi_frontier_by_default(monkeypatch):
-    """Live default is ROI-frontier, so capital-efficient YES can beat larger NO."""
+    """Live default is confidence-weighted ROI, so strong cheap YES can beat larger NO."""
     case = _case()
     space = _outcome_space(case)
     high_cost_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -785,7 +785,7 @@ def test_select_prefers_roi_frontier_by_default(monkeypatch):
     )
     low_cost = _hand_decision(
         low_cost_route,
-        edge_lcb=0.08,
+        edge_lcb=0.38,
         optimal_delta_u=0.05,
         delta_u_at_min=0.01,
         robust_trade_score=0.10,
@@ -801,6 +801,42 @@ def test_select_prefers_roi_frontier_by_default(monkeypatch):
 
     assert reason is None
     assert selected is low_cost
+
+
+def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):
+    """High raw edge/price is not enough when Kelly lower-bound confidence is tiny."""
+    case = _case()
+    space = _outcome_space(case)
+    strong_no_route = _hand_route(space, side="NO", bin_id="b24", cost=0.74)
+    cheap_tail_route = _hand_route(space, side="YES", bin_id="b25", cost=0.01)
+    strong_no = _hand_decision(
+        strong_no_route,
+        edge_lcb=0.156,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("100"),
+    )
+    cheap_tail = _hand_decision(
+        cheap_tail_route,
+        edge_lcb=0.0024,
+        optimal_delta_u=0.05,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("100"),
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([strong_no, cheap_tail])
+
+    assert reason is None
+    assert engine._edge_roi_lcb(cheap_tail) > engine._edge_roi_lcb(strong_no)
+    assert engine._robust_kelly_growth_density(strong_no) > engine._robust_kelly_growth_density(cheap_tail)
+    assert selected is strong_no
 
 
 def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
@@ -1051,7 +1087,7 @@ def test_select_utility_density_objective_is_explicit_non_default(monkeypatch):
     )
     high_density = _hand_decision(
         high_density_route,
-        edge_lcb=0.08,
+        edge_lcb=0.38,
         optimal_delta_u=0.05,
         delta_u_at_min=0.01,
         robust_trade_score=0.10,

@@ -1070,8 +1070,39 @@ class FamilyDecisionEngine:
             and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
         )
 
-    def _roi_frontier_key(self, d: CandidateDecision) -> tuple[float, float, float, float, float]:
+    def _robust_kelly_growth_density(self, d: CandidateDecision) -> float:
+        """Capital-efficiency objective with confidence, not raw payout odds.
+
+        ``edge_lcb / cost`` alone over-rewards one-cent tails whose lower-bound
+        win probability only barely clears price. Multiplying by the binary
+        Kelly lower-bound fraction keeps Shanghai-style cheap center YES legs
+        dominant when their belief is genuinely strong, while refusing to let
+        tiny low-confidence tails beat a high-confidence lower-ROI leg.
+        """
+        roi = self._edge_roi_lcb(d)
+        try:
+            cost = float(d.economics.cost.value)
+            payoff_q_lcb = d.economics.payoff_q_lcb
+            q_lcb = (
+                float(payoff_q_lcb)
+                if payoff_q_lcb is not None
+                else float(d.economics.edge_lcb) + cost
+            )
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+        if not (
+            np.isfinite(roi)
+            and np.isfinite(cost)
+            and np.isfinite(q_lcb)
+            and 0.0 < cost < 1.0
+            and q_lcb > cost
+        ):
+            return float("-inf")
+        return roi * ((q_lcb - cost) / (1.0 - cost))
+
+    def _roi_frontier_key(self, d: CandidateDecision) -> tuple[float, float, float, float, float, float]:
         return (
+            self._robust_kelly_growth_density(d),
             self._edge_roi_lcb(d),
             self._profit_lcb_usd(d),
             self._utility_density(d),
@@ -1088,20 +1119,28 @@ class FamilyDecisionEngine:
         frontier: list[CandidateDecision] = []
         for candidate in useful:
             dominated = False
+            c_growth_density = self._robust_kelly_growth_density(candidate)
             c_roi = self._edge_roi_lcb(candidate)
             c_profit = self._profit_lcb_usd(candidate)
             c_du = float(candidate.economics.optimal_delta_u)
             for other in useful:
                 if other is candidate:
                     continue
+                o_growth_density = self._robust_kelly_growth_density(other)
                 o_roi = self._edge_roi_lcb(other)
                 o_profit = self._profit_lcb_usd(other)
                 o_du = float(other.economics.optimal_delta_u)
                 if (
-                    o_roi >= c_roi
+                    o_growth_density >= c_growth_density
+                    and o_roi >= c_roi
                     and o_profit >= c_profit
                     and o_du >= c_du
-                    and (o_roi > c_roi or o_profit > c_profit or o_du > c_du)
+                    and (
+                        o_growth_density > c_growth_density
+                        or o_roi > c_roi
+                        or o_profit > c_profit
+                        or o_du > c_du
+                    )
                 ):
                     dominated = True
                     break

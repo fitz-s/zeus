@@ -75,16 +75,15 @@ def test_city_skill_gate_allows_good_city_with_explicit_artifact():
 
 
 def test_calibrator_deflates_qlcb_and_blocks_toxic_no():
-    # The toxic-NO cell: raw NO prob ~0.875 -> q_posterior(YES-in-bin) ~0.125. Use a candidate whose
-    # NO raw prob lands in the toxic bucket.
+    # The toxic-NO cell: q_posterior is side-native on CandidateEvaluation, so
+    # raw NO prob ~0.875 is carried directly.
     raw_no = 0.875
     bidx, _ = sc.raw_prob_bucket(raw_no)
     art = {
         "_meta": {"posterior_version": sc.DEFAULT_POSTERIOR_VERSION, "min_n": 30},
         "cells": {f"NO|L1|nonmodal|pb{bidx}": {"n": 104, "hit_rate": 0.679}},
     }
-    # q_posterior is the YES-in-bin belief; NO raw prob = 1 - q_posterior.
-    ev = _base(direction="buy_no", q_posterior=1.0 - raw_no, q_lcb_5pct=0.83,
+    ev = _base(direction="buy_no", q_posterior=raw_no, q_lcb_5pct=0.83,
                execution_price=0.70, selection_calibrator_artifact=art)
     # The calibrator-deflated admission q_lcb is below the 0.70 cost -> not admitted.
     assert ev.calibrated_admission_q_lcb < 0.83

@@ -106,4 +106,13 @@ def _admission_rejection_reason(evaluation: CandidateEvaluation) -> str:
     buy_no_conservative_evidence_reason = evaluation.live_buy_no_conservative_evidence_reason
     if buy_no_conservative_evidence_reason is not None:
         return buy_no_conservative_evidence_reason
+    if not evaluation.selection_calibrator_admissible:
+        return (
+            "ADMISSION_SELECTION_CALIBRATOR:"
+            f"q_safe={evaluation.calibrated_admission_q_lcb:.6f}:"
+            f"price={float(evaluation.execution_price or 0.0):.6f}"
+        )
+    city_skill_reason = evaluation.city_skill_block_reason
+    if city_skill_reason is not None:
+        return city_skill_reason
     return "ADMISSION_NOT_SELECTED"

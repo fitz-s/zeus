@@ -3210,6 +3210,10 @@ def _quarantined_position_can_redecision(pos) -> bool:
     )
 
 
+def _day0_hard_fact_position_eligible(pos) -> bool:
+    return _position_state_value(pos) == "day0_window" or _quarantined_position_can_redecision(pos)
+
+
 def _monitoring_phase_positions(portfolio) -> list:
     """Open positions plus quarantine rows that need explicit monitor receipts."""
 
@@ -4119,7 +4123,7 @@ def execute_monitoring_phase(
             # hold/exit evaluation so the canonical row carries the actual
             # decision for this monitor tick.
             _hard_fact = None
-            if _position_state_value(pos) == "day0_window" and city is not None:
+            if _day0_hard_fact_position_eligible(pos) and city is not None:
                 try:
                     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
                     # Pass conn as world_conn so the METAR kill-memo cold-start
