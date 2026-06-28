@@ -5693,6 +5693,77 @@ class TestRecoveryResolutionTable:
         ]
         assert event_types == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"]
 
+    def test_live_buy_no_projection_repair_event_payload_uses_selected_no_token(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(
+            conn,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            size=13.45,
+            price=0.74,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-live-no")
+        _append_order_fact(
+            conn,
+            order_id="ord-live-no",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_decision_log_trade_case_for_recovery(
+            conn,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            direction="buy_no",
+        )
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT direction, token_id, no_token_id, order_id
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "direction": "buy_no",
+            "token_id": "tok-yes",
+            "no_token_id": "tok-no",
+            "order_id": "ord-live-no",
+        }
+        payloads = [
+            json.loads(row["payload_json"])
+            for row in conn.execute(
+                """
+                SELECT payload_json
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                   AND event_type IN ('POSITION_OPEN_INTENT', 'ENTRY_ORDER_POSTED')
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert payloads
+        for payload in payloads:
+            assert payload["token_id"] == "tok-no"
+            assert payload["selected_token_id"] == "tok-no"
+            assert payload["yes_token_id"] == "tok-yes"
+            assert payload["no_token_id"] == "tok-no"
+
     def test_live_acked_entry_order_with_positive_trade_fact_waits_for_fill_reconciliation(
         self,
         conn,

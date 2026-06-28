@@ -3243,6 +3243,12 @@ def _entry_recovery_event(
     command_id = str(position.command_id)
     position_id = str(position.trade_id)
     slug = event_type.lower()
+    direction = str(position.direction or "").strip().lower()
+    selected_token_id = (
+        str(position.no_token_id or "").strip()
+        if direction == "buy_no"
+        else str(position.token_id or "").strip()
+    )
     payload = {
         "reason": reason,
         "proof_class": proof_class,
@@ -3257,7 +3263,10 @@ def _entry_recovery_event(
         "decision_log_id": position.decision_log_id,
         "executable_snapshot_id": position.executable_snapshot_id,
         "condition_id": position.condition_id,
-        "token_id": position.token_id,
+        "token_id": selected_token_id,
+        "selected_token_id": selected_token_id,
+        "yes_token_id": position.token_id,
+        "no_token_id": position.no_token_id,
     }
     return {
         "event_id": f"{position_id}:recovered_{slug}:{command_id}",
