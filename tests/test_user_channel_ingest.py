@@ -140,6 +140,39 @@ def _envelope(
     )
 
 
+def _entry_submit_payload() -> dict:
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "details": {
+                        "q_live": 0.62,
+                        "q_lcb_5pct": 0.55,
+                        "expected_edge": 0.05,
+                        "limit_price": 0.50,
+                        "submit_edge": 0.05,
+                        "expected_profit_usd": 1.00,
+                        "min_entry_price": 0.05,
+                        "min_expected_profit_usd": 1.00,
+                        "submit_edge_density": 0.10,
+                        "min_submit_edge_density": 0.05,
+                        "shares": 20.0,
+                        "qkernel_side": "YES",
+                    },
+                },
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "details": {"certificate_id": "cert-ws"},
+                },
+            ],
+        },
+    }
+
+
 def _seed_acknowledged_command(c) -> None:
     insert_snapshot(c, _snapshot())
     insert_submission_envelope(c, _envelope(), envelope_id="env-ws")
@@ -165,7 +198,13 @@ def _seed_acknowledged_command(c) -> None:
         expected_neg_risk=False,
         venue_order_id="ord-ws",
     )
-    append_event(c, command_id="cmd-ws", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
+    append_event(
+        c,
+        command_id="cmd-ws",
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=NOW.isoformat(),
+        payload=_entry_submit_payload(),
+    )
     append_event(c, command_id="cmd-ws", event_type="SUBMIT_ACKED", occurred_at=NOW.isoformat())
     c.commit()
 
@@ -960,7 +999,13 @@ def test_same_trade_id_different_order_requires_review_not_rebinding(conn):
         expected_neg_risk=False,
         venue_order_id="ord-other",
     )
-    append_event(conn, command_id="cmd-other", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
+    append_event(
+        conn,
+        command_id="cmd-other",
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=NOW.isoformat(),
+        payload=_entry_submit_payload(),
+    )
     append_event(
         conn,
         command_id="cmd-other",
@@ -1397,8 +1442,9 @@ def test_subscribe_reconnect_with_unresolved_lot_preserves_m5_requirement(conn):
     assert ws_gap_guard.summary(now=NOW)["entry"]["allow_submit"] is False
 
 
-def test_not_configured_default_blocks_submit_until_user_channel_truth_exists(conn):
+def test_not_configured_default_blocks_submit_until_user_channel_truth_exists(conn, monkeypatch):
     """M3 is live-truth-gated; absent WS configuration is not an implicit PASS."""
+    monkeypatch.setattr(ws_gap_guard, "_durable_sidecar_status", lambda *, now: None)
     ws_gap_guard.configure_status(
         ws_gap_guard.WSGapStatus(
             connected=False,

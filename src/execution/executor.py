@@ -634,6 +634,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     q_live = _float_field(getattr(intent, "q_live", None))
     q_lcb = _float_field(getattr(intent, "q_lcb_5pct", None))
     expected_edge = _float_field(getattr(intent, "expected_edge", None))
+    min_entry_price = _float_field(getattr(intent, "min_entry_price", None))
     min_expected_profit = _float_field(getattr(intent, "min_expected_profit_usd", None))
     min_edge_density = _float_field(getattr(intent, "min_submit_edge_density", None))
     limit_price = _float_field(getattr(intent, "limit_price", None))
@@ -644,6 +645,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             ("q_live", q_live),
             ("q_lcb_5pct", q_lcb),
             ("expected_edge", expected_edge),
+            ("min_entry_price", min_entry_price),
             ("min_expected_profit_usd", min_expected_profit),
             ("min_submit_edge_density", min_edge_density),
             ("limit_price", limit_price),
@@ -664,6 +666,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     assert q_live is not None
     assert q_lcb is not None
     assert expected_edge is not None
+    assert min_entry_price is not None
     assert min_expected_profit is not None
     assert min_edge_density is not None
     assert limit_price is not None
@@ -695,7 +698,11 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         min_edge_density,
         _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     )
-    if min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
+    if min_entry_price < 0.0:
+        reason = "min_entry_price_negative"
+    elif limit_price <= min_entry_price + 1e-9:
+        reason = "entry_price_below_live_floor"
+    elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
     elif min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY:
         reason = "min_submit_edge_density_below_live_floor"
@@ -722,6 +729,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             limit_price=limit_price,
             submit_edge=submit_edge,
             expected_profit_usd=expected_profit,
+            min_entry_price=min_entry_price,
             min_expected_profit_usd=min_expected_profit,
             live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
@@ -810,6 +818,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         limit_price=limit_price,
         submit_edge=submit_edge,
         expected_profit_usd=expected_profit,
+        min_entry_price=min_entry_price,
         min_expected_profit_usd=min_expected_profit,
         live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         submit_edge_density=edge_density,

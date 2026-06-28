@@ -19,6 +19,7 @@ def _intent(**overrides) -> ExecutionIntent:
         "q_live": 0.62,
         "q_lcb_5pct": 0.52,
         "expected_edge": 0.10,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
         "qkernel_execution_economics": {
@@ -45,6 +46,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
             q_live=0.005426579861923467,
             q_lcb_5pct=0.005426579861923467,
             expected_edge=-0.0019288776308719231,
+            min_entry_price=0.0,
             qkernel_execution_economics={
                 "source": "qkernel_spine",
                 "side": "YES",
@@ -63,6 +65,36 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
 
     assert verdict["allowed"] is False
     assert verdict["reason"] == "expected_edge_non_positive"
+
+
+def test_entry_economics_blocks_lottery_price_even_with_positive_edge():
+    verdict = _entry_economics_component(
+        _intent(
+            limit_price=0.006,
+            q_live=0.82,
+            q_lcb_5pct=0.72,
+            expected_edge=0.714,
+            min_entry_price=0.05,
+            min_expected_profit_usd=1.0,
+            min_submit_edge_density=0.05,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.82,
+                "payoff_q_lcb": 0.72,
+                "cost": 0.006,
+                "edge_lcb": 0.714,
+                "optimal_delta_u": 0.01,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+            },
+        ),
+        shares=1497.78,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "entry_price_below_live_floor"
 
 
 def test_entry_economics_blocks_missing_receipt_fields():
@@ -173,6 +205,38 @@ def test_entry_economics_blocks_weak_jeddah_style_expensive_no_density():
 
     assert verdict["allowed"] is False
     assert verdict["reason"] == "submit_edge_density_below_floor"
+
+
+def test_entry_economics_blocks_thin_margin_live_profile_order():
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.77,
+            q_live=0.804346,
+            q_lcb_5pct=0.794346,
+            expected_edge=0.014346,
+            min_expected_profit_usd=1.00,
+            min_submit_edge_density=0.05,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "side": "NO",
+                "payoff_q_point": 0.804346,
+                "payoff_q_lcb": 0.794346,
+                "cost": 0.78,
+                "edge_lcb": 0.014346,
+                "optimal_delta_u": 0.002,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+            },
+        ),
+        shares=18.14,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "expected_profit_below_floor"
+    assert verdict["details"]["expected_profit_usd"] < 1.0
+    assert verdict["details"]["submit_edge_density"] < 0.05
 
 
 def test_entry_economics_blocks_non_qkernel_or_self_reported_economics():

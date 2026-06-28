@@ -80,6 +80,10 @@
 #       Strategy economic minimum notional, separate from venue min_order_size.
 #   min_expected_profit_usd: 0.0+
 #       Minimum expected profit before a live entry is worth execution churn.
+#   min_submit_edge_density: 0.0+
+#       Minimum conservative edge per dollar of submitted limit price. This is
+#       the opportunity-cost gate that blocks thin-margin churn even when raw
+#       expected profit is positive.
 #   allow_ultra_low_tail: true | false
 #       Explicit exception for tail-arb strategies with separate calibration.
 #   partial_source_run_allowed: true | false
@@ -163,7 +167,8 @@ day0_nowcast_entry:
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
   partial_source_run_allowed: false
   complete_required_for_tail_orders: true
@@ -196,7 +201,8 @@ center_buy:
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 opening_inertia:
@@ -227,7 +233,8 @@ opening_inertia:
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 shoulder_sell:
@@ -264,7 +271,8 @@ shoulder_sell:
   promotion_evidence_ref: null
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 shoulder_impossible_tail_capture:
@@ -339,7 +347,8 @@ imminent_open_capture:
   promotion_evidence_ref: null
   min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 shoulder_buy:

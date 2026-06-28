@@ -1777,6 +1777,11 @@ def _event_bound_strategy_live_quality_floors(strategy_key: str | None) -> dict[
 
     profile = try_get(str(strategy_key or "").strip())
     return {
+        "min_entry_price": float(
+            getattr(profile, "min_entry_price", 0.05)
+            if profile is not None
+            else 0.05
+        ),
         "min_expected_profit_usd": float(
             getattr(profile, "min_expected_profit_usd", 0.05)
             if profile is not None
@@ -5131,6 +5136,7 @@ def _build_event_bound_no_submit_receipt_core(
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
             "trade_score": trade_score,
+            "min_entry_price": live_quality_floors["min_entry_price"],
             "min_expected_profit_usd": live_quality_floors["min_expected_profit_usd"],
             "min_submit_edge_density": live_quality_floors["min_submit_edge_density"],
             "bias_decay_applied": bool(_bias_decay_applied),
@@ -5691,6 +5697,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         candidate_bin_id=raw_receipt.get("candidate_bin_id"),
         qkernel_execution_economics=raw_receipt.get("qkernel_execution_economics"),
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
+        min_entry_price=_optional_float(raw_receipt.get("min_entry_price")),
         min_expected_profit_usd=_optional_float(raw_receipt.get("min_expected_profit_usd")),
         min_submit_edge_density=_optional_float(raw_receipt.get("min_submit_edge_density")),
         same_bin_yes_posterior=_optional_float(raw_receipt.get("same_bin_yes_posterior")),
@@ -7001,6 +7008,7 @@ def _actionable_payload_from_receipt(
         "p_fill_lcb": receipt.p_fill_lcb,
         "trade_score": receipt.trade_score,
         "action_score": receipt.trade_score,
+        "min_entry_price": receipt.min_entry_price,
         "min_expected_profit_usd": receipt.min_expected_profit_usd,
         "min_submit_edge_density": receipt.min_submit_edge_density,
         "fdr_family_id": receipt.fdr_family_id,
@@ -7083,6 +7091,7 @@ def _live_decision_audit_payload(
         "c_cost_95pct": receipt.c_cost_95pct,
         "p_fill_lcb": receipt.p_fill_lcb,
         "trade_score": receipt.trade_score,
+        "min_entry_price": receipt.min_entry_price,
         "min_expected_profit_usd": receipt.min_expected_profit_usd,
         "min_submit_edge_density": receipt.min_submit_edge_density,
         "kelly_size_usd": receipt.kelly_size_usd,
@@ -7627,6 +7636,7 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "expected_edge": payload.get("trade_score"),
         "action_score": payload.get("action_score"),
         "size": payload.get("size"),
+        "min_entry_price": payload.get("min_entry_price"),
         "min_expected_profit_usd": payload.get("min_expected_profit_usd"),
         "min_submit_edge_density": payload.get("min_submit_edge_density"),
         "c_fee_adjusted": payload.get("c_fee_adjusted"),

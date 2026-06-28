@@ -91,6 +91,8 @@ COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = 180.0
 MONITOR_PROJECTION_MAX_AGE_SECONDS = 900.0
 LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
 LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
+RECENT_ENTRY_SUBMIT_ECONOMICS_LOOKBACK_HOURS = 48.0
+RECENT_ENTRY_SUBMIT_ECONOMICS_SAMPLE_LIMIT = 25
 PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT = 12
 PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS = 5.0
 LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
@@ -122,6 +124,7 @@ PRE_SUBMIT_ECONOMIC_FIELDS = (
     "q_lcb_5pct",
     "expected_edge",
     "size",
+    "min_entry_price",
     "min_expected_profit_usd",
     "min_submit_edge_density",
     "qkernel_execution_economics",
@@ -133,6 +136,7 @@ ENTRY_ECONOMICS_COMPONENT_FIELDS = (
     "limit_price",
     "submit_edge",
     "expected_profit_usd",
+    "min_entry_price",
     "min_expected_profit_usd",
     "submit_edge_density",
     "min_submit_edge_density",
@@ -1720,6 +1724,13 @@ def _decision_certificate_quarantine_hashes(
 
 
 def _entry_economics_component_from_submit(payload_json: str | None) -> dict[str, Any] | None:
+    return _execution_capability_component_from_submit(payload_json, "entry_economics")
+
+
+def _execution_capability_component_from_submit(
+    payload_json: str | None,
+    component_name: str,
+) -> dict[str, Any] | None:
     try:
         payload = json.loads(str(payload_json or "{}"))
     except Exception:
@@ -1735,7 +1746,7 @@ def _entry_economics_component_from_submit(payload_json: str | None) -> dict[str
     for component in components:
         if not isinstance(component, dict):
             continue
-        if str(component.get("component") or "") == "entry_economics":
+        if str(component.get("component") or "") == component_name:
             return component
     return None
 
@@ -2143,6 +2154,140 @@ def _open_entry_submit_economics_check(rows: list[sqlite3.Row]) -> CheckResult:
         "open positive-share positions have entry submit economics provenance"
         if not risky
         else "open positive-share positions include entries submitted without economics provenance",
+        evidence,
+    )
+
+
+def _recent_entry_submit_economics_check() -> CheckResult:
+    """Block restart after recent live ENTRY submit paths skipped economics proof."""
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=RECENT_ENTRY_SUBMIT_ECONOMICS_LOOKBACK_HOURS)
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "lookback_hours": RECENT_ENTRY_SUBMIT_ECONOMICS_LOOKBACK_HOURS,
+        "required_detail_fields": list(ENTRY_ECONOMICS_COMPONENT_FIELDS),
+        "required_components": ["entry_economics", "entry_actionable_certificate"],
+    }
+    with _connect_live_ro() as conn:
+        required_tables = ("venue_commands", "venue_command_events")
+        missing_tables = [
+            table
+            for table in required_tables
+            if not _table_exists(conn, "main", table)
+        ]
+        if missing_tables:
+            evidence["missing_tables"] = missing_tables
+            return CheckResult(
+                "recent_entry_submit_economics",
+                True,
+                "recent ENTRY submit provenance tables absent; no recent submit scan applied",
+                evidence,
+            )
+        rows = conn.execute(
+            """
+            WITH latest_submit AS (
+                SELECT
+                    vce.command_id,
+                    vce.occurred_at,
+                    vce.payload_json,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY vce.command_id
+                        ORDER BY vce.sequence_no DESC, datetime(vce.occurred_at) DESC
+                    ) AS rn
+                  FROM venue_command_events vce
+                 WHERE vce.event_type = 'SUBMIT_REQUESTED'
+            )
+            SELECT
+                vc.command_id,
+                vc.position_id,
+                vc.decision_id,
+                vc.state AS command_state,
+                vc.venue_order_id,
+                vc.price,
+                vc.size,
+                vc.created_at,
+                ls.occurred_at AS submit_requested_at,
+                ls.payload_json AS submit_payload_json
+              FROM venue_commands vc
+              LEFT JOIN latest_submit ls
+                ON ls.command_id = vc.command_id
+               AND ls.rn = 1
+             WHERE vc.intent_kind = 'ENTRY'
+               AND vc.side = 'BUY'
+               AND vc.created_at >= ?
+             ORDER BY vc.created_at DESC, vc.command_id DESC
+            """,
+            (cutoff.isoformat(),),
+        ).fetchall()
+
+    risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    for row in rows:
+        item = {
+            "command_id": row["command_id"],
+            "position_id": row["position_id"],
+            "decision_id": row["decision_id"],
+            "command_state": row["command_state"],
+            "venue_order_id": row["venue_order_id"],
+            "price": row["price"],
+            "size": row["size"],
+            "command_created_at": row["created_at"],
+            "submit_requested_at": row["submit_requested_at"],
+        }
+        economics = _entry_economics_component_from_submit(row["submit_payload_json"])
+        economics_missing = _entry_economics_component_missing_fields(economics)
+        actionable = _execution_capability_component_from_submit(
+            row["submit_payload_json"],
+            "entry_actionable_certificate",
+        )
+        actionable_missing: list[str] = []
+        if actionable is None:
+            actionable_missing.append("entry_actionable_certificate")
+        elif actionable.get("allowed") is not True:
+            actionable_missing.append("entry_actionable_certificate.allowed")
+        missing = [*economics_missing, *actionable_missing]
+        if missing:
+            risky.append(
+                {
+                    **item,
+                    "risk": "recent_entry_submit_missing_live_proof",
+                    "missing": missing,
+                    "entry_economics_reason": None
+                    if economics is None
+                    else economics.get("reason"),
+                    "entry_actionable_certificate_reason": None
+                    if actionable is None
+                    else actionable.get("reason"),
+                }
+            )
+            continue
+        details = economics.get("details") if isinstance(economics, dict) else {}
+        covered.append(
+            {
+                **item,
+                "q_live": details.get("q_live") if isinstance(details, dict) else None,
+                "q_lcb_5pct": details.get("q_lcb_5pct") if isinstance(details, dict) else None,
+                "expected_profit_usd": details.get("expected_profit_usd")
+                if isinstance(details, dict)
+                else None,
+                "submit_edge": details.get("submit_edge") if isinstance(details, dict) else None,
+            }
+        )
+    evidence["checked_count"] = len(rows)
+    evidence["risky_count"] = len(risky)
+    evidence["risky"] = risky[:RECENT_ENTRY_SUBMIT_ECONOMICS_SAMPLE_LIMIT]
+    evidence["covered_count"] = len(covered)
+    evidence["covered_sample"] = covered[:RECENT_ENTRY_SUBMIT_ECONOMICS_SAMPLE_LIMIT]
+    evidence["restart_policy"] = (
+        "fail_closed_recent_entry_submit_requires_current_economics_and_certificate_proof"
+    )
+    return CheckResult(
+        "recent_entry_submit_economics",
+        not risky,
+        "recent ENTRY submits carry live economics and actionable-certificate proof"
+        if not risky
+        else "recent ENTRY submits include orders sent without live economics/certificate proof",
         evidence,
     )
 
@@ -3791,6 +3936,7 @@ def evaluate() -> dict[str, Any]:
         *_sidecar_heartbeat_checks(),
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
+        _recent_entry_submit_economics_check(),
         _live_actionable_certificate_semantics_check(),
         _live_money_certificate_parent_mode_check(),
         _open_entry_actionable_certificate_authority_check(rows),

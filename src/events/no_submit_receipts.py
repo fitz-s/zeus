@@ -300,6 +300,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # decided is first-class decision provenance, recoverable from the blob forever.
     if payload.get("submit_lane") is None:
         payload.pop("submit_lane", None)
+    if payload.get("min_entry_price") is None:
+        payload.pop("min_entry_price", None)
     if payload.get("min_expected_profit_usd") is None:
         payload.pop("min_expected_profit_usd", None)
     if payload.get("min_submit_edge_density") is None:

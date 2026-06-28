@@ -663,6 +663,9 @@ def _verify_pre_submit_revalidation_for_command(
     limit_price = _finite_float(pre_submit.get("limit_price"), "pre-submit limit_price")
     expected_edge = _finite_float(pre_submit.get("expected_edge"), "pre-submit expected_edge")
     size = _finite_float(pre_submit.get("size"), "pre-submit size")
+    min_entry_price = _finite_float(
+        pre_submit.get("min_entry_price"), "pre-submit min_entry_price"
+    )
     min_expected_profit_usd = _finite_float(
         pre_submit.get("min_expected_profit_usd"), "pre-submit min_expected_profit_usd"
     )
@@ -671,6 +674,10 @@ def _verify_pre_submit_revalidation_for_command(
     )
     if expected_edge <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation expected_edge must be positive")
+    if min_entry_price < 0.0:
+        raise CertificateVerificationError("pre-submit revalidation min_entry_price must be non-negative")
+    if limit_price <= min_entry_price + 1e-9:
+        raise CertificateVerificationError("pre-submit revalidation entry price below strategy floor")
     submit_edge = q_lcb - limit_price
     if submit_edge <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")

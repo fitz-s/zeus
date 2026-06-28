@@ -1063,6 +1063,7 @@ class ExecutionIntent:
     q_live: float | None = None
     q_lcb_5pct: float | None = None
     expected_edge: float | None = None
+    min_entry_price: float | None = None
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
     qkernel_execution_economics: Mapping[str, Any] | None = None
@@ -1770,6 +1771,7 @@ class FinalExecutionIntent:
     q_live: float | None = None
     q_lcb_5pct: float | None = None
     expected_edge: float | None = None
+    min_entry_price: float | None = None
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
     qkernel_execution_economics: Mapping[str, Any] | None = None
@@ -1797,6 +1799,7 @@ class FinalExecutionIntent:
         q_live: float | None = None,
         q_lcb_5pct: float | None = None,
         expected_edge: float | None = None,
+        min_entry_price: float | None = None,
         min_expected_profit_usd: float | None = None,
         min_submit_edge_density: float | None = None,
         qkernel_execution_economics: Mapping[str, Any] | None = None,
@@ -1845,6 +1848,7 @@ class FinalExecutionIntent:
             q_live=q_live,
             q_lcb_5pct=q_lcb_5pct,
             expected_edge=expected_edge,
+            min_entry_price=min_entry_price,
             min_expected_profit_usd=min_expected_profit_usd,
             min_submit_edge_density=min_submit_edge_density,
             qkernel_execution_economics=qkernel_execution_economics,

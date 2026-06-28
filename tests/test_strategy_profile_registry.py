@@ -282,9 +282,18 @@ def test_live_quality_floors_are_registry_backed() -> None:
     profile = sp.get("opening_inertia")
     assert profile.min_entry_price == pytest.approx(0.05)
     assert profile.min_strategy_notional_usd == pytest.approx(1.0)
-    assert profile.min_expected_profit_usd == pytest.approx(0.05)
-    assert profile.min_submit_edge_density == pytest.approx(0.02)
+    assert profile.min_expected_profit_usd == pytest.approx(1.0)
+    assert profile.min_submit_edge_density == pytest.approx(0.05)
     assert profile.allow_ultra_low_tail is False
+
+
+def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
+    """Fast-decay live entry profiles must not admit sub-dollar thin-edge churn."""
+
+    for strategy_key in ("center_buy", "opening_inertia", "imminent_open_capture"):
+        profile = sp.get(strategy_key)
+        assert profile.min_expected_profit_usd == pytest.approx(1.0)
+        assert profile.min_submit_edge_density == pytest.approx(0.05)
 
 
 def test_opening_inertia_supports_high_and_low_weather_metrics() -> None:

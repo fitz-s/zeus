@@ -53,6 +53,39 @@ _DEFAULT_IDEM_KEY = "a" * 32
 _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
 
 
+def _entry_submit_payload() -> dict:
+    return {
+        "execution_capability": {
+            "allowed": True,
+            "components": [
+                {
+                    "component": "entry_economics",
+                    "allowed": True,
+                    "details": {
+                        "q_live": 0.62,
+                        "q_lcb_5pct": 0.55,
+                        "expected_edge": 0.05,
+                        "limit_price": 0.50,
+                        "submit_edge": 0.05,
+                        "expected_profit_usd": 1.00,
+                        "min_entry_price": 0.05,
+                        "min_expected_profit_usd": 1.00,
+                        "submit_edge_density": 0.10,
+                        "min_submit_edge_density": 0.05,
+                        "shares": 20.0,
+                        "qkernel_side": "YES",
+                    },
+                },
+                {
+                    "component": "entry_actionable_certificate",
+                    "allowed": True,
+                    "details": {"certificate_id": "cert-recovery"},
+                },
+            ],
+        },
+    }
+
+
 def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
             decision_id="dec-001", idempotency_key=None,
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
@@ -237,8 +270,18 @@ def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):
     If venue_order_id provided, set it on the command row after advancing.
     """
     from src.state.venue_command_repo import append_event
-    append_event(conn, command_id=command_id, event_type="SUBMIT_REQUESTED",
-                 occurred_at="2026-04-26T00:01:00Z")
+    row = conn.execute(
+        "SELECT intent_kind FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    payload = _entry_submit_payload() if row is not None and row["intent_kind"] == "ENTRY" else None
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload=payload,
+    )
     if venue_order_id is not None:
         conn.execute(
             "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",

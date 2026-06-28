@@ -433,6 +433,7 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"q_lcb_5pct": 0.39, "limit_price": 0.40}, "positive submit q_lcb-minus-limit"),
         ({"expected_edge": 0.25}, "expected_edge exceeds"),
         ({"size": 0.0}, "positive size"),
+        ({"limit_price": 0.05}, "entry price below"),
         ({"min_expected_profit_usd": 10.0}, "expected profit below"),
         ({"min_submit_edge_density": 0.75}, "submit edge density below"),
         ({"expected_edge_source_certificate_hash": ""}, "expected_edge_source_certificate_hash"),
@@ -460,7 +461,7 @@ def test_pre_submit_revalidation_failures_block_command(override, message):
         )
 
 
-def test_pre_submit_rejects_lucknow_negative_edge_submit_split():
+def test_pre_submit_rejects_lucknow_lottery_price_submit_split():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -470,7 +471,7 @@ def test_pre_submit_rejects_lucknow_negative_edge_submit_split():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="positive submit q_lcb-minus-limit"):
+    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
@@ -668,6 +669,7 @@ def _pre_submit_payload(**overrides):
         "q_live": 0.70,
         "q_lcb_5pct": 0.60,
         "expected_edge": 0.10,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
         "would_cross_book": False,

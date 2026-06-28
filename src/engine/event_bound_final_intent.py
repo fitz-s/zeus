@@ -303,6 +303,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         q_live=final_payload.get("q_live"),
         q_lcb_5pct=final_payload.get("q_lcb_5pct"),
         expected_edge=final_payload.get("trade_score"),
+        min_entry_price=final_payload.get("min_entry_price"),
         min_expected_profit_usd=final_payload.get("min_expected_profit_usd"),
         min_submit_edge_density=final_payload.get("min_submit_edge_density"),
         qkernel_execution_economics=final_payload.get("qkernel_execution_economics"),

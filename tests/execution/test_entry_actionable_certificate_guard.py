@@ -60,6 +60,7 @@ def _valid_actionable_payload() -> dict:
         "p_fill_lcb": 0.1,
         "trade_score": 0.2,
         "action_score": 0.2,
+        "min_entry_price": 0.05,
         "selection_authority_applied": "qkernel_spine",
         "qkernel_execution_economics": {
             "source": "qkernel_spine",
@@ -114,6 +115,7 @@ def _submit_intent(**overrides) -> ExecutionIntent:
         "q_live": 0.7,
         "q_lcb_5pct": 0.6,
         "expected_edge": 0.2,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
         "qkernel_execution_economics": {

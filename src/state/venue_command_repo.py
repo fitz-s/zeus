@@ -150,6 +150,23 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
 _PROVENANCE_SOURCES = frozenset(
     {"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN", "OPERATOR", "FAKE_VENUE"}
 )
+_ENTRY_SUBMIT_REQUIRED_COMPONENTS = frozenset(
+    {"entry_economics", "entry_actionable_certificate"}
+)
+_ENTRY_SUBMIT_ECONOMICS_DETAIL_FIELDS = (
+    "q_live",
+    "q_lcb_5pct",
+    "expected_edge",
+    "min_entry_price",
+    "limit_price",
+    "submit_edge",
+    "expected_profit_usd",
+    "min_expected_profit_usd",
+    "submit_edge_density",
+    "min_submit_edge_density",
+    "shares",
+    "qkernel_side",
+)
 _PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
     "pre_submit_collateral_reservation_failed",
     # Legacy pre-fix commands could fail before SDK submission, remain in
@@ -1076,19 +1093,25 @@ def append_event(
     with _savepoint_atomic(conn):
         with _row_factory_as(conn, None):
             row = conn.execute(
-                "SELECT state FROM venue_commands WHERE command_id = ?",
+                "SELECT state, intent_kind FROM venue_commands WHERE command_id = ?",
                 (command_id,),
             ).fetchone()
         if row is None:
             raise ValueError(f"Unknown command_id: {command_id!r}")
 
         current_state = row[0]
+        intent_kind = row[1]
         key = (current_state, event_type)
         if key not in _TRANSITIONS:
             raise ValueError(
                 f"Illegal command-event grammar transition: "
                 f"state={current_state!r} event={event_type!r}"
             )
+        _validate_entry_submit_payload(
+            intent_kind=intent_kind,
+            event_type=event_type,
+            payload=payload,
+        )
         _validate_review_clearance_payload(
             conn=conn,
             current_state=current_state,
@@ -1157,6 +1180,55 @@ def append_event(
             release_exit_mutex_for_command_state(conn, command_id, state_after)
 
     return event_id
+
+
+def _validate_entry_submit_payload(
+    *,
+    intent_kind: str,
+    event_type: str,
+    payload: Optional[dict],
+) -> None:
+    if intent_kind != "ENTRY" or event_type != "SUBMIT_REQUESTED":
+        return
+    if not isinstance(payload, dict):
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires execution_capability payload")
+    capability = payload.get("execution_capability")
+    if not isinstance(capability, dict):
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires execution_capability")
+    if capability.get("allowed") is not True:
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires allowed execution_capability")
+    components = capability.get("components")
+    if not isinstance(components, list):
+        raise ValueError("ENTRY SUBMIT_REQUESTED requires execution_capability.components")
+    by_name = {
+        str(component.get("component") or ""): component
+        for component in components
+        if isinstance(component, dict)
+    }
+    missing = sorted(_ENTRY_SUBMIT_REQUIRED_COMPONENTS.difference(by_name))
+    if missing:
+        raise ValueError(
+            "ENTRY SUBMIT_REQUESTED missing live submit proof components: "
+            + ",".join(missing)
+        )
+    for name in sorted(_ENTRY_SUBMIT_REQUIRED_COMPONENTS):
+        component = by_name[name]
+        if component.get("allowed") is not True:
+            raise ValueError(f"ENTRY SUBMIT_REQUESTED {name} component is not allowed")
+    economics = by_name["entry_economics"]
+    details = economics.get("details")
+    if not isinstance(details, dict):
+        raise ValueError("ENTRY SUBMIT_REQUESTED entry_economics requires details")
+    detail_missing = [
+        field
+        for field in _ENTRY_SUBMIT_ECONOMICS_DETAIL_FIELDS
+        if details.get(field) in (None, "")
+    ]
+    if detail_missing:
+        raise ValueError(
+            "ENTRY SUBMIT_REQUESTED entry_economics missing details: "
+            + ",".join(detail_missing)
+        )
 
 
 def _validate_review_clearance_payload(

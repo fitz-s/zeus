@@ -197,6 +197,7 @@ def build_final_intent_certificate_from_actionable(
         "q_lcb_5pct": action.get("q_lcb_5pct"),
         "trade_score": action.get("trade_score"),
         "action_score": action.get("action_score"),
+        "min_entry_price": action.get("min_entry_price"),
         "min_expected_profit_usd": action.get("min_expected_profit_usd"),
         "min_submit_edge_density": action.get("min_submit_edge_density"),
         "c_fee_adjusted": action.get("c_fee_adjusted"),

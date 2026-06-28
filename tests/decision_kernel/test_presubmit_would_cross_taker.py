@@ -90,6 +90,7 @@ def _maker_pre_submit(**overrides) -> dict:
         "q_live": 0.70,
         "q_lcb_5pct": 0.60,
         "expected_edge": 0.10,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
         "expected_edge_source_certificate_hash": "actionable-hash-1",
@@ -139,6 +140,7 @@ def _taker_pre_submit(**overrides) -> dict:
         "q_live": 0.75,
         "q_lcb_5pct": 0.70,
         "expected_edge": 0.05,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
         "expected_edge_source_certificate_hash": "actionable-hash-1",
@@ -301,7 +303,7 @@ class TestLayer2VerifyPreSubmitForCommand:
 
     def test_negative_submit_edge_raises(self):
         ps = _maker_pre_submit(q_live=0.0054, q_lcb_5pct=0.003, limit_price=0.006)
-        with pytest.raises(CertificateVerificationError, match="q_lcb-minus-limit"):
+        with pytest.raises(CertificateVerificationError, match="entry price below strategy floor"):
             self._call(ps)
 
     def test_micro_edge_density_raises(self):

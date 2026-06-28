@@ -911,6 +911,7 @@ def _actionable_payload() -> dict:
         "p_fill_lcb": 0.1,
         "trade_score": 0.2,
         "action_score": 0.2,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
         "selection_authority_applied": "qkernel_spine",
@@ -1004,6 +1005,10 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
             "action_score",
             final_intent.payload.get("action_score", 0.2),
         ),
+        "min_entry_price": command_payload.get(
+            "min_entry_price",
+            final_intent.payload.get("min_entry_price", 0.05),
+        ),
         "min_expected_profit_usd": command_payload.get(
             "min_expected_profit_usd",
             0.0,
@@ -1088,6 +1093,7 @@ def _final_intent_payload(actionable) -> dict:
         "q_lcb_5pct": payload.get("q_lcb_5pct"),
         "trade_score": payload.get("trade_score"),
         "action_score": payload.get("action_score"),
+        "min_entry_price": payload.get("min_entry_price"),
         "min_expected_profit_usd": payload.get("min_expected_profit_usd"),
         "min_submit_edge_density": payload.get("min_submit_edge_density"),
         "qkernel_execution_economics": payload.get("qkernel_execution_economics"),

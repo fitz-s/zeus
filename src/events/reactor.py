@@ -489,6 +489,7 @@ class EventSubmissionReceipt:
     # can verify the actual submitted order size/price clears the strategy's
     # minimum executable profit and edge-density bar. None on legacy receipts;
     # omit-when-None in receipt_json keeps existing hashes stable.
+    min_entry_price: float | None = None
     min_expected_profit_usd: float | None = None
     min_submit_edge_density: float | None = None
     # Telemetry-only Opportunity Book selector evidence. Omitted from receipt_json
