@@ -1503,6 +1503,34 @@ def test_neg_risk_passthrough_v2_preserves_snapshot_value(tmp_path):
     assert result.envelope.neg_risk is True
 
 
+def test_submit_rejects_unbound_pre_submit_funder_before_sdk_contact(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    pre_submit_placeholder = envelope.with_updates(funder_address="UNRESOLVED_PRE_SUBMIT_FUNDER")
+
+    result = adapter.submit(pre_submit_placeholder)
+
+    assert result.status == "rejected"
+    assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "missing pre-bound funder_address" in str(result.envelope.error_message)
+    assert not fake.calls
+
+
+def test_submit_rejects_mismatched_pre_submit_funder_before_sdk_contact(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    mismatched = envelope.with_updates(funder_address="0xotherfunder")
+
+    result = adapter.submit(mismatched)
+
+    assert result.status == "rejected"
+    assert result.envelope.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "does not match adapter funder_address" in str(result.envelope.error_message)
+    assert not fake.calls
+
+
 def test_legacy_sell_compatibility_hashes_final_side_and_size(tmp_path):
     # AMD-T1F-2: T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK makes placeholder→SDK
     # contact impossible by design. This test now inspects the envelope's hash

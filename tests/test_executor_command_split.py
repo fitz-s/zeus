@@ -141,6 +141,63 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
     return snapshot_id
 
 
+def test_pre_submit_envelope_uses_canonical_funder_identity(mem_conn, monkeypatch):
+    from src.execution.executor import _build_pre_submit_envelope
+
+    token_id = "token-canonical-funder"
+    snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+    monkeypatch.delenv("POLYMARKET_FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYMARKET_PROXY_ADDRESS", raising=False)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0xcanonicalfunder",
+    )
+
+    envelope = _build_pre_submit_envelope(
+        mem_conn,
+        command_id="cmd-canonical-funder",
+        snapshot_id=snapshot_id,
+        token_id=token_id,
+        side="BUY",
+        price=0.56,
+        size=10.0,
+        order_type="GTC",
+        post_only=False,
+        captured_at=_NOW.isoformat(),
+    )
+
+    assert envelope is not None
+    assert envelope.funder_address == "0xcanonicalfunder"
+
+
+def test_pre_submit_envelope_fails_closed_without_canonical_funder(mem_conn, monkeypatch):
+    from src.execution.executor import (
+        PreSubmitIdentityBindingError,
+        _build_pre_submit_envelope,
+    )
+
+    token_id = "token-missing-funder"
+    snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: (_ for _ in ()).throw(RuntimeError("missing keychain funder")),
+    )
+
+    with pytest.raises(PreSubmitIdentityBindingError, match="missing keychain funder"):
+        _build_pre_submit_envelope(
+            mem_conn,
+            command_id="cmd-missing-funder",
+            snapshot_id=snapshot_id,
+            token_id=token_id,
+            side="BUY",
+            price=0.56,
+            size=10.0,
+            order_type="GTC",
+            post_only=False,
+            captured_at=_NOW.isoformat(),
+        )
+
+
 def _ensure_envelope(
     conn,
     *,
@@ -1809,12 +1866,32 @@ class TestLiveOrderCommandSplit:
             assert retry_result.venue_ack_time == submit_acked["occurred_at"]
             assert len(command_ids_seen) == 1
 
-    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn):
+    def test_matched_submit_records_fill_truth_instead_of_resting_ack(self, mem_conn, monkeypatch):
         """A matched FOK submit response is a fill boundary, not a resting ACK."""
+        import src.execution.executor as executor_module
         from src.execution.executor import _live_order
         from src.state.venue_command_repo import get_command, list_events
 
-        intent = _make_entry_intent(mem_conn, limit_price=0.34)
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        certificate_hash = "d" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.34,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
         command_ids_seen: list[str] = []
 
         import src.state.venue_command_repo as _repo
@@ -1906,6 +1983,95 @@ class TestLiveOrderCommandSplit:
             "fill_price": "0.34",
             "tx_hash": "0xhash-matched",
         }
+
+    def test_matched_submit_without_fill_evidence_requires_review(self, mem_conn, monkeypatch):
+        """Matched venue status without fill size/price/trade proof is unresolved."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        certificate_hash = "e" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.34,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-matched-missing-fill",
+                    status="matched",
+                    success=True,
+                )
+            )
+            mock_inst.get_order.return_value = {
+                "id": "ord-matched-missing-fill",
+                "status": "MATCHED",
+            }
+
+            result = _live_order(
+                trade_id="trd-matched-missing-fill",
+                intent=intent,
+                shares=5.0,
+                conn=mem_conn,
+                decision_id="dec-matched-missing-fill",
+            )
+
+        assert result.status == "unknown_side_effect"
+        assert result.reason == "matched_submit_missing_fill_size"
+        assert result.command_state == "REVIEW_REQUIRED"
+        command_id = command_ids_seen[0]
+        cmd = get_command(mem_conn, command_id)
+        assert cmd is not None
+        assert cmd["state"] == "REVIEW_REQUIRED"
+        assert cmd["venue_order_id"] == "ord-matched-missing-fill"
+        event_types = [event["event_type"] for event in list_events(mem_conn, command_id)]
+        assert "REVIEW_REQUIRED" in event_types
+        assert "SUBMIT_ACKED" not in event_types
+        assert (
+            mem_conn.execute(
+                "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            mem_conn.execute(
+                "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
     def test_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key: place_limit_order must NOT be called.

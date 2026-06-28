@@ -527,10 +527,29 @@ class PolymarketV2Adapter:
             captured_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def _bind_runtime_submission_envelope(
+        self,
+        envelope: VenueSubmissionEnvelope,
+    ) -> VenueSubmissionEnvelope:
+        envelope_funder = str(envelope.funder_address or "").strip()
+        adapter_funder = str(self.funder_address or "").strip()
+        if envelope_funder in {"", "UNRESOLVED_PRE_SUBMIT_FUNDER"}:
+            raise ValueError("submission envelope missing pre-bound funder_address")
+        if envelope_funder.lower() != adapter_funder.lower():
+            raise ValueError(
+                "submission envelope funder_address does not match adapter funder_address"
+            )
+        return envelope.with_updates(
+            sdk_version=self.sdk_version,
+            host=self.host,
+            chain_id=self.chain_id,
+        )
+
     def submit(self, envelope: VenueSubmissionEnvelope) -> SubmitResult:
         # T1F-ADAPTER-ASSERTS-LIVE-BOUND-BEFORE-SDK: reject placeholder envelopes
         # before any SDK call.  Mirror: src/data/polymarket_client.py:407-424.
         try:
+            envelope = self._bind_runtime_submission_envelope(envelope)
             envelope.assert_live_submit_bound()
         except ValueError as exc:
             _cnt_inc("placeholder_envelope_blocked_total")

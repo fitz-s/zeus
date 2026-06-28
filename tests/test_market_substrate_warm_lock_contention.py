@@ -189,11 +189,27 @@ def test_snapshot_persist_context_wraps_insert_and_commit(monkeypatch):
         },
     )
 
+    class _Clob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": outcome["token_id"], "outcome": "YES"},
+                    {"token_id": outcome["no_token_id"], "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "1",
+                "neg_risk": False,
+            }
+
     ms.capture_executable_market_snapshot(
         conn,
         market=market,
         decision=decision,
-        clob=object(),
+        clob=_Clob(),
         captured_at=_NOW,
         scan_authority="VERIFIED",
         prefetched_orderbook=prefetched_book,
@@ -564,15 +580,12 @@ def test_substrate_clob_timeout_is_short_and_independent_of_discovery(monkeypatc
     """
 
     import src.data.substrate_observer as substrate_observer
-    import src.main as main_module
 
     monkeypatch.setenv("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "9.0")
     monkeypatch.delenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", raising=False)
 
     assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(4.0)
-    assert main_module._substrate_clob_timeout_seconds() == pytest.approx(4.0)
 
     monkeypatch.setenv("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "2.25")
 
     assert substrate_observer._substrate_clob_timeout_seconds() == pytest.approx(2.25)
-    assert main_module._substrate_clob_timeout_seconds() == pytest.approx(2.25)

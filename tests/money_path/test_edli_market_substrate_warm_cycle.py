@@ -2,10 +2,10 @@
 # Last reused/audited: 2026-06-19
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
-# Authority basis: src/main.py:_edli_event_reactor_cycle (inline _refresh_pending_family_snapshots
+# Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
 #   coupling) + _edli_bankroll_warm_cycle precedent (#45 follow-up, the decoupled-warm pattern) +
-#   src/main.py:_refresh_pending_family_snapshots (universe Gamma scan + per-token CLOB capture,
-#   measured 76s cold for _get_active_events alone).
+#   src/data/substrate_observer.py:_refresh_pending_family_snapshots (targeted family topology +
+#   per-token CLOB capture).
 """Relationship test for the dedicated EDLI market-substrate warm cycle (throughput).
 
 Cross-module invariant under test (Fitz methodology — test the boundary between the
@@ -135,10 +135,6 @@ def _reset_substrate_refresh_cursor():
     cursor wraps ``% n_families`` and every family is swept within one period); the
     reset is purely test determinism.
     """
-    saved = main_module._SUBSTRATE_REFRESH_CURSOR
-    saved_gamma = main_module._SUBSTRATE_GAMMA_REFRESH_CURSOR
-    main_module._SUBSTRATE_REFRESH_CURSOR = 0
-    main_module._SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
     saved_lifted = substrate_observer._SUBSTRATE_REFRESH_CURSOR
     substrate_observer._SUBSTRATE_REFRESH_CURSOR = 0
     saved_lifted_priority = substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR
@@ -148,8 +144,6 @@ def _reset_substrate_refresh_cursor():
     try:
         yield
     finally:
-        main_module._SUBSTRATE_REFRESH_CURSOR = saved
-        main_module._SUBSTRATE_GAMMA_REFRESH_CURSOR = saved_gamma
         substrate_observer._SUBSTRATE_REFRESH_CURSOR = saved_lifted
         substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = saved_lifted_priority
         substrate_observer._SUBSTRATE_GAMMA_REFRESH_CURSOR = saved_lifted_gamma
@@ -308,7 +302,6 @@ def test_continuous_redecision_confirms_money_path_before_emit():
 
     screen_src = inspect.getsource(main_module._edli_continuous_redecision_screen_cycle)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
-    retry_src = inspect.getsource(main_module._edli_confirmation_refresh_lock_retry_delays)
 
     assert "probe_acted_state = dict(_edli_redecision_acted_state)" in screen_src
     assert "acted_state=probe_acted_state" in screen_src
@@ -320,11 +313,11 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)" in screen_src
     assert "open_rest_condition_scope," in screen_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
-    assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS" in retry_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
     assert "_market_substrate_refresh_lock" not in confirm_src
-    assert "include_pending_families=False" in confirm_src
-    assert "extra_priority_families=clean_families" in confirm_src
+    assert "mark_money_path_substrate_priority(" in confirm_src
+    assert "_refresh_pending_family_snapshots(" not in confirm_src
+    assert "READ_FILTER_REQUIRED" in confirm_src
     assert "_edli_confirmation_refresh_needs_scoped_freshness_filter(confirm_refresh_summary)" in screen_src
     assert "_edli_families_with_fresh_scoped_executable_substrate(" in screen_src
     assert "confirmed_entry_scope &= fresh_entry_scope" in screen_src
@@ -341,22 +334,19 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
     trade-DB coordinator lease around each snapshot persist+commit.
     """
 
-    decision_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
     observer_warm_src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
     observer_discovery_src = inspect.getsource(substrate_observer._market_discovery_cycle)
 
-    for src in (
-        decision_src,
-        confirm_src,
-        observer_warm_src,
-        observer_discovery_src,
-    ):
+    for src in (observer_warm_src, observer_discovery_src):
         assert "acquire_lock(\"market_substrate_refresh\")" in src
+    assert "acquire_lock(\"market_substrate_refresh\")" not in confirm_src
+    assert "snapshot_write_context_factory=" not in confirm_src
+    assert not hasattr(main_module, "_snapshot_trade_write_context_factory")
+
+    assert not hasattr(main_module, "_refresh_pending_family_snapshots")
 
     for src in (
-        inspect.getsource(main_module._refresh_pending_family_snapshots),
-        decision_src,
         inspect.getsource(substrate_observer._refresh_pending_family_snapshots),
         observer_discovery_src,
     ):
@@ -365,20 +355,11 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
         assert "refresh_executable_market_substrate_snapshots(" in src
 
     for src in (
-        inspect.getsource(main_module._refresh_pending_family_snapshots),
-        decision_src,
-    ):
-        assert "_snapshot_trade_write_context_factory(" in src
-
-    for src in (
         inspect.getsource(substrate_observer._refresh_pending_family_snapshots),
         observer_discovery_src,
     ):
         assert "_substrate_snapshot_trade_write_context_factory(" in src
 
-    assert "capture_reserve_seconds=snapshot_reserve_s" in inspect.getsource(
-        main_module._refresh_pending_family_snapshots
-    )
     assert "capture_reserve_seconds=snapshot_reserve_s" in inspect.getsource(
         substrate_observer._refresh_pending_family_snapshots
     )
@@ -392,18 +373,16 @@ def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
     assert "family_snapshot_refresher=_reactor_family_snapshot_refresher" in cycle_src
 
 
-def test_decision_refresh_lock_busy_does_not_consume_quota():
-    """A shared-lock miss is not a refresh attempt and must not spend the one-family quota."""
+def test_decision_refresher_is_marker_only_and_never_writes_snapshots():
+    """Decision handling must not race the sidecar for executable-snapshot writes."""
 
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
-    assert "refresh_window_started: float | None = None" in refresh_src
-    assert "if refresh_window_started is None:" in refresh_src
-    assert "process_lock_deadline = time.monotonic() + call_budget_s" in refresh_src
-    assert "time.sleep(" in refresh_src
-    quota_pos = refresh_src.index("refresh_attempts += 1")
-    process_lock_pos = refresh_src.index("if not substrate_process_acquired:")
-    write_conn_pos = refresh_src.index("write_conn = get_trade_connection")
-    assert process_lock_pos < quota_pos < write_conn_pos
+    assert "mark_money_path_substrate_priority(" in refresh_src
+    assert "refresh_executable_market_substrate_snapshots(" not in refresh_src
+    assert "get_trade_connection" not in refresh_src
+    assert "PolymarketClient" not in refresh_src
+    assert "acquire_lock(\"market_substrate_refresh\")" not in refresh_src
+    assert "return False" in refresh_src
 
 
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
@@ -424,11 +403,12 @@ def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     assert "with ThreadPoolExecutor(" not in refresh_src
 
 
-def test_targeted_decision_refresh_defaults_cover_multiple_blocked_families():
+def test_targeted_decision_refresh_has_no_inline_quota_knobs():
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
 
-    assert '"reactor_decision_refresh_cycle_budget_seconds",\n        10.0,' in refresh_src
-    assert '"reactor_decision_refresh_max_per_cycle",\n        4,' in refresh_src
+    assert "reactor_decision_refresh_cycle_budget_seconds" not in refresh_src
+    assert "reactor_decision_refresh_max_per_cycle" not in refresh_src
+    assert "ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS" not in refresh_src
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
@@ -446,142 +426,48 @@ def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
     }
 
 
-def test_continuous_redecision_confirm_refresh_retries_locked_summary(monkeypatch):
-    """A transient trade-DB lock in confirmation refresh must not become a false
-    no-evidence tick when a fresh connection retry can still capture prices."""
+def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(monkeypatch):
+    """The live daemon must not race the substrate sidecar for snapshot writes."""
 
-    import src.data.dual_run_lock as dual_run_lock
-    import src.state.db as state_db
+    import src.data.substrate_priority as substrate_priority
 
-    class _TrackedConn(_FakeConn):
-        def __init__(self, name: str):
-            self.name = name
-            self.closed = False
+    marked: list[dict] = []
 
-        def close(self):
-            self.closed = True
+    def _mark(**kwargs):
+        marked.append(kwargs)
 
-    worlds: list[_TrackedConn] = []
-    forecasts: list[_TrackedConn] = []
-
-    def _world_conn():
-        conn = _TrackedConn(f"world-{len(worlds)}")
-        worlds.append(conn)
-        return conn
-
-    def _forecast_conn():
-        conn = _TrackedConn(f"forecasts-{len(forecasts)}")
-        forecasts.append(conn)
-        return conn
-
-    summaries = [
-        {
-            "status": "refreshed",
-            "executable_substrate_coverage_status": "NONE",
-            "failed": 1,
-            "failure_samples": [{"condition_id": "0xlock", "error": "database is locked"}],
-        },
-        {
-            "status": "refreshed",
-            "executable_substrate_coverage_status": "FULL",
-            "failed": 0,
-            "inserted": 1,
-        },
-    ]
-    calls: list[dict] = []
-    sleeps: list[float] = []
-
-    def _refresh(*_args, **kwargs):
-        calls.append(kwargs)
-        return summaries.pop(0)
-
-    class _AlwaysAcquiredLock:
-        def __enter__(self):
-            return True
-
-        def __exit__(self, *_args):
-            pass
-
-    monkeypatch.setattr(
-        dual_run_lock,
-        "acquire_lock",
-        lambda name: _AlwaysAcquiredLock(),
-    )
-    monkeypatch.setattr(state_db, "get_world_connection", _world_conn)
-    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _forecast_conn)
-    monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _refresh)
-    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
-    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS", "0.01")
+    monkeypatch.setattr(substrate_priority, "mark_money_path_substrate_priority", _mark)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _delay: (_ for _ in ()).throw(AssertionError("no retry sleeps")))
 
     result = main_module._edli_refresh_continuous_money_path_families(
         {("Paris", "2026-06-20", "low")},
         now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
+        priority_condition_ids={"cond-1", "cond-2"},
     )
 
-    assert result["executable_substrate_coverage_status"] == "FULL"
-    assert len(calls) == 2
-    assert sleeps == [0.01]
-    assert len(worlds) == 2 and all(conn.closed for conn in worlds)
-    assert len(forecasts) == 2 and all(conn.closed for conn in forecasts)
-
-
-def test_continuous_redecision_confirm_refresh_waits_for_cross_process_substrate_lock(monkeypatch):
-    """A sidecar-held substrate lock must not erase this live money-path tick.
-
-    The live failure on 2026-06-26 was not a math/admission no-trade: the
-    confirmation refresh marked priority, then immediately returned
-    skipped_cross_process_lock_busy because the sidecar had started seconds
-    earlier. Live targeted refresh should wait briefly, acquire the lock, and
-    produce fresh substrate for the normal decision gates.
-    """
-
-    import src.data.dual_run_lock as dual_run_lock
-    import src.state.db as state_db
-
-    class _ProcessLock:
-        def __init__(self, acquired: bool):
-            self.acquired = acquired
-            self.closed = False
-
-        def __enter__(self):
-            return self.acquired
-
-        def __exit__(self, *_args):
-            self.closed = True
-
-    locks = [_ProcessLock(False), _ProcessLock(True)]
-    sleeps: list[float] = []
-    refresh_calls: list[dict] = []
-
-    def _acquire_lock(name: str):
-        assert name == "market_substrate_refresh"
-        return locks.pop(0)
-
-    def _refresh(*_args, **kwargs):
-        refresh_calls.append(kwargs)
-        return {
-            "status": "refreshed",
-            "executable_substrate_coverage_status": "FULL",
-            "inserted": 1,
-            "failed": 0,
+    assert result["status"] == "priority_marked"
+    assert result["executable_substrate_coverage_status"] == "READ_FILTER_REQUIRED"
+    assert result["families_requested"] == 1
+    assert result["priority_condition_count"] == 2
+    assert marked == [
+        {
+            "reason": "continuous_redecision_confirm_refresh",
+            "ttl_seconds": 35.0,
+            "families": {("Paris", "2026-06-20", "low")},
         }
+    ]
 
-    monkeypatch.setattr(dual_run_lock, "acquire_lock", _acquire_lock)
-    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
-    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _FakeConn())
-    monkeypatch.setattr(main_module, "_refresh_pending_family_snapshots", _refresh)
-    monkeypatch.setattr(main_module.time, "sleep", lambda delay: sleeps.append(delay))
-    monkeypatch.setenv("ZEUS_REDECISION_CONFIRM_REFRESH_PROCESS_LOCK_RETRY_SECONDS", "0.01")
 
-    result = main_module._edli_refresh_continuous_money_path_families(
-        {("Paris", "2026-06-20", "low")},
-        now_utc=datetime(2026, 6, 19, 12, 0, tzinfo=timezone.utc),
-    )
+def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_process_lock():
+    """Sidecar ownership is asynchronous; main only marks priority and filters reads."""
 
-    assert result["executable_substrate_coverage_status"] == "FULL"
-    assert sleeps == [0.01]
-    assert len(refresh_calls) == 1
-    assert locks == []
+    confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
+    assert "src.data.dual_run_lock" not in confirm_src
+    assert "acquire_lock(\"market_substrate_refresh\")" not in confirm_src
+    assert "get_world_connection" not in confirm_src
+    assert "get_forecasts_connection_read_only" not in confirm_src
+    assert "ZEUS_REDECISION_CONFIRM_REFRESH_PROCESS_LOCK_RETRY_SECONDS" not in confirm_src
+    assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_RETRY_SECONDS" not in confirm_src
 
 
 def test_continuous_redecision_confirm_refresh_unavailable_on_locked_or_partial_summary():
@@ -1094,7 +980,7 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert "clear_money_path_substrate_priority(" in cycle_src
     assert "mark_money_path_substrate_priority(" in refresh_src
     assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
-    assert "families=[(city, target_date, metric)]" in refresh_src
+    assert "families=[family]" in refresh_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
     assert "families=clean_families" in confirm_src
@@ -2532,7 +2418,7 @@ def _pending_family_conn(event_id: str, city: str, target_date: str, metric: str
     return conn
 
 
-def _venue_close_relationship_harness(monkeypatch, *, refresh_module=main_module):
+def _venue_close_relationship_harness(monkeypatch, *, refresh_module=substrate_observer):
     """Wire a single Hong Kong / 2026-06-07 pending family through the warm
     refresh with all venue-I/O mocked. Returns a callable
     ``run(now_utc) -> (result, submitted)`` so a single fixture can be driven at
@@ -2569,11 +2455,11 @@ def _venue_close_relationship_harness(monkeypatch, *, refresh_module=main_module
     import src.data.market_scanner as scanner
     import src.data.market_topology_rows as market_topology_rows
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as topology_rows_module
     import src.state.db as state_db
 
     monkeypatch.setattr(
-        adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
+        topology_rows_module, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
     )
     monkeypatch.setattr(
         market_topology_rows,
@@ -2745,13 +2631,13 @@ def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypat
 
     import src.data.market_scanner as scanner
     import src.data.polymarket_client as polymarket_client
-    import src.engine.event_reactor_adapter as adapter
+    import src.data.market_topology_rows as market_topology_rows
     import src.state.db as state_db
 
     submitted: list[list[dict]] = []
 
     monkeypatch.setattr(
-        adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
+        market_topology_rows, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
     )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _FakeConn())
@@ -2773,7 +2659,7 @@ def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypat
     # Decision clock well past the F1 close — a RESOLVABLE family here would skip,
     # but the unresolvable city must be KEPT (fail-soft).
     closed_now = datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc)
-    result = main_module._refresh_pending_family_snapshots(
+    result = substrate_observer._refresh_pending_family_snapshots(
         world_conn, forecasts_conn, now_utc=closed_now
     )
 

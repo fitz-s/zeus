@@ -1605,14 +1605,15 @@ def test_prefetch_full_family_can_use_smaller_primary_chunk(monkeypatch):
     assert sorted(books) == [f"yes-{i}" for i in range(6)]
 
 
-def test_prefetch_retry_chunk_falls_back_to_bounded_singular_get(monkeypatch):
-    """If POST /books is unhealthy even for tiny chunks, fetch a bounded priority
-    prefix with singular /book instead of returning an empty price surface."""
+def test_prefetch_retry_chunk_defers_without_singular_get(monkeypatch):
+    """If POST /books is unhealthy even for tiny chunks, defer price capture.
+
+    The substrate sidecar owns retry cadence; batch failure must not turn into
+    serial per-token GET /book work inside the live refresh loop.
+    """
 
     monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
     monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS", "3")
-
     def _cand(i: int) -> tuple:
         return (
             0,
@@ -1637,18 +1638,16 @@ def test_prefetch_retry_chunk_falls_back_to_bounded_singular_get(monkeypatch):
 
     books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
 
-    assert singular_calls == ["yes-0", "yes-1", "yes-2"]
-    assert sorted(books) == ["yes-0", "yes-1", "yes-2"]
+    assert singular_calls == []
+    assert books == {}
 
 
-def test_prefetch_singular_fallback_stops_after_default_failure_cap(monkeypatch):
-    """If both /books and /book are timing out, stop after a tiny failure sample."""
+def test_prefetch_batch_failure_never_samples_singular_get(monkeypatch):
+    """Batch failure must not probe per-token /book as a hidden fallback."""
 
     monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_CHUNK", 6)
     monkeypatch.setattr(ms, "_BATCH_ORDERBOOK_RETRY_CHUNK", 2)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MAX_RETRY_CHUNKS", "3")
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS", "4")
-
     def _cand(i: int) -> tuple:
         return (
             0,
@@ -1673,7 +1672,7 @@ def test_prefetch_singular_fallback_stops_after_default_failure_cap(monkeypatch)
 
     books = ms._prefetch_selected_orderbooks(_Clob(), candidates, deadline=None)
 
-    assert singular_calls == ["yes-0", "yes-1"]
+    assert singular_calls == []
     assert books == {}
 
 
@@ -2147,15 +2146,13 @@ def test_large_full_family_refresh_fills_priority_books_from_direct_clob(monkeyp
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
-def test_priority_full_family_refresh_singular_fallback_covers_both_sides(monkeypatch):
-    """Priority held/rest conditions must complete YES+NO even when batch /books fails."""
+def test_priority_full_family_refresh_defers_when_batch_books_fail(monkeypatch):
+    """Priority held/rest conditions do not use per-token GET fallback."""
 
     monkeypatch.setenv(
         "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
         "2",
     )
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS", "1")
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES", "1")
     conn = _make_in_memory_trade_db()
     priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
     sibling_market = _make_market("Seoul", 2, metric="lowest", target_date="2026-05-25")
@@ -2196,23 +2193,21 @@ def test_priority_full_family_refresh_singular_fallback_covers_both_sides(monkey
         )
 
     assert batch_calls == [expected_tokens]
-    assert singular_calls == expected_tokens
-    assert captured_books == expected_tokens
-    assert summary["attempted"] == 2
-    assert summary["inserted"] == 2
-    assert summary["prefetch_missing_skipped"] == 2
+    assert singular_calls == []
+    assert captured_books == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] >= 2
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
-def test_small_priority_refresh_uses_priority_fallback_caps(monkeypatch):
-    """Money-path priority conditions do not lose fallback coverage in small refreshes."""
+def test_small_priority_refresh_defers_without_per_token_book_reads(monkeypatch):
+    """Money-path priority conditions wait for batch price evidence."""
 
     monkeypatch.setenv(
         "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
         "10",
     )
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS", "1")
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES", "1")
     conn = _make_in_memory_trade_db()
     priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
     priority_outcome = priority_market["outcomes"][0]
@@ -2252,24 +2247,22 @@ def test_small_priority_refresh_uses_priority_fallback_caps(monkeypatch):
         )
 
     assert batch_calls == [expected_tokens]
-    assert singular_calls == expected_tokens
-    assert captured_books == expected_tokens
-    assert summary["attempted"] == 2
-    assert summary["inserted"] == 2
-    assert summary["prefetch_missing_skipped"] == 0
+    assert singular_calls == []
+    assert captured_books == []
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["prefetch_missing_skipped"] == 2
     assert summary["direct_clob_prefetch_small_family_enabled"] == 0
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
-def test_priority_refresh_fills_partial_batch_misses_with_singular_fallback(monkeypatch):
-    """Partial /books responses must still complete the priority condition sides."""
+def test_priority_refresh_defers_partial_batch_misses(monkeypatch):
+    """Partial /books responses capture only priced sides; missing sides retry later."""
 
     monkeypatch.setenv(
         "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
         "10",
     )
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS", "1")
-    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES", "1")
     conn = _make_in_memory_trade_db()
     priority_market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
     priority_outcome = priority_market["outcomes"][0]
@@ -2314,11 +2307,11 @@ def test_priority_refresh_fills_partial_batch_misses_with_singular_fallback(monk
             priority_condition_ids={priority_outcome["condition_id"]},
         )
 
-    assert singular_calls == [expected_tokens[1]]
-    assert captured_books == expected_tokens
-    assert summary["attempted"] == 2
-    assert summary["inserted"] == 2
-    assert summary["prefetch_missing_skipped"] == 0
+    assert singular_calls == []
+    assert captured_books == [expected_tokens[0]]
+    assert summary["attempted"] == 1
+    assert summary["inserted"] == 1
+    assert summary["prefetch_missing_skipped"] == 1
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
@@ -2737,10 +2730,9 @@ def test_illiquid_identity_capture_skips_fee_rate_http():
     assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
 
 
-def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
-    """Background substrate identity rows should not spend one /markets HTTP per bin."""
+def test_substrate_identity_capture_requires_real_clob_market_info(monkeypatch):
+    """Background substrate identity rows must be backed by real CLOB metadata."""
 
-    monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
     condition_id = "0x" + "4" * 64
     yes_token = "0x" + "5" * 64
     no_token = "0x" + "6" * 64
@@ -2780,8 +2772,24 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
     )
 
     class LiquidSubstrateClob:
+        def __init__(self) -> None:
+            self.market_info_calls: list[str] = []
+
         def get_clob_market_info(self, _condition_id: str) -> dict:
-            raise AssertionError("substrate identity capture must not fetch /markets")
+            self.market_info_calls.append(_condition_id)
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": yes_token, "outcome": "YES"},
+                    {"token_id": no_token, "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
 
         def get_orderbook_snapshot(self, _token_id: str) -> dict:
             return {
@@ -2797,6 +2805,7 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
             raise AssertionError("substrate identity capture must not fetch /fee-rate")
 
     captured = []
+    clob = LiquidSubstrateClob()
     with (
         patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
         patch("src.data.market_scanner._write_book_hash_transition"),
@@ -2805,12 +2814,13 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
             _make_in_memory_trade_db(),
             market=market,
             decision=decision,
-            clob=LiquidSubstrateClob(),
+            clob=clob,
             captured_at=_NOW,
             scan_authority="VERIFIED",
             tolerate_missing_book=True,
         )
 
+    assert clob.market_info_calls == [condition_id]
     assert len(captured) == 1
     assert captured[0].tradeability_status.executable_allowed is True
     assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
@@ -2819,10 +2829,9 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
     assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
 
 
-def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
+def test_substrate_identity_capture_uses_contract_fee_without_fee_rate_http(monkeypatch):
     """Background substrate refresh should not fetch fee rate for every token."""
 
-    monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
     condition_id = "0x" + "7" * 64
     yes_token = "0x" + "8" * 64
     no_token = "0x" + "9" * 64
@@ -2860,9 +2869,23 @@ def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
     class FamilyFeeClob:
         def __init__(self) -> None:
             self.fee_tokens: list[str] = []
+            self.market_info_calls: list[str] = []
 
         def get_clob_market_info(self, _condition_id: str) -> dict:
-            raise AssertionError("substrate identity capture must not fetch /markets")
+            self.market_info_calls.append(_condition_id)
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": yes_token, "outcome": "YES"},
+                    {"token_id": no_token, "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
 
         def get_orderbook_snapshot(self, token_id: str) -> dict:
             return {
@@ -2881,6 +2904,7 @@ def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
     captured = []
     clob = FamilyFeeClob()
     fee_cache: dict[str, dict[str, object]] = {}
+    clob_market_info_cache: dict[str, dict[str, object]] = {}
     with (
         patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
         patch("src.data.market_scanner._write_book_hash_transition"),
@@ -2896,11 +2920,13 @@ def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
                 clob=clob,
                 captured_at=_NOW,
                 scan_authority="VERIFIED",
+                clob_market_info_cache=clob_market_info_cache,
                 fee_details_cache=fee_cache,
                 tolerate_missing_book=True,
             )
 
     assert clob.fee_tokens == []
+    assert clob.market_info_calls == [condition_id]
     assert len(captured) == 2
     assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
     assert captured[1].fee_details["source"] == "weather_fee_contract_substrate_identity"

@@ -18628,7 +18628,7 @@ def _execution_price_from_snapshot(
     # side is empty". That case is maker-EXECUTABLE: a maker quotes behind the
     # complementary book (a resting NO bid at p is matched by YES buyers at 1-p).
     # Every OTHER reason (accepting_orders_not_true / clob_archived / clob_orderbook
-    # _disabled / synthetic_clob_market_info_substrate_only) means the market itself
+    # _disabled) means the market itself
     # cannot fill at all — those STAY fail-closed (the snapshot can never become a
     # fillable quote, taker OR maker). So we route ONLY the illiquid-empty-ask
     # reason to the maker lane, and only when complementary liquidity actually

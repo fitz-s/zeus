@@ -190,9 +190,6 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
-_ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS = 60
-_ENTRY_TERMINAL_NO_FILL_REPRICE_EPSILON = Decimal("0.001")
-_ENTRY_TERMINAL_NO_FILL_RESIZE_FRACTION = Decimal("0.01")
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -324,10 +321,13 @@ def _entry_terminal_command_has_no_fill_exposure(
     command_id: str,
     state: str,
 ) -> bool:
-    if str(state or "").upper() not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
+    state_text = str(state or "").upper()
+    if state_text not in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES:
         return False
     if _entry_has_positive_trade_fact(conn, command_id=command_id):
         return False
+    if state_text in {"CANCELLED", "EXPIRED"}:
+        return _entry_command_has_terminal_no_fill_order_fact(conn, command_id)
     return True
 
 
@@ -1248,38 +1248,14 @@ def _entry_same_token_cooldown_component(
         command_id=command_id,
         state=state,
     )
-    if terminal_no_fill and _terminal_no_fill_repriced_or_resized(
-        prior_price=prior_price,
-        prior_size=prior_size,
-        limit_price=limit_price,
-        shares=shares,
-    ):
-        rebid_remaining = _ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS - age_seconds
-        if rebid_remaining <= 0:
-            return {
-                "component": "entry_same_token_cooldown",
-                "allowed": True,
-                "reason": "allowed_terminal_no_fill_repriced",
-                "rebid_cooldown_seconds": _ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS,
-                "age_seconds": int(age_seconds),
-                "existing_command_id": command_id,
-                "existing_command_state": state,
-                "existing_price": str(prior_price or ""),
-                "existing_size": str(prior_size or ""),
-                "candidate_price": str(limit_price or ""),
-                "candidate_shares": str(shares or ""),
-            }
+    if terminal_no_fill:
         return {
             "component": "entry_same_token_cooldown",
-            "allowed": False,
-            "reason": "same_token_terminal_no_fill_reprice_cooling_down",
-            "rebid_cooldown_seconds": _ENTRY_TERMINAL_NO_FILL_REBID_COOLDOWN_SECONDS,
-            "remaining_seconds": int(rebid_remaining),
+            "allowed": True,
+            "reason": "allowed_terminal_no_fill_redecision",
+            "age_seconds": int(age_seconds),
             "existing_command_id": command_id,
-            "existing_position_id": position_id,
             "existing_command_state": state,
-            "existing_updated_at": str(updated_at or ""),
-            "existing_created_at": str(created_at or ""),
             "existing_price": str(prior_price or ""),
             "existing_size": str(prior_size or ""),
             "candidate_price": str(limit_price or ""),
@@ -1317,35 +1293,6 @@ def _entry_same_token_cooldown_component(
         "existing_command_id": command_id,
         "existing_command_state": state,
     }
-
-
-def _terminal_no_fill_repriced_or_resized(
-    *,
-    prior_price: object | None,
-    prior_size: object | None,
-    limit_price: float | None,
-    shares: float | None,
-) -> bool:
-    try:
-        previous_price = Decimal(str(prior_price))
-        candidate_price = Decimal(str(limit_price))
-    except (InvalidOperation, TypeError, ValueError):
-        previous_price = None
-        candidate_price = None
-    if previous_price is not None and candidate_price is not None:
-        if abs(candidate_price - previous_price) >= _ENTRY_TERMINAL_NO_FILL_REPRICE_EPSILON:
-            return True
-
-    try:
-        previous_size = Decimal(str(prior_size))
-        candidate_size = Decimal(str(shares))
-    except (InvalidOperation, TypeError, ValueError):
-        return False
-    min_delta = max(
-        Decimal("0.01"),
-        abs(previous_size) * _ENTRY_TERMINAL_NO_FILL_RESIZE_FRACTION,
-    )
-    return abs(candidate_size - previous_size) >= min_delta
 
 
 def _entry_duplicate_same_token_component(
@@ -1777,7 +1724,6 @@ def _venue_submit_order_fact_state(result: dict) -> str:
 def _venue_submit_matched_size(
     result: dict,
     *,
-    fallback_size: float | Decimal | None = None,
     side: str | None = None,
 ) -> str:
     for key in (
@@ -1798,9 +1744,6 @@ def _venue_submit_matched_size(
     value = _first_submit_value(result, *amount_keys)
     if value not in (None, ""):
         return str(value)
-    status = _venue_submit_status(result)
-    if status in {"MATCHED", "FILLED"} and fallback_size is not None:
-        return str(fallback_size)
     return "0"
 
 
@@ -1838,9 +1781,8 @@ def _venue_submit_remaining_size(
 def _venue_submit_fill_price(
     result: dict,
     *,
-    fallback_price: float | Decimal,
     side: str | None = None,
-) -> str:
+) -> str | None:
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
@@ -1851,7 +1793,7 @@ def _venue_submit_fill_price(
         value = _first_submit_value(result, key)
         if _positive_decimal_or_none(value) is not None:
             return str(value)
-    return str(fallback_price)
+    return None
 
 
 def _venue_fill_covers_submit(matched_size: str, submitted_size: float | Decimal) -> bool:
@@ -2523,15 +2465,17 @@ def _build_pre_submit_envelope(
     """Build the U2 venue-submission envelope before SDK contact.
 
     This deliberately uses only the already-captured ExecutableMarketSnapshot
-    plus the command's intended order shape.  It does not resolve keychain
-    credentials or instantiate the SDK client, preserving INV-30's
-    persist-before-submit ordering.  If the snapshot is missing or the token is
-    not in that snapshot, return None and let insert_command's executable
-    snapshot gate raise the more precise fail-closed error.
+    plus the command's intended order shape and the canonical public funder
+    identity. It does not touch the private key or instantiate the SDK client,
+    preserving INV-30's persist-before-submit ordering. If the snapshot is
+    missing or the token is not in that snapshot, return None and let
+    insert_command's executable snapshot gate raise the more precise
+    fail-closed error.
     """
 
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.contracts.executable_market_snapshot import canonicalize_fee_details
+    from src.data.polymarket_client import resolve_funder_address
     from src.state.snapshot_repo import get_snapshot
     from src.venue.polymarket_v2_adapter import DEFAULT_V2_HOST
 
@@ -2567,16 +2511,18 @@ def _build_pre_submit_envelope(
         separators=(",", ":"),
     )
     payload_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    try:
+        funder_address = str(resolve_funder_address() or "").strip()
+    except Exception as exc:
+        raise PreSubmitIdentityBindingError(str(exc)) from exc
+    if not funder_address:
+        raise PreSubmitIdentityBindingError("canonical funder_address is empty")
     envelope = VenueSubmissionEnvelope(
         sdk_package="py-clob-client-v2",
         sdk_version="pre-submit",
         host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
         chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-        funder_address=(
-            os.environ.get("POLYMARKET_FUNDER_ADDRESS")
-            or os.environ.get("POLYMARKET_PROXY_ADDRESS")
-            or "UNRESOLVED_PRE_SUBMIT_FUNDER"
-        ),
+        funder_address=funder_address,
         condition_id=snapshot.condition_id,
         question_id=snapshot.question_id,
         yes_token_id=snapshot.yes_token_id,
@@ -2626,6 +2572,10 @@ def _persist_prebuilt_submit_envelope(
 
 class FinalSubmissionEnvelopePersistenceError(RuntimeError):
     """Raised when post-submit SDK provenance cannot be persisted."""
+
+
+class PreSubmitIdentityBindingError(RuntimeError):
+    """Raised when a pre-submit envelope cannot bind canonical live identity."""
 
 
 def _persist_final_submission_envelope_payload(
@@ -4250,6 +4200,21 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        except PreSubmitIdentityBindingError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"pre_submit_identity_binding_failed: {exc}",
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         except CollateralInsufficient as exc:
             rej_time = datetime.now(timezone.utc).isoformat()
             if _venue_command_exists(conn, command_id):
@@ -5421,6 +5386,21 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
             )
+        except PreSubmitIdentityBindingError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_identity_binding_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+                command_state="REJECTED",
+            )
         except CollateralInsufficient as exc:
             rej_time = datetime.now(timezone.utc).isoformat()
             if _venue_command_exists(conn, command_id):
@@ -5981,7 +5961,7 @@ def _live_order(
                 venue_ack_time=ack_time,
             )
         order_fact_state = _venue_submit_order_fact_state(result)
-        matched_size = _venue_submit_matched_size(result, fallback_size=shares, side="BUY")
+        matched_size = _venue_submit_matched_size(result, side="BUY")
         remaining_size = _venue_submit_remaining_size(
             result,
             shares,
@@ -5989,14 +5969,18 @@ def _live_order(
             side="BUY",
         )
         fill_event_type: str | None = None
-        fill_price = _venue_submit_fill_price(result, fallback_price=intent.limit_price, side="BUY")
+        fill_price = _venue_submit_fill_price(result, side="BUY")
         fill_trade_id: str | None = None
         fill_tx_hash = next(iter(_venue_submit_transaction_hashes(result)), None)
 
         fill_evidence = result
-        if order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"} and _positive_decimal_or_none(matched_size):
+        if order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"}:
             trade_ids = _venue_submit_trade_ids(result)
-            if not trade_ids:
+            if (
+                not trade_ids
+                or not _positive_decimal_or_none(matched_size)
+                or fill_price is None
+            ):
                 get_order = getattr(client, "get_order", None)
                 if callable(get_order):
                     try:
@@ -6015,7 +5999,6 @@ def _live_order(
                         trade_ids = _venue_submit_trade_ids(fill_evidence)
                         point_matched = _venue_submit_matched_size(
                             fill_evidence,
-                            fallback_size=matched_size,
                             side="BUY",
                         )
                         if _positive_decimal_or_none(point_matched):
@@ -6028,7 +6011,6 @@ def _live_order(
                             )
                         fill_price = _venue_submit_fill_price(
                             fill_evidence,
-                            fallback_price=intent.limit_price,
                             side="BUY",
                         )
                         fill_tx_hash = next(
@@ -6041,6 +6023,75 @@ def _live_order(
                     "FILL_CONFIRMED"
                     if _venue_fill_covers_submit(matched_size, shares)
                     else "PARTIAL_FILL_OBSERVED"
+                )
+            if fill_event_type and fill_price is None:
+                fill_event_type = None
+
+            if fill_event_type is None:
+                if not _positive_decimal_or_none(matched_size):
+                    review_reason = "matched_submit_missing_fill_size"
+                    review_detail = "venue matched status lacked positive matched size in submit response and point-order proof"
+                elif not fill_trade_id:
+                    review_reason = "matched_submit_missing_trade_id"
+                    review_detail = "venue matched status lacked trade id in submit response and point-order proof"
+                else:
+                    review_reason = "matched_submit_missing_fill_price"
+                    review_detail = "venue matched status lacked fill price in submit response and point-order proof"
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": review_reason,
+                            "detail": review_detail,
+                            "venue_order_id": order_id,
+                            "venue_status": str(result.get("status") or ""),
+                            "idempotency_key": idem.value,
+                            "side_effect_boundary_crossed": True,
+                            "sdk_submit_returned_order_id": True,
+                            "requires_recovery": True,
+                            "submit_result": _jsonable_payload(result),
+                            "fill_evidence": _jsonable_payload(fill_evidence),
+                            **final_envelope_payload,
+                        },
+                    )
+                    conn.commit()
+                    durable_state = _current_command_state_value(conn, command_id)
+                except Exception as inner:
+                    logger.error(
+                        "_live_order: REVIEW_REQUIRED append_event failed after "
+                        "matched submit missing fill evidence (command_id=%s order_id=%s): %s",
+                        command_id,
+                        order_id,
+                        inner,
+                    )
+                    durable_state = _mark_post_submit_persistence_failure(
+                        conn,
+                        command_id=command_id,
+                        order_id=order_id,
+                        occurred_at=ack_time,
+                        reason="matched_submit_fill_evidence_review_persistence_failed",
+                        detail=str(inner),
+                        idempotency_key=idem.value,
+                        order_role="entry_order",
+                    )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="unknown_side_effect",
+                    reason=review_reason,
+                    order_id=order_id,
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    external_order_id=order_id,
+                    venue_status=str(result.get("status") or ""),
+                    idempotency_key=idem.value,
+                    command_state=durable_state or "REVIEW_REQUIRED",
+                    command_id=command_id,
+                    zeus_submit_intent_time=zeus_submit_intent_time,
+                    venue_ack_time=ack_time,
                 )
 
         # SUBMIT_ACKED

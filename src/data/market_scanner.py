@@ -3056,20 +3056,13 @@ def capture_executable_market_snapshot(
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
 
-    # Decision (2026-05-27, FT-64): order/submit capture still reads fresh
-    # CLOB /markets authority.  Background substrate enumeration is different:
-    # it is an identity/family-proof producer and the submit path revalidates
-    # executable candidates before any order.  For that tolerate_missing_book
-    # path, use Gamma/topology identity plus the fresh CLOB orderbook instead of
-    # spending one serial /markets HTTP per condition.
-    use_synthetic_clob_market = tolerate_missing_book and _bool_env(
-        "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
-        True,
-    )
-
-    if not use_synthetic_clob_market and clob_market_info_cache is not None and condition_id in clob_market_info_cache:
+    # Every persisted executable-market snapshot, including background
+    # substrate identity rows, must be backed by real CLOB market metadata. A
+    # missing /markets fact defers the row; it must not be replaced with
+    # Gamma/topology-derived defaults that later look like live executable facts.
+    if clob_market_info_cache is not None and condition_id in clob_market_info_cache:
         raw_clob_market = clob_market_info_cache[condition_id]
-    elif not use_synthetic_clob_market:
+    else:
         raw_clob_market = _fetch_clob_market_info(clob, condition_id)
         if clob_market_info_cache is not None:
             clob_market_info_cache[condition_id] = raw_clob_market
@@ -3085,15 +3078,6 @@ def capture_executable_market_snapshot(
     else:
         raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
 
-    if use_synthetic_clob_market:
-        raw_clob_market = _synthetic_clob_market_info_for_substrate_identity(
-            condition_id=condition_id,
-            yes_token=yes_token,
-            no_token=no_token,
-            accepting_orders=accepting_orders,
-            enable_orderbook=enable_orderbook,
-            raw_orderbook=raw_orderbook,
-        )
     # Fill enable_orderbook from CLOB when Gamma omitted it (slug-discovered
     # markets) or for the persisted-reconstruction path.  CLOB is authoritative.
     clob_orderbook = _boolish_market_field(
@@ -3133,7 +3117,7 @@ def capture_executable_market_snapshot(
         accepting_orders=accepting_orders,
         child_active=active,
         child_closed=child_closed,
-        require_explicit_clob_tradeability=reconstructed_tradability,
+        require_explicit_clob_tradeability=True,
     )
     if not tradeability_status.executable_allowed:
         raise ExecutableSnapshotCaptureError(
@@ -4197,8 +4181,6 @@ def _prefetch_selected_orderbooks(
     deadline: float | None = None,
     max_retry_chunks: int | None = None,
     primary_chunk_size: int | None = None,
-    singular_fallback_max_tokens: int | None = None,
-    singular_fallback_max_failures: int | None = None,
 ) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
@@ -4268,61 +4250,13 @@ def _prefetch_selected_orderbooks(
         if max_retry_chunks is None
         else max(0, int(max_retry_chunks))
     )
-    singular_getter = getattr(clob, "get_orderbook_snapshot", None)
-    singular_fallback_cap = (
-        max(0, int(singular_fallback_max_tokens))
-        if singular_fallback_max_tokens is not None
-        else _positive_int_env(
-            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS",
-            4,
-        )
-    )
-    singular_fallback_failure_cap = (
-        max(0, int(singular_fallback_max_failures))
-        if singular_fallback_max_failures is not None
-        else _positive_int_env(
-            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES",
-            2,
-        )
-    )
-    singular_fallback_used = 0
-    singular_fallback_failures = 0
-
-    def _singular_fallback(chunk: list[str]) -> dict[str, dict]:
-        nonlocal singular_fallback_failures, singular_fallback_used
-        if (
-            not callable(singular_getter)
-            or singular_fallback_used >= singular_fallback_cap
-            or singular_fallback_failures >= singular_fallback_failure_cap
-        ):
-            return {}
-        out: dict[str, dict] = {}
-        for tok in chunk:
-            if (
-                singular_fallback_used >= singular_fallback_cap
-                or singular_fallback_failures >= singular_fallback_failure_cap
-            ):
-                break
-            if deadline is not None and (deadline - time.monotonic()) < min_prefetch_window:
-                break
-            singular_fallback_used += 1
-            try:
-                book = singular_getter(tok)
-            except Exception as exc:
-                singular_fallback_failures += 1
-                logger.warning("Singular orderbook fallback failed token=%s: %s", tok, exc)
-                continue
-            if isinstance(book, dict):
-                out[tok] = book
-        return out
-
     def _fetch_chunk_with_split(chunk: list[str]) -> dict[str, dict]:
         try:
             chunk_books = getter(chunk)
         except Exception as exc:
             if len(chunk) <= retry_chunk_size:
                 logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
-                return _singular_fallback(chunk)
+                return {}
             logger.warning(
                 "Batch orderbook prefetch chunk failed (%d tokens); retrying in %d-token chunks: %s",
                 len(chunk),
@@ -4358,7 +4292,6 @@ def _prefetch_selected_orderbooks(
                         len(sub_chunk),
                         sub_exc,
                     )
-                    split_books.update(_singular_fallback(sub_chunk))
                     continue
                 if isinstance(sub_books, dict):
                     split_books.update(sub_books)
@@ -4366,7 +4299,10 @@ def _prefetch_selected_orderbooks(
         if isinstance(chunk_books, dict):
             missing_tokens = [tok for tok in chunk if tok not in chunk_books]
             if missing_tokens:
-                chunk_books.update(_singular_fallback(missing_tokens))
+                logger.info(
+                    "Batch orderbook prefetch missing %d token(s); deferred to next substrate tick",
+                    len(missing_tokens),
+                )
             return chunk_books
         return {}
 
@@ -4381,7 +4317,7 @@ def _prefetch_selected_orderbooks(
             if remaining_window < min_prefetch_window:
                 logger.info(
                     "Batch orderbook prefetch stopped after chunk %d/%d "
-                    "(window %.3fs below %.3fs minimum); remaining tokens fall back per-token",
+                    "(window %.3fs below %.3fs minimum); remaining tokens deferred",
                     chunk_index,
                     total_chunks,
                     remaining_window,
@@ -4516,29 +4452,8 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
         bids = []
     if not isinstance(asks, list):
         asks = []
-    if not bids or not asks:
-        try:
-            best_bid = row.get("best_bid_before")
-            best_ask = row.get("best_ask_before")
-            if best_bid is not None and not bids:
-                bid_dec = Decimal(str(best_bid))
-                if bid_dec.is_finite() and Decimal("0") < bid_dec < Decimal("1"):
-                    bids = [{"price": str(bid_dec), "size": "1"}]
-            if best_ask is not None and not asks:
-                ask_dec = Decimal(str(best_ask))
-                if ask_dec.is_finite() and Decimal("0") < ask_dec < Decimal("1"):
-                    asks = [{"price": str(ask_dec), "size": "1"}]
-        except (InvalidOperation, TypeError, ValueError):
-            return None
     if not asks:
         return None
-    book: dict[str, Any] = {
-        "asset_id": token_id,
-        "market": token_id,
-        "bids": bids,
-        "asks": asks,
-        "hash": str(row.get("book_hash_before") or ""),
-    }
     gamma_market_raw = outcome.get("gamma_market_raw")
     if not isinstance(gamma_market_raw, dict):
         gamma_market_raw = {}
@@ -4551,9 +4466,27 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
     neg_risk = _boolish_market_field(outcome, "neg_risk", "negRisk", "negative_risk")
     if neg_risk is None:
         neg_risk = _boolish_market_field(gamma_market_raw, "neg_risk", "negRisk", "negative_risk")
-    book["tick_size"] = str(tick_size or "0.01")
-    book["min_order_size"] = str(min_order_size or "1")
-    book["neg_risk"] = bool(neg_risk)
+    if tick_size is None or min_order_size is None or neg_risk is None:
+        return None
+    try:
+        tick_dec = Decimal(str(tick_size))
+        min_order_dec = Decimal(str(min_order_size))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not tick_dec.is_finite() or tick_dec <= Decimal("0"):
+        return None
+    if not min_order_dec.is_finite() or min_order_dec <= Decimal("0"):
+        return None
+    book: dict[str, Any] = {
+        "asset_id": token_id,
+        "market": token_id,
+        "bids": bids,
+        "asks": asks,
+        "hash": str(row.get("book_hash_before") or ""),
+        "tick_size": str(tick_dec),
+        "min_order_size": str(min_order_dec),
+        "neg_risk": bool(neg_risk),
+    }
     return book
 
 
@@ -4918,12 +4851,6 @@ def refresh_executable_market_substrate_snapshots(
         ]
         if not network_book_candidates:
             direct_clob_prefetch_skipped = True
-    priority_network_tokens = {
-        _selected_token_for_direction(candidate[4], candidate[6])
-        for candidate in network_book_candidates
-        if priority_full_family_direct_clob_prefetch
-    }
-    priority_network_tokens.discard("")
     if not direct_clob_prefetch_skipped:
         full_family_primary_chunk_size = (
             min(
@@ -4936,29 +4863,6 @@ def refresh_executable_market_substrate_snapshots(
             if full_family_capture
             else None
         )
-        singular_fallback_max_tokens_arg: int | None
-        singular_fallback_max_failures_arg: int | None
-        if priority_full_family_direct_clob_prefetch and priority_network_tokens:
-            singular_fallback_max_tokens_arg = max(
-                _positive_int_env(
-                    "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_TOKENS",
-                    4,
-                ),
-                len(priority_network_tokens),
-            )
-            singular_fallback_max_failures_arg = max(
-                _positive_int_env(
-                    "ZEUS_MARKET_DISCOVERY_ORDERBOOK_SINGULAR_FALLBACK_MAX_FAILURES",
-                    2,
-                ),
-                len(priority_network_tokens),
-            )
-        elif full_family_capture:
-            singular_fallback_max_tokens_arg = 0
-            singular_fallback_max_failures_arg = 0
-        else:
-            singular_fallback_max_tokens_arg = None
-            singular_fallback_max_failures_arg = None
         prefetched_books.update(
             _prefetch_selected_orderbooks(
                 clob,
@@ -4966,8 +4870,6 @@ def refresh_executable_market_substrate_snapshots(
                 deadline=prefetch_deadline,
                 max_retry_chunks=(0 if full_family_capture else None),
                 primary_chunk_size=full_family_primary_chunk_size,
-                singular_fallback_max_tokens=singular_fallback_max_tokens_arg,
-                singular_fallback_max_failures=singular_fallback_max_failures_arg,
             )
         )
     prefetch_missing_skipped = 0
@@ -5008,7 +4910,6 @@ def refresh_executable_market_substrate_snapshots(
             batch_orderbook_supported
             and selected_token
             and prefetched_book is None
-            and not (priority_candidate and priority_direct_clob_scope_allowed)
         ):
             skipped += 1
             prefetch_missing_skipped += 1
@@ -5188,37 +5089,6 @@ def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
     if not isinstance(raw, dict) or not raw:
         raise ExecutableSnapshotCaptureError("CLOB market info response is empty or non-object")
     return dict(raw)
-
-
-def _synthetic_clob_market_info_for_substrate_identity(
-    *,
-    condition_id: str,
-    yes_token: str,
-    no_token: str,
-    accepting_orders: bool | None,
-    enable_orderbook: bool | None,
-    raw_orderbook: dict,
-) -> dict[str, Any]:
-    """Build substrate-only CLOB identity facts without /markets HTTP.
-
-    This is only used by ``tolerate_missing_book=True`` background substrate
-    refresh.  It does not change order/submit capture, which still fetches CLOB
-    market authority and revalidates before any real venue command.
-    """
-
-    return {
-        "condition_id": condition_id,
-        "tokens": [{"token_id": yes_token, "outcome": "YES"}, {"token_id": no_token, "outcome": "NO"}],
-        "archived": False,
-        "enable_order_book": bool(enable_orderbook is not False),
-        "accepting_orders": bool(accepting_orders is not False),
-        "tick_size": _first_field(raw_orderbook, "tick_size", "min_tick_size", "minimum_tick_size", "minTickSize")
-        or "0.01",
-        "min_order_size": _first_field(raw_orderbook, "min_order_size", "minimum_order_size", "minOrderSize")
-        or "1",
-        "neg_risk": _first_field(raw_orderbook, "neg_risk", "negRisk", "negative_risk"),
-        "authority": "synthetic_substrate_identity",
-    }
 
 
 def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:

@@ -227,6 +227,7 @@ def test_fetch_events_by_tags_does_not_pass_closed_false_param():
 
 from src.data.market_scanner import (
     _market_child_is_tradable,
+    _orderbook_from_feasibility_row,
     capture_executable_market_snapshot,
 )
 from src.state.snapshot_repo import init_snapshot_schema
@@ -298,6 +299,63 @@ class _FakeClob:
 
     def get_fee_rate_details(self, token_id: str) -> dict:
         return {"bps": 0, "source": "clob_fee_rate", "token_id": token_id}
+
+
+def test_feasibility_row_without_exchange_book_depth_is_not_executable() -> None:
+    """Top-of-book columns alone must not synthesize a live orderbook."""
+    row = {
+        "token_id": "no-token",
+        "best_bid_before": "0.70",
+        "best_ask_before": "0.75",
+        "depth_before_json": "{}",
+        "book_hash_before": "hash-1",
+    }
+    outcome = {
+        "condition_id": "cond-real",
+        "gamma_market_raw": {
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "negRisk": True,
+        },
+    }
+
+    assert _orderbook_from_feasibility_row(row, outcome=outcome) is None
+
+
+def test_feasibility_row_without_exchange_metadata_is_not_executable() -> None:
+    """A quote witness cannot invent tick size, min order size, or negRisk."""
+    row = {
+        "token_id": "no-token",
+        "depth_before_json": json.dumps({"bids": [], "asks": [{"price": "0.75", "size": "12"}]}),
+        "book_hash_before": "hash-1",
+    }
+    outcome = {"condition_id": "cond-real", "gamma_market_raw": {}}
+
+    assert _orderbook_from_feasibility_row(row, outcome=outcome) is None
+
+
+def test_feasibility_row_preserves_exchange_metadata_when_reused() -> None:
+    row = {
+        "token_id": "no-token",
+        "depth_before_json": json.dumps({"bids": [], "asks": [{"price": "0.75", "size": "12"}]}),
+        "book_hash_before": "hash-1",
+    }
+    outcome = {
+        "condition_id": "cond-real",
+        "gamma_market_raw": {
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "negRisk": True,
+        },
+    }
+
+    book = _orderbook_from_feasibility_row(row, outcome=outcome)
+
+    assert book is not None
+    assert book["asset_id"] == "no-token"
+    assert book["tick_size"] == "0.01"
+    assert book["min_order_size"] == "5"
+    assert book["neg_risk"] is True
 
 
 def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> None:

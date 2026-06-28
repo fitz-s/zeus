@@ -1920,14 +1920,15 @@ def test_redecision_screen_belief_read_filters_forecast_only_inadmissible_famili
     assert "_all_latest_beliefs(world_ro)" not in src
 
 
-def test_decision_triggered_refresh_is_cycle_bounded():
-    """Inline recapture is live value, but must not monopolize the reactor cycle."""
+def test_decision_triggered_refresh_delegates_to_substrate_sidecar():
+    """Decision-time stale snapshots mark sidecar priority instead of writing live substrate."""
 
     src = inspect.getsource(main._edli_decision_family_snapshot_refresher)
-    assert "reactor_decision_refresh_max_per_cycle" in src
-    assert "reactor_decision_refresh_cycle_budget_seconds" in src
-    assert "budget_seconds=call_budget_s" in src
-    assert "refresh_attempts += 1" in src
+    assert "mark_money_path_substrate_priority(" in src
+    assert 'reason="decision_triggered_targeted_refresh"' in src
+    assert "refresh_executable_market_substrate_snapshots(" not in src
+    assert "get_trade_connection" not in src
+    assert "PolymarketClient" not in src
 
 
 def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_changes():
