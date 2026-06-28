@@ -5901,17 +5901,22 @@ class TestRecoveryResolutionTable:
             "order_status": "pending",
         }
         event_types = [
-            row[0]
+            dict(row)
             for row in conn.execute(
                 """
-                SELECT event_type
+                SELECT event_type, venue_status, payload_json
                   FROM position_events
                  WHERE position_id = 'pos-001'
                  ORDER BY sequence_no
                 """
             ).fetchall()
         ]
-        assert event_types == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED"]
+        assert [row["event_type"] for row in event_types] == [
+            "POSITION_OPEN_INTENT",
+            "ENTRY_ORDER_POSTED",
+        ]
+        assert [row["venue_status"] for row in event_types] == ["LIVE", "LIVE"]
+        assert all(json.loads(row["payload_json"])["venue_status"] == "LIVE" for row in event_types)
 
     def test_live_buy_no_projection_repair_event_payload_uses_selected_no_token(
         self,

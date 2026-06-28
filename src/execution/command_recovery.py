@@ -3372,6 +3372,7 @@ def _entry_recovery_event(
     order_id: str | None,
     reason: str = "terminal_filled_entry_trade_fact_projection_repair",
     proof_class: str = "filled_entry_command_trade_fact_without_position_current",
+    venue_status: str | None = None,
 ) -> dict:
     command_id = str(position.command_id)
     position_id = str(position.trade_id)
@@ -3400,7 +3401,13 @@ def _entry_recovery_event(
         "selected_token_id": selected_token_id,
         "yes_token_id": position.token_id,
         "no_token_id": position.no_token_id,
+        "venue_status": venue_status,
     }
+    event_venue_status = str(
+        venue_status
+        or position.fill_states
+        or ("FILLED" if event_type == "ENTRY_ORDER_FILLED" else "")
+    ).strip()
     return {
         "event_id": f"{position_id}:recovered_{slug}:{command_id}",
         "position_id": position_id,
@@ -3417,7 +3424,7 @@ def _entry_recovery_event(
         "command_id": command_id,
         "caused_by": f"venue_trade_fact:{position.source_trade_fact_id}",
         "idempotency_key": f"{position_id}:recovered:{slug}:{command_id}",
-        "venue_status": str(position.fill_states or "FILLED"),
+        "venue_status": event_venue_status or None,
         "source_module": "src.execution.command_recovery",
         "env": position.env,
         "payload_json": json.dumps(payload, sort_keys=True, default=str),
@@ -3612,6 +3619,7 @@ def _append_live_entry_projection_repair(
             order_id=None,
             reason="live_entry_order_fact_projection_repair",
             proof_class="live_entry_command_order_fact_without_position_current",
+            venue_status=str(position.order_fact_state or "LIVE"),
         ),
         _entry_recovery_event(
             position,
@@ -3623,6 +3631,7 @@ def _append_live_entry_projection_repair(
             order_id=position.order_id,
             reason="live_entry_order_fact_projection_repair",
             proof_class="live_entry_command_order_fact_without_position_current",
+            venue_status=str(position.order_fact_state or "LIVE"),
         ),
     ]
     append_many_and_project(conn, events, projection)
