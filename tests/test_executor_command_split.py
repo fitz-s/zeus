@@ -239,6 +239,7 @@ def _make_entry_intent(
     decision_source_context=_DEFAULT_CONTEXT,
     submit_order_type: str = "GTC",
     post_only: bool = True,
+    actionable_certificate_hash: str | None = None,
 ) -> object:
     """Build a minimal ExecutionIntent that passes the ExecutionPrice guard."""
     from src.contracts.execution_intent import ExecutionIntent
@@ -274,6 +275,7 @@ def _make_entry_intent(
         min_entry_price=0.05,
         min_expected_profit_usd=0.05,
         min_submit_edge_density=0.02,
+        actionable_certificate_hash=actionable_certificate_hash,
         qkernel_execution_economics={
             "source": "qkernel_spine",
             "side": "YES",
@@ -286,6 +288,68 @@ def _make_entry_intent(
             "direction_law_ok": True,
             "coherence_allows": True,
         },
+    )
+
+
+def _insert_actionable_certificate_for_intent(
+    conn: sqlite3.Connection,
+    intent,
+    *,
+    certificate_hash: str,
+) -> None:
+    payload = {
+        "event_id": "event-entry-capability",
+        "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": "forecast-snap-entry-capability",
+        "family_id": "family-entry-capability",
+        "candidate_id": "candidate-entry-capability",
+        "condition_id": "condition-test",
+        "token_id": intent.token_id,
+        "direction": "buy_yes",
+        "strategy_key": "center_buy",
+        "executable_snapshot_id": intent.executable_snapshot_id,
+        "q_live": intent.q_live,
+        "q_lcb_5pct": intent.q_lcb_5pct,
+        "c_fee_adjusted": intent.limit_price,
+        "c_cost_95pct": intent.limit_price,
+        "p_fill_lcb": 0.5,
+        "trade_score": 0.10,
+        "action_score": 0.10,
+        "min_entry_price": intent.min_entry_price,
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": dict(intent.qkernel_execution_economics),
+        "fdr_family_id": "fdr-family-entry-capability",
+        "kelly_decision_id": "kelly-entry-capability",
+        "kelly_size_usd": 3.0,
+        "risk_decision_id": "risk-entry-capability",
+        "live_cap_usage_id": "cap-entry-capability",
+        "final_intent_id": "intent-entry-capability",
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+        "native_quote_available": True,
+        "submitted": False,
+    }
+    payload_json = json.dumps(payload, sort_keys=True)
+    payload_hash = "a" * 64
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_type, schema_version, canonicalization_version,
+            semantic_key, claim_type, mode, decision_time, authority_id,
+            authority_version, algorithm_id, algorithm_version, payload_json,
+            payload_hash, certificate_hash, verifier_status, created_at
+        ) VALUES (?, 'ActionableTradeCertificate', 1, 'test-v1',
+                  ?, 'actionable_trade', 'LIVE', ?, 'test-authority',
+                  'v1', 'test-algorithm', 'v1', ?, ?, ?, 'VERIFIED', ?)
+        """,
+        (
+            f"ActionableTradeCertificate:{certificate_hash[:24]}",
+            f"actionable:event-entry-capability:{intent.token_id}",
+            _NOW.isoformat(),
+            payload_json,
+            payload_hash,
+            certificate_hash,
+            _NOW.isoformat(),
+        ),
     )
 
 
@@ -440,8 +504,26 @@ class TestLiveOrderCommandSplit:
             "_assert_ws_gap_allows_submit",
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
         )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
 
-        intent = _make_entry_intent(mem_conn)
+        certificate_hash = "c" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
 
         with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
             mock_inst = MagicMock()
@@ -485,8 +567,17 @@ class TestLiveOrderCommandSplit:
             "ws_gap_guard",
             "collateral_ledger",
             "decision_source_integrity",
+            "entry_economics",
+            "entry_actionable_certificate",
             "executable_snapshot_gate",
         }
+        assert components_by_name["entry_economics"]["allowed"] is True
+        assert components_by_name["entry_economics"]["details"]["min_entry_price"] == 0.05
+        assert components_by_name["entry_actionable_certificate"]["allowed"] is True
+        assert (
+            components_by_name["entry_actionable_certificate"]["details"]["certificate_hash"]
+            == certificate_hash
+        )
         assert components_by_name["decision_source_integrity"]["allowed"] is True
         assert components_by_name["decision_source_integrity"]["details"]["source_id"] == "tigge"
         assert components_by_name["decision_source_integrity"]["details"]["degradation_level"] == "OK"

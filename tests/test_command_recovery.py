@@ -5415,7 +5415,7 @@ class TestRecoveryResolutionTable:
         assert current["p_posterior"] == 0.0
         assert current["entry_method"] == "ens_member_counting"
 
-    def test_invalid_open_entry_authority_repair_quarantines_active_position(
+    def test_invalid_open_entry_authority_repair_reviews_active_position_without_quarantine(
         self,
         conn,
         mock_client,
@@ -5454,11 +5454,11 @@ class TestRecoveryResolutionTable:
         )
 
         from src.execution.command_recovery import (
-            INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
-            reconcile_invalid_open_entry_authority_quarantines,
+            INVALID_ENTRY_AUTHORITY_REVIEW_REASON,
+            reconcile_invalid_open_entry_authority_reviews,
         )
 
-        summary = reconcile_invalid_open_entry_authority_quarantines(conn)
+        summary = reconcile_invalid_open_entry_authority_reviews(conn)
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
@@ -5469,13 +5469,13 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "quarantined",
-            "chain_state": "entry_authority_quarantined",
-            "exit_reason": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+            "phase": "active",
+            "chain_state": "synced",
+            "exit_reason": None,
         }
         event = conn.execute(
             """
-            SELECT event_type, phase_before, phase_after, command_id, payload_json
+            SELECT event_type, phase_before, phase_after, command_id, caused_by, payload_json
               FROM position_events
              WHERE position_id = 'pos-001'
              ORDER BY sequence_no DESC
@@ -5485,8 +5485,9 @@ class TestRecoveryResolutionTable:
         payload = json.loads(event["payload_json"])
         assert event["event_type"] == "REVIEW_REQUIRED"
         assert event["phase_before"] == "active"
-        assert event["phase_after"] == "quarantined"
+        assert event["phase_after"] == "active"
         assert event["command_id"] == "cmd-001"
+        assert event["caused_by"] == INVALID_ENTRY_AUTHORITY_REVIEW_REASON
         assert payload["proof_class"] == "open_position_entry_actionable_certificate_not_current_valid"
 
     def test_edli_entry_authority_projection_repair_backfills_legacy_method(

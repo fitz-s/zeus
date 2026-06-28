@@ -4112,7 +4112,8 @@ def reconcile_edli_entry_posterior_projection_repairs(
 
 
 _INVALID_ENTRY_AUTHORITY_OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
-INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON = "invalid_entry_actionable_certificate_authority"
+_ENTRY_AUTHORITY_REVIEW_PHASES = (*_INVALID_ENTRY_AUTHORITY_OPEN_PHASES, "quarantined")
+INVALID_ENTRY_AUTHORITY_REVIEW_REASON = "invalid_entry_actionable_certificate_authority"
 
 
 def _invalid_open_entry_authority_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -4162,12 +4163,12 @@ def _invalid_open_entry_authority_candidates(conn: sqlite3.Connection) -> list[d
         if payload:
             continue
         candidate["entry_event_id"] = event_id
-        candidate["quarantine_reason"] = INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON
+        candidate["review_reason"] = INVALID_ENTRY_AUTHORITY_REVIEW_REASON
         out.append(candidate)
     return out
 
 
-def _quarantine_open_entry_invalid_authority(
+def _record_open_entry_invalid_authority_review(
     conn: sqlite3.Connection,
     *,
     candidate: Mapping[str, Any],
@@ -4177,7 +4178,7 @@ def _quarantine_open_entry_invalid_authority(
     position_id = str(candidate.get("position_id") or "").strip()
     if not position_id:
         return False
-    idempotency_key = f"{position_id}:invalid_entry_authority_quarantine"
+    idempotency_key = f"{position_id}:invalid_entry_authority_review"
     if (
         _table_exists(conn, "position_events")
         and conn.execute(
@@ -4189,6 +4190,14 @@ def _quarantine_open_entry_invalid_authority(
         return False
     now = _now_iso()
     phase_before = str(candidate.get("phase") or "")
+    phase_after = (
+        "active"
+        if (
+            phase_before == "quarantined"
+            and str(candidate.get("chain_state") or "") == "entry_authority_quarantined"
+        )
+        else phase_before
+    )
     sequence_no = _latest_position_sequence(conn, position_id) + 1
     projection_cols = _table_columns(conn, "position_current")
     projection = {
@@ -4199,20 +4208,21 @@ def _quarantine_open_entry_invalid_authority(
     projection.update(
         {
             "position_id": position_id,
-            "phase": "quarantined",
+            "phase": phase_after,
             "trade_id": candidate.get("trade_id") or position_id,
-            "chain_state": "entry_authority_quarantined",
-            "exit_reason": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+            "chain_state": "synced"
+            if str(candidate.get("chain_state") or "") == "entry_authority_quarantined"
+            else candidate.get("chain_state"),
             "updated_at": now,
         }
     )
     payload = {
         "schema_version": 1,
-        "reason": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+        "reason": INVALID_ENTRY_AUTHORITY_REVIEW_REASON,
         "proof_class": "open_position_entry_actionable_certificate_not_current_valid",
         "position_id": position_id,
         "phase_before": phase_before,
-        "phase_after": "quarantined",
+        "phase_after": phase_after,
         "entry_command_id": str(candidate.get("entry_command_id") or ""),
         "entry_decision_id": str(candidate.get("entry_decision_id") or ""),
         "entry_event_id": str(candidate.get("entry_event_id") or ""),
@@ -4220,25 +4230,28 @@ def _quarantine_open_entry_invalid_authority(
         "entry_command_state": str(candidate.get("entry_command_state") or ""),
         "entry_venue_order_id": str(candidate.get("entry_venue_order_id") or ""),
         "source_proof": {
-            "source_function": "command_recovery.reconcile_invalid_open_entry_authority_quarantines",
-            "source_reason": "EDLI entry certificate is quarantined, missing, or fails current verifier",
+            "source_function": "command_recovery.reconcile_invalid_open_entry_authority_reviews",
+            "source_reason": (
+                "EDLI entry certificate is missing, excluded, or fails current verifier; "
+                "real exposure stays in the live monitoring lifecycle"
+            ),
         },
     }
     event = {
-        "event_id": f"{position_id}:invalid_entry_authority_quarantined:{sequence_no}",
+        "event_id": f"{position_id}:invalid_entry_authority_reviewed:{sequence_no}",
         "position_id": position_id,
         "event_version": 1,
         "sequence_no": sequence_no,
         "event_type": "REVIEW_REQUIRED",
         "occurred_at": now,
         "phase_before": phase_before or None,
-        "phase_after": "quarantined",
+        "phase_after": phase_after,
         "strategy_key": str(candidate.get("strategy_key") or "center_buy"),
         "decision_id": str(candidate.get("entry_decision_id") or ""),
         "snapshot_id": candidate.get("decision_snapshot_id"),
         "order_id": candidate.get("order_id") or candidate.get("entry_venue_order_id"),
         "command_id": str(candidate.get("entry_command_id") or ""),
-        "caused_by": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+        "caused_by": INVALID_ENTRY_AUTHORITY_REVIEW_REASON,
         "idempotency_key": idempotency_key,
         "venue_status": str(candidate.get("entry_command_state") or ""),
         "source_module": "src.execution.command_recovery",
@@ -4249,8 +4262,13 @@ def _quarantine_open_entry_invalid_authority(
     return True
 
 
-def reconcile_invalid_open_entry_authority_quarantines(conn: sqlite3.Connection) -> dict:
-    """Quarantine open positions whose EDLI entry certificate is no longer live-valid."""
+def reconcile_invalid_open_entry_authority_reviews(conn: sqlite3.Connection) -> dict:
+    """Record invalid EDLI entry authority without changing real exposure lifecycle.
+
+    Entry certificate validity is an execution-authority fact. It is not a
+    position lifecycle state: once chain exposure exists, monitor/day0/redecision
+    must keep managing the position from current belief and price evidence.
+    """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for candidate in _invalid_open_entry_authority_candidates(conn):
@@ -4261,7 +4279,7 @@ def reconcile_invalid_open_entry_authority_quarantines(conn: sqlite3.Connection)
         )[:80]
         conn.execute("SAVEPOINT " + sp_name)
         try:
-            advanced = _quarantine_open_entry_invalid_authority(conn, candidate=candidate)
+            advanced = _record_open_entry_invalid_authority_review(conn, candidate=candidate)
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             if advanced:
                 summary["advanced"] += 1
@@ -4271,7 +4289,7 @@ def reconcile_invalid_open_entry_authority_quarantines(conn: sqlite3.Connection)
             conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             logger.error(
-                "recovery: invalid open entry authority quarantine failed for position %s: %s",
+                "recovery: invalid open entry authority review failed for position %s: %s",
                 position_id,
                 exc,
             )
@@ -12518,8 +12536,8 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_entry_posterior_summary["stayed"]
         summary["errors"] += edli_entry_posterior_summary["errors"]
 
-        invalid_entry_authority_summary = reconcile_invalid_open_entry_authority_quarantines(conn)
-        summary["invalid_open_entry_authority_quarantine"] = invalid_entry_authority_summary
+        invalid_entry_authority_summary = reconcile_invalid_open_entry_authority_reviews(conn)
+        summary["invalid_open_entry_authority_review"] = invalid_entry_authority_summary
         summary["advanced"] += invalid_entry_authority_summary["advanced"]
         summary["stayed"] += invalid_entry_authority_summary["stayed"]
         summary["errors"] += invalid_entry_authority_summary["errors"]
@@ -13158,9 +13176,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_edli_entry_posterior_projection_repairs,
                  "edli_entry_posterior_projection_repair",
                  client_kw=True)
-    _db_pass("invalid_open_entry_authority_quarantine",
-             reconcile_invalid_open_entry_authority_quarantines,
-             "invalid_open_entry_authority_quarantine")
+    _db_pass("invalid_open_entry_authority_review",
+             reconcile_invalid_open_entry_authority_reviews,
+             "invalid_open_entry_authority_review")
     _db_pass("hard_terminal_position_projection_repair",
              reconcile_hard_terminal_position_projection_repairs,
              "hard_terminal_position_projection_repair")
