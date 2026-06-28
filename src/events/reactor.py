@@ -587,8 +587,8 @@ class EventSubmissionReceipt:
     #                          a TYPED NO_SUBMIT abort — never the default reason).
     #   "SUBMIT_DISABLED"   — live adapter, real_order_submit_enabled False (the
     #                          submit-disabled-bridge build lane).
-    #   "NO_SUBMIT_ADAPTER" — the no-submit adapter ran (the degrade lane). On a
-    #                          full-pass its reason names the degrade cause that drove
+    #   "NO_SUBMIT_ADAPTER" — the no-submit adapter ran (control-blocked live-submit lane). On a
+    #                          full-pass its reason names the live block cause that drove
     #                          the selector off the live lane (NO_SUBMIT_ADAPTER_LANE:
     #                          <cause>), NEVER the default literal.
     # This is DECISION provenance (which lane decided), not transport metadata, so it
@@ -642,8 +642,8 @@ class LiveLaneDarkInvariantError(RuntimeError):
     the 2026-06-12 11:51-12:12Z silent-kill incident — so we RAISE instead of
     persisting a kill indistinguishable from normal no-submit accounting.
 
-    A no-submit receipt produced by the legitimate degrade lane carries
-    submit_lane="NO_SUBMIT_ADAPTER" + a named degrade cause and is NOT impacted by
+    A no-submit receipt produced by the legitimate control-blocked lane carries
+    submit_lane="NO_SUBMIT_ADAPTER" + a named live block cause and is NOT impacted by
     this invariant (it persists, honestly labelled).
     """
 
@@ -2114,7 +2114,7 @@ class OpportunityEventReactor:
             # SUBMITs, returns a SUBMIT_DISABLED build, or carries a typed abort reason.
             # submit_lane="LIVE" here means the live lane silently ate a tradeable entry
             # (the 11:51-12:12Z incident). Raise rather than persist the kill. Receipts
-            # from the honest degrade lane (submit_lane="NO_SUBMIT_ADAPTER" + named
+            # from the honest control-blocked lane (submit_lane="NO_SUBMIT_ADAPTER" + named
             # cause) and legacy pre-stamp receipts (submit_lane=None) pass through.
             self._assert_no_submit_lane_invariant(receipt)
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)

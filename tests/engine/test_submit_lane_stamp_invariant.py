@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-06-28
 # Authority basis: silent-trade-kill antibody — submit_lane stamp + persist-boundary
 #   invariant. Root cause /tmp/allpass_nosubmit_rootcause.md (32 full-pass candidates
 #   consumed on the no-submit adapter during a live-arm crash-loop, receipts byte-
@@ -156,25 +156,24 @@ def _no_submit_rows(conn, event_id):
 # ---------------------------------------------------------------------------
 
 
-def test_no_submit_adapter_lane_full_pass_default_reason_named_degrade():
+def test_no_submit_adapter_lane_full_pass_default_reason_names_live_block():
     """Incident shape at the ADAPTER: a full-pass receipt carrying the DEFAULT
-    no-submit reason on the no-submit (degrade) lane is stamped NO_SUBMIT_ADAPTER and
-    its reason is rewritten to name the degrade cause."""
+    no-submit reason on the control-blocked no-submit lane is stamped
+    NO_SUBMIT_ADAPTER and its reason is rewritten to name the live block cause."""
     event = _forecast_event()
     raw = _full_pass_receipt(
         event,
         submit_lane=None,
         reason="event_bound_final_intent_no_submit",
     )
-    stamped = _stamp_no_submit_adapter_lane(raw, degrade_cause="operator_arm_none")
+    stamped = _stamp_no_submit_adapter_lane(raw, live_block_cause="operator_arm_none")
     assert stamped.submit_lane == SUBMIT_LANE_NO_SUBMIT_ADAPTER
     assert stamped.reason == "NO_SUBMIT_ADAPTER_LANE:operator_arm_none"
     assert stamped.proof_accepted is True
 
 
 def test_no_submit_adapter_lane_honest_reject_keeps_reason():
-    """An honest gate-reject (FDR_REJECTED etc.) on the degrade lane keeps its specific
-    reason — it is a real no-edge decline, not a lane degrade — and is only stamped."""
+    """An honest gate-reject on the no-submit lane keeps its specific reason."""
     event = _forecast_event()
     raw = _full_pass_receipt(
         event,
@@ -182,13 +181,13 @@ def test_no_submit_adapter_lane_honest_reject_keeps_reason():
         reason="FDR_REJECTED",
         proof_accepted=False,
     )
-    stamped = _stamp_no_submit_adapter_lane(raw, degrade_cause="operator_arm_none")
+    stamped = _stamp_no_submit_adapter_lane(raw, live_block_cause="operator_arm_none")
     assert stamped.submit_lane == SUBMIT_LANE_NO_SUBMIT_ADAPTER
     assert stamped.reason == "FDR_REJECTED"
 
 
 def test_no_submit_adapter_lane_unconstructable_without_cause():
-    """Unconstructable: a NO_SUBMIT_ADAPTER-lane stamp without a degrade cause raises."""
+    """Unconstructable: a NO_SUBMIT_ADAPTER-lane stamp without a live block cause raises."""
     event = _forecast_event()
     raw = _full_pass_receipt(
         event,
@@ -196,7 +195,7 @@ def test_no_submit_adapter_lane_unconstructable_without_cause():
         reason="event_bound_final_intent_no_submit",
     )
     with pytest.raises(ValueError):
-        _stamp_no_submit_adapter_lane(raw, degrade_cause="")
+        _stamp_no_submit_adapter_lane(raw, live_block_cause="")
 
 
 def test_live_adapter_lane_stamps_live_and_submit_disabled():
@@ -218,9 +217,9 @@ def test_live_adapter_lane_stamps_live_and_submit_disabled():
 
 
 def test_armed_live_daemon_full_pass_degrade_requeues_not_consumed():
-    """Incident shape end-to-end: an armed live daemon + the no-submit (degrade) adapter
+    """Incident shape end-to-end: an armed live daemon + the control-blocked no-submit adapter
     selected for a FULL-PASS candidate → the receipt carries NO_SUBMIT_ADAPTER + a named
-    degrade cause, and the reactor REQUEUES it (transient) rather than terminally
+    live block cause, and the reactor REQUEUES it (transient) rather than terminally
     consuming a tradeable entry as an 'accepted' no-submit.
 
     This is the strongest form of the antibody: a full-pass entry is NEVER silently

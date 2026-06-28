@@ -1025,7 +1025,7 @@ def _build_edli_status_pulse(
     FIX-4 (P2, 2026-06-09): separates proof_accepted from live_submit_attempts.
     ``proof_accepted`` counts events whose money-path proof was accepted (i.e.,
     final intent was built). ``live_submit_attempts`` counts ONLY actual venue
-    submit calls made this cycle — 0 in no-submit / degraded cycles. Dashboards
+    submit calls made this cycle — 0 when the live-submit lane is not selected. Dashboards
     MUST NOT treat proof_accepted as evidence of a venue interaction.
 
     ``live_venue_acks`` counts venue responses where ``venue_ack_received`` is
@@ -4431,24 +4431,24 @@ def _edli_event_reactor_cycle() -> None:
         # via refresh_global_allocator; the EDLI cycle does not run that cycle, so without
         # this seam every canary order silently blocks (see /tmp/edli_submit_gate_trace.md).
         # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
-        # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
+        # / baseline undefined / exception), block THIS cycle to the no-submit adapter rather
         # than submit live with an unconfigured-but-proceeding allocator.
         # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12): track the TYPED
-        # cause whenever a degrade clears live_submit_effective so the no-submit adapter
+        # cause whenever a live block clears live_submit_effective so the no-submit adapter
         # can name it on every full-pass receipt it consumes (single source of truth —
-        # the same value that drove the selector off the live lane). None => no degrade
+        # the same value that drove the selector off the live lane). None => no live block
         # (the live lane was simply not configured for this reactor_mode).
-        _live_lane_degrade_cause: str | None = None
+        _live_lane_block_cause: str | None = None
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
         if live_submit_effective:
             _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
             if live_bridge_mode and not _alloc_refresh.get("configured"):
                 live_submit_effective = False
                 _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
-                _live_lane_degrade_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
+                _live_lane_block_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
                 logger.error(
                     "EDLI reactor: live-bridge allocator refresh did not configure "
-                    "(fail_closed=%r reason=%r) — degrading to NO-SUBMIT this cycle.",
+                    "(fail_closed=%r reason=%r) — selecting NO-SUBMIT this cycle.",
                     _alloc_refresh.get("fail_closed"),
                     _alloc_refresh.get("entry", {}).get("reason"),
                 )
@@ -4457,10 +4457,10 @@ def _edli_event_reactor_cycle() -> None:
         # the bankroll NET of correlation-weighted committed capital. The
         # provider closure hands the SAME cached snapshot to every event this
         # cycle (cycle-level read, not per-decision — mirrors the bankroll warm).
-        # Shadow remains observational when the portfolio snapshot is unavailable.
-        # Real-submit is different: never let the live path fall back to pre-#107
-        # single-asset Kelly sizing, because that ignores open/pending/correlated
-        # exposure.
+        # The no-submit adapter may still build read-only receipts when the portfolio
+        # snapshot is unavailable. Real-submit is different: never let the live path
+        # fall back to pre-#107 single-asset Kelly sizing, because that ignores
+        # open/pending/correlated exposure.
         _portfolio_state_provider = None
         try:
             _portfolio_snapshot = load_portfolio()
@@ -4473,7 +4473,7 @@ def _edli_event_reactor_cycle() -> None:
             )
         if real_submit_effective and _portfolio_state_provider is None:
             live_submit_effective = False
-            _live_lane_degrade_cause = "live_submit_effective_false:portfolio_state_unavailable"
+            _live_lane_block_cause = "live_submit_effective_false:portfolio_state_unavailable"
             logger.error(
                 "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
             )
@@ -4506,20 +4506,20 @@ def _edli_event_reactor_cycle() -> None:
         # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
         # executor never constructs this adapter, so the 293-order mainline is untouched.
         operator_arm = require_operator_arm(edli_cfg)
-        # SUBMIT-LANE STAMP + CYCLE-LEVEL DEGRADE SIGNAL (silent-trade-kill antibody
+        # SUBMIT-LANE STAMP + CYCLE-LEVEL LIVE-BLOCK SIGNAL (silent-trade-kill antibody
         # 2026-06-12; /tmp/allpass_nosubmit_rootcause.md). The selector picks the live
         # adapter ONLY when (live_submit_effective AND operator_arm is not None); else
-        # the no-submit (degrade) adapter. Resolve the TYPED cause once, here, so it is
-        # the single source of truth threaded onto the degrade lane's receipts.
+        # the no-submit adapter. Resolve the TYPED cause once, here, so it is
+        # the single source of truth threaded onto the control-blocked lane's receipts.
         _edli_live_operator_authorized = edli_cfg.get("edli_live_operator_authorized") is True
         _live_lane_selected = bool(live_submit_effective and operator_arm is not None)
-        if operator_arm is None and _live_lane_degrade_cause is None:
-            _live_lane_degrade_cause = "operator_arm_none"
-        if _live_lane_degrade_cause is None and not _live_lane_selected:
-            # live_submit_effective was False without a tracked degrade.
-            _live_lane_degrade_cause = f"live_lane_unselected:reactor_mode={reactor_mode}"
-        _no_submit_degrade_cause = _live_lane_degrade_cause or "live_lane_unselected"
-        # LOUD cycle-level degrade signal: the live lane is dark THIS cycle while the
+        if operator_arm is None and _live_lane_block_cause is None:
+            _live_lane_block_cause = "operator_arm_none"
+        if _live_lane_block_cause is None and not _live_lane_selected:
+            # live_submit_effective was False without a tracked live block.
+            _live_lane_block_cause = f"live_lane_unselected:reactor_mode={reactor_mode}"
+        _no_submit_live_block_cause = _live_lane_block_cause or "live_lane_unselected"
+        # LOUD cycle-level live-block signal: the live lane is dark THIS cycle while the
         # operator has nominally armed it (reactor_mode=live + operator_authorized). The
         # crash-loop incident ran ~50 min on the no-submit lane with the arm on and NO
         # decision-lane signal. One ERROR per cycle here makes it impossible to miss.
@@ -4529,7 +4529,7 @@ def _edli_event_reactor_cycle() -> None:
                 "(reactor_mode=live, edli_live_operator_authorized=True) — cause=%s. "
                 "Full-pass candidates this cycle are consumed on the NO_SUBMIT_ADAPTER "
                 "lane (receipts stamped with this cause); the live lane submitted nothing.",
-                _no_submit_degrade_cause,
+                _no_submit_live_block_cause,
             )
         # Decision-triggered targeted substrate marker: when the adapter sees stale
         # executable prices, it marks the family for sidecar capture and returns
@@ -4607,10 +4607,10 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
                 family_snapshot_refresher=_decision_family_snapshot_refresher,
-                # SUBMIT-LANE STAMP: name the degrade cause that selected this lane so a
+                # SUBMIT-LANE STAMP: name the live-block cause that selected this lane so a
                 # full-pass receipt consumed here can never be confused with a genuine
                 # decision-declined no-submit (single source of truth from the selector).
-                degrade_cause=_no_submit_degrade_cause,
+                live_block_cause=_no_submit_live_block_cause,
             )
         )
 
