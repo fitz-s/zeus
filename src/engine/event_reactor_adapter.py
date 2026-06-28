@@ -6316,7 +6316,7 @@ def _build_live_execution_command_certificates(
             live_cap,
             event=event,
         )
-        _assert_live_entry_uses_qkernel_authority(actionable_payload)
+        _assert_live_entry_submit_authority(actionable_payload)
         actionable = build_actionable_trade_certificate(
             payload=actionable_payload,
             parent_certificates=base_certs + (live_cap,),
@@ -6965,8 +6965,21 @@ def _selected_candidate_mode_fields_from_receipt(
     return {}
 
 
-def _assert_live_entry_uses_qkernel_authority(actionable_payload: Mapping[str, object]) -> None:
-    """Live ENTRY submit is licensed only by qkernel spine execution economics."""
+def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]) -> None:
+    """Fail closed unless the event's live entry lane has its own executable authority."""
+
+    event_type = str(actionable_payload.get("event_type") or "").strip()
+    if event_type in _FORECAST_DECISION_EVENT_TYPES:
+        _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
+        return
+    if event_type in _DAY0_LANE_EVENT_TYPES:
+        _assert_day0_entry_uses_live_observation_authority(actionable_payload)
+        return
+    raise ValueError(f"LIVE_ENTRY_AUTHORITY_UNSUPPORTED_EVENT_TYPE:{event_type or 'missing'}")
+
+
+def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[str, object]) -> None:
+    """Forecast live ENTRY submit is licensed only by qkernel spine economics."""
 
     if str(actionable_payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
         raise ValueError("LIVE_ENTRY_QKERNEL_AUTHORITY_REQUIRED")
@@ -6988,6 +7001,35 @@ def _assert_live_entry_uses_qkernel_authority(actionable_payload: Mapping[str, o
         raise ValueError(
             "LIVE_ENTRY_QKERNEL_CERT_BIN_MISMATCH:"
             f"cert_bin_id={cert_bin_id}:payload_bin_id={payload_bin_id}"
+        )
+
+
+def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mapping[str, object]) -> None:
+    """Day0 live ENTRY submit is licensed by observation truth, not forecast qkernel."""
+
+    required_matches = {
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "live_authority_status": "live",
+    }
+    for key, expected in required_matches.items():
+        observed = str(actionable_payload.get(key) or "").strip()
+        if observed != expected:
+            raise ValueError(
+                "LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:"
+                f"{key}={observed or 'missing'}"
+            )
+    source_authorized = str(
+        actionable_payload.get("source_authorized_status") or "AUTHORIZED"
+    ).strip()
+    if source_authorized != "AUTHORIZED":
+        raise ValueError(
+            "LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:"
+            f"source_authorized_status={source_authorized or 'missing'}"
         )
 
 
@@ -7069,6 +7111,14 @@ def _actionable_payload_from_receipt(
         "target_date": target_date,
         "metric": metric,
         "temperature_metric": metric,
+        "source_match_status": _event_identity_value(event, "source_match_status"),
+        "local_date_status": _event_identity_value(event, "local_date_status"),
+        "station_match_status": _event_identity_value(event, "station_match_status"),
+        "dst_status": _event_identity_value(event, "dst_status"),
+        "metric_match_status": _event_identity_value(event, "metric_match_status"),
+        "rounding_status": _event_identity_value(event, "rounding_status"),
+        "source_authorized_status": _event_identity_value(event, "source_authorized_status"),
+        "live_authority_status": _event_identity_value(event, "live_authority_status"),
         "bin_label": receipt.bin_label,
         "outcome_label": receipt.outcome_label,
         "unit": receipt.unit,
