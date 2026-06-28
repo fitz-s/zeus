@@ -416,13 +416,14 @@ class TestRequestHashProvenance:
         """maybe_refresh persists with the fetch's request hash, never ''."""
         import src.data.day0_hourly_vectors as hv
 
-        captured = {}
+        captured = {"target_dates": []}
 
         def fake_fetch(city, *, models=None, now=None):
             return [_vector()], "sha256:realhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured["request_hash"] = request_hash
+            captured["target_dates"].append(target_date)
             return len(vectors)
 
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
@@ -432,7 +433,9 @@ class TestRequestHashProvenance:
         n = hv.maybe_refresh_day0_hourly_vectors(
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         )
-        assert n == 1 and captured["request_hash"] == "sha256:realhash"
+        assert n == 2
+        assert captured["request_hash"] == "sha256:realhash"
+        assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]
 
     def test_refresh_lock_contention_does_not_throttle_next_attempt(self, monkeypatch):
         """A contended forecasts writer lock must not stall the trading reactor lane."""
@@ -513,7 +516,7 @@ class TestRequestHashProvenance:
     def test_refresh_uses_global_ecmwf_fallback_when_no_regional_model(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
-        captured = {}
+        captured = {"target_dates": []}
 
         def fake_fetch(city, *, models=None, now=None):
             captured["models"] = list(models or [])
@@ -522,6 +525,7 @@ class TestRequestHashProvenance:
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured["request_hash"] = request_hash
             captured["vector_models"] = [v.model for v in vectors]
+            captured["target_dates"].append(target_date)
             return len(vectors)
 
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
@@ -533,10 +537,11 @@ class TestRequestHashProvenance:
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         )
 
-        assert n == 1
+        assert n == 2
         assert captured["models"] == ["ecmwf_ifs"]
         assert captured["request_hash"] == "sha256:globalhash"
         assert captured["vector_models"] == ["ecmwf_ifs"]
+        assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]
 
     def test_refresh_throttle_is_target_date_scoped_at_local_midnight(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
@@ -569,8 +574,13 @@ class TestRequestHashProvenance:
             interval_s=1800.0,
         )
 
-        assert (n1, n2) == (1, 1)
-        assert captured_dates == ["2026-06-25", "2026-06-26"]
+        assert (n1, n2) == (2, 2)
+        assert captured_dates == [
+            "2026-06-25",
+            "2026-06-26",
+            "2026-06-26",
+            "2026-06-27",
+        ]
 
     def test_scheduler_orders_same_local_day_money_path_cities_first(self):
         import src.main as main

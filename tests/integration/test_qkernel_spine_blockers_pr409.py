@@ -1150,12 +1150,12 @@ def test_qkernel_direct_route_receipt_probability_must_match_monitor_belief():
     ) is True
 
 
-def test_overlay_refuses_structural_direction_law_rejected_candidate():
-    """A spine-positive route must not revive a structurally illegal leg.
+def test_overlay_clears_legacy_rounded_mu_direction_veto_for_qkernel_selected_candidate():
+    """A spine-positive route may clear the old rounded-mu direction veto.
 
-    qkernel may replace scalar economics and admission vetoes; it must not clear a
-    reactor direction-law rejection. Live Cape/Shenzhen-style regressions selected a
-    leg whose proof still said ``DIRECTION_LAW_BIN_FORECAST_MISMATCH``.
+    ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` was a pre-spine modal-bin heuristic. The
+    qkernel selector owns payoff-vector economics now, so a selected direct native route
+    with positive edge/DeltaU must not stay blocked by that legacy missing reason.
     """
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.27, q_dot_payoff=0.32, point_ev=0.20, side="YES"
@@ -1168,7 +1168,10 @@ def test_overlay_refuses_structural_direction_law_rejected_candidate():
         missing_reason="DIRECTION_LAW_BIN_FORECAST_MISMATCH:legacy-pre-spine",
     )
 
-    assert new_proof is None
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.passed_prefilter is True
+    assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
 def test_overlay_clears_scalar_admission_missing_reason_for_qkernel_selected_candidate():
@@ -1482,13 +1485,13 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypat
     assert center_yes[0].economics.optimal_delta_u > 0.0
 
 
-def test_qkernel_scope_does_not_rescore_structural_direction_law_rejections():
-    """The spine must not revive a reactor structural direction-law rejection.
+def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence():
+    """Old rounded-mu direction vetoes may enter qkernel, then fail on real gates.
 
-    The reactor has one live structural direction law. qkernel can rescore stale scalar
-    capital/FDR-style vetoes, but if a proof already carries
-    ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` it must not become an executable direct
-    route through side-aware OOF evidence.
+    The old ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` reason is not structural authority.
+    It must not delete a proof before qkernel can score the family. In this fixture the
+    candidate remains visible, but market coherence blocks the family, proving the live
+    refusal comes from current payoff/market evidence instead of the stale heuristic.
     """
     from dataclasses import replace
 
@@ -1544,14 +1547,13 @@ def test_qkernel_scope_does_not_rescore_structural_direction_law_rejections():
     )
 
     assert res.decision is not None
-    assert all(
-        not (
-            decision.route.side == "NO"
-            and decision.route.bin_id == blocked_bin_id
-        )
+    blocked_decisions = [
+        decision
         for decision in res.decision.candidate_decisions
-    )
-    assert res.selected_proof is None or not (
-        res.selected_proof.direction == "buy_no"
-        and res.selected_proof.candidate.bin.label == "21C"
-    )
+        if decision.route.side == "NO" and decision.route.bin_id == blocked_bin_id
+    ]
+    assert blocked_decisions
+    assert all(decision.direction_law_ok is True for decision in blocked_decisions)
+    assert all(decision.coherence_allows is False for decision in blocked_decisions)
+    assert res.selected_proof is None
+    assert res.no_trade_reason == "MARKET_INCOHERENT_BLOCK_LIVE"

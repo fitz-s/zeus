@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import date
 from typing import Optional
 
 import numpy as np
@@ -35,6 +36,53 @@ _NEI_V1_DIGEST_CHARS = 16
 # Sentinel value matching the AFTER INSERT trigger on day0_nowcast_runs.
 # Any NULL writer-bypass will produce this string via the trigger.
 _NEI_V1_BACKSTOP_SENTINEL = "nei_v1_BACKSTOP_NULL_WRITER_BYPASS"
+
+IDENTITY_FIT_RUN_ID = "hpf_v1_identity_conservative_v1"
+IDENTITY_FIT_ARTIFACT_ID = "hpf_v1"
+
+
+def build_identity_platt_fit():
+    """Documented conservative Day0 horizon fit used to bootstrap live logging.
+
+    This fit claims zero skill: ``predict_proba(p)==p``. It exists so the live
+    nowcast lane can write evidence rows and start the data clock automatically
+    instead of relying on an operator-run script after every empty DB/restart.
+    """
+    from src.calibration.day0_horizon_calibration import HorizonPlattFit
+
+    return HorizonPlattFit(
+        alpha=1.0,
+        beta=0.0,
+        gamma_morning=0.0,
+        gamma_afternoon=0.0,
+        gamma_post_peak=0.0,
+        delta=0.0,
+        epsilon=0.0,
+        fit_artifact_id=IDENTITY_FIT_ARTIFACT_ID,
+        fit_run_id=IDENTITY_FIT_RUN_ID,
+        fit_date=date.today().isoformat(),
+        n_obs=0,
+        sample_period_start="",
+        sample_period_end="",
+    )
+
+
+def ensure_identity_platt_fit(
+    *,
+    fit_artifact_id: str = IDENTITY_FIT_ARTIFACT_ID,
+    conn: Optional[sqlite3.Connection] = None,
+):
+    """Ensure the conservative identity fit exists and return the latest fit.
+
+    Idempotent. With ``conn=None`` this writes through the canonical LIVE forecasts
+    writer path. Tests may pass a temp connection to keep the operation local.
+    """
+    fit = read_latest_platt_fit(fit_artifact_id=fit_artifact_id, conn=conn)
+    if fit is not None:
+        return fit
+    identity = build_identity_platt_fit()
+    write_platt_fit(identity, conn=conn)
+    return read_latest_platt_fit(fit_artifact_id=fit_artifact_id, conn=conn)
 
 
 def nowcast_event_id_v1_hash(

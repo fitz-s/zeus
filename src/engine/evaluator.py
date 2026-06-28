@@ -4031,10 +4031,13 @@ def evaluate_candidate(
             if _obs_time_for_nowcast is not None:
                 try:
                     from src.state.day0_nowcast_store import (
+                        ensure_identity_platt_fit,
                         read_latest_platt_fit,
                         write_nowcast_run,
                     )
                     _horizon_model = read_latest_platt_fit()
+                    if _horizon_model is None:
+                        _horizon_model = ensure_identity_platt_fit()
                     if _horizon_model is not None:
                         _nowcast = Day0HighNowcastSignal(
                             observed_high_so_far=float(observed_high_so_far or 0.0),

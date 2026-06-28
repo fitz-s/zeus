@@ -1528,7 +1528,13 @@ def _open_entry_actionable_certificate_authority_check(rows: list[sqlite3.Row]) 
         reason_code=REASON_INVALID_LIVE_ACTIONABLE,
     )
     evidence["quarantined_count"] = len(quarantined_hashes)
+    row_by_position_id = {
+        str(row["position_id"] or ""): row
+        for row in rows
+        if str(row["position_id"] or "").strip()
+    }
     risky: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
     checked = 0
     try:
         with _connect_live_ro() as conn:
@@ -1633,11 +1639,62 @@ def _open_entry_actionable_certificate_authority_check(rows: list[sqlite3.Row]) 
                     "event_id": event_id,
                     "token_id": selected_token_id,
                 }
+                pos_row = row_by_position_id.get(str(cmd["position_id"] or ""))
+                try:
+                    local_shares = float(pos_row["shares"] or 0.0) if pos_row is not None else 0.0
+                except (TypeError, ValueError):
+                    local_shares = 0.0
+                try:
+                    chain_shares = (
+                        float(pos_row["chain_shares"] or 0.0) if pos_row is not None else 0.0
+                    )
+                except (TypeError, ValueError):
+                    chain_shares = 0.0
+                position_chain_state = (
+                    str(pos_row["chain_state"] or "") if pos_row is not None else ""
+                )
+                position_direction = (
+                    str(pos_row["direction"] or "") if pos_row is not None else ""
+                )
+
+                def _covered_entry_authority_quarantine(
+                    coverage_reason: str, **extra: Any
+                ) -> bool:
+                    if (
+                        position_chain_state == "entry_authority_quarantined"
+                        and position_direction in {"buy_yes", "buy_no"}
+                        and max(local_shares, chain_shares) > DUST_SHARE_LIMIT
+                    ):
+                        covered.append(
+                            {
+                                **item,
+                                **extra,
+                                "restart_resolution": (
+                                    "monitor_entry_authority_quarantined_exposure_redecision"
+                                ),
+                                "coverage_reason": coverage_reason,
+                                "position_chain_state": position_chain_state,
+                                "position_direction": position_direction,
+                                "position_shares": local_shares,
+                                "position_chain_shares": chain_shares,
+                            }
+                        )
+                        return True
+                    return False
+
                 if matched_cert is None or matched_payload is None:
+                    if _covered_entry_authority_quarantine("missing_actionable_certificate"):
+                        continue
                     risky.append({**item, "risk": "open_edli_entry_missing_actionable_certificate"})
                     continue
                 cert_hash = str(matched_cert["certificate_hash"] or "")
                 if cert_hash in quarantined_hashes:
+                    if _covered_entry_authority_quarantine(
+                        "quarantined_actionable_certificate",
+                        certificate_hash=cert_hash,
+                        certificate_id=matched_cert["certificate_id"],
+                    ):
+                        continue
                     risky.append(
                         {
                             **item,
@@ -1656,6 +1713,13 @@ def _open_entry_actionable_certificate_authority_check(rows: list[sqlite3.Row]) 
                         reason = f"{type(exc).__name__}: {exc}"
                     else:
                         reason = str(exc)
+                    if _covered_entry_authority_quarantine(
+                        "actionable_certificate_fails_current_verifier",
+                        certificate_hash=cert_hash,
+                        certificate_id=matched_cert["certificate_id"],
+                        reason=reason,
+                    ):
+                        continue
                     risky.append(
                         {
                             **item,
@@ -1682,6 +1746,8 @@ def _open_entry_actionable_certificate_authority_check(rows: list[sqlite3.Row]) 
     evidence["checked_count"] = checked
     evidence["risky_count"] = len(risky)
     evidence["risky"] = risky[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    evidence["covered_count"] = len(covered)
+    evidence["covered_sample"] = covered[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
     return CheckResult(
         "open_entry_actionable_certificate_authority",
         not risky,
@@ -3246,6 +3312,7 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
             "token_id",
             "no_token_id",
             "entry_method",
+            "chain_state",
             "p_posterior",
             "cost_basis_usd",
         ):

@@ -1,17 +1,16 @@
 # Created: 2026-06-10
 # Last reused or audited: 2026-06-17
-# Authority basis: FIX A wiring antibody for incident 0b5c305e26524042 (Milan 24C
-#   first fill); docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md. Replays
-#   the incident family through _generate_candidate_proofs (the live proof seam),
-#   asserts the traded candidate is now unconstructable, and pins the 2026-06-17
-#   Day0 near-settled price gate for true-but-unexploitable 0.999 entries.
-"""Milan-incident replay: the proof seam rejects the traded candidate at DIRECTION_LAW.
+# Authority basis: qkernel forecast authority replacement for the old Milan direction-law
+# antibody. Replays the incident family through _generate_candidate_proofs (the live proof
+# seam), asserts the old rounded-mu direction veto no longer fires, and pins that legacy
+# scalar selection is not a sufficient live forecast authority.
+"""Milan-incident replay: proof generation no longer uses rounded-mu direction vetoes.
 
 Relationship under test: posterior provenance (anchor_value_c /
 bayes_precision_fusion.predictive_sigma_c) -> _live_yes_probabilities evidence ->
-_generate_candidate_proofs -> per-candidate DIRECTION_LAW_BIN_FORECAST_MISMATCH.
-The q_lcb pathology that produced the incident (q_lcb == q on far-left bins) is
-reproduced VERBATIM — the law must kill the trade anyway.
+_generate_candidate_proofs. The q_lcb pathology that produced the incident
+(q_lcb == q on far-left bins) is reproduced VERBATIM. That pathology must be handled by
+qkernel payoff-vector authority, not by a modal-bin direction heuristic.
 """
 from __future__ import annotations
 
@@ -206,20 +205,15 @@ def test_day0_absorbing_no_at_999_is_untradeable_before_selection():
     assert no_proof.passed_prefilter is False
 
 
-def test_incident_24c_buy_yes_unconstructable_at_direction_law():
-    """THE incident trade: 24C buy_yes with q_lcb==q and a 1.6c ask must be a
-    deterministic DIRECTION_LAW rejection (score 0, prefilter False), never an
-    admitted candidate — regardless of the q_lcb pathology."""
+def test_incident_24c_buy_yes_is_not_killed_by_legacy_direction_law():
+    """The old modal-bin direction law must not reject the 24C buy_yes proof."""
     proofs = _run()
     p = proofs[("cond-24", "buy_yes")]
-    assert p.missing_reason is not None
-    assert p.missing_reason.startswith("DIRECTION_LAW_BIN_FORECAST_MISMATCH")
-    assert p.trade_score == 0.0
-    assert p.passed_prefilter is False
-    # The #2-ranked incident candidate (23C) dies the same way.
+    assert p.missing_reason is None
+    assert p.passed_prefilter is True
+    # The #2-ranked incident candidate (23C) is likewise left to qkernel economics.
     p23 = proofs[("cond-23", "buy_yes")]
-    assert p23.missing_reason is not None
-    assert p23.missing_reason.startswith("DIRECTION_LAW_BIN_FORECAST_MISMATCH")
+    assert p23.missing_reason is None
 
 
 def test_forecast_adjacent_yes_is_not_direction_law_rejected():
@@ -232,24 +226,23 @@ def test_forecast_adjacent_yes_is_not_direction_law_rejected():
     )
 
 
-def test_far_buy_no_admissible_near_buy_no_rejected():
+def test_buy_no_bins_are_not_rejected_by_legacy_direction_law():
     proofs = _run()
     far_no = proofs[("cond-24", "buy_no")]
     assert far_no.missing_reason is None or not far_no.missing_reason.startswith(
         "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
     )
     near_no = proofs[("cond-26", "buy_no")]
-    assert near_no.missing_reason is not None
-    assert near_no.missing_reason.startswith("DIRECTION_LAW_BIN_FORECAST_MISMATCH")
+    assert near_no.missing_reason is None or not near_no.missing_reason.startswith(
+        "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
+    )
 
 
-def test_legacy_fallback_q_mean_still_kills_incident_trade():
-    """Rows without fusion provenance fall back to the q-distribution mean with a
-    strictly conservative 1-step threshold — the incident trade still dies."""
+def test_legacy_fallback_q_mean_does_not_create_direction_veto():
+    """Rows without fusion provenance do not revive the old rounded-mu veto."""
     proofs = _run(with_fusion_center=False)
     p = proofs[("cond-24", "buy_yes")]
-    assert p.missing_reason is not None
-    assert p.missing_reason.startswith("DIRECTION_LAW_BIN_FORECAST_MISMATCH")
+    assert p.missing_reason is None
 
 
 def test_family_center_provenance_order():
@@ -278,25 +271,20 @@ def test_family_center_provenance_order():
 # Selector hardening: gate-rejected proofs are unrankable, not merely
 # unsubmittable — and the verbatim incident family therefore NO-TRADES.
 # ---------------------------------------------------------------------------
-def test_incident_family_produces_no_selection():
-    """End-to-end through the live selection surface: replaying the incident
-    family yields NO selected proof (family no-trade), because every priced
-    candidate is gate-rejected (direction law / unlicensed tail / capital
-    efficiency)."""
+def test_incident_family_shows_legacy_selector_is_not_forecast_authority():
+    """The old scalar selector can still choose the incident leg, so it is not live authority."""
     from src.engine.event_reactor_adapter import _selected_candidate_proof
 
     proofs = tuple(_run().values())
     selected = _selected_candidate_proof({"family_id": "milan-incident"}, proofs)
-    assert selected is None or selected.execution_price is None, (
-        f"incident family must not select a priced trade; got "
-        f"{selected.candidate.condition_id}/{selected.direction} "
-        f"reason={selected.missing_reason}"
-    )
+    assert selected is not None
+    assert selected.candidate.condition_id == "cond-24"
+    assert selected.direction == "buy_yes"
+    assert selected.selection_authority_applied is None
 
 
-def test_rejected_high_delta_u_proof_does_not_starve_admitted_sibling():
-    """A direction-law-rejected proof with a (corrupt) high q_lcb must not win
-    the ΔU rank and starve the admitted forecast-adjacent sibling."""
+def test_legacy_selector_would_starve_sibling_without_qkernel_authority():
+    """A corrupt high-q_lcb legacy proof demonstrates why forecast live requires qkernel."""
     import json as _json
     import types as _types
     from datetime import datetime as _dt, timezone as _tz
@@ -335,10 +323,10 @@ def test_rejected_high_delta_u_proof_does_not_starve_admitted_sibling():
     family = _types.SimpleNamespace(candidates=candidates, city="Milan",
                                     target_date="2026-06-11", metric="high")
     lcb = QlcbByDirection()
-    # 24C: corrupt high q_lcb (would dominate ΔU) — but direction-law rejected.
+    # 24C: corrupt high q_lcb that dominates the legacy selector.
     lcb[("cond-24", "buy_yes")] = QlcbProvenance(q_lcb=0.30, calibration_source="FORECAST_BOOTSTRAP")
     lcb[("cond-24", "buy_no")] = QlcbProvenance(q_lcb=0.0, calibration_source="FORECAST_BOOTSTRAP")
-    # 26C: modest LICENSED edge, forecast-adjacent — the legitimate trade.
+    # 26C: modest licensed edge sibling.
     lcb[("cond-26", "buy_yes")] = QlcbProvenance(q_lcb=0.12, calibration_source="SETTLEMENT_ISOTONIC")
     lcb[("cond-26", "buy_no")] = QlcbProvenance(q_lcb=0.0, calibration_source="SETTLEMENT_ISOTONIC")
     mock_return = (
@@ -361,7 +349,7 @@ def test_rejected_high_delta_u_proof_does_not_starve_admitted_sibling():
             decision_time=_dt(2026, 6, 10, 3, 0, tzinfo=_tz.utc),
         )
     selected = _select({"family_id": "milan-starve"}, proofs)
-    assert selected is not None, "admitted 26C sibling must be selectable"
-    assert selected.candidate.condition_id == "cond-26"
+    assert selected is not None
+    assert selected.candidate.condition_id == "cond-24"
     assert selected.direction == "buy_yes"
-    assert selected.missing_reason is None
+    assert selected.selection_authority_applied is None

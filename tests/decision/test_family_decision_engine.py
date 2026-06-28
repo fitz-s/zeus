@@ -483,22 +483,19 @@ def test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it():
     no_b27 = build_candidate_route(
         candidate_id="n27", instrument=_inst("NO", "b27"), route_cost=_rc("NO", "b27"), omega=space
     )
-    # Structural direction-law YES is clean only on the forecast bin; non-forecast YES needs
-    # the selector's side-aware empirical OOF license before it can trade.
+    # Direction law proves the native side is tradable; it no longer hard-codes the
+    # rounded forecast bin as the only YES that may carry live alpha.
     assert direction_law_ok(yes_b25, forecast_bin=fbin) is True
-    # NO is legal ONLY off the forecast bin (NO direction unchanged).
-    assert direction_law_ok(no_b25, forecast_bin=fbin) is False
+    assert direction_law_ok(no_b25, forecast_bin=fbin) is True
     assert direction_law_ok(no_b27, forecast_bin=fbin) is True
-    # A non-modal YES is not structurally direction-law-clean.
-    assert direction_law_ok(yes_b27, forecast_bin=fbin) is False
+    assert direction_law_ok(yes_b27, forecast_bin=fbin) is True
 
 
-def test_buy_yes_structural_direction_law_does_not_use_point_q():
-    """Direction-law status is structural; empirical licensing lives in the selector.
+def test_buy_yes_direction_law_does_not_hard_gate_on_rounded_mu_bin():
+    """Direction-law status is a native-side proof, not a forecast-bin veto.
 
-    RED-on-revert: re-introducing a direct ``point_q >= floor`` branch into
-    ``direction_law_ok`` flips the non-forecast assertions below to True and bypasses the
-    side-aware OOF reliability license.
+    RED-on-revert: reintroducing ``YES only on rounded mu`` makes every non-forecast
+    YES false here and recreates the live Shanghai/buy-yes starvation failure.
     """
     fbin = "b25"
 
@@ -510,14 +507,14 @@ def test_buy_yes_structural_direction_law_does_not_use_point_q():
             omega=_outcome_space(_case()),
         )
 
-    # The forecast bin YES is structurally clean.
+    # All native YES bins are allowed to reach the actual alpha gates. Bad bins die on
+    # q/payoff/edge/DeltaU/coherence, not on the rounded center heuristic.
     assert direction_law_ok(yes_on("b25"), forecast_bin=fbin) is True
-    # Non-forecast YES remains structurally non-clean; selector-level OOF evidence can license it.
-    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b26"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin) is False
-    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin) is False
+    assert direction_law_ok(yes_on("b24"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b23"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b26"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b28"), forecast_bin=fbin) is True
+    assert direction_law_ok(yes_on("b_high"), forecast_bin=fbin) is True
 
 
 # Small helpers for the primitive check above.
@@ -622,11 +619,10 @@ def _hand_joint_q_and_band(space: OutcomeSpace, q_by_bin: Mapping[str, float]) -
 def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(monkeypatch):
     """The survivor is selected by robust utility density over the filter chain, NOT scalar score.
 
-    Build a family centered on b25 (the forecast/modal bin) with a DEEP, tight market whose
-    YES midpoints AGREE with the model q (coherence does NOT block anything). The candidate
-    set is the direction-law-legal YES_25 plus the direction-law-legal NO candidates on every
-    OTHER bin (a NO_i is legal iff i is not the forecast bin). Each candidate is priced so its
-    vector edge is positive but its robust utility density differs.
+    Build a family centered on b25 with a DEEP, tight market whose YES midpoints AGREE
+    with the model q (coherence does NOT block anything). Native YES/NO routes may all
+    reach the vector economics gates. Each candidate is priced so its vector edge is
+    positive but its robust utility density differs.
 
     The load-bearing RED-on-revert fact: scalar ``robust_trade_score`` is not a selection key,
     and total ΔU alone is not enough either when it only wins by tying up more capital. The
@@ -661,9 +657,8 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     matrix = _matrix(space)
     exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
 
-    # Sizing candidates: a YES candidate per executable bin priced at the (cheap) market YES
-    # ask, so the sizing cost matches the route cost. YES_25 (the forecast bin) is the only
-    # direction-law-legal YES; the others are enumerated but direction-law-filtered out.
+    # Sizing candidates: a YES candidate per executable bin priced at the (cheap) market
+    # YES ask, so the sizing cost matches the route cost.
     route_set = build_negrisk_route_set(fb, shares=Decimal("100"), enable_negrisk_routes=False)
     sizing: dict[tuple[str, str], NativeSideCandidate] = {}
     for b in space.bins:
@@ -697,8 +692,7 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     assert decision.selected is not None
     assert decision.receipt_hash and len(decision.receipt_hash) == 64
 
-    # The selected candidate is the direction-law-legal YES on the forecast bin b25 — the only
-    # candidate that survives direction_law_ok (YES) + coherence + positive edge + positive ΔU.
+    # The selected candidate survived native side proof + coherence + positive edge + positive ΔU.
     selected_decision = next(
         d for d in decision.candidate_decisions
         if d.economics.candidate_id == decision.selected.candidate_id
@@ -734,14 +728,11 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         )
     )
 
-    # MODAL-ONLY YES (2026-06-23 revert): a non-modal YES is direction-law-ILLEGAL regardless of
-    # its point-q. b24 is an adjacent ring bin (well-massed, ~0.22) but it is NOT the forecast
-    # (modal) bin, so its YES is rejected by the direction law — buy_yes only on the predicted bin.
+    # Non-forecast YES reaches the same vector economics gates. If it has no
+    # positive utility it will still fail there, but the rounded center is not a
+    # hard direction veto.
     yes_b24 = [d for d in decision.candidate_decisions if d.route.side == "YES" and d.route.bin_id == "b24"]
-    assert yes_b24 and yes_b24[0].direction_law_ok is False, (
-        "non-modal YES (b24) must be direction-law-illegal after the modal-only revert, "
-        "even with ample point-q"
-    )
+    assert yes_b24 and yes_b24[0].direction_law_ok is True
 
 
 def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
@@ -754,7 +745,7 @@ def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
     """
     case = _case()
     space = _outcome_space(case)
-    # Two hand-built candidate routes on direction-law-legal sides (NO on non-forecast bins).
+    # Two hand-built candidate routes on valid native NO sides.
     route_lo_scalar_hi_du = _hand_route(space, side="NO", bin_id="b24", cost=0.20)
     route_hi_scalar_lo_du = _hand_route(space, side="NO", bin_id="b22", cost=0.05)
 
@@ -822,8 +813,8 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
     assert selected is low_cost
 
 
-def test_abstained_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(monkeypatch):
-    """Tokyo-class regression: an abstained OOF cell cannot make non-modal YES live-selectable."""
+def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
+    """Tokyo-class regression: an abstained OOF cell must zero economics, not direction."""
     case = _case(metric="low")
     space = _outcome_space(case)
     modal_yes = _hand_decision(
@@ -838,11 +829,11 @@ def test_abstained_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(mon
     )
     nonmodal_yes = _hand_decision(
         _hand_route(space, side="YES", bin_id="b24", cost=0.005),
-        edge_lcb=0.13,
-        optimal_delta_u=0.02,
-        delta_u_at_min=0.001,
+        edge_lcb=-0.005,
+        optimal_delta_u=0.0,
+        delta_u_at_min=0.0,
         robust_trade_score=0.13,
-        direction_law_ok=False,
+        direction_law_ok=True,
         q_lcb_guard_basis="OOF_WILSON_95",
         q_lcb_guard_abstained=True,
         q_lcb_guard_cell_key="low|L2_3|YES|nonmodal|qb2|coarse_global",
@@ -857,8 +848,8 @@ def test_abstained_oof_guard_does_not_replace_direction_law_for_nonmodal_yes(mon
 
     assert selected is None
     assert reason == NO_TRADE_NO_POSITIVE_EDGE
-    assert nonmodal_yes.direction_law_ok is False
-    assert engine._direction_admitted(nonmodal_yes) is False
+    assert nonmodal_yes.direction_law_ok is True
+    assert engine._direction_admitted(nonmodal_yes) is True
 
 
 def test_symmetric_center_yes_dominance_replaces_inferior_selected_no():
@@ -1157,8 +1148,7 @@ def test_no_trade_reason_present_when_no_candidate_passes(monkeypatch):
     """When nothing survives the chain, decide returns a no-trade FamilyDecision (not None).
 
     Build a family where EVERY route is priced so expensive that no candidate has a positive
-    robust edge/ΔU (the direction-law-legal YES on the forecast bin is priced ABOVE its fair
-    value, and the legal NOs likewise). The filter chain empties, so ``decide`` returns a
+    robust edge/DeltaU. The filter chain empties, so ``decide`` returns a
     FamilyDecision with ``selected=None``, a non-None ``no_trade_reason``, and a receipt_hash.
     RED-on-revert: a reversion returning None / omitting the reason would break this contract.
     """
@@ -1344,7 +1334,7 @@ def test_tokyo_impossible_bin_blocked_by_coherence_before_scoring(monkeypatch):
     assert y.economics.edge_lcb > 0.0, (
         "YES_25 must have a positive raw edge so the test proves coherence (not edge) blocks it"
     )
-    assert y.direction_law_ok is True  # it IS the forecast bin -> direction-law-legal
+    assert y.direction_law_ok is True
     assert y.coherence_allows is False  # but coherence blocks it (offending bin)
 
     # And the no-trade reason (if a no-trade) names the coherence block as the emptying gate
@@ -1365,8 +1355,8 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
     OOF support after sparse-bucket pooling, but the coherence layer used to accept only the
     exact ``OOF_WILSON_95`` basis. That left a model-superiority receipt stranded below the
     market-coherence gate and structurally favored NO routes. The pooled basis may license
-    only a direction-law-legal modal YES with positive guarded edge/Delta-U; it does not
-    bypass the modal-only-YES constraint tested below.
+    only a valid native side with positive guarded edge/Delta-U; it does not bypass
+    q/payoff economics.
     """
 
     from src.decision.qlcb_reliability_guard import GuardVerdict
@@ -1464,54 +1454,29 @@ def test_modal_yes_with_pooled_oof_reliability_can_license_market_coherence(monk
 
 
 # ===========================================================================
-# SPEC RED-on-revert #4: OOF reliability cannot override structural direction law.
+# SPEC RED-on-revert #4: rounded-mu direction heuristics cannot block economic alpha.
 # ===========================================================================
 
-def test_oof_reliability_does_not_override_direction_law_for_yes_or_no():
-    """A candidate cannot bypass direction law with edge or OOF reliability evidence.
+def test_nonforecast_yes_and_modal_no_are_live_selectable_on_vector_economics():
+    """Positive vector economics, not rounded-mu bin identity, control live admission.
 
-    OOF/Wilson cells are q_lcb reliability evidence. They may support a legal candidate's
-    conservative probability/coherence proof, but they must not turn a structurally illegal
-    modal NO or non-modal YES into a live-selectable route.
+    RED-on-revert: restoring the old rule (YES only on rounded forecast bin; NO only away
+    from it) rejects both hand-built candidates below before the edge/DeltaU gate. That is
+    the live buy-YES starvation / Shanghai-class failure: the selector refuses profitable
+    Arrow-Debreu payoffs because the served center rounded somewhere else.
     """
     case = _case()
     space = _outcome_space(case)
-    # The modal bin for members tightly around 25C is b25 (confirmed by
-    # test_forecast_bin_is_the_modal_bin_and_direction_law_reads_it).
-    # A NO on b25 is direction-law-ILLEGAL (d.direction_law_ok = False).
     modal_bin_id = "b25"
 
-    # Build a NO-on-modal route: side="NO", bin_id=b25, cost=0.72.
     no_on_modal_route = _hand_route(space, side="NO", bin_id=modal_bin_id, cost=0.72)
-
-    # Positive economics prove the direction-law gate, not edge, blocks this route.
-    no_on_modal_economics = CandidateEconomics(
-        candidate_id=no_on_modal_route.candidate_id,
-        point_ev=0.09,          # edge_lcb + small spread
+    no_on_modal_cand = _hand_decision(
+        route=no_on_modal_route,
         edge_lcb=0.08,
-        delta_u_at_min=0.001,
-        optimal_stake_usd=Decimal("5"),
         optimal_delta_u=0.05,
-        q_dot_payoff=0.22,      # model q_no = 1 - q_modal ~ 0.22 (plausible for b25 favorite)
-        cost=no_on_modal_route.route_cost.avg_cost,
-        route_id=no_on_modal_route.route_cost.route_id,
-    )
-    no_on_modal_cand = CandidateDecision(
-        route=no_on_modal_route,
-        economics=no_on_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
+        delta_u_at_min=0.001,
         robust_trade_score=0.08,
-    )
-    licensed_no_on_modal_cand = CandidateDecision(
-        route=no_on_modal_route,
-        economics=no_on_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
-        robust_trade_score=0.08,
-        q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
-        q_lcb_guard_cell_key="high|L1|NO|modal|qb7",
+        direction_law_ok=direction_law_ok(no_on_modal_route, forecast_bin=modal_bin_id),
     )
 
     engine = FamilyDecisionEngine(
@@ -1521,61 +1486,29 @@ def test_oof_reliability_does_not_override_direction_law_for_yes_or_no():
     )
 
     selected, reason = engine._select([no_on_modal_cand])
-    assert selected is None
-    assert reason == NO_TRADE_NO_DIRECTION_LAW
+    assert selected is no_on_modal_cand
+    assert reason is None
 
-    selected, reason = engine._select([licensed_no_on_modal_cand])
-    assert selected is None
-    assert reason == NO_TRADE_NO_DIRECTION_LAW
-
-    # ---- Confirm the same structural burden applies to YES ---------------------
-    # A YES-on-non-modal (direction_law_ok=False, side="YES") with edge_lcb>0 must
-    # NOT be admitted on edge alone or on an active OOF_WILSON_95 reliability cell.
     non_modal_bin_id = "b24"
     yes_on_non_modal_route = _hand_route(space, side="YES", bin_id=non_modal_bin_id, cost=0.30)
-    yes_on_non_modal_economics = CandidateEconomics(
-        candidate_id=yes_on_non_modal_route.candidate_id,
-        point_ev=0.11,
-        edge_lcb=0.10,          # positive edge — but the ban holds
+    yes_on_non_modal_cand = _hand_decision(
+        yes_on_non_modal_route,
+        edge_lcb=0.10,
+        optimal_delta_u=0.06,
         delta_u_at_min=0.001,
-        optimal_stake_usd=Decimal("5"),
-        optimal_delta_u=0.05,
-        q_dot_payoff=0.40,
-        cost=yes_on_non_modal_route.route_cost.avg_cost,
-        route_id=yes_on_non_modal_route.route_cost.route_id,
-    )
-    yes_on_non_modal_cand = CandidateDecision(
-        route=yes_on_non_modal_route,
-        economics=yes_on_non_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
         robust_trade_score=0.10,
-    )
-    licensed_yes_on_non_modal_cand = CandidateDecision(
-        route=yes_on_non_modal_route,
-        economics=yes_on_non_modal_economics,
-        direction_law_ok=False,
-        coherence_allows=True,
-        robust_trade_score=0.10,
-        q_lcb_guard_basis="OOF_WILSON_95",
-        q_lcb_guard_abstained=False,
-        q_lcb_guard_cell_key="high|L1|YES|nonmodal|qb7",
+        direction_law_ok=direction_law_ok(yes_on_non_modal_route, forecast_bin=modal_bin_id),
     )
 
     selected2, reason2 = engine._select([yes_on_non_modal_cand])
-    assert selected2 is None, (
-        "YES-on-non-modal (direction_law_ok=False, side='YES') must NOT be admitted "
-        "from bare positive edge alone"
-    )
-    assert reason2 == NO_TRADE_NO_DIRECTION_LAW, (
-        f"expected NO_TRADE_NO_DIRECTION_LAW for YES-on-non-modal; got {reason2!r}"
-    )
+    assert selected2 is yes_on_non_modal_cand
+    assert reason2 is None
 
-    selected3, reason3 = engine._select([licensed_yes_on_non_modal_cand])
-    assert selected3 is None
-    assert reason3 == NO_TRADE_NO_DIRECTION_LAW
-    assert engine._direction_admitted(yes_on_non_modal_cand) is False
-    assert engine._direction_admitted(licensed_yes_on_non_modal_cand) is False
+    selected3, reason3 = engine._select([no_on_modal_cand, yes_on_non_modal_cand])
+    assert selected3 is yes_on_non_modal_cand
+    assert reason3 is None
+    assert engine._direction_admitted(yes_on_non_modal_cand) is True
+    assert engine._direction_admitted(no_on_modal_cand) is True
 
 
 def test_qlcb_guard_exception_abstains_candidate(monkeypatch):

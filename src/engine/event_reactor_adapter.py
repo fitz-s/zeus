@@ -3796,23 +3796,15 @@ def _build_event_bound_no_submit_receipt_core(
     # per-candidate kelly_size_usd is a display field only; it is no longer fed by a
     # parallel scalar-Kelly pass (one sizing surface, no alternate path).
     #
-    # === Q-KERNEL REBUILD WAVE 5B — single cutover branch (2026-06-14) ============
-    # ONE flag decides which authority computes the per-family DECISION (q +
-    # candidate selection + sizing). When qkernel_spine_enabled is OFF (default), the
-    # legacy path below runs byte-for-byte unchanged. When ON, the decision is
-    # computed by the rebuilt q-kernel spine (src/decision/family_decision_engine via
-    # src/engine/qkernel_spine_bridge): predictive_distribution -> joint_q ->
+    # === Q-KERNEL FORECAST DECISION AUTHORITY ====================================
+    # Forecast-family entry decisions require the rebuilt q-kernel spine
+    # (src/decision/family_decision_engine via src/engine/qkernel_spine_bridge):
+    # predictive_distribution -> joint_q ->
     # joint_q_band -> family_book -> market_coherence -> negrisk_routes ->
-    # payoff_vector -> filter[direction, coherence, edge_lcb>0 & delta_u>0] -> argmax
-    # optimal_delta_u, and FamilyDecision.selected is mapped back onto the SAME
-    # _CandidateProof shape this submission pipeline already consumes (so RiskGuard,
-    # freshness, MECE fail-closed, venue submission, receipts, and the Stage-0
-    # decision_receipt_spine all still run on the spine's selected candidate,
-    # unchanged). The legacy authorities (EDLI bias correction, scalar trade_score
-    # selector, binary Kelly, 1-q_ucb_yes NO LCB, market_anchor) stay INERT for
-    # rollback; Stage 11 removes them. The proofs tuple is generated the SAME way on
-    # both paths (it is the submission substrate — rows / execution_price / native
-    # costs); only the SELECTION authority differs.
+    # payoff_vector -> filter[native side, coherence, edge_lcb>0 & delta_u>0] ->
+    # argmax robust utility density. If the qkernel flag is off or unavailable for a
+    # forecast event, the lane no-trades with a typed reason instead of falling back to
+    # the legacy scalar selector. That legacy selector is not live forecast authority.
     _spine_no_trade_reason: str | None = None
     from src.engine.qkernel_spine_bridge import (
         decide_family_via_spine,
@@ -3844,7 +3836,10 @@ def _build_event_bound_no_submit_receipt_core(
         portfolio_state_provider=portfolio_state_provider,
         family=family,
     )
-    if _spine_flag_on and _spine_eligible_event and not _is_day0_event:
+    if _spine_eligible_event and not _is_day0_event and not _spine_flag_on:
+        proof = None
+        _spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"
+    elif _spine_flag_on and _spine_eligible_event and not _is_day0_event:
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
@@ -10556,9 +10551,9 @@ def _selection_scoped_proofs(
     def _qkernel_may_rescore_rejected_proof(missing_reason: str | None) -> bool:
         """Whether the qkernel may re-evaluate a legacy admission rejection.
 
-        The qkernel replaces scalar economics and owns the live forecast/bin direction
-        law for forecast families. It may restore a proof removed by the old
-        capital-efficiency prefilter or the retired distance-threshold direction law so
+        The qkernel replaces scalar economics and owns live side/bin selection for
+        forecast families. It may restore a proof removed by the old
+        capital-efficiency prefilter or the retired rounded-mu direction heuristic so
         the vector payoff engine can compare the leg honestly under the qkernel's
         settlement-bin law. It must not resurrect missing native structure,
         near-settled-price blocks, or buy-NO conservative-evidence failures; those are
@@ -10739,7 +10734,7 @@ def _proofs_with_qkernel_candidate_economics(
 # helpers turn the per-candidate missing_reasons (already on the proofs) into one
 # deterministic family-level rejection class taxonomy + reason string. Observability
 # only: they read proofs, change no gate, and never decide a trade. The class names are
-# stable identifiers (snake_case) so the receipt string is greppable in regret SQL.
+    # stable identifiers (snake_case) so the receipt string is greppable in regret SQL.
 _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     # (missing_reason prefix, stable class name). Ordered most-specific first; the
     # first prefix that matches a missing_reason wins. CAPITAL_EFFICIENCY_LCB_EV
@@ -10750,7 +10745,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
     ("COVERAGE_UNLICENSED_TAIL", "coverage_unlicensed_tail"),
     ("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE", "buy_no_evidence"),
     ("ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", "buy_no_evidence"),
-    ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "direction_law"),
+    ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "legacy_rounded_mu_direction"),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
     (_ENTRY_HELD_FAMILY_REASON_BASE, "held_family_monitor_owned"),

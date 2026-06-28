@@ -42,7 +42,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -89,6 +89,27 @@ _INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_day0_hourly_vectors_city_date "
     "ON day0_hourly_vectors(city, target_date, captured_at)"
 )
+
+
+def day0_hourly_target_dates_for_refresh(
+    *, city: Any, decision_time: datetime
+) -> tuple[str, ...]:
+    """Target dates covered by a 2-day hourly fetch for the city's local clock.
+
+    Open-Meteo requests in this module ask for ``forecast_days=2``. Persisting the
+    response only under the city's current local date starves active next-day weather
+    markets: the read path correctly requires exact ``(city, target_date)``, so a
+    June 29 market cannot use a June 28-stamped vector even though the payload already
+    contains June 29 hours. Persist both local today and local tomorrow under separate
+    target_date identities.
+    """
+
+    tz = ZoneInfo(str(getattr(city, "timezone")))
+    local_day = decision_time.astimezone(tz).date()
+    return (
+        local_day.isoformat(),
+        (local_day + timedelta(days=1)).isoformat(),
+    )
 
 
 @dataclass(frozen=True)
@@ -524,9 +545,10 @@ def maybe_refresh_day0_hourly_vectors(
         if not name:
             continue
         try:
-            tz = ZoneInfo(str(getattr(city, "timezone")))
-            target_date = decision_time.astimezone(tz).date().isoformat()
-            refresh_key = f"{name}|{target_date}"
+            target_dates = day0_hourly_target_dates_for_refresh(
+                city=city, decision_time=decision_time
+            )
+            refresh_key = f"{name}|{target_dates[0]}"
             with _REFRESH_LOCK:
                 last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
                 if now_monotonic - last < float(interval_s):
@@ -549,12 +571,13 @@ def maybe_refresh_day0_hourly_vectors(
                     city, models=models, now=decision_time
                 )
             if vectors and request_hash:
-                written += persist_day0_hourly_vectors(
-                    vectors,
-                    target_date=target_date,
-                    request_hash=request_hash,
-                    lock_blocking=persist_lock_blocking,
-                )
+                for target_date in target_dates:
+                    written += persist_day0_hourly_vectors(
+                        vectors,
+                        target_date=target_date,
+                        request_hash=request_hash,
+                        lock_blocking=persist_lock_blocking,
+                    )
             else:
                 with _REFRESH_LOCK:
                     _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)

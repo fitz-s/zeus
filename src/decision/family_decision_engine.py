@@ -112,15 +112,11 @@ selects a trade carries the selected candidate; a decision that selects nothing 
 ``candidates`` tuple so the no-trade is auditable. The ``receipt_hash`` anchors the exact
 (predictive, omega, q, band, family_book, coherence, candidates, selected) tuple.
 
-DIRECTION LAW (spec lines 947-951):
-``YES_i`` is structurally direction-law-clean when ``i`` IS the forecast bin (buying the
-forecast/modal bin); ``NO_i`` is structurally direction-law-clean when its bin is NOT the
-forecast bin. The forecast bin is the μ*-containing settlement bin of the family. This flag is a
-receipt proof, not the whole selector: a side-aware empirical OOF reliability verdict may license
-a NO-on-forecast-bin claim when the candidate's own q_safe, edge, ΔU, and coherence evidence all
-survive. It must not license a non-forecast YES: direct YES is buying a specific settlement bin,
-and a non-forecast YES with positive payoff-space edge is a probability-authority mismatch, not a
-safe alternate expression.
+SIDE ADMISSION:
+``direction_law_ok`` is now a native-side proof: the executable route must be a valid YES/NO
+claim, but the rounded forecast center is not a hard bin veto. Direct YES on any bin and direct
+NO on any bin may reach the real live gates. Settlement-aware payoff vectors, q_lcb reliability,
+market coherence, executable cost, and robust DeltaU decide whether that side/bin has alpha.
 
 GREENFIELD / WAVE-5 WIRING. The spec ``decide(case, family, snapshots, portfolio)``
 references ``fresh_model_reader``, ``day0_reader``, ``predictive_builder``,
@@ -439,16 +435,14 @@ class FamilyDecision:
 
 
 # ===========================================================================
-# Forecast (modal) bin — the direction-law reference (spec lines 947-951).
+# Forecast-bin helpers — receipt/provenance context, not live side admission.
 # ===========================================================================
 
 def forecast_bin_id(joint_q: JointQ) -> str:
-    """The forecast bin — the modal (max-mass) bin of the joint q (spec line 948-951).
+    """The modal max-mass bin of the joint q.
 
-    The direction law is anchored on the bin the predictive distribution most favors. The
-    modal bin of the normalized joint q IS that bin: it carries the most settlement mass,
-    so a YES on it is "buying the forecast bin" and a NO on it is illegal (you would be
-    betting against your own forecast). Ties resolve to the first max bin (deterministic).
+    This is useful for receipts and diagnostics. It is not a live admission rule; direct
+    native side/bin selection is governed by vector economics.
     """
     q = np.asarray(joint_q.q, dtype=float)
     if q.shape[0] == 0:
@@ -462,10 +456,10 @@ def forecast_settlement_bin_id(
 ) -> str:
     """The bin where the served center settles under this family's rounding rule.
 
-    Direction law is a contract/settlement statement, not a largest-mass statement.
+    This settlement bin is receipt/provenance context, not a largest-mass statement and
+    not a live side/bin admission gate.
     Open shoulders can carry more probability than a one-degree center bin simply
-    because they aggregate many integer outcomes. That must not make the shoulder
-    the "forecast bin" for live direction law. The forecast bin is the bin containing
+    because they aggregate many integer outcomes. The settlement-center bin is the bin containing
     the settlement value of ``predictive.mu_native`` under ``omega.resolution``.
     """
     mu = float(predictive.mu_native)
@@ -494,23 +488,23 @@ def forecast_settlement_bin_id(
 
 
 def direction_law_ok(route: CandidateRoute, *, forecast_bin: str) -> bool:
-    """Whether ``route`` is direction-law-legal against the forecast bin (spec 947-951).
+    """Whether ``route`` has a live-tradable native side.
 
-    * ``YES_i`` is structurally clean when ``i`` IS the forecast bin — buying the forecast
-      bin, the ONE bin the predictive distribution most favors. A non-forecast YES is not
-      structurally direction-law-clean and cannot become live-selectable through empirical
-      reliability evidence.
-    * ``NO_i`` is legal ONLY when ``i`` is NOT the forecast bin (its payoff vector ``1 - e_i``
-      wins on the forecast bin — "not forecast bin"). NO direction is unchanged.
+    ``forecast_bin`` is retained in the signature because callers already compute and
+    stamp it for receipt reconstruction, but it is not an admission gate. A weather
+    binary is an Arrow-Debreu payoff; the mathematically relevant live question is
+    whether the executable payoff vector has positive robust edge and positive robust
+    utility after cost, coherence, q_lcb reliability, and exposure. The rounded
+    predictive center is useful telemetry, not a proof that only ``YES_forecast`` or
+    ``NO_nonforecast`` can carry alpha.
 
-    This function stays purely structural: ``point_q`` and empirical reliability
-    are not read here. Empirical OOF reliability may affect q_lcb/coherence evidence, but
-    it does not authorize a structurally illegal live route.
+    This avoids the Shanghai failure mode: a cheap YES on a non-center bin, or a NO on
+    the rounded-center bin, must not be rejected merely because ``mu_native`` rounds
+    elsewhere. If its vector economics are wrong, the q/payoff/edge/DeltaU gates reject
+    it. If they are right, the family selector may choose it.
     """
-    if route.side == "YES":
-        return route.bin_id == forecast_bin
-    # NO_i is legal exactly when its bin is NOT the forecast bin.
-    return route.bin_id != forecast_bin
+    _ = forecast_bin
+    return route.side in {"YES", "NO"}
 
 
 def coherence_allows(route: CandidateRoute, report: MarketCoherenceReport) -> bool:
@@ -701,9 +695,9 @@ class FamilyDecisionEngine:
             enable_negrisk_routes=self._enable_negrisk_routes,
         )
 
-        # The forecast settlement bin — the direction-law reference. This is the bin
-        # containing the rounded served center, not necessarily the max-mass bin (open
-        # shoulders can accumulate more mass than a one-degree center bin).
+        # The forecast settlement bin remains receipt/provenance context. It is not a
+        # live admission gate; vector payoff economics decide which native side/bin can
+        # carry alpha.
         forecast_bin = forecast_settlement_bin_id(predictive, omega)
 
         # --- (6) enumerate + score every candidate route -------------------------
@@ -718,9 +712,10 @@ class FamilyDecisionEngine:
             max_stake_usd=max_stake_usd,
         )
 
-        # Stamp the direction-law first. The q_lcb reliability guard is empirical
-        # model-superiority evidence; it must run before market coherence so a guarded,
-        # positive-edge candidate can carry the license promised by the coherence contract.
+        # Stamp the native-side direction proof first. The q_lcb reliability guard is
+        # empirical model-superiority evidence; it must run before market coherence so a
+        # guarded, positive-edge candidate can carry the license promised by the
+        # coherence contract.
         pre_coherence_scored = tuple(
             CandidateDecision(
                 route=d.route,
@@ -757,9 +752,9 @@ class FamilyDecisionEngine:
 
         # --- the market-coherence report over the candidate bins (spec 891) ------
         # A large model/market logit gap is not automatically a live-money incident.
-        # Side-aware OOF reliability evidence can support market-coherence acceptance for a
-        # structurally legal candidate. It cannot override the direction law for non-modal
-        # YES or modal NO routes.
+        # Side-aware OOF reliability evidence can support market-coherence acceptance for
+        # a candidate whose native side is live-tradable. It does not move mu or fabricate
+        # edge; q/payoff economics still decide selection.
         empirical_reliability_bins = frozenset(
             d.route.bin_id
             for d in guarded
@@ -796,7 +791,7 @@ class FamilyDecisionEngine:
         )
 
         # --- (7) the filter chain (spec lines 896-898) — ORDER IS THE CONTRACT ----
-        #   direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
+        #   native side proof -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)
         # The scalar robust_trade_score is NOT one of the conditions.
         selected_decision, no_trade_reason = self._select(scored)
         if selected_decision is not None:
@@ -1427,10 +1422,10 @@ class FamilyDecisionEngine:
 
         The filter ORDER is the contract:
 
-            1. direction_law_ok          (the candidate is on the legal side of the forecast)
+            1. direction_law_ok          (the candidate has a live-tradable native side)
             2. coherence_allows          (the market-coherence report does NOT block the bin)
             3. edge_lcb > 0 AND optimal_delta_u > 0   (the vector edge + the vector ΔU)
-               (the executable-route + direction-law + coherence preconditions of the live
+               (the executable-route + native-side + coherence preconditions of the live
                 pass are already true here, so live_candidate_passes is a re-proof)
 
         The default live objective selects the survivor with the MAX
@@ -1450,8 +1445,8 @@ class FamilyDecisionEngine:
         if not after_executable:
             return None, NO_TRADE_NO_EXECUTABLE_ROUTE
 
-        # Direction law is structural. Reliability evidence can support q_lcb and
-        # market-coherence, but cannot make a structurally illegal route live-selectable.
+        # Direction law is a native-side route proof. It must not impose a rounded-mu
+        # bin heuristic after q/payoff economics have already priced the route.
         after_direction = [d for d in after_executable if self._direction_admitted(d)]
         if not after_direction:
             return None, NO_TRADE_NO_DIRECTION_LAW
@@ -1465,9 +1460,8 @@ class FamilyDecisionEngine:
             for d in after_coherence
             if d.economics.edge_lcb > 0.0 and d.economics.optimal_delta_u > 0.0
         ]
-        # The live pass is a final structural re-proof (executable route, direction-law
-        # proof present, coherence accepted, vector edge/ΔU). The direction-law proof
-        # passed here is intentionally the same structural predicate used above.
+        # The live pass is a final structural re-proof (executable route, native-side
+        # proof present, coherence accepted, vector edge/DeltaU).
         survivors = [
             d
             for d in edge_survivors

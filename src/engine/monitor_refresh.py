@@ -2848,17 +2848,20 @@ def _maybe_write_day0_nowcast(
 
     try:
         from src.state.day0_nowcast_store import (  # noqa: PLC0415
+            ensure_identity_platt_fit,
             read_latest_platt_fit,
             write_nowcast_run,
         )
 
         fit = read_latest_platt_fit()
         if fit is None:
-            logger.debug(
-                "T5 nowcast: no platt fit available yet for %s — skipping write",
-                position.market_slug,
-            )
-            return
+            fit = ensure_identity_platt_fit()
+            if fit is None:
+                logger.debug(
+                    "T5 nowcast: no platt fit available yet for %s — skipping write",
+                    position.market_slug,
+                )
+                return
 
         _metric_str = (
             temperature_metric.temperature_metric

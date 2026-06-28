@@ -871,7 +871,7 @@ def live_candidate_passes(
         candidate.delta_u_at_min > 0
         candidate.optimal_delta_u > 0
         executable route available
-        direction law proof present
+        native side proof present
         market coherence accepted
 
     EVERY condition is a vector / structural quantity. The scalar ``q - price`` trade
@@ -879,7 +879,7 @@ def live_candidate_passes(
     telemetry and is never read here. So the bad selection (promoting on a
     scalar ``q_i - price`` that ignores the rest of the payoff vector and the family
     exposure) is unconstructable: the only inputs to the pass are the vector edge_lcb,
-    the vector ΔU at min and at s*, the route's executability, the direction-law proof,
+    the vector DeltaU at min and at s*, the route's executability, the native-side proof,
     and the coherence report.
     """
     return (

@@ -13,12 +13,13 @@
 #     (CHECK schema_version IN (3,4), column `fit_version`) -> the two latent
 #     write_platt_fit bugs (fit_artifact_id column name; schema_version=7) are
 #     regression-locked.
-#   SHORT-CIRCUIT: with NO fit, the lane writes 0 rows (the documented
-#     pre-activation behavior) -> proves the fit is the load-bearing activator.
+#   AUTO-BOOTSTRAP: with NO fit, the lane persists the documented conservative
+#     identity fit and writes the row; no operator script is required after restart.
 """ThePath P1 lane-activation antibodies.
 
-Relationship test: the obs-timing data clock starts ONLY when a HorizonPlattFit
-is persisted. These exercise the REAL monitor_refresh._maybe_write_day0_nowcast
+Relationship test: the obs-timing data clock starts when the conservative identity
+HorizonPlattFit is present or can be auto-bootstrapped. These exercise the REAL
+monitor_refresh._maybe_write_day0_nowcast
 against a temp DB (never LIVE) by binding the day0_nowcast_store functions to a
 temp-DB connection — the monitor function itself is left byte-identical.
 """
@@ -102,6 +103,7 @@ def _bind_store_to_conn(monkeypatch, conn: sqlite3.Connection) -> None:
     """
     real_read = day0_nowcast_store.read_latest_platt_fit
     real_write = day0_nowcast_store.write_nowcast_run
+    real_ensure = day0_nowcast_store.ensure_identity_platt_fit
 
     def _read_bound(*, fit_artifact_id: str = "hpf_v1", **_kw):
         return real_read(fit_artifact_id=fit_artifact_id, conn=conn)
@@ -110,8 +112,12 @@ def _bind_store_to_conn(monkeypatch, conn: sqlite3.Connection) -> None:
         kw["conn"] = conn
         return real_write(**kw)
 
+    def _ensure_bound(*, fit_artifact_id: str = "hpf_v1", **_kw):
+        return real_ensure(fit_artifact_id=fit_artifact_id, conn=conn)
+
     monkeypatch.setattr(day0_nowcast_store, "read_latest_platt_fit", _read_bound)
     monkeypatch.setattr(day0_nowcast_store, "write_nowcast_run", _write_bound)
+    monkeypatch.setattr(day0_nowcast_store, "ensure_identity_platt_fit", _ensure_bound)
 
 
 def _call_lane(conn: sqlite3.Connection, *, obs_avail: str | None) -> None:
@@ -184,16 +190,18 @@ def test_lane_writes_null_unverified_when_availability_absent(monkeypatch) -> No
 
 
 # --------------------------------------------------------------------------- #
-# SHORT-CIRCUIT: with NO fit, the lane writes 0 rows (load-bearing activator).
+# AUTO-BOOTSTRAP: with NO fit, the lane persists identity fit and writes.
 # --------------------------------------------------------------------------- #
-def test_lane_short_circuits_and_writes_nothing_without_fit(monkeypatch) -> None:
+def test_lane_auto_bootstraps_identity_fit_when_missing(monkeypatch) -> None:
     conn = _deployed_shape_conn()
-    # NO write_platt_fit -> read_latest_platt_fit returns None.
+    # NO write_platt_fit upfront: runtime must create the conservative identity fit.
     _bind_store_to_conn(monkeypatch, conn)
     _call_lane(conn, obs_avail="2026-06-15T13:45:01+00:00")
 
-    n = conn.execute("SELECT COUNT(*) FROM day0_nowcast_runs").fetchone()[0]
-    assert n == 0, "with no fit the lane must short-circuit and write nothing"
+    fit_n = conn.execute("SELECT COUNT(*) FROM day0_horizon_platt_fits").fetchone()[0]
+    run_n = conn.execute("SELECT COUNT(*) FROM day0_nowcast_runs").fetchone()[0]
+    assert fit_n == 1
+    assert run_n == 1
     conn.close()
 
 
