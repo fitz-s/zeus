@@ -814,9 +814,13 @@ class FamilyDecisionEngine:
                 band=band,
                 forecast_bin=forecast_bin,
             )
-            if any(c.dominates_selected for c in portfolio_comparisons):
-                selected_decision = None
-                no_trade_reason = NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE
+            # A superior non-executable portfolio is live telemetry, not an execution veto.
+            # The current executor can submit one native leg; blocking an already-live,
+            # positive-edge center YES because a two-leg adjacent-NO expression is better
+            # recreates the Shanghai failure mode where a profitable executable route
+            # disappears instead of flowing to the venue. Keep the comparison in the receipt
+            # so portfolio execution can be promoted later without hiding the opportunity
+            # cost, but trade the best executable route available now.
 
         candidates_economics = tuple(d.economics for d in scored)
         selected_economics = (

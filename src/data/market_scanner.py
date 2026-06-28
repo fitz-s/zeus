@@ -228,11 +228,19 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
 
     if per_city_limit != 0:
         return None
+    direct_clob_threshold = _full_family_direct_clob_prefetch_candidate_threshold()
     try:
-        configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "500"))
+        configured = int(
+            os.environ.get(
+                "ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK",
+                str(direct_clob_threshold),
+            )
+        )
     except ValueError:
-        configured = 500
-    return configured if configured > 0 else None
+        configured = direct_clob_threshold
+    if configured <= 0:
+        return None
+    return min(configured, direct_clob_threshold)
 
 
 def _snapshot_market_refresh_urgency(market: dict[str, Any]) -> int:
@@ -3755,6 +3763,13 @@ def reconstruct_weather_market_from_static_topology(
     # freshness window — it only makes the warm lane fast enough to keep every pending
     # family's book inside it. The market-identity authority is stable by operator law
     # ("freshness 针对价格不针对市场; 市场捕捉了不会突然消失").
+    snapshot_select_columns = (
+        "snapshot_id, gamma_market_id, event_id, event_slug, condition_id, "
+        "question_id, yes_token_id, no_token_id, selected_outcome_token_id, "
+        "outcome_label, enable_orderbook, active, closed, accepting_orders, "
+        "market_start_at, market_end_at, market_close_at, sports_start_at, "
+        "token_map_json, raw_gamma_payload_hash, captured_at, freshness_deadline"
+    )
     seen_snapshot_ids: set[str] = set()
     snapshot_rows: list[Any] = []
     try:
@@ -3762,14 +3777,14 @@ def reconstruct_weather_market_from_static_topology(
             for label in ("YES", "NO", None):
                 if label is None:
                     seek_sql = (
-                        "SELECT * FROM executable_market_snapshots "
+                        f"SELECT {snapshot_select_columns} FROM executable_market_snapshots "
                         "WHERE condition_id = ? "
                         "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
                     )
                     seek_params: tuple[str, ...] = (condition_id_seek,)
                 else:
                     seek_sql = (
-                        "SELECT * FROM executable_market_snapshots "
+                        f"SELECT {snapshot_select_columns} FROM executable_market_snapshots "
                         "WHERE condition_id = ? AND outcome_label = ? "
                         "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
                     )

@@ -154,6 +154,20 @@ def test_substrate_refresh_cursor_module_global_exists():
     )
 
 
+def test_substrate_gamma_refresh_cursor_module_global_exists():
+    """Gamma slug lookup needs its own cursor.
+
+    A family sweep can process every pending family while the bounded Gamma slice
+    only submits the first few slugs. Without a persistent Gamma cursor, every
+    cycle probes the same prefix and tail families never get topology/bin identity.
+    """
+    import src.main as M
+    import src.data.substrate_observer as S
+
+    assert hasattr(M, "_SUBSTRATE_GAMMA_REFRESH_CURSOR")
+    assert hasattr(S, "_SUBSTRATE_GAMMA_REFRESH_CURSOR")
+
+
 # ---------------------------------------------------------------------------
 # INV-SWEEP-3: reactor evaluation ceiling can reach the live family count
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ These tests lock:
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import re
@@ -135,17 +136,23 @@ def _reset_substrate_refresh_cursor():
     reset is purely test determinism.
     """
     saved = main_module._SUBSTRATE_REFRESH_CURSOR
+    saved_gamma = main_module._SUBSTRATE_GAMMA_REFRESH_CURSOR
     main_module._SUBSTRATE_REFRESH_CURSOR = 0
+    main_module._SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
     saved_lifted = substrate_observer._SUBSTRATE_REFRESH_CURSOR
     substrate_observer._SUBSTRATE_REFRESH_CURSOR = 0
     saved_lifted_priority = substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR
     substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
+    saved_lifted_gamma = substrate_observer._SUBSTRATE_GAMMA_REFRESH_CURSOR
+    substrate_observer._SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
     try:
         yield
     finally:
         main_module._SUBSTRATE_REFRESH_CURSOR = saved
+        main_module._SUBSTRATE_GAMMA_REFRESH_CURSOR = saved_gamma
         substrate_observer._SUBSTRATE_REFRESH_CURSOR = saved_lifted
         substrate_observer._SUBSTRATE_PRIORITY_REFRESH_CURSOR = saved_lifted_priority
+        substrate_observer._SUBSTRATE_GAMMA_REFRESH_CURSOR = saved_lifted_gamma
 
 
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
@@ -196,6 +203,16 @@ def test_pending_family_refresh_does_not_call_global_weather_discovery():
     src = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
 
     assert "find_weather_markets_or_raise" not in src
+
+
+def test_static_topology_reconstruction_reads_narrow_snapshot_columns():
+    """Warm-lane reconstruction must not pull historical orderbook depth payloads."""
+
+    src = inspect.getsource(market_scanner.reconstruct_weather_market_from_static_topology)
+
+    assert "SELECT * FROM executable_market_snapshots" not in src
+    assert "snapshot_select_columns" in src
+    assert "orderbook_depth_json" not in src
 
 
 def test_pending_family_refresh_default_budget_stays_inside_price_ttl():
@@ -764,8 +781,14 @@ def test_day0_emit_lock_exhaustion_is_caught_at_reactor_boundary():
     assert "skipping Day0 emit this cycle" in source
 
 
-def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
-    """Late topology selection must leave both /books prefetch and capture time."""
+def test_snapshot_capture_budget_never_extends_scheduler_tick(monkeypatch):
+    """Late topology selection must not fabricate CLOB time after the deadline.
+
+    The prior reserve-as-floor behavior returned 14-15.5s even when the refresh
+    deadline was already in the past. Live evidence showed that lets one warm
+    cycle outlive its 20s scheduler cadence and makes later ticks skip with
+    max_instances=1 forever.
+    """
 
     monkeypatch.setattr(main_module.time, "monotonic", lambda: 100.0)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", "0.75")
@@ -773,7 +796,7 @@ def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatc
     assert substrate_observer._snapshot_capture_budget_for_refresh(
         refresh_deadline=90.0,
         snapshot_reserve_s=12.0,
-    ) == pytest.approx(14.0)
+    ) == pytest.approx(0.0)
     assert substrate_observer._snapshot_capture_budget_for_refresh(
         refresh_deadline=125.0,
         snapshot_reserve_s=12.0,
@@ -781,9 +804,9 @@ def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatc
 
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_TARGET_WINDOW_SECONDS", "3.5")
     assert substrate_observer._snapshot_capture_budget_for_refresh(
-        refresh_deadline=90.0,
+        refresh_deadline=104.0,
         snapshot_reserve_s=12.0,
-    ) == pytest.approx(15.5)
+    ) == pytest.approx(4.0)
 
 
 def test_market_discovery_does_not_defer_on_reactor_state_after_p2_lift():
@@ -904,6 +927,10 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     substrate_observer._edli_market_substrate_warm_cycle()
@@ -932,6 +959,10 @@ def test_market_substrate_warm_cycle_prioritizes_claim_order_families(monkeypatc
         state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     substrate_observer._edli_market_substrate_warm_cycle()
@@ -955,6 +986,10 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_kwargs: _FakeConn())
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     assert main_module._edli_reactor_active_lock.acquire(blocking=False)
@@ -1583,6 +1618,7 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
     monkeypatch.setattr(main_module.time, "monotonic", _monotonic)
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", _topology_rows)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: _FakeConn())
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _FakeConn())
     monkeypatch.setattr(scanner, "reconstruct_weather_market_from_static_topology", _reconstruct)
     monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")))
     monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
@@ -1608,7 +1644,7 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
     assert result["topology_budget_exhausted"] == 1
     assert result["topology_deferred_families"] > 0
     assert 1 <= len(submitted[0]) < 12
-    assert refresh_kwargs[0]["budget_seconds"] == pytest.approx(14.0)
+    assert refresh_kwargs[0]["budget_seconds"] == pytest.approx(15.0 - fake_now)
 
 
 def test_pending_family_refresh_reserves_time_for_direct_gamma_lookup(monkeypatch):
@@ -2115,6 +2151,7 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
 
     monkeypatch.setattr(adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _FakeConn())
     monkeypatch.setattr(
         scanner,
         "reconstruct_weather_market_from_static_topology",
@@ -2673,6 +2710,7 @@ def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypat
         adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
     )
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _FakeConn())
     monkeypatch.setattr(
         scanner,
         "reconstruct_weather_market_from_static_topology",

@@ -39,6 +39,7 @@ behavior the spec replaces:
 """
 from __future__ import annotations
 
+import inspect
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Mapping, Optional, Sequence
@@ -1088,7 +1089,7 @@ def test_adjacent_no_pair_comparator_does_not_block_capital_efficient_center_yes
 
 
 def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(monkeypatch):
-    """If a non-executable portfolio is superior, the engine has evidence to refuse a weaker leg."""
+    """If a non-executable portfolio is superior, the engine records that evidence."""
     case = _case()
     space = _outcome_space(case)
     joint_q, band = _hand_joint_q_and_band(
@@ -1137,6 +1138,15 @@ def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(
     assert comparison.edge_lcb_density > comparison.selected_edge_lcb_density
     assert comparison.point_ev_density > comparison.selected_point_ev_density
     assert comparison.leg_candidate_ids == (no24.economics.candidate_id, no26.economics.candidate_id)
+
+
+def test_adjacent_no_pair_dominance_does_not_veto_executable_center_yes():
+    """Shanghai correction: non-executable portfolio superiority is telemetry, not veto."""
+
+    source = inspect.getsource(FamilyDecisionEngine.decide)
+
+    assert "portfolio_comparisons = self._portfolio_comparisons" in source
+    assert "NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" not in source
 
 
 # ===========================================================================

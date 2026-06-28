@@ -102,6 +102,7 @@ _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 # consecutive cycles cover disjoint families and the whole live set is swept
 # within a bounded number of cycles. See _refresh_pending_family_snapshots.
 _SUBSTRATE_REFRESH_CURSOR = 0
+_SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): family_key -> monotonic
 # deadline until which a NO-topology family whose Gamma slug lookup returned an
 # EMPTY event list (no Polymarket market listed yet for a future target_date) is
@@ -2950,10 +2951,11 @@ def _snapshot_capture_budget_for_refresh(
     """Return the CLOB capture slice for pending-family snapshot refresh.
 
     The warm job has two qualitatively different phases: cheap topology/cache
-    selection and price capture.  Live evidence showed the selection phase can
-    consume the full nominal refresh budget; passing the leftover 0.1s to CLOB
-    creates one-row "progress" while every pending family remains effectively
-    blocked.  The reserve is therefore a phase budget, not a leftover hint.
+    selection and price capture.  The topology phase is expected to stop early
+    enough to leave a capture window; if it fails to do that, the safe behavior is
+    to skip capture until the next tick.  Fabricating a fresh CLOB budget after
+    the wall-clock deadline makes the APScheduler max_instances=1 guard skip
+    every later tick and starves the live substrate.
     """
 
     min_prefetch_window_s = max(
@@ -2972,9 +2974,18 @@ def _snapshot_capture_budget_for_refresh(
     # overhead can burn milliseconds between budget construction and prefetch,
     # making a nominal 0.750s window measure as "below 0.750s" and collapse back
     # to serial /book reads. Keep prefetch as its own small phase budget.
-    min_budget_s = snapshot_reserve_s + target_prefetch_window_s
     remaining_s = refresh_deadline - time.monotonic()
-    return max(min_budget_s, remaining_s)
+    if remaining_s <= 0.0:
+        return 0.0
+    min_budget_s = snapshot_reserve_s + target_prefetch_window_s
+    if remaining_s < min_budget_s:
+        logger.info(
+            "refresh_pending_family_snapshots: CLOB capture window %.3fs below target %.3fs; "
+            "using remaining wall-clock budget rather than extending the scheduler tick",
+            remaining_s,
+            min_budget_s,
+        )
+    return remaining_s
 
 
 def _refresh_pending_family_snapshots(
@@ -3136,7 +3147,7 @@ def _refresh_pending_family_snapshots(
     # the freshness-first deterministic order; we only choose a different *start*.
     # No family is dropped — rotation reorders, it does not filter — so a True from
     # the freshness check still captures and no candidate is starved.
-    global _SUBSTRATE_REFRESH_CURSOR, _GAMMA_EMPTY_BACKOFF_UNTIL
+    global _SUBSTRATE_REFRESH_CURSOR, _SUBSTRATE_GAMMA_REFRESH_CURSOR, _GAMMA_EMPTY_BACKOFF_UNTIL
     ordinary_families = families[len(priority_families):]
     n_ordinary_families = len(ordinary_families)
     start_offset = _SUBSTRATE_REFRESH_CURSOR % max(1, n_ordinary_families)
@@ -3216,8 +3227,16 @@ def _refresh_pending_family_snapshots(
     # a bounded number of cycles instead of re-processing the same front slice.
     families_processed_this_cycle = len(families)
 
-    snapshot_read_conn = get_trade_connection_read_only()
+    snapshot_read_conn = None
     try:
+        try:
+            snapshot_read_conn = get_trade_connection_read_only()
+        except Exception as exc:
+            logger.warning(
+                "refresh_pending_family_snapshots: trade snapshot read unavailable; "
+                "treating cached executable substrate as stale: %s",
+                exc,
+            )
         for index, (city, target_date, metric) in enumerate(families):
             if time.monotonic() >= topology_deadline and (
                 cached_topology_markets or gamma_refresh_families
@@ -3277,19 +3296,26 @@ def _refresh_pending_family_snapshots(
             ]
 
             any_stale = False
-            for trow in topology_rows:
-                cid = str(trow.get("condition_id") or "").strip()
-                if not cid:
-                    continue
-                if not _condition_buy_sides_fresh(snapshot_read_conn, cid, now_iso):
-                    any_stale = True
-                    break
+            if snapshot_read_conn is None:
+                any_stale = True
+            else:
+                for trow in topology_rows:
+                    cid = str(trow.get("condition_id") or "").strip()
+                    if not cid:
+                        continue
+                    if not _condition_buy_sides_fresh(snapshot_read_conn, cid, now_iso):
+                        any_stale = True
+                        break
 
             if any_stale:
-                reconstructed = reconstruct_weather_market_from_static_topology(
-                    snapshot_read_conn,
-                    topology_rows=topology_rows,
-                    now_utc=now_utc,
+                reconstructed = (
+                    reconstruct_weather_market_from_static_topology(
+                        snapshot_read_conn,
+                        topology_rows=topology_rows,
+                        now_utc=now_utc,
+                    )
+                    if snapshot_read_conn is not None
+                    else None
                 )
                 if reconstructed is not None:
                     cached_topology_markets.append(reconstructed)
@@ -3412,8 +3438,16 @@ def _refresh_pending_family_snapshots(
             # still stays terminal.
             gamma_harvested_family_keys: set[tuple[str, str, str]] = set()
 
+            gamma_family_count = len(gamma_refresh_families)
+            gamma_start_offset = _SUBSTRATE_GAMMA_REFRESH_CURSOR % max(1, gamma_family_count)
+            rotated_gamma_refresh_families = (
+                gamma_refresh_families[gamma_start_offset:]
+                + gamma_refresh_families[:gamma_start_offset]
+                if gamma_refresh_families
+                else []
+            )
             gamma_jobs: list[dict] = []
-            for fam_city, fam_date, fam_metric in gamma_refresh_families:
+            for fam_city, fam_date, fam_metric in rotated_gamma_refresh_families:
                 family_key = _refresh_family_key(fam_city, fam_date, fam_metric)
                 if time.monotonic() > gamma_deadline:
                     gamma_slug_timebox_unattempted += 1
@@ -3631,6 +3665,12 @@ def _refresh_pending_family_snapshots(
                     pending_futures.clear()
                     executor.shutdown(wait=False, cancel_futures=True)
 
+            if gamma_family_count:
+                gamma_progress = max(1, gamma_slug_attempted + gamma_slug_invalid)
+                _SUBSTRATE_GAMMA_REFRESH_CURSOR = (
+                    gamma_start_offset + gamma_progress
+                ) % gamma_family_count
+
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
             # FUTURE-NOT-LISTED WARM-BACKOFF (2026-06-15, #122): families whose
@@ -3700,6 +3740,7 @@ def _refresh_pending_family_snapshots(
         # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
         markets: list[dict] = []
         markets.extend(cached_topology_markets)
+        gamma_unharvested_retryable = 0
         for city, target_date, metric in gamma_refresh_families:
             key = _refresh_family_key(city, target_date, metric)
             ev = gamma_by_family.get(key)
@@ -3726,13 +3767,15 @@ def _refresh_pending_family_snapshots(
                             city, target_date, metric,
                         )
                 else:
-                    logger.info(
-                        "refresh_pending_family_snapshots: Gamma fetch not harvested before time-box for "
-                        "%s/%s/%s — family remains retryable",
-                        city, target_date, metric,
-                    )
+                    gamma_unharvested_retryable += 1
                 continue
             markets.append(ev)
+        if gamma_unharvested_retryable:
+            logger.info(
+                "refresh_pending_family_snapshots: %d Gamma families were not harvested before "
+                "the time-box and remain retryable",
+                gamma_unharvested_retryable,
+            )
 
         for market in markets:
             if not isinstance(market, dict):
@@ -3772,18 +3815,23 @@ def _refresh_pending_family_snapshots(
         #         refresh_executable_market_substrate_snapshots, so illiquid bins
         #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
         _clob_timeout = _substrate_clob_timeout_seconds()
-        markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
-            _prune_fresh_market_outcomes_for_snapshot_refresh(
-                snapshot_read_conn,
-                markets,
-                fresh_at_iso=now_iso,
-                restrict_to_condition_ids=(
-                    priority_conditions
-                    if priority_conditions and not include_pending_families
-                    else None
-                ),
+        if snapshot_read_conn is None:
+            markets_for_refresh = markets
+            fresh_condition_skipped = 0
+            stale_condition_submitted = sum(len(market.get("outcomes") or []) for market in markets)
+        else:
+            markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
+                _prune_fresh_market_outcomes_for_snapshot_refresh(
+                    snapshot_read_conn,
+                    markets,
+                    fresh_at_iso=now_iso,
+                    restrict_to_condition_ids=(
+                        priority_conditions
+                        if priority_conditions and not include_pending_families
+                        else None
+                    ),
+                )
             )
-        )
         if not markets_for_refresh:
             return {
                 "status": "all_fresh",
@@ -3813,7 +3861,36 @@ def _refresh_pending_family_snapshots(
             refresh_deadline=refresh_deadline,
             snapshot_reserve_s=snapshot_reserve_s,
         )
-        snapshot_read_conn.close()
+        if snapshot_budget_s <= 0.0:
+            return {
+                "status": "budget_exhausted_before_snapshot_capture",
+                "families_checked": len(families),
+                "explicit_priority_families": len(explicit_priority_families),
+                "include_pending_families": bool(include_pending_families),
+                "open_rest_priority_families": len(open_rest_priority_families),
+                "held_position_priority_families": len(held_position_priority_families),
+                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+                "gamma_refresh_families": len(gamma_refresh_families),
+                "cached_topology_families": cached_topology_families,
+                "cached_topology_incomplete": cached_topology_incomplete,
+                "no_topology": no_topology,
+                "fresh_skipped": fresh_skipped,
+                "venue_closed_skipped": venue_closed_skipped,
+                "gamma_slug_attempted": gamma_slug_attempted,
+                "gamma_slug_empty": gamma_slug_empty,
+                "gamma_slug_http_non_200": gamma_slug_http_non_200,
+                "gamma_slug_failed": gamma_slug_failed,
+                "gamma_slug_invalid": gamma_slug_invalid,
+                "gamma_slug_timebox_unattempted": gamma_slug_timebox_unattempted,
+                "fresh_condition_skipped": fresh_condition_skipped,
+                "stale_condition_submitted": stale_condition_submitted,
+                "refresh_budget_seconds": refresh_budget_s,
+                "snapshot_reserve_seconds": snapshot_reserve_s,
+                "snapshot_budget_seconds": snapshot_budget_s,
+            }
+        if snapshot_read_conn is not None:
+            snapshot_read_conn.close()
+            snapshot_read_conn = None
         write_conn = get_trade_connection(write_class="live")
         try:
             with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
@@ -3838,7 +3915,8 @@ def _refresh_pending_family_snapshots(
         logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
         return {"status": "error", "reason": str(exc)}
     finally:
-        snapshot_read_conn.close()
+        if snapshot_read_conn is not None:
+            snapshot_read_conn.close()
 
     result = {
         "status": "refreshed",
