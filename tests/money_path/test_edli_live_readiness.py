@@ -15,6 +15,27 @@ from types import SimpleNamespace
 import pytest
 
 
+def _install_unpaused_world_control_db(monkeypatch, tmp_path: Path) -> Path:
+    from src.state import db as state_db
+    from src.state.ledger import apply_architecture_kernel_schema
+
+    world_path = tmp_path / "zeus-world.db"
+    setup_conn = sqlite3.connect(str(world_path))
+    try:
+        apply_architecture_kernel_schema(setup_conn)
+        setup_conn.commit()
+    finally:
+        setup_conn.close()
+
+    def _get_world_connection():
+        conn = sqlite3.connect(str(world_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(state_db, "get_world_connection", _get_world_connection)
+    return world_path
+
+
 def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     """Current live-canary contract after operator unshadow.
 
@@ -1383,14 +1404,15 @@ def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch)
     assert _table_count(conn, "edli_live_cap_usage") == 0
 
 
-def test_live_certificate_build_failure_preserves_selected_leg_on_receipt(monkeypatch):
+def test_live_certificate_build_failure_preserves_selected_leg_on_receipt(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
+    event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
     accepted = _accepted_receipt(event)
     accepted = replace(
@@ -2087,7 +2109,7 @@ def test_live_adapter_no_canary_gate_proceeds_past_deleted_canary_block(monkeypa
     assert receipt.reason == "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED"
 
 
-def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch):
+def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.events.reactor import EventSubmissionReceipt
@@ -2095,6 +2117,7 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     called = {"count": 0}
@@ -2108,6 +2131,19 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
     try:
         def _submit(_final_intent, _command):
             called["count"] += 1
+            actionable_hash = _final_intent.payload["actionable_certificate_hash"]
+            persisted = conn.execute(
+                """
+                SELECT certificate_type, mode, verifier_status
+                FROM decision_certificates
+                WHERE certificate_hash = ?
+                """,
+                (actionable_hash,),
+            ).fetchone()
+            assert persisted is not None
+            assert persisted["certificate_type"] == "ActionableTradeCertificate"
+            assert persisted["mode"] == "LIVE"
+            assert persisted["verifier_status"] == "VERIFIED"
             return EventBoundExecutorSubmitResult(
                 status="SUBMITTED",
                 reason_code="OK",
@@ -2132,7 +2168,11 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-        assert called["count"] == 1
+        assert called["count"] == 1, (
+            receipt.side_effect_status,
+            receipt.reason,
+            getattr(receipt, "submit_diagnostics", None),
+        )
         assert receipt.submitted is True
         assert receipt.side_effect_status == "SUBMITTED"
         assert _receipt_status(receipt) == "SUBMITTED"
@@ -2143,13 +2183,14 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
-def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
+def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.riskguard.risk_level import RiskLevel
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
@@ -2218,18 +2259,17 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
         assert audit["actual_condition_id"] == "condition-1"
         assert audit["actual_token_id"] == "yes-1"
         assert audit["actual_direction"] == "buy_yes"
-        assert audit["opportunity_book"] == {
-            "selected_candidate_id": "candidate-1",
-            "actual_receipt_selected_candidate_id": "candidate-1",
-            "candidates": [
-                {
-                    "candidate_id": "candidate-1",
-                    "condition_id": "condition-1",
-                    "token_id": "yes-1",
-                    "direction": "buy_yes",
-                }
-            ],
-        }
+        opportunity_book = audit["opportunity_book"]
+        assert opportunity_book["selected_candidate_id"] == "candidate-1"
+        assert opportunity_book["actual_receipt_selected_candidate_id"] == "candidate-1"
+        assert len(opportunity_book["candidates"]) == 1
+        candidate = opportunity_book["candidates"][0]
+        assert candidate["candidate_id"] == "candidate-1"
+        assert candidate["condition_id"] == "condition-1"
+        assert candidate["token_id"] == "yes-1"
+        assert candidate["direction"] == "buy_yes"
+        assert candidate["qkernel_execution_economics"]["source"] == "qkernel_spine"
+        assert candidate["qkernel_execution_economics"]["route_id"]
         assert audit["actionable_certificate_hash"]
         assert audit["final_intent_certificate_hash"]
         assert {cert["certificate_type"] for cert in audit["parent_certificates"]}
@@ -2280,7 +2320,7 @@ def test_live_adapter_blocks_real_submit_without_durable_outbox(monkeypatch):
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
-def test_live_adapter_records_rejected_fixture_response(monkeypatch):
+def test_live_adapter_records_rejected_fixture_response(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.events.reactor import EventSubmissionReceipt
@@ -2288,6 +2328,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     accepted = replace(
@@ -2328,7 +2369,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
-def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeypatch):
+def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeypatch, tmp_path):
     """RELATIONSHIP (F-class deadlock antibody, 2026-06-01):
 
     A live order that FAILS the executor's PRE-VENUE depth validation
@@ -2352,6 +2393,7 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
@@ -2426,7 +2468,7 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
-def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
+def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.events.reactor import EventSubmissionReceipt
@@ -2434,6 +2476,7 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     accepted = replace(
@@ -2491,13 +2534,14 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
-def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypatch):
+def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
     from src.riskguard.risk_level import RiskLevel
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     event = _forecast_event()
+    _install_unpaused_world_control_db(monkeypatch, tmp_path)
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     accepted = replace(
@@ -3147,6 +3191,7 @@ def _accepted_receipt(event, *, execution_mode_intent="TAKER", maker_limit_price
         trade_score=0.2,
         min_expected_profit_usd=0.05,
         min_submit_edge_density=0.02,
+        native_quote_available=True,
         trade_score_positive=True,
         fdr_pass=True,
         fdr_family_id="family-1",

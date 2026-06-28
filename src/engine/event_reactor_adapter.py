@@ -192,6 +192,7 @@ from src.decision_kernel.compiler import (
     NoSubmitProofBundle,
     normalize_forecast_reader_status,
 )
+from src.decision_kernel.ledger import DecisionCertificateLedger
 from src.decision_kernel.verifier import DAY0_OBSERVATION_CALIBRATION_AUTHORITY
 from src.engine.event_bound_final_intent import (
     EventBoundExecutorSubmitResult,
@@ -2876,6 +2877,10 @@ def event_bound_live_adapter_from_trade_conn(
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
                 command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
                 certificate_decision_time = command.header.decision_time
+                _persist_live_command_certificates_before_executor_submit(
+                    build_conn,
+                    command_certificates,
+                )
                 assert executor_submit is not None
                 submit_result = _normalize_event_bound_executor_submit_result(
                     executor_submit(final_intent, command)
@@ -3216,6 +3221,16 @@ def _rollback_release_live_order_build_savepoint(conn: sqlite3.Connection) -> No
         conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_build")
     finally:
         conn.execute("RELEASE SAVEPOINT edli_live_order_build")
+
+
+def _persist_live_command_certificates_before_executor_submit(
+    conn: sqlite3.Connection,
+    certificates: tuple[DecisionCertificate, ...],
+) -> None:
+    """Durably expose the live command proof before the executor boundary."""
+
+    DecisionCertificateLedger(conn).persist_all(certificates)
+    conn.commit()
 
 
 def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
