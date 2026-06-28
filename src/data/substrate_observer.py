@@ -61,7 +61,10 @@ from typing import Iterable
 from src.config import settings
 from src.data.substrate_priority import (
     money_path_substrate_priority_active,
+    money_path_substrate_priority_condition_ids,
     money_path_substrate_priority_families,
+    money_path_substrate_priority_request,
+    record_money_path_substrate_priority_receipt,
 )
 
 logger = logging.getLogger("zeus.substrate_observer")
@@ -1677,6 +1680,7 @@ def _refresh_pending_family_snapshots(
     result = {
         "status": "refreshed",
         "families_checked": len(families),
+        "priority_condition_ids_requested": len(priority_conditions),
         "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
         "gamma_refresh_families": len(gamma_refresh_families),
         "cached_topology_families": cached_topology_families,
@@ -1854,13 +1858,18 @@ def _edli_market_substrate_warm_cycle() -> None:
     if not edli_cfg.get("enabled"):
         return
     priority_marker_active = money_path_substrate_priority_active()
+    priority_marker_request = (
+        money_path_substrate_priority_request() if priority_marker_active else None
+    )
     priority_marker_families = (
         money_path_substrate_priority_families() if priority_marker_active else []
     )
-    if priority_marker_active and not priority_marker_families:
+    priority_marker_condition_ids = (
+        money_path_substrate_priority_condition_ids() if priority_marker_active else []
+    )
+    if priority_marker_active and not priority_marker_families and not priority_marker_condition_ids:
         logger.info(
-            "EDLI market-substrate warm skipped: live-money targeted substrate "
-            "refresh has priority"
+            "EDLI market-substrate warm skipped: active substrate priority request has no scoped families or conditions"
         )
         return
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
@@ -1931,8 +1940,14 @@ def _edli_market_substrate_warm_cycle() -> None:
             forecasts_conn,
             extra_priority_families=priority_families,
             include_pending_families=not priority_only,
+            priority_condition_ids=priority_marker_condition_ids,
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
+        )
+        record_money_path_substrate_priority_receipt(
+            request=priority_marker_request,
+            summary=summary,
+            now=datetime.now(timezone.utc),
         )
         logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
     except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries

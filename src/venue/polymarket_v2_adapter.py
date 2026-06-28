@@ -598,69 +598,64 @@ class PolymarketV2Adapter:
             nonlocal signed_order, signed_hash
             signed_order = None
             signed_hash = None
-            if callable(getattr(active_client, "create_and_post_order", None)):
-                return active_client.create_and_post_order(
+            create_order = getattr(active_client, "create_order", None)
+            post_order = getattr(active_client, "post_order", None)
+            if callable(create_order) and callable(post_order):
+                local_signed_order = create_order(order_args, options=options)
+                signed_bytes = _signed_order_bytes(local_signed_order)
+                signed_hash = hashlib.sha256(signed_bytes).hexdigest()
+                signed_order = signed_bytes
+                return post_order(
+                    local_signed_order,
+                    order_type=envelope.order_type,
+                    post_only=envelope.post_only,
+                    defer_exec=False,
+                )
+            create_and_post = getattr(active_client, "create_and_post_order", None)
+            if callable(create_and_post):
+                return create_and_post(
                     order_args,
                     options=options,
                     order_type=envelope.order_type,
                     post_only=envelope.post_only,
                     defer_exec=False,
                 )
-            local_signed_order = active_client.create_order(order_args, options=options)
-            signed_bytes = _signed_order_bytes(local_signed_order)
-            signed_hash = hashlib.sha256(signed_bytes).hexdigest()
-            signed_order = signed_bytes
-            raw = active_client.post_order(
-                local_signed_order,
-                order_type=envelope.order_type,
-                post_only=envelope.post_only,
-                defer_exec=False,
+            raise V2AdapterError(
+                "SDK client exposes neither two-step nor one-step order submission"
             )
-            return raw
 
-        if not callable(getattr(client, "create_and_post_order", None)) and not (
+        if not (
             callable(getattr(client, "create_order", None))
             and callable(getattr(client, "post_order", None))
-        ):
+        ) and not callable(getattr(client, "create_and_post_order", None)):
             return _rejected_submit_result(
                 envelope,
                 error_code="V2_SUBMIT_UNSUPPORTED",
                 error_message="SDK client exposes neither one-step nor two-step order submission",
             )
 
-        if callable(getattr(client, "create_order", None)) and not callable(
-            getattr(client, "create_and_post_order", None)
-        ):
-            try:
-                raw_response = _submit_once(client)
-            except Exception as exc:
-                if _is_polymarket_invalid_safe_signature_error(exc):
-                    self._refresh_signer_bound_l2_api_creds(client)
-                    raw_response = _submit_once(client)
-                    logger.warning(
-                        "VENUE_ORDER_SIGNATURE_RECOVERED: invalid Safe signature "
-                        "recovered after signer-bound L2 credential refresh"
-                    )
-                elif signed_order is None:
-                    return _rejected_submit_result(
-                        envelope,
-                        error_code="V2_PRE_SUBMIT_EXCEPTION",
-                        error_message=str(exc),
-                    )
-                else:
-                    raise
-        else:
-            try:
-                raw_response = _submit_once(client)
-            except Exception as exc:
-                if not _is_polymarket_invalid_safe_signature_error(exc):
-                    raise
-                self._refresh_signer_bound_l2_api_creds(client)
-                raw_response = _submit_once(client)
-                logger.warning(
-                    "VENUE_ORDER_SIGNATURE_RECOVERED: invalid Safe signature "
-                    "recovered after signer-bound L2 credential refresh"
+        try:
+            raw_response = _submit_once(client)
+        except Exception as exc:
+            if _is_polymarket_invalid_safe_signature_error(exc):
+                logger.error(
+                    "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
+                    "order signature; not retrying through L2 credential refresh"
                 )
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_auth_invalid_signature_400",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
+            if signed_order is None:
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_message=str(exc),
+                )
+            raise
         return _submit_result_from_response(
             envelope,
             raw_response,

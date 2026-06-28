@@ -135,7 +135,16 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
-class FakeInvalidSafeSignatureThenSuccessClient(FakeOneStepClient):
+class FakeInvalidSafeSignatureTwoStepClient(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        raise RuntimeError(
+            "PolyApiException[status_code=400, "
+            "error_message={'error':'invalid POLY_GNOSIS_SAFE signature'}]"
+        )
+
+
+class FakeInvalidSafeSignatureOneStepClient(FakeOneStepClient):
     def __init__(self):
         super().__init__(response={"orderID": "ord-recovered", "status": "LIVE"})
         self._refreshed = False
@@ -1283,32 +1292,42 @@ def test_post_order_exception_still_bubbles_as_possible_unknown_side_effect(tmp_
     assert any(call[0] == "post_order" for call in fake.calls)
 
 
-def test_submit_rederives_l2_creds_once_on_invalid_safe_signature(tmp_path):
+def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_retry(tmp_path):
     import src.venue.polymarket_v2_adapter as adapter_mod
 
     adapter_mod._DERIVED_API_CREDS_CACHE.clear()
-    fake = FakeInvalidSafeSignatureThenSuccessClient()
+    fake = FakeInvalidSafeSignatureOneStepClient()
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
 
     result = adapter.submit(envelope)
 
-    assert result.status == "accepted"
-    assert result.envelope.order_id == "ord-recovered"
-    assert [call[0] for call in fake.calls] == [
-        "get_ok",
-        "create_and_post_order",
-        "derive_api_key",
-        "set_api_creds",
-        "create_and_post_order",
-    ]
+    assert result.status == "rejected"
+    assert result.error_code == "venue_auth_invalid_signature_400"
+    assert "invalid POLY_GNOSIS_SAFE signature" in (result.error_message or "")
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_and_post_order"]
     assert adapter_mod._cached_derived_api_creds(
         host="https://clob-v2.polymarket.com",
         chain_id=137,
         signer_key="test-key",
         signature_type=2,
         funder_address="0xfunder",
-    ) is fake.derived_creds
+    ) is None
+
+
+def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path):
+    signed = b"signed-safe-order"
+    fake = FakeInvalidSafeSignatureTwoStepClient(signed_order=signed)
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_auth_invalid_signature_400"
+    assert result.envelope.signed_order == signed
+    assert result.envelope.signed_order_hash == hashlib.sha256(signed).hexdigest()
+    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
 
 
 def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):

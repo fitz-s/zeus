@@ -4182,23 +4182,8 @@ def _edli_event_reactor_cycle() -> None:
         logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return
     try:
-        from src.data.substrate_priority import mark_money_path_substrate_priority
-
-        mark_money_path_substrate_priority(
-            reason="edli_event_reactor_cycle",
-            ttl_seconds=150.0,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("EDLI reactor: substrate priority marker write failed: %r", exc)
-    try:
         conn = get_world_connection()
     except Exception:
-        try:
-            from src.data.substrate_priority import clear_money_path_substrate_priority
-
-            clear_money_path_substrate_priority(pid=os.getpid())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("EDLI reactor: substrate priority marker clear failed: %r", exc)
         _edli_reactor_active_lock.release()
         raise
     # K1: the calibration authority is split — platt_models lives in the world DB (this conn's
@@ -4733,12 +4718,6 @@ def _edli_event_reactor_cycle() -> None:
         except NameError:
             pass
         conn.close()
-        try:
-            from src.data.substrate_priority import clear_money_path_substrate_priority
-
-            clear_money_path_substrate_priority(pid=os.getpid())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("EDLI reactor: substrate priority marker clear failed: %r", exc)
         _edli_reactor_active_lock.release()
         _start_venue_background_maintenance_after_reactor_if_required()
 
@@ -6640,6 +6619,7 @@ def _edli_refresh_continuous_money_path_families(
                 reason="continuous_redecision_confirm_refresh",
                 ttl_seconds=35.0,
                 families=clean_families,
+                condition_ids=priority_conditions,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug(
@@ -8589,6 +8569,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 reason="decision_triggered_targeted_refresh",
                 ttl_seconds=45.0,
                 families=[family],
+                condition_ids=condition_ids,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("decision family refresh: priority marker write failed: %r", exc)
@@ -8613,7 +8594,7 @@ def _edli_reactor_family_snapshot_refresher():
     accounting without blocking the reactor on producer I/O.
     """
 
-    def _refresh(*, city, target_date, metric, **_ignored):
+    def _refresh(*, city, target_date, metric, condition_ids=(), **_ignored):
         family = (
             str(city or "").strip(),
             str(target_date or "").strip(),
@@ -8628,6 +8609,7 @@ def _edli_reactor_family_snapshot_refresher():
                 reason="reactor_blocked_family_refresh",
                 ttl_seconds=45.0,
                 families=[family],
+                condition_ids=condition_ids,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("reactor family refresh priority marker write failed: %r", exc)

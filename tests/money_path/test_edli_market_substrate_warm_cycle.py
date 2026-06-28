@@ -454,6 +454,7 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
             "reason": "continuous_redecision_confirm_refresh",
             "ttl_seconds": 35.0,
             "families": {("Paris", "2026-06-20", "low")},
+            "condition_ids": {"cond-1", "cond-2"},
         }
     ]
 
@@ -898,6 +899,7 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     _enable_edli_cfg(monkeypatch, enabled=True)
 
     substrate_observer._edli_market_substrate_warm_cycle()
@@ -910,12 +912,27 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
 
     calls: list[dict] = []
     marker_families = [("Shanghai", "2026-06-28", "high")]
+    marker_condition_ids = ["cond-shanghai-31"]
     claim_families = [("Tokyo", "2026-06-28", "low")]
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
     monkeypatch.setattr(
         substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-1",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
         "money_path_substrate_priority_families",
         lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
     )
     monkeypatch.setattr(
         substrate_observer,
@@ -926,6 +943,12 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
         substrate_observer,
         "_refresh_pending_family_snapshots",
         lambda *a, **k: calls.append(k),
+    )
+    receipts: list[dict] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
     )
     import src.state.db as state_db
 
@@ -943,7 +966,9 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
 
     assert calls
     assert calls[0]["extra_priority_families"] == marker_families + claim_families
+    assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
+    assert receipts and receipts[0]["request"]["request_id"] == "req-1"
 
 
 def test_market_discovery_cycle_yields_to_money_path_priority(monkeypatch):
@@ -975,15 +1000,16 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
     confirm_src = inspect.getsource(main_module._edli_refresh_continuous_money_path_families)
 
-    assert "mark_money_path_substrate_priority(" in cycle_src
-    assert 'reason="edli_event_reactor_cycle"' in cycle_src
-    assert "clear_money_path_substrate_priority(" in cycle_src
+    assert 'reason="edli_event_reactor_cycle"' not in cycle_src
+    assert "clear_money_path_substrate_priority(" not in cycle_src
     assert "mark_money_path_substrate_priority(" in refresh_src
     assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
     assert "families=[family]" in refresh_src
+    assert "condition_ids=condition_ids" in refresh_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
     assert "families=clean_families" in confirm_src
+    assert "condition_ids=priority_conditions" in confirm_src
 
 
 def test_substrate_priority_clear_is_pid_scoped(tmp_path, monkeypatch):
@@ -992,12 +1018,21 @@ def test_substrate_priority_clear_is_pid_scoped(tmp_path, monkeypatch):
         clear_money_path_substrate_priority,
         mark_money_path_substrate_priority,
         money_path_substrate_priority_active,
+        money_path_substrate_priority_condition_ids,
+        money_path_substrate_priority_families,
     )
 
     monkeypatch.setattr(config, "state_path", lambda rel: tmp_path / rel)
 
-    mark_money_path_substrate_priority(reason="test", ttl_seconds=60.0)
+    mark_money_path_substrate_priority(
+        reason="test",
+        ttl_seconds=60.0,
+        families=[("Paris", "2026-06-20", "low")],
+        condition_ids=["cond-1", "cond-2", "cond-1"],
+    )
     assert money_path_substrate_priority_active()
+    assert money_path_substrate_priority_families() == [("Paris", "2026-06-20", "low")]
+    assert money_path_substrate_priority_condition_ids() == ["cond-1", "cond-2"]
 
     clear_money_path_substrate_priority(pid=999999)
     assert money_path_substrate_priority_active()
