@@ -2113,19 +2113,17 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _harvester_live_enabled() -> tuple[bool, dict[str, Any]]:
     """Return whether the restart target will run the settlement P&L resolver.
 
-    The preflight usually runs from an operator shell, not inside launchd, so the
-    shell environment alone is not enough evidence. Prefer the current process
-    env when present, then inspect the launchd plist that owns src.main.
+    The preflight usually runs from an operator shell, not inside launchd. The
+    shell environment is therefore not restart-target evidence and must not
+    override the active live-trading LaunchAgent.
     """
     env_value = os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED")
     evidence: dict[str, Any] = {
-        "env_value": env_value,
+        "shell_env_value_ignored": env_value,
         "plist_path": str(LIVE_TRADING_PLIST_PATH),
         "plist_value": None,
-        "source": "env" if env_value is not None else "plist",
+        "source": "live_trading_launchagent_plist",
     }
-    if env_value is not None:
-        return env_value == "1", evidence
 
     try:
         with LIVE_TRADING_PLIST_PATH.open("rb") as handle:

@@ -1948,6 +1948,20 @@ def test_clob_signature_type_config_accepts_explicit_supported_value(monkeypatch
     assert result.evidence["configured_value"] == "2"
 
 
+def test_harvester_live_enabled_uses_live_plist_not_shell_env(monkeypatch, tmp_path):
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    _write_live_plist_with_env(plist, {"ZEUS_HARVESTER_LIVE_ENABLED": "1"})
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+    monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "0")
+
+    enabled, evidence = preflight._harvester_live_enabled()
+
+    assert enabled is True
+    assert evidence["source"] == "live_trading_launchagent_plist"
+    assert evidence["shell_env_value_ignored"] == "0"
+    assert evidence["plist_value"] == "1"
+
+
 def test_import_time_db_paths_follow_live_plist_primary_root(tmp_path):
     home = tmp_path / "home"
     launch_agents = home / "Library" / "LaunchAgents"
@@ -3269,7 +3283,13 @@ def test_preflight_treats_settled_active_position_as_harvester_recovery(monkeypa
 
 def test_preflight_blocks_settled_active_position_when_harvester_disabled(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
-    monkeypatch.setenv("ZEUS_HARVESTER_LIVE_ENABLED", "0")
+    _write_live_plist_with_env(
+        preflight.LIVE_TRADING_PLIST_PATH,
+        {
+            "ZEUS_HARVESTER_LIVE_ENABLED": "0",
+            "POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "2",
+        },
+    )
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
     fresh = datetime.now(timezone.utc)
