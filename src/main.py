@@ -10164,7 +10164,7 @@ def _edli_reactor_cycle_advance_enqueuer():
     return _enqueue
 
 
-def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
+def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, side: str | None = None):
     """JIT single-token book fetch for the SELECTED candidate at submit time.
 
     GATE #84 root cause: the shared market-channel feasibility feed stamps
@@ -10175,10 +10175,12 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
     candidate we pull its live book ``now`` and anchor freshness to OUR
     observation time — the FOK crosses against exactly this book.
 
-    Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable two-sided
-    book, or ``None`` when the fetch fails or the book is empty/crossed
+    Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable executable
+    book, or ``None`` when the fetch fails or the executable side is empty/crossed
     (fail-closed — the caller then falls back to a genuinely-fresh DB row or
-    raises). ``observed_at`` is OUR actual fetch completion instant, not the
+    raises). A BUY needs a fresh ask; a SELL needs a fresh bid. The opposite side
+    may be absent on thin weather books and must not make submit-time authority
+    disappear. ``observed_at`` is OUR actual fetch completion instant, not the
     venue's coarse book timestamp or the cycle-start decision time.
     """
 
@@ -10192,9 +10194,16 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
     best_bid = _edli_book_best_price(message.get("bids"), best="bid")
     best_ask = _edli_book_best_price(message.get("asks"), best="ask")
     book_hash = str(message.get("hash") or "")
-    if best_bid is None or best_ask is None or not book_hash:
+    normalized_side = str(side or "").upper()
+    if normalized_side == "BUY" and best_ask is None:
         return None
-    if best_bid >= best_ask:
+    if normalized_side == "SELL" and best_bid is None:
+        return None
+    if normalized_side not in {"BUY", "SELL"} and (best_bid is None or best_ask is None):
+        return None
+    if not book_hash:
+        return None
+    if best_bid is not None and best_ask is not None and best_bid >= best_ask:
         # Crossed/locked book is not a usable pre-submit authority.
         return None
     return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
@@ -10290,7 +10299,8 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         # PRIMARY: just-in-time live book for the selected candidate. Freshness is
         # anchored to OUR observation time (checked_at) — the FOK crosses against
         # exactly this book — so quote_age_ms is the observation-to-submit latency.
-        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id)
+        side = str(intent.get("side") or "").upper()
+        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id, side=side)
         if jit is not None:
             best_bid, best_ask, book_hash, book_observed_at = jit
             checked_at = book_observed_at.astimezone(timezone.utc)
@@ -10303,6 +10313,7 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             row = _edli_latest_pre_submit_book_row(
                 book_evidence_conn,
                 token_id=token_id,
+                side=side,
                 decision_time=checked_at,
             )
             if row is None:
@@ -10311,7 +10322,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             book_hash = str(_row_get(row, "book_hash_before") or "")
             best_bid = _row_float(row, "best_bid_before")
             best_ask = _row_float(row, "best_ask_before")
-            if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
+            if not quote_seen_at or not book_hash:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            if side == "BUY" and best_ask is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            if side == "SELL" and best_bid is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
             try:
                 row_quote_dt = datetime.fromisoformat(quote_seen_at.replace("Z", "+00:00"))
@@ -10365,15 +10380,28 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     return _provider
 
 
-def _edli_latest_pre_submit_book_row(book_evidence_conn, *, token_id: str, decision_time: datetime):
+def _edli_latest_pre_submit_book_row(
+    book_evidence_conn,
+    *,
+    token_id: str,
+    side: str | None = None,
+    decision_time: datetime,
+):
+    normalized_side = str(side or "").upper()
+    side_filter = ""
+    if normalized_side == "BUY":
+        side_filter = "AND best_ask_before IS NOT NULL"
+    elif normalized_side == "SELL":
+        side_filter = "AND best_bid_before IS NOT NULL"
+    else:
+        side_filter = "AND best_bid_before IS NOT NULL AND best_ask_before IS NOT NULL"
     return book_evidence_conn.execute(
-        """
+        f"""
         SELECT quote_seen_at, book_hash_before, best_bid_before, best_ask_before
         FROM execution_feasibility_evidence
         WHERE token_id = ?
           AND quote_seen_at <= ?
-          AND best_bid_before IS NOT NULL
-          AND best_ask_before IS NOT NULL
+          {side_filter}
           AND COALESCE(book_hash_before, '') != ''
         ORDER BY quote_seen_at DESC
         LIMIT 1

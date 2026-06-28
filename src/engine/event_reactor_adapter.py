@@ -433,8 +433,8 @@ class _CandidateProof:
 class PreSubmitAuthorityWitness:
     quote_seen_at: str
     book_hash: str
-    current_best_bid: float
-    current_best_ask: float
+    current_best_bid: float | None
+    current_best_ask: float | None
     tick_size: float
     min_order_size: float
     neg_risk: bool
@@ -508,8 +508,16 @@ def build_presubmit_snapshot_row(
     )
     freshness_deadline = captured_at + timedelta(seconds=max(0.0, window))
 
-    fresh_bid = Decimal(str(witness.current_best_bid))
-    fresh_ask = Decimal(str(witness.current_best_ask))
+    fresh_bid = (
+        Decimal(str(witness.current_best_bid))
+        if witness.current_best_bid is not None
+        else None
+    )
+    fresh_ask = (
+        Decimal(str(witness.current_best_ask))
+        if witness.current_best_ask is not None
+        else None
+    )
 
     # raw_orderbook_hash must be a 64-char sha256 hex digest (contract invariant).
     # The witness book_hash is the venue's opaque hash string; sha256 it together
@@ -6344,8 +6352,8 @@ def _build_live_execution_command_certificates(
             executable_snapshot,
             decision_time,
         )
-        fresh_best_bid = float(authority_witness.current_best_bid)
-        fresh_best_ask = float(authority_witness.current_best_ask)
+        fresh_best_bid = _optional_float(authority_witness.current_best_bid)
+        fresh_best_ask = _optional_float(authority_witness.current_best_ask)
         # K=1 STAGE 1 (k1_final_snapshot_authority_plan_2026-06-11.md §4): persist the
         # fresh submit-time JIT book (R8 — already fetched [NET] above, inside the
         # witness provider) as ONE first-class executable_market_snapshots row tagged
@@ -7040,6 +7048,7 @@ def _actionable_payload_from_receipt(
     event: OpportunityEvent | None = None,
 ) -> dict[str, object]:
     reserved_notional = float(live_cap_cert.payload["reserved_notional_usd"])
+    live_quality_floors = _event_bound_strategy_live_quality_floors(receipt.strategy_key)
     city = receipt.city or _event_identity_value(event, "city")
     target_date = receipt.target_date or _event_identity_value(event, "target_date")
     metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
@@ -7094,9 +7103,21 @@ def _actionable_payload_from_receipt(
         "p_fill_lcb": receipt.p_fill_lcb,
         "trade_score": receipt.trade_score,
         "action_score": receipt.trade_score,
-        "min_entry_price": receipt.min_entry_price,
-        "min_expected_profit_usd": receipt.min_expected_profit_usd,
-        "min_submit_edge_density": receipt.min_submit_edge_density,
+        "min_entry_price": (
+            receipt.min_entry_price
+            if receipt.min_entry_price is not None
+            else live_quality_floors["min_entry_price"]
+        ),
+        "min_expected_profit_usd": (
+            receipt.min_expected_profit_usd
+            if receipt.min_expected_profit_usd is not None
+            else live_quality_floors["min_expected_profit_usd"]
+        ),
+        "min_submit_edge_density": (
+            receipt.min_submit_edge_density
+            if receipt.min_submit_edge_density is not None
+            else live_quality_floors["min_submit_edge_density"]
+        ),
         "fdr_family_id": receipt.fdr_family_id,
         "kelly_decision_id": receipt.kelly_decision_id,
         "kelly_size_usd": receipt.kelly_size_usd,
@@ -7687,8 +7708,8 @@ def _pre_submit_revalidation_payload_from_final_intent(
         raise ValueError("PRE_SUBMIT_QUOTE_SEEN_AT_REQUIRED")
     checked_at = _parse_utc(authority_witness.checked_at) or decision_time.astimezone(UTC)
     quote_age_ms = int(max(0.0, (checked_at.astimezone(UTC) - quote_seen_at).total_seconds() * 1000.0))
-    current_best_bid = float(authority_witness.current_best_bid)
-    current_best_ask = float(authority_witness.current_best_ask)
+    current_best_bid = _optional_float(authority_witness.current_best_bid)
+    current_best_ask = _optional_float(authority_witness.current_best_ask)
     tick_size = float(authority_witness.tick_size)
     min_order_size = float(authority_witness.min_order_size)
     side = str(payload["side"])
@@ -7848,12 +7869,16 @@ def _would_cross_post_only_book(
     *,
     side: str,
     limit_price: float,
-    current_best_bid: float,
-    current_best_ask: float,
+    current_best_bid: float | None,
+    current_best_ask: float | None,
 ) -> bool:
     if side == "BUY":
+        if current_best_ask is None:
+            raise ValueError("PRE_SUBMIT_BUY_BEST_ASK_REQUIRED")
         return limit_price >= current_best_ask
     if side == "SELL":
+        if current_best_bid is None:
+            raise ValueError("PRE_SUBMIT_SELL_BEST_BID_REQUIRED")
         return limit_price <= current_best_bid
     raise ValueError(f"unsupported pre-submit side: {side!r}")
 

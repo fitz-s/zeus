@@ -1652,6 +1652,35 @@ def test_actionable_payload_persists_live_authority_provenance():
     assert payload["strategy_key"] == "center_buy"
 
 
+def test_actionable_payload_backfills_missing_receipt_quality_floors():
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    receipt = replace(
+        _accepted_receipt(event),
+        min_entry_price=None,
+        min_expected_profit_usd=None,
+        min_submit_edge_density=None,
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 3.0,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+    floors = adapter._event_bound_strategy_live_quality_floors("center_buy")
+
+    assert payload["min_entry_price"] == pytest.approx(floors["min_entry_price"])
+    assert payload["min_expected_profit_usd"] == pytest.approx(floors["min_expected_profit_usd"])
+    assert payload["min_submit_edge_density"] == pytest.approx(floors["min_submit_edge_density"])
+
+
 def test_actionable_payload_persists_qkernel_execution_economics():
     from src.engine import event_reactor_adapter as adapter
 
@@ -3721,11 +3750,11 @@ def _gate84_world_conn_with_stale_row(*, quote_seen_at: str):
     return conn
 
 
-def _gate84_final_intent():
+def _gate84_final_intent(*, side: str = "BUY"):
     return SimpleNamespace(
         payload={
             "token_id": "yes-1",
-            "side": "BUY",
+            "side": side,
             "tick_size": 0.01,
             "min_order_size": 1.0,
             "neg_risk": False,
@@ -3821,6 +3850,117 @@ def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monk
     assert witness.current_best_ask == 0.42
     assert witness.book_hash == "fresh-jit-book-hash"
     assert quote_seen > decision_time
+
+
+def test_gate84_jit_buy_accepts_ask_only_book(monkeypatch):
+    """A BUY submit-time book needs an executable ask, not a two-sided market.
+
+    Thin weather longshots often have no bid but do have a live ask. Requiring a
+    bid at the pre-submit authority seam converts a usable buy_yes/buy_no touch
+    into PRE_SUBMIT_BOOK_AUTHORITY_STALE after the DB fallback misses; that is a
+    false liveness failure, not a real no-edge decision.
+    """
+    import src.main as main
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(seconds=71)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "market": "cond-1",
+            "hash": "fresh-ask-only-book-hash",
+            "bids": [],
+            "asks": [{"price": "0.006", "size": "50"}],
+        },
+    )
+
+    witness = provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+
+    assert witness.book_authority_id == "clob_jit_book"
+    assert witness.current_best_bid is None
+    assert witness.current_best_ask == 0.006
+    assert witness.book_hash == "fresh-ask-only-book-hash"
+    quote_seen = datetime.fromisoformat(witness.quote_seen_at)
+    checked_at = datetime.fromisoformat(witness.checked_at)
+    assert 0.0 <= (checked_at - quote_seen).total_seconds() * 1000.0 <= witness.max_quote_age_ms
+
+
+def test_gate84_jit_buy_rejects_book_without_ask(monkeypatch):
+    import src.main as main
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(seconds=71)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "market": "cond-1",
+            "hash": "fresh-bid-only-book-hash",
+            "bids": [{"price": "0.005", "size": "50"}],
+            "asks": [],
+        },
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY"):
+        provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+
+
+def test_gate84_db_fallback_buy_accepts_fresh_ask_only_row(monkeypatch):
+    import src.main as main
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-1",
+            (decision_time - timedelta(milliseconds=200)).isoformat(),
+            "fresh-db-ask-only-book",
+            None,
+            0.006,
+        ),
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    provider = main._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=lambda token_id: (_ for _ in ()).throw(RuntimeError("transient /book failure")),
+    )
+
+    witness = provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+
+    assert witness.book_authority_id == "execution_feasibility_evidence"
+    assert witness.current_best_bid is None
+    assert witness.current_best_ask == 0.006
+    assert witness.book_hash == "fresh-db-ask-only-book"
 
 
 def test_gate84_jit_book_uses_fetch_time_when_reactor_decision_time_is_old(monkeypatch):
