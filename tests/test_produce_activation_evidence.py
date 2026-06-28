@@ -5,8 +5,8 @@
 
 The producer is the operator-runnable evidence factory referenced by
 ``UNLOCK_CRITERIA.md``. Each public function:
-- runs ONE flag's dry-run against an in-memory DB / tmp evidence file
-- writes the resulting artifact (SQL dump / log / diff) to an output
+- runs ONE active flag's dry-run against injected or live healthcheck evidence
+- writes the resulting artifact (log / diff) to an output
   directory, with a deterministic filename
 - returns a verdict dict that ``--all`` mode aggregates into a summary
 
@@ -16,108 +16,14 @@ satisfy them; the CLI is a thin wrapper.
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from src.config import EntryForecastRolloutMode, entry_forecast_config
-from src.control.entry_forecast_promotion_evidence_io import (
-    write_promotion_evidence,
-)
-from src.control.entry_forecast_rollout import EntryForecastPromotionEvidence
-from src.data.live_entry_status import LiveEntryForecastStatus
-
 scripts = pytest.importorskip("scripts.produce_activation_evidence")
 
 UTC = timezone.utc
-
-
-def _ready_status() -> LiveEntryForecastStatus:
-    return LiveEntryForecastStatus(
-        status="LIVE_ELIGIBLE",
-        blockers=(),
-        executable_row_count=4,
-        producer_readiness_count=4,
-        producer_live_eligible_count=4,
-    )
-
-
-def _complete_evidence() -> EntryForecastPromotionEvidence:
-    return EntryForecastPromotionEvidence(
-        operator_approval_id="op-2026-05-04",
-        g1_evidence_id="g1-2026-05-04",
-        status_snapshot=_ready_status(),
-        calibration_promotion_approved=True,
-        canary_success_evidence_id="canary-2026-05-04",
-    )
-
-
-# -------------------------------------------------------------------- #
-# C1 rollout-gate evidence
-# -------------------------------------------------------------------- #
-
-
-def test_produce_c1_no_evidence_records_evidence_missing(tmp_path: Path):
-    """Flag 1 dry-run with no evidence ⇒ blocker_code = EVIDENCE_MISSING;
-    verdict.ready_to_flip True (the gate correctly fail-closes; that
-    IS the evidence the operator needs to see).
-    """
-
-    verdict = scripts.produce_c1_rollout_gate_evidence(
-        out_dir=tmp_path,
-        promotion_evidence_path=tmp_path / "absent.json",
-    )
-
-    assert verdict["flag"] == "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
-    assert verdict["blocker_code"] == "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING"
-    assert verdict["evidence_present"] is False
-    assert verdict["ready_to_flip"] is True
-
-    artifact = Path(verdict["artifact_path"])
-    assert artifact.exists()
-    assert "ENTRY_FORECAST_PROMOTION_EVIDENCE_MISSING" in artifact.read_text()
-
-
-def test_produce_c1_complete_evidence_records_no_blocker(tmp_path: Path):
-    """Flag 1 with complete evidence ⇒ blocker_code is None;
-    ready_to_flip True with rationale noting the gate would let live
-    orders flow."""
-
-    evidence_path = tmp_path / "evidence.json"
-    write_promotion_evidence(_complete_evidence(), path=evidence_path)
-
-    verdict = scripts.produce_c1_rollout_gate_evidence(
-        out_dir=tmp_path,
-        promotion_evidence_path=evidence_path,
-    )
-
-    assert verdict["blocker_code"] is None
-    assert verdict["evidence_present"] is True
-    assert verdict["ready_to_flip"] is True
-    artifact = Path(verdict["artifact_path"])
-    assert "evidence_present=True" in artifact.read_text()
-
-
-def test_produce_c1_corrupt_evidence_records_corruption_blocker(tmp_path: Path):
-    """Corrupt JSON ⇒ blocker_code starts with EVIDENCE_CORRUPT prefix.
-    ready_to_flip is False — operator must fix the file before flipping.
-    """
-
-    evidence_path = tmp_path / "evidence.json"
-    evidence_path.write_text("not valid json {{")
-
-    verdict = scripts.produce_c1_rollout_gate_evidence(
-        out_dir=tmp_path,
-        promotion_evidence_path=evidence_path,
-    )
-
-    assert verdict["blocker_code"] is not None
-    assert verdict["blocker_code"].startswith("ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:")
-    assert verdict["ready_to_flip"] is False
 
 
 # -------------------------------------------------------------------- #
@@ -213,13 +119,7 @@ def test_produce_c4_no_diff_when_blockers_empty(tmp_path: Path):
 
 
 def test_produce_all_writes_summary_artifact(tmp_path: Path):
-    """``produce_all`` runs c1 and c4 in sequence and writes a
-    summary markdown to ``<out_dir>/<date>_summary.md`` referencing
-    each per-flag artifact. The summary has a unified verdict table.
-    """
-
-    evidence_path = tmp_path / "evidence.json"
-    write_promotion_evidence(_complete_evidence(), path=evidence_path)
+    """``produce_all`` writes a summary for active activation evidence."""
 
     def fake_check():
         return {
@@ -237,12 +137,10 @@ def test_produce_all_writes_summary_artifact(tmp_path: Path):
 
     summary = scripts.produce_all(
         out_dir=tmp_path,
-        promotion_evidence_path=evidence_path,
         check_fn=fake_check,
         as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
     )
 
-    assert summary["c1"]["ready_to_flip"] is True
     assert summary["c4"]["ready_to_flip"] is True
 
     summary_path = Path(summary["summary_path"])
@@ -250,7 +148,6 @@ def test_produce_all_writes_summary_artifact(tmp_path: Path):
     body = summary_path.read_text()
     # Markdown sanity — must reference each flag by name and link the
     # underlying artifact paths so the operator can drill in.
-    assert "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE" in body
     assert "ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS" in body
     assert "ready_to_flip" in body
 
@@ -262,14 +159,28 @@ def test_artifact_paths_are_dated_and_unique(tmp_path: Path):
     audit trail.
     """
 
-    verdict_a = scripts.produce_c1_rollout_gate_evidence(
+    def fake_check():
+        return {
+            "daemon_alive": True,
+            "status_fresh": True,
+            "status_contract_valid": True,
+            "riskguard_alive": True,
+            "riskguard_fresh": True,
+            "riskguard_contract_valid": True,
+            "assumptions_valid": True,
+            "cycle_failed": False,
+            "infrastructure_level": "GREEN",
+            "entry_forecast_blockers": ["ENTRY_FORECAST_WORLD_DB_MISSING"],
+        }
+
+    verdict_a = scripts.produce_c4_healthcheck_evidence(
         out_dir=tmp_path,
-        promotion_evidence_path=tmp_path / "absent.json",
+        check_fn=fake_check,
         as_of=datetime(2026, 5, 4, 12, tzinfo=UTC),
     )
-    verdict_b = scripts.produce_c1_rollout_gate_evidence(
+    verdict_b = scripts.produce_c4_healthcheck_evidence(
         out_dir=tmp_path,
-        promotion_evidence_path=tmp_path / "absent.json",
+        check_fn=fake_check,
         as_of=datetime(2026, 5, 5, 12, tzinfo=UTC),
     )
 

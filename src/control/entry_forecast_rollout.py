@@ -1,4 +1,9 @@
-"""Entry-forecast rollout gate for canary/live promotion."""
+"""Control-plane validator for entry-forecast promotion evidence.
+
+This module is intentionally not live evaluator authority. It validates
+operator CLI promotion evidence; executable forecast reader/config checks
+own live candidate admission.
+"""
 
 from __future__ import annotations
 

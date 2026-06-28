@@ -1,24 +1,19 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
-# Authority basis: docs/operations/activation/UNLOCK_CRITERIA.md — operator-runnable evidence factory for ZEUS_ENTRY_FORECAST_{ROLLOUT_GATE,HEALTHCHECK_BLOCKERS} flag flips.
-"""Produce activation-evidence artifacts for the operator's flag flip.
+# Authority basis: docs/operations/activation/UNLOCK_CRITERIA.md — operator-runnable evidence factory for active healthcheck blocker flag flips.
+"""Produce activation-evidence artifacts for active operator flag flips.
 
-Each function below dry-runs ONE active Phase-C flag path against a
-synthetic candidate / in-memory DB and emits an artifact under
+Each function below dry-runs ONE active control flag path against live
+or injected healthcheck evidence and emits an artifact under
 ``<out_dir>/`` that the unlock-criteria audit trail consumes.
 
 The functions are deliberately import-friendly so the unit test in
 ``tests/test_produce_activation_evidence.py`` can drive them directly
 without a subprocess. The CLI at the bottom is a thin wrapper.
 
-Why separate producers and not one daemon-cycle replay:
-- The daemon's evaluator path needs producer-readiness rows, ensemble
-  snapshots, source-run coverage, etc. that the operator does not
-  always have populated on a dev box. This script bypasses those by
-  running each gate in isolation.
-- Each artifact answers ONE question: "if I flip flag X today, what
-  state will the daemon land in?" Aggregating into a single replay
-  would obscure per-flag readiness.
+The retired evaluator-side rollout gate is intentionally absent here:
+this script must not keep producing artifacts for controls that no
+longer affect live evaluator behavior.
 """
 
 from __future__ import annotations
@@ -26,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -35,131 +29,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import (
-    City,
-    EntryForecastRolloutMode,
-    entry_forecast_config,
-)
-from src.control.entry_forecast_promotion_evidence_io import (
-    PromotionEvidenceCorruption,
-    read_promotion_evidence,
-)
-from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
-
 UTC = timezone.utc
 
-C1_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
 C4_FLAG = "ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS"
 
 
 def _stamp(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
-
-
-def _sample_city() -> City:
-    return City(
-        name="London",
-        lat=51.4775,
-        lon=-0.4614,
-        timezone="Europe/London",
-        settlement_unit="C",
-        cluster="London",
-        wu_station="EGLL",
-    )
-
-
-def _live_cfg():
-    return replace(entry_forecast_config(), rollout_mode=EntryForecastRolloutMode.LIVE)
-
-
-# -------------------------------------------------------------------- #
-# C1: rollout-gate dry-run
-# -------------------------------------------------------------------- #
-
-
-def produce_c1_rollout_gate_evidence(
-    *,
-    out_dir: Path,
-    promotion_evidence_path: Path,
-    as_of: datetime | None = None,
-) -> dict[str, Any]:
-    """Dry-run the rollout gate. Returns a verdict dict and writes
-    ``<out_dir>/<date>_c1_rollout_gate.txt`` with the gate's reason
-    codes for the supplied evidence.
-    """
-
-    if as_of is None:
-        as_of = datetime.now(UTC)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    artifact_path = out_dir / f"{_stamp(as_of)}_c1_rollout_gate.txt"
-
-    blocker_code: str | None
-    evidence_present: bool
-    rationale: str
-
-    try:
-        evidence = read_promotion_evidence(path=promotion_evidence_path)
-    except PromotionEvidenceCorruption as exc:
-        blocker_code = f"ENTRY_FORECAST_PROMOTION_EVIDENCE_CORRUPT:{exc}"
-        evidence_present = promotion_evidence_path.exists()
-        ready = False
-        rationale = (
-            "evidence file present but failed strict parsing; operator must "
-            "fix or rewrite before flipping."
-        )
-        decision_payload = {"reason_codes": [blocker_code]}
-    else:
-        decision = evaluate_entry_forecast_rollout_gate(
-            config=_live_cfg(), evidence=evidence
-        )
-        evidence_present = evidence is not None
-        if decision.may_submit_live_orders:
-            blocker_code = None
-            ready = True
-            rationale = (
-                "gate would PASS with current evidence; flipping the flag "
-                "delegates the rollout-blocker check to the typed evidence "
-                "gate. Combined with flag 2 ON, live submission becomes "
-                "possible (still subject to producer-readiness)."
-            )
-        else:
-            blocker_code = decision.reason_codes[0] if decision.reason_codes else "ENTRY_FORECAST_ROLLOUT_GATE_BLOCKED"
-            ready = True  # fail-closed is the EXPECTED first-flip state
-            rationale = (
-                f"gate fail-closes with reason {blocker_code!r}; this is the "
-                "expected first-flip behavior — flag is safe to flip while "
-                "the operator continues populating evidence."
-            )
-        decision_payload = {
-            "reason_codes": list(decision.reason_codes),
-            "status": decision.status,
-            "may_submit_live_orders": decision.may_submit_live_orders,
-        }
-
-    verdict = {
-        "flag": C1_FLAG,
-        "blocker_code": blocker_code,
-        "evidence_present": evidence_present,
-        "ready_to_flip": ready,
-        "rationale": rationale,
-        "artifact_path": str(artifact_path),
-        "as_of": as_of.isoformat(),
-    }
-
-    artifact_path.write_text(_render_c1_artifact(verdict, decision=decision_payload))
-    return verdict
-
-
-def _render_c1_artifact(verdict: dict[str, Any], *, decision: dict[str, Any]) -> str:
-    return (
-        f"# Phase C-1 rollout-gate dry-run — {verdict['as_of']}\n"
-        f"flag={verdict['flag']}\n"
-        f"evidence_present={verdict['evidence_present']}\n"
-        f"blocker_code={verdict['blocker_code']!r}\n"
-        f"ready_to_flip={verdict['ready_to_flip']}\n"
-        f"rationale={verdict['rationale']}\n"
-        f"decision={json.dumps(decision, sort_keys=True)}\n"
-    )
 
 
 # -------------------------------------------------------------------- #
@@ -254,7 +130,6 @@ def produce_c4_healthcheck_evidence(
 def produce_all(
     *,
     out_dir: Path,
-    promotion_evidence_path: Path,
     check_fn: Callable[[], dict[str, Any]] | None = None,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
@@ -264,11 +139,6 @@ def produce_all(
         as_of = datetime.now(UTC)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    c1 = produce_c1_rollout_gate_evidence(
-        out_dir=out_dir,
-        promotion_evidence_path=promotion_evidence_path,
-        as_of=as_of,
-    )
     c4 = produce_c4_healthcheck_evidence(
         out_dir=out_dir,
         check_fn=check_fn,
@@ -277,19 +147,17 @@ def produce_all(
 
     summary_path = out_dir / f"{_stamp(as_of)}_summary.md"
     summary_path.write_text(
-        _render_summary(c1=c1, c4=c4, as_of=as_of)
+        _render_summary(c4=c4, as_of=as_of)
     )
 
     return {
-        "c1": c1,
         "c4": c4,
         "summary_path": str(summary_path),
     }
 
 
-def _render_summary(*, c1, c4, as_of: datetime) -> str:
+def _render_summary(*, c4, as_of: datetime) -> str:
     rows = [
-        ("ZEUS_ENTRY_FORECAST_ROLLOUT_GATE (C-1)", c1),
         ("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS (C-4)", c4),
     ]
     body = [
@@ -310,8 +178,7 @@ def _render_summary(*, c1, c4, as_of: datetime) -> str:
     body.append(
         "Recommended flip order per "
         "`docs/runbooks/live-operation.md` §Phase C:\n"
-        "1. ZEUS_ENTRY_FORECAST_ROLLOUT_GATE\n"
-        "2. ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS"
+        "1. ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS"
     )
     return "\n".join(body) + "\n"
 
@@ -328,17 +195,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("docs/historical_evidence/activation"),
         help="Directory to write artifact files into (default: docs/historical_evidence/activation/).",
-    )
-    parser.add_argument(
-        "--evidence",
-        type=Path,
-        default=Path("state/entry_forecast_promotion_evidence.json"),
-        help="Path to the promotion-evidence JSON file the gate will consult.",
-    )
-    parser.add_argument(
-        "--c1",
-        action="store_true",
-        help="Produce ZEUS_ENTRY_FORECAST_ROLLOUT_GATE evidence.",
     )
     parser.add_argument(
         "--c4",
@@ -359,22 +215,15 @@ def _main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     as_of = datetime.now(UTC)
 
-    if args.all or not (args.c1 or args.c4):
+    if args.all or not args.c4:
         result = produce_all(
             out_dir=out_dir,
-            promotion_evidence_path=args.evidence,
             as_of=as_of,
         )
         print(json.dumps(result, indent=2, default=str))
         return 0
 
     payload: dict[str, Any] = {}
-    if args.c1:
-        payload["c1"] = produce_c1_rollout_gate_evidence(
-            out_dir=out_dir,
-            promotion_evidence_path=args.evidence,
-            as_of=as_of,
-        )
     if args.c4:
         payload["c4"] = produce_c4_healthcheck_evidence(
             out_dir=out_dir,

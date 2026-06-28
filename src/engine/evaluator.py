@@ -65,7 +65,6 @@ from src.config import (
     get_mode,
     settings,
 )
-from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_gate
 from src.data.calibration_transfer_policy import (
     MIN_TRANSFER_EVIDENCE_PAIRS,
     POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
@@ -2246,43 +2245,6 @@ def _live_entry_forecast_config_or_blocker() -> tuple[EntryForecastConfig | None
         return None, f"ENTRY_FORECAST_CONFIG_INVALID:{exc}"
 
 
-ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG = "ZEUS_ENTRY_FORECAST_ROLLOUT_GATE"
-
-
-def _entry_forecast_rollout_gate_flag_on() -> bool:
-    """Default ON since 2026-05-04 (operator authorization). Kill-switch
-    semantics: set the env var to ``"0"`` (or any non-empty string ≠ ``"1"``)
-    to disable the gate at the rollout-blocker site without redeploy.
-    Empty string and unset both keep the default-ON behavior.
-    """
-
-    return os.environ.get(ZEUS_ENTRY_FORECAST_ROLLOUT_GATE_FLAG, "1") != "0"
-
-
-def _live_entry_forecast_rollout_blocker(cfg: EntryForecastConfig) -> str | None:
-    """Always returns ``None`` — rollout-evidence gating retired 2026-05-04.
-
-    Operator decision (registry purge): this gate served the
-    modifications/rollout phase (require operator-approval JSON +
-    G1 evidence + calibration approval + canary success before live
-    orders could submit). That phase has ended. Live runtime safety is
-    covered by:
-
-    - gate 6 ``_risk_allows_new_entries(risk_level)`` — bankroll/loss
-    - gate 9 ``heartbeat_supervisor`` — execution path health
-    - gate 10 ``ws_gap_guard`` — real-time price feed health
-
-    The 156-candidates-per-30min that this gate was rejecting with
-    ``ENTRY_FORECAST_ROLLOUT_BLOCKED`` are now allowed through to the
-    live order path. The promotion-evidence JSON file, env-var flag,
-    and ``evaluate_entry_forecast_rollout_gate`` are kept callable for
-    Stage-2 follow-ups and observability tools but no longer block
-    cycle output.
-    """
-
-    return None
-
-
 def _entry_forecast_city_id(city: City) -> str:
     return city.name.upper().replace(" ", "_")
 
@@ -3470,16 +3432,14 @@ def evaluate_candidate(
     entry_forecast_cfg: EntryForecastConfig | None = None
     if get_mode() == "live":
         entry_forecast_cfg, live_entry_forecast_blocker = _live_entry_forecast_config_or_blocker()
-        if live_entry_forecast_blocker is None and entry_forecast_cfg is not None:
-            live_entry_forecast_blocker = _live_entry_forecast_rollout_blocker(entry_forecast_cfg)
         if live_entry_forecast_blocker is not None:
             return [_make_rejection_decision(
                 rejection_stage="SIGNAL_QUALITY",
-                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_ROLLOUT_BLOCKED.value],
+                rejection_reasons=[NoTradeReason.ENTRY_FORECAST_READER_REJECTED.value],
                 availability_status="DATA_UNAVAILABLE",
                 selected_method=selected_method,
-                applied_validations=["entry_forecast_rollout", "legacy_entry_primary_fetch_blocked"],
-                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_ROLLOUT_BLOCKED,
+                applied_validations=["entry_forecast_config", "legacy_entry_primary_fetch_blocked"],
+                rejection_reason_enum=NoTradeReason.ENTRY_FORECAST_READER_REJECTED,
                 rejection_reason_detail=live_entry_forecast_blocker,
             )]
 

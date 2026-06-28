@@ -742,8 +742,8 @@ files:
     - src/observability/status_summary.py
   src/control/entry_forecast_rollout.py:
     zone: K1_governance
-    authority_role: entry_forecast_promotion_gate
-    why: PR47 promotion gate evaluating EntryForecastPromotionEvidence (operator approval, G1, calibration approval, canary success) before allowing canary or live entry-forecast orders. PHASE C-1 wired into src/engine/evaluator.py behind ZEUS_ENTRY_FORECAST_ROLLOUT_GATE env flag (default OFF — daemon behavior at flag-default is byte-equal to pre-Phase-C). Operator flips the flag per docs/operations/task_2026-05-02_full_launch_audit/REMEDIATION_PLAN_2026-05-03.md.
+    authority_role: entry_forecast_promotion_cli_validator
+    why: Control-plane validator for operator promotion evidence used by src/control/cli/promote_entry_forecast.py. It is not live evaluator authority and is not imported by src/engine/evaluator.py; executable entry forecast reader/config checks own the live path.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
@@ -752,7 +752,7 @@ files:
   src/control/entry_forecast_promotion_evidence_io.py:
     zone: K1_governance
     authority_role: entry_forecast_promotion_evidence_persistence
-    why: Phase B1 atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json. Strict schema, treats corruption as PromotionEvidenceCorruption. Phase C-flock adds fcntl.flock around writes to prevent concurrent-writer races. PHASE C-1 wired into src/engine/evaluator.py (read-side) behind ZEUS_ENTRY_FORECAST_ROLLOUT_GATE env flag (default OFF). Write-side remains operator-script-only.
+    why: Atomic JSON read/write for EntryForecastPromotionEvidence at state/entry_forecast_promotion_evidence.json for operator promotion CLI workflows. Strict schema, treats corruption as PromotionEvidenceCorruption, and uses fcntl.flock around writes. No live evaluator path reads this file.
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:
