@@ -774,6 +774,15 @@ def _json_dict(raw: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _canonical_temperature_metric_text(metric: object) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", str(metric or "").strip().lower()).strip()
+    if text in {"low", "lowest", "min", "minimum", "tmin"} or text.startswith("lowest "):
+        return "low"
+    if text in {"high", "highest", "max", "maximum", "tmax"} or text.startswith("highest "):
+        return "high"
+    return text
+
+
 def _review_required_command(conn: sqlite3.Connection, command_id: str) -> dict:
     row = conn.execute(
         "SELECT * FROM venue_commands WHERE command_id = ?",
@@ -9379,22 +9388,24 @@ def _terminalize_abandoned_unsubmitted_ghost(
     aggregate_id: str,
     execution_command_id: str,
     occurred_at: str,
-) -> bool:
+) -> dict | None:
     """Append a PRE-SUBMIT SubmitRejected terminal + release the cap reservation.
 
-    Returns True when the ghost was terminalized, False when a final guard
-    (re-read venue truth) refuses. Caller wraps this in a SAVEPOINT.
+    Returns a redecision-continuation identity when the ghost was terminalized,
+    or None when a final guard (re-read venue truth) refuses. Caller wraps this
+    in a SAVEPOINT.
     """
     # Re-read the ExecutionCommandCreated event for the exact command-binding
     # fields (event_id / final_intent_id / execution_command_id) the
     # _require_command_binding check enforces. Fail closed if absent.
     command_event = _latest_edli_event(conn, events_ref, aggregate_id, "ExecutionCommandCreated")
     command_payload = _edli_payload(command_event)
+    plan_payload = _edli_payload(_latest_edli_event(conn, events_ref, aggregate_id, "SubmitPlanBuilt"))
     event_id = str(command_payload.get("event_id") or "").strip()
     final_intent_id = str(command_payload.get("final_intent_id") or "").strip()
     bound_command_id = str(command_payload.get("execution_command_id") or "").strip()
     if not event_id or not final_intent_id or bound_command_id != execution_command_id:
-        return False
+        return None
 
     # FINAL venue-truth guard (re-read the projection under the write lock): the
     # latest event must still be ExecutionCommandCreated and venue_order_id NULL.
@@ -9407,13 +9418,13 @@ def _terminalize_abandoned_unsubmitted_ghost(
         (aggregate_id,),
     ).fetchone()
     if projection is None:
-        return False
+        return None
     if str(projection["current_state"]) != "EXECUTION_COMMAND_CREATED":
-        return False
+        return None
     if str(projection["last_event_type"] or "") != "ExecutionCommandCreated":
-        return False
+        return None
     if str(projection["venue_order_id"] or "").strip():
-        return False
+        return None
 
     # The PRE-SUBMIT SubmitRejected payload the immutable ledger accepts directly
     # after ExecutionCommandCreated (no VenueSubmitAttempted required), per
@@ -9479,14 +9490,29 @@ def _terminalize_abandoned_unsubmitted_ghost(
         projection_ref=projection_ref,
         aggregate_id=aggregate_id,
     )
-    return True
+    return {
+        "reason": "abandoned_unsubmitted_ghost",
+        "aggregate_id": aggregate_id,
+        "execution_command_id": execution_command_id,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "family_id": str(plan_payload.get("family_id") or ""),
+        "city": str(plan_payload.get("city") or ""),
+        "target_date": str(plan_payload.get("target_date") or ""),
+        "metric": _canonical_temperature_metric_text(
+            plan_payload.get("metric") or plan_payload.get("temperature_metric") or ""
+        ),
+        "condition_id": str(plan_payload.get("condition_id") or ""),
+        "token_id": str(plan_payload.get("token_id") or ""),
+        "direction": str(plan_payload.get("direction") or ""),
+    }
 
 
 def reconcile_abandoned_unsubmitted_ghosts(
     conn: sqlite3.Connection,
     *,
     updated_before: str | None = None,
-) -> dict[str, int]:
+) -> dict[str, object]:
     """Terminalize EDLI order aggregates abandoned at ExecutionCommandCreated.
 
     THE GHOST CLASS THIS KILLS (live_order_pathology 2026-06-22): an aggregate
@@ -9505,9 +9531,15 @@ def reconcile_abandoned_unsubmitted_ghosts(
 
     Wired into both recovery lanes (boot / periodic) so a daemon restart self-heals
     any ghost it created on its way down. DB-only pass; never calls the venue.
-    Returns {"scanned", "advanced", "stayed", "errors"}.
+    Returns {"scanned", "advanced", "stayed", "errors", "continuations"}.
     """
-    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    summary: dict[str, object] = {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+        "continuations": [],
+    }
     events_ref = _edli_live_order_events_ref(conn)
     projection_ref = _edli_live_order_projection_ref(conn)
     cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
@@ -9532,12 +9564,12 @@ def reconcile_abandoned_unsubmitted_ghosts(
     )
     occurred_at = _now_iso()
     for candidate in candidates:
-        summary["scanned"] += 1
+        summary["scanned"] = int(summary["scanned"]) + 1
         aggregate_id = str(candidate.get("aggregate_id") or "")
         execution_command_id = str(candidate.get("execution_command_id") or "")
         conn.execute("SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
         try:
-            advanced = _terminalize_abandoned_unsubmitted_ghost(
+            continuation = _terminalize_abandoned_unsubmitted_ghost(
                 conn,
                 events_ref=events_ref,
                 projection_ref=projection_ref,
@@ -9549,10 +9581,13 @@ def reconcile_abandoned_unsubmitted_ghosts(
                 occurred_at=occurred_at,
             )
             conn.execute("RELEASE SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
-            if advanced:
-                summary["advanced"] += 1
+            if continuation:
+                summary["advanced"] = int(summary["advanced"]) + 1
+                continuations = summary.get("continuations")
+                if isinstance(continuations, list):
+                    continuations.append(continuation)
             else:
-                summary["stayed"] += 1
+                summary["stayed"] = int(summary["stayed"]) + 1
         except Exception as exc:
             conn.execute("ROLLBACK TO SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
             conn.execute("RELEASE SAVEPOINT abandoned_unsubmitted_ghost_reconcile")
@@ -9562,7 +9597,7 @@ def reconcile_abandoned_unsubmitted_ghosts(
                 execution_command_id,
                 exc,
             )
-            summary["errors"] += 1
+            summary["errors"] = int(summary["errors"]) + 1
     return summary
 
 
@@ -12142,9 +12177,9 @@ def _reconcile_passes_inline(
             updated_before=started_at,
         )
         summary["abandoned_unsubmitted_ghosts"] = abandoned_ghost_summary
-        summary["advanced"] += abandoned_ghost_summary["advanced"]
-        summary["stayed"] += abandoned_ghost_summary["stayed"]
-        summary["errors"] += abandoned_ghost_summary["errors"]
+        summary["advanced"] += int(abandoned_ghost_summary.get("advanced", 0))
+        summary["stayed"] += int(abandoned_ghost_summary.get("stayed", 0))
+        summary["errors"] += int(abandoned_ghost_summary.get("errors", 0))
 
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
@@ -12667,10 +12702,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "terminal_order_facts",
             collect_continuations=True,
         )
+        abandoned_ghosts = summary.get("abandoned_unsubmitted_ghosts")
+        abandoned_continuations = (
+            list(abandoned_ghosts.get("continuations") or [])
+            if isinstance(abandoned_ghosts, dict)
+            else []
+        )
         terminal_order_facts = summary.get("terminal_order_facts")
-        if isinstance(terminal_order_facts, dict):
-            summary["terminal_no_fill_continuations"] = list(
-                terminal_order_facts.get("continuations") or []
+        terminal_continuations = (
+            list(terminal_order_facts.get("continuations") or [])
+            if isinstance(terminal_order_facts, dict)
+            else []
+        )
+        if terminal_continuations or abandoned_continuations:
+            summary["terminal_no_fill_continuations"] = (
+                terminal_continuations + abandoned_continuations
             )
         _db_pass("edli_acknowledged_venue_command_sync",
                  reconcile_edli_acknowledged_venue_command_sync,

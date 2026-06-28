@@ -824,17 +824,14 @@ def _sizing_candidates_from_proofs(
     proof's direction (buy_yes -> YES, buy_no -> NO).
     """
     out: dict[tuple[str, str], Any] = {}
-    for proof in proofs:
-        if _proof_direction_law_rejected(proof):
-            continue
+    for (bin_id, side), proof in _canonical_proofs_by_bin_side(
+        proofs,
+        candidate_bin_id,
+        require_probability_unit_price=True,
+    ).items():
         try:
             candidate = native_side_candidate_from_proof(family_key=family_key, proof=proof)
         except Exception:  # noqa: BLE001 — a non-materializable proof is simply absent
-            continue
-        bin_id = candidate_bin_id(proof)
-        direction = str(getattr(proof, "direction", "") or "")
-        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
-        if side is None:
             continue
         out[(bin_id, side)] = candidate
     return out
@@ -867,16 +864,65 @@ def _proof_by_bin_side(
     proofs: Sequence[Any], candidate_bin_id
 ) -> dict[tuple[str, str], Any]:
     """Index the reactor proofs by (bin_id, side) for the selected-proof remap."""
-    out: dict[tuple[str, str], Any] = {}
+    return _canonical_proofs_by_bin_side(
+        proofs,
+        candidate_bin_id,
+        require_probability_unit_price=True,
+    )
+
+
+def _proof_side(proof: Any) -> str | None:
+    direction = str(getattr(proof, "direction", "") or "")
+    return "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+
+
+def _proof_execution_price_value(proof: Any) -> Decimal | None:
+    execution_price = getattr(proof, "execution_price", None)
+    if execution_price is None or getattr(execution_price, "currency", None) != "probability_units":
+        return None
+    try:
+        return Decimal(str(getattr(execution_price, "value")))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _canonical_proofs_by_bin_side(
+    proofs: Sequence[Any],
+    candidate_bin_id,
+    *,
+    require_probability_unit_price: bool,
+) -> dict[tuple[str, str], Any]:
+    """Choose one proof per (bin_id, side), then reuse it across route/size/remap.
+
+    The bridge is the boundary between reactor-native proof objects and qkernel
+    route economics. A duplicate key cannot be allowed to size on one proof, route
+    on another, and remap selection to a third; choose once by executable price and
+    stable venue identity, and every downstream map consumes that same proof.
+    """
+
+    chosen: dict[tuple[str, str], Any] = {}
+    chosen_key: dict[tuple[str, str], tuple] = {}
     for proof in proofs:
         if _proof_direction_law_rejected(proof):
             continue
-        direction = str(getattr(proof, "direction", "") or "")
-        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
+        side = _proof_side(proof)
         if side is None:
             continue
-        out[(candidate_bin_id(proof), side)] = proof
-    return out
+        price = _proof_execution_price_value(proof)
+        if require_probability_unit_price and price is None:
+            continue
+        candidate = getattr(proof, "candidate", None)
+        key = (candidate_bin_id(proof), side)
+        rank_key = (
+            price if price is not None else Decimal("Infinity"),
+            str(getattr(proof, "token_id", "") or ""),
+            str(getattr(candidate, "condition_id", "") or ""),
+            str(getattr(proof, "executable_snapshot_id", "") or ""),
+        )
+        if key not in chosen or rank_key < chosen_key[key]:
+            chosen[key] = proof
+            chosen_key[key] = rank_key
+    return chosen
 
 
 def _proof_direction_law_rejected(proof: Any) -> bool:
@@ -1324,19 +1370,13 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
 
     direct_yes: dict[str, RouteCost] = {}
     direct_no: dict[str, RouteCost] = {}
-    for proof in proofs:
-        if _proof_direction_law_rejected(proof):
-            continue
+    for (bin_id, side), proof in _canonical_proofs_by_bin_side(
+        proofs,
+        candidate_bin_id,
+        require_probability_unit_price=True,
+    ).items():
         direction = str(getattr(proof, "direction", "") or "")
-        side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else None)
-        if side is None:
-            continue
         execution_price = getattr(proof, "execution_price", None)
-        if execution_price is None or getattr(execution_price, "currency", None) != "probability_units":
-            # An unpriced / wrong-unit proof is not a routable direct candidate; the
-            # engine simply has no route for that (bin, side) and never sizes it.
-            continue
-        bin_id = candidate_bin_id(proof)
         candidate = getattr(proof, "candidate", None)
         token_id = str(getattr(proof, "token_id", "") or "")
         condition_id = str(getattr(candidate, "condition_id", "") or "")
@@ -1367,8 +1407,7 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
             reason=None,
         )
         target = direct_yes if side == "YES" else direct_no
-        # First proof for a (bin, side) wins (YES and NO proofs are distinct sides).
-        target.setdefault(bin_id, route)
+        target[bin_id] = route
 
     def _build(family_book, *, shares=Decimal("1"), enable_negrisk_routes=False):  # noqa: ARG001
         return NegRiskRouteSet(

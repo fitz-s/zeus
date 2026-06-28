@@ -15,9 +15,9 @@ Writer pattern mirrors src/state/decision_events.py:
 INV-37 note: all writes go to zeus-forecasts.db (single DB).
 No cross-DB ATTACH needed here; all day0_nowcast tables are forecast-class.
 
-NOT_DAEMON_WIRED: caller-site wiring (evaluator.py + monitor_refresh.py) is a
-separate operator-controlled step. This module exists in src/ but is not imported
-from any daemon hot-path until that wiring lands.
+Live daemon wiring: src.main bootstraps the conservative hpf_v1 identity fit when
+the forecasts DB is empty, and evaluator.py / monitor_refresh.py also ensure it
+on demand before writing nowcast evidence.
 """
 from __future__ import annotations
 

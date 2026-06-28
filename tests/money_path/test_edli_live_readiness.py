@@ -80,8 +80,8 @@ def test_live_canary_groundwork_has_live_cap_schema_and_verifiers():
     assert LiveCapLedger.__name__ == "LiveCapLedger"
 
 
-def test_event_bound_executable_neg_risk_is_true_monotonic():
-    """Regression: live receipt/actionable true must not fight old snapshot false."""
+def test_event_bound_executable_neg_risk_uses_hydrated_snapshot_single_source():
+    """Regression: executable cert metadata must match the cited snapshot."""
     from src.engine.event_reactor_adapter import _event_bound_executable_snapshot_neg_risk
 
     snapshot_false = SimpleNamespace(neg_risk=False)
@@ -89,9 +89,9 @@ def test_event_bound_executable_neg_risk_is_true_monotonic():
 
     assert _event_bound_executable_snapshot_neg_risk(
         raw_receipt={"neg_risk": True},
-        selected_snapshot_row={"neg_risk": 0},
+        selected_snapshot_row={"neg_risk": 1},
         hydrated_snapshot=snapshot_false,
-    ) is True
+    ) is False
     assert _event_bound_executable_snapshot_neg_risk(
         raw_receipt={"neg_risk": False},
         selected_snapshot_row={"neg_risk": 0},
@@ -99,7 +99,7 @@ def test_event_bound_executable_neg_risk_is_true_monotonic():
     ) is True
     assert _event_bound_executable_snapshot_neg_risk(
         raw_receipt={},
-        selected_snapshot_row={"neg_risk": 0},
+        selected_snapshot_row={"neg_risk": 1},
         hydrated_snapshot=snapshot_false,
     ) is False
 

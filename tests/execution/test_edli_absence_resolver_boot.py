@@ -267,9 +267,31 @@ def test_pre_submit_orphan_resolver_releases_command_created_without_side_effect
     monkeypatch.setattr(resolver_mod, "get_world_connection", lambda **kw: _connect(seeded["db_path"]))
     monkeypatch.setattr(resolver_mod, "world_write_lock", _no_world_lock)
 
-    rc = resolver_mod.resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=lambda msg: None)
+    continuations: list[dict] = []
+    rc = resolver_mod.resolve_pre_submit_orphans(
+        aggregate_id=None,
+        apply=True,
+        log=lambda msg: None,
+        collect_continuations=continuations,
+    )
 
     assert rc == 0
+    assert continuations == [
+        {
+            "reason": resolver_mod.PRE_SUBMIT_ORPHAN_REASON,
+            "aggregate_id": seeded["aggregate_id"],
+            "execution_command_id": seeded["execution_command_id"],
+            "event_id": seeded["event_id"],
+            "final_intent_id": seeded["final_intent_id"],
+            "family_id": "fam-pre-submit-orphan",
+            "city": "Hong Kong",
+            "target_date": "2026-06-19",
+            "metric": "low",
+            "condition_id": "condition-1",
+            "token_id": "token-yes",
+            "direction": "buy_no",
+        }
+    ]
     check = _connect(seeded["db_path"])
     try:
         assert check.execute(
@@ -308,7 +330,7 @@ def test_pre_submit_orphan_resolver_scopes_to_latest_command_after_prior_termina
                 "idempotency_key": "prior-idempotency-key",
             },
             occurred_at=NOW,
-            source_authority="executor",
+            source_authority="existing_executor",
         )
         ledger.append_event(
             aggregate_id=seeded["aggregate_id"],
@@ -323,7 +345,7 @@ def test_pre_submit_orphan_resolver_scopes_to_latest_command_after_prior_termina
                 "pre_submit_rejection": False,
             },
             occurred_at=NOW,
-            source_authority="executor",
+            source_authority="existing_executor",
         )
         ledger.append_event(
             aggregate_id=seeded["aggregate_id"],
@@ -338,7 +360,7 @@ def test_pre_submit_orphan_resolver_scopes_to_latest_command_after_prior_termina
                 "transition_reason": "entries_paused:old-local-rejection",
             },
             occurred_at=NOW,
-            source_authority="executor",
+            source_authority="existing_executor",
         )
         cap_ledger.release(seeded["usage_id"], "prior command released")
 
@@ -497,6 +519,10 @@ def _seed_pre_submit_orphan(db_path, *, include_regret: bool) -> dict[str, str]:
                 "condition_id": "condition-1",
                 "token_id": "token-yes",
                 "direction": "buy_no",
+                "family_id": "fam-pre-submit-orphan",
+                "city": "Hong Kong",
+                "target_date": "2026-06-19",
+                "metric": "tmin",
                 "limit_price": 0.44,
                 "size": 25,
             },
@@ -607,6 +633,20 @@ def _pre_submit_payload(*, event_id: str, final_intent_id: str):
         "current_best_bid": 0.41,
         "current_best_ask": 0.43,
         "limit_price": 0.40,
+        "size": 25,
+        "q_live": 0.50,
+        "q_lcb_5pct": 0.45,
+        "expected_edge": 0.05,
+        "min_entry_price": 0.05,
+        "min_expected_profit_usd": 0.05,
+        "min_submit_edge_density": 0.02,
+        "qkernel_execution_economics": {
+            "route_type": "direct",
+            "route_id": "DIRECT_NO",
+            "route": {"side": "NO"},
+            "payoff_q_point": 0.50,
+            "payoff_q_lcb": 0.45,
+        },
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,

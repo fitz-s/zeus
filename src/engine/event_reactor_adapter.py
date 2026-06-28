@@ -6161,37 +6161,48 @@ def _build_event_bound_taker_quality_proof(
     min_incremental_profit = Decimal(str(actionable_payload.get("min_taker_incremental_profit_usd") or "0.05"))
     min_model_confidence = Decimal(str(actionable_payload.get("min_taker_model_confidence") or "0.60"))
     min_profit_ratio = Decimal(str(actionable_payload.get("min_taker_profit_ratio") or "1.20"))
+    min_entry_price = Decimal(str(actionable_payload.get("min_entry_price") or "0"))
+    min_expected_profit = Decimal(str(actionable_payload.get("min_expected_profit_usd") or "0"))
+    min_submit_edge_density = Decimal(str(actionable_payload.get("min_submit_edge_density") or "0"))
     required_profit = max(
         maker_expected_profit_usd * min_profit_ratio,
         maker_expected_profit_usd + min_incremental_profit,
     )
-    # EXTRA-GATE COLLAPSE (2026-06-20, operator law = NO CAPS). The taker that
-    # reaches here is ALREADY admissible only when the settlement-conservative
-    # after-cost law holds (fresh ask + fee <= q_lcb, i.e. taker_edge_dec >= 0 — the
-    # same FIX-B bound the policy enforces at select_rest_then_cross_mode). The
-    # 0.03 / 0.05 / 1.20 / 0.60 thresholds were an UNLICENSED cap layered on top of
-    # the conservative law: they fired ~26x (live order events 06-18..06-20) and
-    # ABORTED takers that passed the conservative bound -> TAKER_QUALITY_PROOF_NOT_PASSED
-    # -> the certified +EV cross never executed. They are DEMOTED TO TELEMETRY here:
-    # the metrics + the threshold values still travel on the receipt (the settlement
-    # loop can study them), but they NO LONGER abort. `passed` is True exactly when
-    # the conservative after-cost surplus is non-negative. A negative-edge taker
-    # (ask + fee > q_lcb) still fails closed (passed=False) — the conservative law is
-    # never loosened, only the extra cap is removed.
+    taker_edge_density = taker_edge_dec / max(touch_dec, Decimal("0.000001"))
     conservative_surplus_ok = taker_edge_dec >= Decimal("0")
-    legacy_threshold_pass = bool(
+    taker_quality_threshold_pass = bool(
         taker_edge_dec >= min_taker_edge
         and incremental_expected_profit_usd >= min_incremental_profit
         and taker_expected_profit_usd >= required_profit
         and model_confidence >= min_model_confidence
     )
-    passed = bool(conservative_surplus_ok)
+    strategy_quality_floor_pass = bool(
+        touch_dec >= min_entry_price
+        and taker_expected_profit_usd >= min_expected_profit
+        and taker_edge_density >= min_submit_edge_density
+    )
+    passed = bool(
+        conservative_surplus_ok
+        and taker_quality_threshold_pass
+        and strategy_quality_floor_pass
+    )
+    reason = "allowed"
+    if not conservative_surplus_ok:
+        reason = "negative_conservative_after_cost_surplus"
+    elif not taker_quality_threshold_pass:
+        reason = "taker_quality_threshold_not_met"
+    elif not strategy_quality_floor_pass:
+        reason = "strategy_live_quality_floor_not_met"
     return {
         "schema_version": 1,
         "passed": bool(passed),
-        "passed_basis": "conservative_after_cost_surplus_nonnegative",
-        "legacy_threshold_pass": legacy_threshold_pass,
+        "reason": reason,
+        "passed_basis": "conservative_after_cost_plus_taker_and_strategy_quality_floors",
+        "taker_quality_threshold_pass": taker_quality_threshold_pass,
+        "strategy_quality_floor_pass": strategy_quality_floor_pass,
+        "legacy_threshold_pass": taker_quality_threshold_pass,
         "taker_fee_adjusted_edge": str(taker_edge_dec),
+        "taker_fee_adjusted_edge_density": str(taker_edge_density),
         "taker_expected_profit_usd": str(taker_expected_profit_usd),
         "maker_expected_profit_usd": str(maker_expected_profit_usd),
         "incremental_expected_profit_usd": str(incremental_expected_profit_usd),
@@ -6201,6 +6212,9 @@ def _build_event_bound_taker_quality_proof(
         "min_taker_incremental_profit_usd": str(min_incremental_profit),
         "min_taker_model_confidence": str(min_model_confidence),
         "min_taker_profit_ratio": str(min_profit_ratio),
+        "min_entry_price": str(min_entry_price),
+        "min_expected_profit_usd": str(min_expected_profit),
+        "min_submit_edge_density": str(min_submit_edge_density),
         "fresh_touch_price": str(touch_dec),
         "fresh_touch_fee": str(fee_dec),
         "notional_usd": str(notional_dec),
@@ -8517,18 +8531,15 @@ def _event_bound_executable_snapshot_neg_risk(
 ) -> bool:
     """Return the executable snapshot neg-risk bit used by live certificates.
 
-    Live evidence can carry neg-risk through two surfaces: the elected snapshot
-    row/hydrated snapshot and the already-bound receipt/actionable path. A true
-    flag is monotonic: if any live input proves a condition is neg-risk, the
-    executable parent must carry true so downstream certificates do not fight
-    themselves. We never use receipt false to downgrade a snapshot true to false;
-    that still trips the verifier against final_intent and fails closed.
+    The executable parent cites ``proof.executable_snapshot_id``; therefore its
+    venue metadata must come from that hydrated snapshot only. Raw receipts and
+    selected rows are earlier projections and may refer to a trigger/sibling row.
+    They must not override the snapshot that the final certificate actually cites.
     """
 
-    raw_value = _optional_bool(raw_receipt.get("neg_risk"))
-    row_value = _optional_bool(selected_snapshot_row.get("neg_risk"))
-    snapshot_value = bool(getattr(hydrated_snapshot, "neg_risk", False))
-    return raw_value is True or row_value is True or snapshot_value is True
+    _ = raw_receipt, selected_snapshot_row
+    _hydrated_snapshot = hydrated_snapshot
+    return bool(_hydrated_snapshot.neg_risk)
 
 
 def _require_cost_basis(
@@ -8681,6 +8692,11 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
         selected_snapshot_row=selected_snapshot_row,
         hydrated_snapshot=_hydrated_snapshot,
     )
+    # The executable snapshot is the single source for venue neg-risk metadata.
+    # Mutate the raw receipt before typed reconstruction so receipt/actionable/
+    # final-intent certificates match the executable parent instead of an older
+    # trigger-row projection.
+    raw_receipt["neg_risk"] = executable_snapshot_neg_risk
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -10706,6 +10722,39 @@ def _proofs_with_qkernel_candidate_economics(
     """
     if not qkernel_economics_by_bin_side:
         return proofs
+
+    def _qkernel_receipt_rejection_reason(cert: Mapping[str, Any]) -> str | None:
+        try:
+            side = str(cert.get("side") or "").strip().upper()
+            cost = float(cert.get("cost"))
+            payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+            edge_lcb = float(cert.get("edge_lcb"))
+            optimal_delta_u = float(cert.get("optimal_delta_u"))
+            optimal_stake_usd = float(cert.get("optimal_stake_usd") or 0.0)
+        except (TypeError, ValueError):
+            return "QKERNEL_EXECUTION_ECONOMICS_INVALID"
+        if cert.get("direction_law_ok") is not True:
+            return f"QKERNEL_DIRECTION_LAW_REJECTED:side={side or 'UNKNOWN'}"
+        if cert.get("coherence_allows") is not True:
+            return f"QKERNEL_MARKET_COHERENCE_BLOCKED:side={side or 'UNKNOWN'}"
+        if edge_lcb <= 0.0:
+            return (
+                "QKERNEL_EDGE_LCB_NON_POSITIVE:"
+                f"edge_lcb={edge_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}:cost={cost:.6f}"
+            )
+        if optimal_delta_u <= 0.0:
+            return (
+                "QKERNEL_DELTA_U_NON_POSITIVE:"
+                f"optimal_delta_u={optimal_delta_u:.9f}:edge_lcb={edge_lcb:.6f}:"
+                f"stake={optimal_stake_usd:.6f}"
+            )
+        if optimal_stake_usd <= 0.0:
+            return (
+                "QKERNEL_STAKE_NON_POSITIVE:"
+                f"stake={optimal_stake_usd:.6f}:edge_lcb={edge_lcb:.6f}"
+            )
+        return None
+
     annotated: list[_CandidateProof] = []
     changed = False
     for proof in proofs:
@@ -10718,9 +10767,22 @@ def _proofs_with_qkernel_candidate_economics(
         if cert is None:
             annotated.append(proof)
             continue
+        qkernel_reason = _qkernel_receipt_rejection_reason(cert)
+        q_point = _optional_float(cert.get("payoff_q_point"))
+        q_lcb = _optional_float(cert.get("payoff_q_lcb"))
+        trade_score = _optional_float(cert.get("edge_lcb"))
         annotated.append(
             dataclass_replace(
                 proof,
+                q_posterior=q_point if q_point is not None else proof.q_posterior,
+                q_lcb_5pct=q_lcb if q_lcb is not None else proof.q_lcb_5pct,
+                trade_score=(
+                    trade_score
+                    if trade_score is not None and qkernel_reason is None
+                    else 0.0
+                ),
+                passed_prefilter=qkernel_reason is None,
+                missing_reason=qkernel_reason,
                 qkernel_execution_economics=dict(cert),
             )
         )

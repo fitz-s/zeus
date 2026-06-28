@@ -976,6 +976,50 @@ def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():
     )
 
 
+def test_center_yes_dominance_uses_full_outcome_space_not_scored_subset_adjacency():
+    """Missing executable routes must not compress non-adjacent NOs into adjacent bins."""
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b23", cost=0.79),
+        edge_lcb=0.11,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.90,
+        optimal_stake_usd=Decimal("5"),
+    )
+    sibling_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b27", cost=0.80),
+        edge_lcb=0.10,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.80,
+        optimal_stake_usd=Decimal("5"),
+    )
+    center_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.53,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("5"),
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected = engine._apply_symmetric_center_yes_dominance(
+        selected_decision=selected_no,
+        scored=[selected_no, center_yes, sibling_no],
+        forecast_bin="b25",
+        outcome_bin_ids=[b.bin_id for b in space.bins],
+    )
+
+    assert selected is selected_no
+
+
 def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
     """The terminal total-utility objective only applies when explicitly requested."""
     case = _case()

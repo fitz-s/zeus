@@ -61,20 +61,22 @@ def test_midprice_buy_no_taker_refused_when_bound_armed(monkeypatch):
     assert float(proof["q_exec_lcb"]) == pytest.approx(0.66, abs=1e-6)
 
 
-def test_deep_favorite_buy_no_untouched(monkeypatch):
-    # Favorite NO at price 0.97: realized ~1.0 -> bound keeps raw q_lcb -> still passes.
+def test_deep_favorite_buy_no_still_needs_taker_margin(monkeypatch):
+    # Favorite NO at price 0.97: realized ~1.0 keeps raw q_lcb, but live taker submit
+    # still requires a significant after-fee margin above the touch.
     _patch(monkeypatch, _bound())
     payload = dict(_BUY_NO, q_lcb_5pct="0.99")
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload, order_mode="TAKER", fresh_best_bid=0.96, fresh_best_ask=0.97
     )
-    assert proof is not None and proof["passed"] is True
+    assert proof is not None and proof["passed"] is False
+    assert proof["reason"] == "taker_quality_threshold_not_met"
     assert float(proof["q_exec_lcb"]) == pytest.approx(0.99, abs=1e-6)  # min(0.99, ~1.0)
 
 
 def test_buy_yes_is_identity(monkeypatch):
     _patch(monkeypatch, _bound())  # bound has buy_no only
-    payload = dict(_BUY_NO, direction="buy_yes", q_lcb_5pct="0.30")
+    payload = dict(_BUY_NO, direction="buy_yes", q_live="0.30", q_lcb_5pct="0.30")
     proof = _build_event_bound_taker_quality_proof(
         actionable_payload=payload, order_mode="TAKER", fresh_best_bid=0.11, fresh_best_ask=0.12
     )

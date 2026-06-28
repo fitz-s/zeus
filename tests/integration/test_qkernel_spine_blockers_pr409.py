@@ -967,6 +967,71 @@ def test_overlay_collapses_direct_route_probability_authority_split():
     )
 
 
+def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
+    """No-trade receipts must not show stale scalar gates after qkernel scores a leg."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-qk-reject",
+        yes_token="yes-qk-reject",
+        no_token="no-qk-reject",
+        yes_ask=0.01,
+        no_ask=0.99,
+        snapshot_id="snap-qk-reject",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-qk-reject",
+        q_posterior=0.02,
+        q_lcb_5pct=0.000001,
+        bin_obj=Bin(low=33.0, high=33.0, unit="C", label="33C"),
+    )
+    proof = replace(
+        proof,
+        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:ev_per_dollar=-0.9",
+        passed_prefilter=False,
+        trade_score=0.0,
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-reject",
+        "receipt_hash": "receipt-qk-reject",
+        "candidate_id": "YES:b33:DIRECT_YES:b33@proof",
+        "route_id": "DIRECT_YES:b33@proof",
+        "side": "YES",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.061,
+        "payoff_q_lcb": 0.012,
+        "edge_lcb": 0.002,
+        "point_ev": 0.051,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "2.5",
+        "optimal_delta_u": 0.001,
+        "q_dot_payoff": 0.061,
+        "cost": 0.010,
+        "direction_law_ok": False,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb0|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
+    )
+
+    assert annotated.q_posterior == pytest.approx(0.061)
+    assert annotated.q_lcb_5pct == pytest.approx(0.012)
+    assert annotated.trade_score == 0.0
+    assert annotated.passed_prefilter is False
+    assert annotated.missing_reason == "QKERNEL_DIRECTION_LAW_REJECTED:side=YES"
+    assert annotated.selection_authority_applied is None
+    assert annotated.qkernel_execution_economics == cert
+
+
 def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
     """A non-native YES cannot become live through qkernel overlay without direction law."""
 

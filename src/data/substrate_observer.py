@@ -77,8 +77,23 @@ _SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
-SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 5000
-SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 1000
+SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 15000
+SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 3000
+
+
+def _substrate_snapshot_write_lease_ms(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.environ.get(f"ZEUS_{name.upper()}")
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def _substrate_snapshot_trade_write_context_factory(owner: str):
@@ -89,8 +104,18 @@ def _substrate_snapshot_trade_write_context_factory(owner: str):
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
-            deadline_ms=SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+            deadline_ms=_substrate_snapshot_write_lease_ms(
+                "substrate_snapshot_db_write_lease_deadline_ms",
+                SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+                minimum=1000,
+                maximum=30000,
+            ),
+            max_hold_ms=_substrate_snapshot_write_lease_ms(
+                "substrate_snapshot_db_write_max_hold_ms",
+                SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+                minimum=250,
+                maximum=10000,
+            ),
         )
 
     return _factory

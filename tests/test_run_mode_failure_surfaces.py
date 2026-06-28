@@ -968,3 +968,88 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     assert forecasts_ro.closed is True
     assert clear_calls == [families]
     assert emitted_calls and emitted_calls[0][0] == families
+
+
+def test_terminal_no_fill_continuation_accepts_direct_family_identity() -> None:
+    import src.main as main_module
+
+    summary = {
+        "terminal_no_fill_continuations": [
+            {
+                "city": "Boston",
+                "target_date": "2026-06-23",
+                "metric": "tmax",
+                "condition_id": "cond-unused",
+            }
+        ]
+    }
+
+    assert main_module._terminal_no_fill_continuation_families(
+        summary,
+        trade_conn=object(),
+        forecasts_conn=object(),
+    ) == {("Boston", "2026-06-23", "high")}
+
+
+def test_boot_auto_resolution_continuation_is_emitted_before_first_tick(monkeypatch) -> None:
+    """Boot auto-resolution must not release a family and then leave it invisible."""
+    import src.execution.command_recovery as command_recovery
+    import src.execution.edli_absence_resolver as resolver_mod
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    trade_ro = FakeConn()
+    forecasts_ro = FakeConn()
+    families = {("Hong Kong", "2026-06-19", "low")}
+    emitted_calls: list[set[tuple[str, str, str]]] = []
+    clear_calls: list[set[tuple[str, str, str]]] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_settings_section",
+        lambda name, default=None: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: {"scanned": 0, "advanced": 0},
+    )
+    monkeypatch.setattr(
+        resolver_mod,
+        "take_boot_auto_resolution_continuations",
+        lambda: [
+            {
+                "city": "Hong Kong",
+                "target_date": "2026-06-19",
+                "metric": "tmin",
+            }
+        ],
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: trade_ro)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: forecasts_ro)
+    monkeypatch.setattr(
+        main_module,
+        "_clear_redecision_acted_state_for_families",
+        lambda observed_families: clear_calls.append(set(observed_families)) or 1,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_emit_terminal_no_fill_redecision_continuations",
+        lambda observed_families, decision_time, received_at: (
+            emitted_calls.append(set(observed_families)) or 1
+        ),
+    )
+
+    main_module._edli_boot_command_recovery_once()
+
+    assert trade_ro.closed is True
+    assert forecasts_ro.closed is True
+    assert clear_calls == [families]
+    assert emitted_calls == [families]

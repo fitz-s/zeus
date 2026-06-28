@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -47,10 +48,20 @@ PRE_SUBMIT_ORPHAN_REASON = "PRE_SUBMIT_ORPHAN_RECOVERY_NO_VENUE_ATTEMPT"
 _LEGACY_PRE_SUBMIT_ORPHAN_REASON_PREFIX = (
     "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SubmitRejected requires preceding VenueSubmitAttempted"
 )
+_BOOT_AUTO_RESOLUTION_CONTINUATIONS: list[dict[str, Any]] = []
 
 
 def _json(row: sqlite3.Row) -> dict[str, Any]:
     return json.loads(str(row["payload_json"]))
+
+
+def _canonical_temperature_metric_text(metric: object) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", str(metric or "").strip().lower()).strip()
+    if text in {"low", "lowest", "min", "minimum", "tmin"} or text.startswith("lowest "):
+        return "low"
+    if text in {"high", "highest", "max", "maximum", "tmax"} or text.startswith("highest "):
+        return "high"
+    return text
 
 
 def _latest_payload(conn: sqlite3.Connection, aggregate_id: str, event_type: str) -> dict[str, Any]:
@@ -217,6 +228,31 @@ def _readiness_counts(conn: sqlite3.Connection) -> tuple[int, int]:
     return int(unresolved), int(reserved)
 
 
+def take_boot_auto_resolution_continuations() -> list[dict[str, Any]]:
+    """Return and clear boot-time recovery continuations for the live daemon."""
+
+    out = list(_BOOT_AUTO_RESOLUTION_CONTINUATIONS)
+    _BOOT_AUTO_RESOLUTION_CONTINUATIONS.clear()
+    return out
+
+
+def _pre_submit_orphan_continuation(proof: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "reason": PRE_SUBMIT_ORPHAN_REASON,
+        "aggregate_id": str(proof.get("aggregate_id") or ""),
+        "execution_command_id": str(proof.get("execution_command_id") or ""),
+        "event_id": str(proof.get("event_id") or ""),
+        "final_intent_id": str(proof.get("final_intent_id") or ""),
+        "family_id": str(proof.get("family_id") or ""),
+        "city": str(proof.get("city") or ""),
+        "target_date": str(proof.get("target_date") or ""),
+        "metric": _canonical_temperature_metric_text(proof.get("metric") or ""),
+        "condition_id": str(proof.get("condition_id") or ""),
+        "token_id": str(proof.get("token_id") or ""),
+        "direction": str(proof.get("direction") or ""),
+    }
+
+
 def _pre_submit_orphan_proofs(conn: sqlite3.Connection, aggregate_id: str | None) -> list[dict[str, Any]]:
     if aggregate_id:
         rows = conn.execute(
@@ -252,6 +288,12 @@ def _pre_submit_orphan_proofs(conn: sqlite3.Connection, aggregate_id: str | None
             "token_id": str(plan.get("token_id") or ""),
             "condition_id": str(plan.get("condition_id") or ""),
             "direction": str(plan.get("direction") or ""),
+            "family_id": str(plan.get("family_id") or ""),
+            "city": str(plan.get("city") or ""),
+            "target_date": str(plan.get("target_date") or ""),
+            "metric": _canonical_temperature_metric_text(
+                plan.get("metric") or plan.get("temperature_metric") or ""
+            ),
             "reserved_notional_usd": row["reserved_notional_usd"],
             "cap_created_at": row["cap_created_at"],
             "venue_submit_attempted_event_exists": False,
@@ -343,6 +385,7 @@ def resolve_pre_submit_orphans(
     aggregate_id: str | None,
     apply: bool,
     log: Callable[[str], None] = print,
+    collect_continuations: list[dict[str, Any]] | None = None,
 ) -> int:
     """Recover legacy pre-submit terminal rows that never reached venue.
 
@@ -422,6 +465,9 @@ def resolve_pre_submit_orphans(
                     source_authority="explicit_reconcile",
                 )
                 cap_ledger.release(str(proof["usage_id"]), PRE_SUBMIT_ORPHAN_REASON)
+                continuation = _pre_submit_orphan_continuation(proof)
+                if collect_continuations is not None:
+                    collect_continuations.append(continuation)
                 log(
                     f"PRE_SUBMIT_ORPHAN_RESOLVED {str(proof['aggregate_id'])[:80]}... "
                     f"cap_usage={proof['usage_id']} proof_hash={proof['proof_hash']}"
@@ -598,8 +644,15 @@ def boot_auto_resolve_stuck_unknowns(blocking_reasons: list[str]) -> bool:
             exc,
         )
     try:
-        rc0 = resolve_pre_submit_orphans(aggregate_id=None, apply=True, log=logger.warning)
+        pre_submit_continuations: list[dict[str, Any]] = []
+        rc0 = resolve_pre_submit_orphans(
+            aggregate_id=None,
+            apply=True,
+            log=logger.warning,
+            collect_continuations=pre_submit_continuations,
+        )
         if rc0 == 0:
+            _BOOT_AUTO_RESOLUTION_CONTINUATIONS.extend(pre_submit_continuations)
             return True
         logger.warning("boot pre-submit orphan resolution did not fully clear (rc=%s); trying absence", rc0)
     except Exception as exc:  # noqa: BLE001 — bounded local recovery failed -> try venue-truth resolvers

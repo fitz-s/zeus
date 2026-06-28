@@ -112,8 +112,17 @@ _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 # DO have topology — the fresh_executable_city_count 0-oscillation. Module-global
 # (mirrors _SUBSTRATE_REFRESH_CURSOR); resets on restart (cold re-warm is fine).
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
-SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 5000
-SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 1000
+SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 15000
+SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 3000
+
+
+def _snapshot_write_lease_ms(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(f"ZEUS_{name.upper()}")
+    try:
+        value = int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def _snapshot_trade_write_context_factory(owner: str):
@@ -124,11 +133,37 @@ def _snapshot_trade_write_context_factory(owner: str):
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
-            deadline_ms=SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+            deadline_ms=_snapshot_write_lease_ms(
+                "snapshot_db_write_lease_deadline_ms",
+                SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+                minimum=1000,
+                maximum=30000,
+            ),
+            max_hold_ms=_snapshot_write_lease_ms(
+                "snapshot_db_write_max_hold_ms",
+                SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+                minimum=250,
+                maximum=10000,
+            ),
         )
 
     return _factory
+
+
+def _ensure_day0_identity_platt_fit_at_boot() -> None:
+    """Ensure Day0 nowcast has a live fit row before scheduler/reactor work starts."""
+
+    try:
+        from src.state.day0_nowcast_store import ensure_identity_platt_fit
+
+        fit = ensure_identity_platt_fit()
+        logger.info(
+            "day0_horizon_platt_fit_bootstrap: fit_run_id=%s fit_artifact_id=%s",
+            getattr(fit, "fit_run_id", None),
+            getattr(fit, "fit_artifact_id", None),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"DAY0_HORIZON_PLATT_FIT_BOOTSTRAP_FAILED:{exc}") from exc
 
 
 def _substrate_clob_timeout_seconds() -> float:
@@ -171,9 +206,9 @@ def _substrate_refresh_canonical_city_name(city: object) -> str:
 
 def _substrate_refresh_canonical_metric(metric: object) -> str:
     text = _substrate_refresh_family_text_key(metric)
-    if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
+    if text in {"low", "lowest", "min", "minimum", "tmin"} or text.startswith("lowest "):
         return "low"
-    if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
+    if text in {"high", "highest", "max", "maximum", "tmax"} or text.startswith("highest "):
         return "high"
     return text
 
@@ -5900,49 +5935,7 @@ def _edli_command_recovery_cycle() -> None:
             "edli_command_recovery: refreshed allocator after recovery mutation: %s",
             allocator_refresh,
         )
-    if edli_cfg.get("event_writer_enabled") and isinstance(summary, dict):
-        try:
-            from datetime import datetime, timezone
-            from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
-
-            trade_ro = get_trade_connection_read_only()
-            forecasts_ro = get_forecasts_connection_read_only()
-            try:
-                families = _terminal_no_fill_continuation_families(
-                    summary,
-                    trade_ro,
-                    forecasts_ro,
-                )
-            finally:
-                try:
-                    trade_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                try:
-                    forecasts_ro.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            if families:
-                cleared = _clear_redecision_acted_state_for_families(families)
-                now = datetime.now(timezone.utc)
-                emitted = _emit_terminal_no_fill_redecision_continuations(
-                    families,
-                    decision_time=now,
-                    received_at=now.isoformat(),
-                )
-                logger.info(
-                    "edli_command_recovery: terminal no-fill continuation "
-                    "families=%d acted_state_cleared=%d events_emitted=%d",
-                    len(families),
-                    cleared,
-                    emitted,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "edli_command_recovery: terminal no-fill continuation emit failed "
-                "(non-fatal; family remains eligible for normal redecision): %r",
-                exc,
-            )
+    _emit_command_recovery_redecision_continuations(summary, log_context="edli_command_recovery")
 
 
 def _edli_boot_command_recovery_once() -> None:
@@ -5964,6 +5957,19 @@ def _edli_boot_command_recovery_once() -> None:
     from src.state.db import get_trade_connection_with_world_required
 
     summary = reconcile_unresolved_commands(scope="live_tick")
+    try:
+        from src.execution.edli_absence_resolver import take_boot_auto_resolution_continuations
+
+        boot_auto_continuations = take_boot_auto_resolution_continuations()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "edli_boot_command_recovery: boot auto-resolution continuation read failed: %r",
+            exc,
+        )
+        boot_auto_continuations = []
+    if boot_auto_continuations:
+        existing = list(summary.get("terminal_no_fill_continuations") or [])
+        summary["terminal_no_fill_continuations"] = existing + boot_auto_continuations
     logger.warning("edli_boot_command_recovery: %s", summary)
     if _command_recovery_summary_mutated_allocator_inputs(summary):
         trade_conn = get_trade_connection_with_world_required(write_class=None)
@@ -5975,6 +5981,7 @@ def _edli_boot_command_recovery_once() -> None:
             "edli_boot_command_recovery: refreshed allocator after recovery mutation: %s",
             allocator_refresh,
         )
+    _emit_command_recovery_redecision_continuations(summary, log_context="edli_boot_command_recovery")
 
 
 def _escalation_families_from_cancelled(
@@ -6155,7 +6162,78 @@ def _terminal_no_fill_continuation_families(
     entries = [entry for entry in continuations if isinstance(entry, dict)]
     if not entries:
         return set()
-    return _escalation_families_from_cancelled(entries, trade_conn, forecasts_conn)
+    direct: set[tuple[str, str, str]] = set()
+    unresolved: list[dict] = []
+    for entry in entries:
+        metric = _substrate_refresh_canonical_metric(
+            entry.get("metric") or entry.get("temperature_metric") or ""
+        )
+        key = (
+            str(entry.get("city") or "").strip(),
+            str(entry.get("target_date") or "").strip(),
+            metric,
+        )
+        if all(key) and key[2] in {"high", "low"}:
+            direct.add(key)
+        else:
+            unresolved.append(entry)
+    if not unresolved:
+        return direct
+    return direct | _escalation_families_from_cancelled(unresolved, trade_conn, forecasts_conn)
+
+
+def _emit_command_recovery_redecision_continuations(
+    summary: object,
+    *,
+    log_context: str,
+) -> None:
+    edli_cfg = _settings_section("edli", {})
+    if not (edli_cfg.get("event_writer_enabled") and isinstance(summary, dict)):
+        return
+    try:
+        from datetime import datetime, timezone
+        from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
+
+        trade_ro = get_trade_connection_read_only()
+        forecasts_ro = get_forecasts_connection_read_only()
+        try:
+            families = _terminal_no_fill_continuation_families(
+                summary,
+                trade_ro,
+                forecasts_ro,
+            )
+        finally:
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                forecasts_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if families:
+            cleared = _clear_redecision_acted_state_for_families(families)
+            now = datetime.now(timezone.utc)
+            emitted = _emit_terminal_no_fill_redecision_continuations(
+                families,
+                decision_time=now,
+                received_at=now.isoformat(),
+            )
+            logger.info(
+                "%s: terminal no-fill/pre-submit continuation "
+                "families=%d acted_state_cleared=%d events_emitted=%d",
+                log_context,
+                len(families),
+                cleared,
+                emitted,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%s: terminal no-fill/pre-submit continuation emit failed "
+            "(non-fatal; family remains eligible for normal redecision): %r",
+            log_context,
+            exc,
+        )
 
 
 def _emit_escalation_cross_redecisions(
@@ -11111,6 +11189,8 @@ def main():
             raise RuntimeError(f"BOOT_GUARD_FAILED:{_gname}: {_gdetail}")
         logger.info("boot-guard %s: %s", _gname, _gdetail)
     logger.info("calibration pin shape + staleness boot-guards: OK")
+
+    _ensure_day0_identity_platt_fit_at_boot()
 
     # N2 — S2 deployment gate (PR-S1, Bug #3).
     # If S1 is deployed but S2 has not been deployed within 4h, refuse boot.

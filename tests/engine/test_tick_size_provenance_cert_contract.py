@@ -113,7 +113,10 @@ def _patch_dependencies(hydrated_snap, monkeypatch):
     # get_snapshot → return hydrated_snap
     monkeypatch.setattr(era, "get_snapshot", lambda conn, sid: hydrated_snap)
     # _require_cost_basis → return a stub with cost_basis_id
-    stub_cost_basis = SimpleNamespace(cost_basis_id="cost_basis:deadbeef01234567")
+    stub_cost_basis = SimpleNamespace(
+        cost_basis_id="cost_basis:deadbeef01234567",
+        cost_basis_hash="deadbeef01234567" * 4,
+    )
     monkeypatch.setattr(era, "_require_cost_basis", lambda snap, **kw: stub_cost_basis)
     # _forecast_authority_payload_and_clock → minimal stub
     monkeypatch.setattr(
@@ -142,6 +145,14 @@ def _make_proof(snapshot_id: str = "snap-hydrated") -> SimpleNamespace:
         execution_price=SimpleNamespace(value=0.55, fee_deducted=False),
         native_quote_available=True,
         p_fill_lcb=0.8,
+        q_posterior=0.75,
+        q_lcb_5pct=0.70,
+        p_value=0.01,
+        passed_prefilter=True,
+        p_cal_vector_hash="pcalhash",
+        p_live_vector_hash="plivehash",
+        c_cost_95pct=0.56,
+        trade_score=0.14,
     )
 
 
@@ -170,6 +181,10 @@ def _make_family_and_event():
     family = SimpleNamespace(
         family_id="fam-001",
         candidates=[candidate],
+        yes_token_ids=("yes-token-001",),
+        no_token_ids=("no-token-001",),
+        metric="high",
+        target_date="2026-06-01",
     )
     event = SimpleNamespace(
         event_id="event-001",
@@ -179,6 +194,7 @@ def _make_family_and_event():
         available_at=_NOW.isoformat(),
         received_at=_NOW.isoformat(),
         created_at=_NOW.isoformat(),
+        payload_hash="payload-hash-001",
     )
     return family, event
 
@@ -224,14 +240,25 @@ def _call_builder(monkeypatch, hydrated_snap, selected_row):
         calibration_conn=None,
         proof=proof,
         raw_receipt=raw_receipt,
-        fdr=SimpleNamespace(passed=True, reason="ok"),
+        fdr=SimpleNamespace(
+            passed=True,
+            reason="ok",
+            fdr_family_id="fdr-001",
+            attempted_hypotheses=1,
+            selected_hypotheses=("hyp-001",),
+            selected_post_fdr=("hyp-001",),
+        ),
         kelly=SimpleNamespace(size_usd=5.0, passed=True,
                               kelly_decision_id="kelly-001"),
-        risk=SimpleNamespace(level="LOW", passed=True),
+        risk=SimpleNamespace(
+            level=SimpleNamespace(name="LOW"),
+            passed=True,
+            risk_decision_id="risk-001",
+        ),
         bankroll_usd=100.0,
         kelly_multiplier=0.5,
     )
-    return bundle
+    return bundle, raw_receipt
 
 
 def _get_exec_snap_payload(bundle) -> dict:
@@ -326,6 +353,32 @@ class TestTickSizeProvenanceERACertPayload:
         assert 'bool(_hydrated_snapshot.neg_risk)' in src, (
             "ERA cert fix missing: neg_risk must use _hydrated_snapshot"
         )
+
+    def test_builder_rebinds_receipt_neg_risk_to_hydrated_snapshot(self, monkeypatch):
+        """
+        Regression for live compile failures where the executable snapshot cert
+        used the cited hydrated snapshot, but receipt/actionable inherited a
+        sibling row's neg_risk bit and failed executor expressibility.
+        """
+        hydrated = _make_minimal_snapshot(neg_risk=False)
+        selected_row = _make_selected_row(neg_risk=1)
+
+        bundle, raw_receipt = _call_builder(monkeypatch, hydrated, selected_row)
+        exec_payload = _get_exec_snap_payload(bundle)
+
+        assert exec_payload["neg_risk"] is False
+        assert raw_receipt["neg_risk"] is False
+
+        hydrated_true = _make_minimal_snapshot(neg_risk=True)
+        selected_row_false = _make_selected_row(neg_risk=0)
+
+        bundle_true, raw_receipt_true = _call_builder(
+            monkeypatch, hydrated_true, selected_row_false
+        )
+        exec_payload_true = _get_exec_snap_payload(bundle_true)
+
+        assert exec_payload_true["neg_risk"] is True
+        assert raw_receipt_true["neg_risk"] is True
 
 
 class TestTickSizeDivergenceAntibody:

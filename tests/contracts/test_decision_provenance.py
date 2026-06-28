@@ -685,6 +685,66 @@ def test_envelope_building_leaves_forecast_conn_row_factory_untouched():
     fc.close()
 
 
+def test_qkernel_family_no_trade_candidate_rows_preserve_candidate_reason_and_payoff_q():
+    """A qkernel family no-trade must remain diagnosable at candidate granularity.
+
+    The family reason explains why the selector returned no trade, but ROI repair
+    needs the per-candidate qkernel cause and payoff-space probability. Regressing
+    to the old scalar q / family-only reason hides whether YES was rejected by
+    direction law, coherence, edge, or utility.
+    """
+    from src.events import reactor as reactor_module
+    from src.events.reactor import EventSubmissionReceipt
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="evt-qkernel-no-trade",
+        causal_snapshot_id="snap-causal",
+        executable_snapshot_id="exec-snap-1",
+        opportunity_book={
+            "candidates": [
+                {
+                    "candidate_id": "YES:bin-33:DIRECT_YES:bin-33@proof",
+                    "family_id": "fam-istanbul-2026-06-29-high",
+                    "condition_id": "cond-33",
+                    "token_id": "tok-yes-33",
+                    "outcome_label": "Yes",
+                    "bin_label": "33C",
+                    "direction": "buy_yes",
+                    "q_posterior": 0.02,
+                    "q_lcb_5pct": 0.0001,
+                    "execution_price": 0.01,
+                    "trade_score": 0.0,
+                    "missing_reason": "QKERNEL_DIRECTION_LAW_REJECTED:side=YES",
+                    "native_quote_available": True,
+                    "qkernel_execution_economics": {
+                        "payoff_q_point": 0.61,
+                        "payoff_q_lcb": 0.51,
+                        "cost": 0.01,
+                        "edge_lcb": 0.50,
+                    },
+                }
+            ]
+        },
+    )
+
+    rows = reactor_module._all_candidates_rejected_candidate_rows(
+        receipt,
+        family_reason="QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["rejection_reason"].startswith(
+        "EVENT_BOUND_CANDIDATE_REJECTED:QKERNEL_DIRECTION_LAW_REJECTED:side=YES"
+    )
+    assert "NO_POSITIVE_EDGE_CANDIDATE" not in row["rejection_reason"]
+    assert row["q_live"] == pytest.approx(0.61)
+    assert row["q_lcb_5pct"] == pytest.approx(0.51)
+    assert row["c_fee_adjusted"] == pytest.approx(0.01)
+    assert row["trade_score"] == pytest.approx(0.50)
+
+
 def test_envelope_building_leaves_forecast_conn_row_factory_untouched_on_query_error():
     """ANTIBODY exception path (Task #42): even when the artifact query raises, the sentinel
     row_factory must survive — cursor-local isolation removes the need for try/finally restore."""

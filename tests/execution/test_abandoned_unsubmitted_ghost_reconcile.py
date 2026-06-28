@@ -73,8 +73,16 @@ def _pre_submit_payload(*, event_id: str, final_intent_id: str) -> dict:
         "q_live": 0.50,
         "q_lcb_5pct": 0.45,
         "expected_edge": 0.05,
+        "min_entry_price": 0.05,
         "min_expected_profit_usd": 0.05,
         "min_submit_edge_density": 0.02,
+        "qkernel_execution_economics": {
+            "route_type": "direct",
+            "route_id": "DIRECT_YES",
+            "route": {"side": "YES"},
+            "payoff_q_point": 0.50,
+            "payoff_q_lcb": 0.45,
+        },
         "expected_edge_source_certificate_hash": "edge-cert-hash-1",
         "cost_basis_source_certificate_hash": "cost-cert-hash-1",
         "would_cross_book": False,
@@ -227,6 +235,22 @@ def test_reconcile_terminalizes_aged_never_submitted_ghost():
     summary = reconcile_abandoned_unsubmitted_ghosts(conn)
     assert summary["advanced"] == 1, summary
     assert summary["errors"] == 0, summary
+    assert summary["continuations"] == [
+        {
+            "reason": "abandoned_unsubmitted_ghost",
+            "aggregate_id": "event-1:intent-1",
+            "execution_command_id": "cmd-1",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "family_id": "fam-1",
+            "city": "boston",
+            "target_date": "2026-06-23",
+            "metric": "high",
+            "condition_id": "condition-1",
+            "token_id": "token-yes",
+            "direction": "buy_yes",
+        }
+    ]
 
     # The appended terminal is a SubmitRejected that the production ledger's
     # _validate_event_append accepts (proves the pre-submit payload is legal).
@@ -301,6 +325,8 @@ def test_reconcile_ignores_prior_rejected_attempt_when_current_command_is_ghost(
 
     assert summary["advanced"] == 1, summary
     assert summary["errors"] == 0, summary
+    assert summary["continuations"][0]["execution_command_id"] == "cmd-2"
+    assert summary["continuations"][0]["metric"] == "high"
     projection = LiveOrderAggregateLedger(conn).get_projection("event-1:intent-1")
     assert projection.current_state == "SUBMIT_REJECTED"
     assert _cap_status(conn, "cmd-2") == "RELEASED"
@@ -425,7 +451,7 @@ def test_no_ghosts_is_a_clean_noop():
 
     conn = _conn()
     summary = reconcile_abandoned_unsubmitted_ghosts(conn)
-    assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0, "continuations": []}
 
 
 def test_reconcile_payload_is_legal_per_production_validate_event_append():

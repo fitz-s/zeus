@@ -407,14 +407,8 @@ class TestDoubleSubmitSafetyPreserved:
         assert decision.chosen_ev == float("-inf")  # NO new order while a live rest exists
 
 
-class TestTakerQualityShadowGateCollapsed:
-    """SHADOW-GATE COLLAPSE (operator law = NO CAPS, 2026-06-20). A taker that
-    passes the conservative after-cost law (fresh ask + fee <= q_lcb, i.e.
-    taker_edge >= 0 — the same FIX-B bound) must NOT be aborted by the extra
-    0.03 / 0.05 / 1.20 / 0.60 thresholds. They are demoted to TELEMETRY: the
-    proof passes on the conservative surplus; the legacy thresholds still travel
-    on the receipt but no longer gate.
-    """
+class TestTakerQualityLiveGate:
+    """Taker submit requires surplus plus live quality margins."""
 
     def _proof(self, *, q_lcb, ask):
         from src.engine.event_reactor_adapter import (
@@ -435,20 +429,18 @@ class TestTakerQualityShadowGateCollapsed:
             fresh_best_ask=ask,
         )
 
-    def test_positive_surplus_below_legacy_thresholds_passes(self):
-        """edge in [0, 0.03): conservative surplus positive but BELOW the 0.03
-        legacy edge cap. On the unfixed tree passed=False (aborts the cross). After
-        the fix passed=True with legacy_threshold_pass=False recorded as telemetry."""
+    def test_positive_surplus_below_live_thresholds_fails_closed(self):
+        """A taker with tiny positive surplus is not enough for live-money submit."""
         proof = self._proof(q_lcb=0.52, ask=0.49)  # edge ~0.0175 in [0, 0.03)
         assert proof is not None
         assert float(proof["taker_fee_adjusted_edge"]) >= 0.0
         assert float(proof["taker_fee_adjusted_edge"]) < float(
             proof["min_taker_fee_adjusted_edge"]
         )
-        assert proof["passed"] is True
-        # The legacy cap is recorded as telemetry only (it did NOT gate).
+        assert proof["passed"] is False
+        assert proof["reason"] == "taker_quality_threshold_not_met"
         assert proof["legacy_threshold_pass"] is False
-        assert proof["passed_basis"] == "conservative_after_cost_surplus_nonnegative"
+        assert proof["passed_basis"] == "conservative_after_cost_plus_taker_and_strategy_quality_floors"
 
     def test_negative_surplus_still_fails_closed(self):
         """The conservative law is NEVER loosened: ask + fee > q_lcb (negative

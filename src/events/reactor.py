@@ -2630,11 +2630,16 @@ def _all_candidates_rejected_candidate_rows(
         ):
             continue
         if qkernel_family_reason and qkernel_economics is not None:
-            candidate_missing_reason = str(family_reason or "").strip()
+            candidate_missing_reason = (
+                missing_reason
+                if missing_reason.startswith("QKERNEL_")
+                else str(family_reason or "").strip()
+            )
             q_lcb_5pct = qkernel_economics["q_lcb_5pct"]
             c_fee_adjusted = qkernel_economics["c_fee_adjusted"]
             c_cost_95pct = qkernel_economics["c_cost_95pct"]
             candidate_trade_score = qkernel_economics["trade_score"]
+            q_live = qkernel_economics["q_live"]
         else:
             if (
                 trade_score is None
@@ -2647,6 +2652,7 @@ def _all_candidates_rejected_candidate_rows(
             c_fee_adjusted = execution_price
             c_cost_95pct = _optional_float(raw.get("c_cost_95pct")) or execution_price
             candidate_trade_score = trade_score
+            q_live = _optional_float(raw.get("q_posterior"))
         reason = (
             "EVENT_BOUND_CANDIDATE_REJECTED:"
             f"{candidate_missing_reason}:candidate_id={candidate_id}"
@@ -2660,7 +2666,7 @@ def _all_candidates_rejected_candidate_rows(
                 "outcome_label": raw.get("outcome_label"),
                 "bin_label": raw.get("bin_label"),
                 "direction": raw.get("direction"),
-                "q_live": _optional_float(raw.get("q_posterior")),
+                "q_live": q_live,
                 "q_lcb_5pct": q_lcb_5pct,
                 "c_fee_adjusted": c_fee_adjusted,
                 "c_cost_95pct": c_cost_95pct,

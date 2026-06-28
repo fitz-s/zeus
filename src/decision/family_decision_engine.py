@@ -799,6 +799,7 @@ class FamilyDecisionEngine:
                 selected_decision=selected_decision,
                 scored=scored,
                 forecast_bin=forecast_bin,
+                outcome_bin_ids=tuple(b.bin_id for b in omega.bins),
             )
         portfolio_comparisons: tuple[PortfolioCandidateDecision, ...] = ()
         if selected_decision is not None:
@@ -1055,6 +1056,7 @@ class FamilyDecisionEngine:
         selected_decision: CandidateDecision,
         scored: Sequence[CandidateDecision],
         forecast_bin: str,
+        outcome_bin_ids: Sequence[str] | None = None,
     ) -> CandidateDecision:
         """Replace an inferior selected NO with a strictly superior center YES.
 
@@ -1104,6 +1106,7 @@ class FamilyDecisionEngine:
             scored=scored,
             forecast_bin=forecast_bin,
             selected_decision=selected_decision,
+            outcome_bin_ids=outcome_bin_ids,
         )
         if adjacent_pair is None:
             return selected_decision
@@ -1148,9 +1151,13 @@ class FamilyDecisionEngine:
         scored: Sequence[CandidateDecision],
         forecast_bin: str,
         selected_decision: CandidateDecision,
+        outcome_bin_ids: Sequence[str] | None = None,
     ) -> tuple[CandidateDecision, CandidateDecision] | None:
-        bin_ids = [d.route.bin_id for d in scored]
-        ordered_unique = list(dict.fromkeys(bin_ids))
+        if outcome_bin_ids is None:
+            bin_ids = [d.route.bin_id for d in scored]
+            ordered_unique = list(dict.fromkeys(bin_ids))
+        else:
+            ordered_unique = list(dict.fromkeys(str(b) for b in outcome_bin_ids if str(b)))
         try:
             idx = ordered_unique.index(forecast_bin)
         except ValueError:
