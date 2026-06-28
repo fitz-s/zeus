@@ -9,6 +9,7 @@ auditable but cannot be consumed as live executable authority.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import pathlib
 import sqlite3
 import sys
@@ -49,53 +50,59 @@ def main() -> int:
 
     dry_run = not args.apply
     lookback_hours = args.lookback_hours if args.lookback_hours > 0 else None
-    conn = sqlite3.connect(str(world_db))
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("ATTACH DATABASE ? AS trade", (str(trade_db),))
-        if not dry_run:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trade.decision_integrity_quarantine (
-                    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-                    table_name               TEXT NOT NULL,
-                    row_id                   TEXT NOT NULL,
-                    reason_code              TEXT NOT NULL,
-                    forecast_snapshot_id     TEXT,
-                    recorded_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    meta_json                TEXT NOT NULL DEFAULT '{}',
-                    UNIQUE(table_name, row_id, reason_code)
+    lock_context = nullcontext()
+    if not dry_run:
+        from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+        lock_context = db_writer_lock(trade_db, WriteClass.BULK)
+    with lock_context:
+        conn = sqlite3.connect(str(world_db))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("ATTACH DATABASE ? AS trade", (str(trade_db),))
+            if not dry_run:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trade.decision_integrity_quarantine (
+                        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                        table_name               TEXT NOT NULL,
+                        row_id                   TEXT NOT NULL,
+                        reason_code              TEXT NOT NULL,
+                        forecast_snapshot_id     TEXT,
+                        recorded_at              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        meta_json                TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(table_name, row_id, reason_code)
+                    )
+                    """
                 )
-                """
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        trade.idx_decision_integrity_quarantine_table_row
+                        ON decision_integrity_quarantine(table_name, row_id)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                        trade.idx_decision_integrity_quarantine_reason
+                        ON decision_integrity_quarantine(reason_code, recorded_at)
+                    """
+                )
+            actionable_result = quarantine_invalid_live_actionable_certificates(
+                conn,
+                dry_run=dry_run,
+                lookback_hours=lookback_hours,
             )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS
-                    trade.idx_decision_integrity_quarantine_table_row
-                    ON decision_integrity_quarantine(table_name, row_id)
-                """
+            parent_mode_result = quarantine_invalid_live_money_parent_modes(
+                conn,
+                dry_run=dry_run,
+                lookback_hours=lookback_hours,
             )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS
-                    trade.idx_decision_integrity_quarantine_reason
-                    ON decision_integrity_quarantine(reason_code, recorded_at)
-                """
-            )
-        actionable_result = quarantine_invalid_live_actionable_certificates(
-            conn,
-            dry_run=dry_run,
-            lookback_hours=lookback_hours,
-        )
-        parent_mode_result = quarantine_invalid_live_money_parent_modes(
-            conn,
-            dry_run=dry_run,
-            lookback_hours=lookback_hours,
-        )
-        if not dry_run:
-            conn.commit()
-    finally:
-        conn.close()
+            if not dry_run:
+                conn.commit()
+        finally:
+            conn.close()
 
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f"[{mode}] quarantine_invalid_live_money_certificates")

@@ -3196,6 +3196,9 @@ def _forecast_sidecar_health() -> CheckResult:
         running_age = None
         if last_started is not None:
             running_age = (now - last_started).total_seconds()
+        business_liveness = entry.get("business_liveness")
+        if not isinstance(business_liveness, dict):
+            business_liveness = {}
         item = {
             "status": status,
             "last_run_at": entry.get("last_run_at"),
@@ -3203,6 +3206,9 @@ def _forecast_sidecar_health() -> CheckResult:
             "last_success_at": entry.get("last_success_at"),
             "last_failure_at": entry.get("last_failure_at"),
             "last_failure_reason": entry.get("last_failure_reason"),
+            "last_skip_at": entry.get("last_skip_at"),
+            "last_skip_reason": entry.get("last_skip_reason"),
+            "business_liveness": business_liveness,
             "running_age_seconds": running_age,
         }
         job_evidence[job_name] = item
@@ -3216,6 +3222,12 @@ def _forecast_sidecar_health() -> CheckResult:
                 risky.append({"job": job_name, "risk": "scheduler_job_running_clock_invalid", **item})
             elif running_age > REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS:
                 risky.append({"job": job_name, "risk": "scheduler_job_running_stale", **item})
+            continue
+        if (
+            job_name == "bayes_precision_fusion_capture"
+            and status == "SKIPPED"
+            and business_liveness.get("transport_degraded") is True
+        ):
             continue
         if status != "OK":
             risky.append({"job": job_name, "risk": "scheduler_job_not_ok", **item})
