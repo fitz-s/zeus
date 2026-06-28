@@ -9,7 +9,7 @@
 #   no_trade PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE) -> joint_q -> joint_q_band ->
 #   family_book -> market_implied_q -> coherence -> routes -> payoff candidates ->
 #   filter [direction_law_ok, coherence_allows, edge_lcb>0 & optimal_delta_u>0] ->
-#   selected = max robust utility density) and the Stage 8 block lines 1166-1184.
+#   selected = max robust utility) and the Stage 8 block lines 1166-1184.
 #   Reconciled against docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md
 #   (GREENFIELD — no live edits; reactor wiring is Wave 5. The scalar robust_trade_score
 #   is telemetry only — it CANNOT select. This is the ONLY decision authority; it
@@ -67,18 +67,19 @@ THE PIPELINE (spec decide() lines 876-901; the order is the contract):
     candidates = [c for c in candidates if coherence_allows(c)]
     candidates = [c for c in candidates if c.edge_lcb > 0 and c.optimal_delta_u > 0]
 
-    selected   = max(candidates, key=lambda c: c.optimal_delta_u / c.optimal_stake_usd)
+    selected   = max(candidates, key=lambda c: c.optimal_delta_u)
     return FamilyDecision(...)
 
 THE THREE CORRECTED TRANSFORMATIONS THIS ORCHESTRATOR PRESERVES (operator law — make the
 bad output mathematically impossible; NO gate/cap/clamp/haircut that catches a bad value
 and leaves a broken transform in place):
 
-  1. SELECTION IS ROBUST UTILITY DENSITY OVER THE SURVIVORS, NEVER A SCALAR TRADE
+  1. SELECTION IS ROBUST UTILITY OVER THE SURVIVORS, NEVER A SCALAR TRADE
      SCORE (operator Shanghai correction over spec lines 900-903, 1184). The candidate filter chain is
      ``direction_law_ok -> coherence_allows -> (edge_lcb > 0 AND optimal_delta_u > 0)``,
-     and the survivor with the maximum ``optimal_delta_u / optimal_stake_usd`` is selected.
-     Total ``optimal_delta_u`` remains a secondary ordering signal. The scalar
+     and the survivor with the maximum ``optimal_delta_u`` is selected. Utility density
+     remains a secondary ordering signal, so capital efficiency breaks ties without
+     dominating absolute robust log-growth. The scalar
      ``robust_trade_score`` (``scalar_trade_score`` from payoff_vector) is computed for
      EVERY candidate as TELEMETRY on the receipt, but it is never one of the filter
      conditions and never the argmax key. There is no code path where the scalar reaches
@@ -565,7 +566,7 @@ class FamilyDecisionEngine:
         max_spread: float = 0.10,
         selection_objective: Literal[
             "utility_density", "total_delta_u"
-        ] = "utility_density",
+        ] = "total_delta_u",
     ) -> None:
         if selection_objective not in {"utility_density", "total_delta_u"}:
             raise ValueError(f"unknown selection_objective: {selection_objective!r}")
@@ -1435,9 +1436,9 @@ class FamilyDecisionEngine:
                (the executable-route + native-side + coherence preconditions of the live
                 pass are already true here, so live_candidate_passes is a re-proof)
 
-        The default live objective selects the survivor with the MAX
-        ``optimal_delta_u / optimal_stake_usd``. Terminal/research callers may explicitly
-        request ``total_delta_u`` to rank first by absolute robust utility. The scalar
+        The default live objective selects the survivor with the MAX ``optimal_delta_u``.
+        Terminal/research callers may explicitly request ``utility_density`` for
+        capital-efficiency-first studies. The scalar
         ``robust_trade_score`` is NEVER consulted. When the survivor set is empty, the
         returned ``no_trade_reason`` names the FIRST filter that emptied it (so the no-trade
         is auditable to its cause).
@@ -1515,11 +1516,11 @@ class FamilyDecisionEngine:
                 pass
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
-        # SELECT: live defaults to the best robust utility density over the survivors.
-        # Total ΔU remains a secondary ordering signal, so a high-capital low-density NO
-        # cannot dominate a lower-capital higher-density YES just because it ties up more
-        # dollars. Terminal/research callers can explicitly request total ΔU first. The
-        # scalar trade score is NOT a key in either objective.
+        # SELECT: live defaults to the highest total robust utility over the survivors.
+        # Utility density remains a secondary ordering signal, so capital efficiency
+        # breaks ties without making tiny low-absolute-utility legs dominate the family.
+        # Terminal/research callers can explicitly request density first. The scalar trade
+        # score is NOT a key in either objective.
         if self._selection_objective == "total_delta_u":
             selected = max(
                 survivors,

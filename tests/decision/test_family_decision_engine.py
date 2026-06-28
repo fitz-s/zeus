@@ -4,7 +4,7 @@
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
 #   filter chain direction_law_ok -> coherence_allows -> (edge_lcb>0 & optimal_delta_u>0)
-#   -> selected = max robust utility density; the no_trade_reason + receipt_hash on every
+#   -> selected = max total robust utility; the no_trade_reason + receipt_hash on every
 #   exit) and the Stage 8 block lines 1166-1184 (the scalar robust_trade_score is
 #   telemetry only — it CANNOT select). Reconciled against
 #   docs/evidence/qkernel_rebuild/spec_vs_live_drift_ledger.md (GREENFIELD — the engine
@@ -15,11 +15,10 @@
 Spec-named tests fail if the corrected transformation is reverted to the broken
 behavior the spec replaces:
 
-  * ``test_decide_filters_direction_then_coherence_then_edge_then_utility_density`` — the
+  * ``test_decide_filters_direction_then_coherence_then_edge_then_total_utility`` — the
     full candidate filter chain runs in the spec ORDER (direction_law_ok ->
     coherence_allows -> edge_lcb>0 & optimal_delta_u>0) and the survivor is selected by
-    robust utility density, NOT by the scalar ``q - price`` trade score or capital-heavy
-    total ΔU alone.
+    total robust utility, NOT by the scalar ``q - price`` trade score or density alone.
 
   * ``test_no_trade_reason_present_when_no_candidate_passes`` — when nothing survives the
     filter chain, ``decide`` returns a ``FamilyDecision`` with ``selected=None``, a non-None
@@ -613,21 +612,20 @@ def _hand_joint_q_and_band(space: OutcomeSpace, q_by_bin: Mapping[str, float]) -
 
 
 # ===========================================================================
-# SPEC RED-on-revert #1: filter chain order + utility-density selection (not the scalar).
+# SPEC RED-on-revert #1: filter chain order + total-utility selection (not the scalar).
 # ===========================================================================
 
-def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(monkeypatch):
-    """The survivor is selected by robust utility density over the filter chain, NOT scalar score.
+def test_decide_filters_direction_then_coherence_then_edge_then_total_utility(monkeypatch):
+    """The survivor is selected by robust utility over the filter chain, NOT scalar score.
 
     Build a family centered on b25 with a DEEP, tight market whose YES midpoints AGREE
     with the model q (coherence does NOT block anything). Native YES/NO routes may all
     reach the vector economics gates. Each candidate is priced so its vector edge is
     positive but its robust utility density differs.
 
-    The load-bearing RED-on-revert fact: scalar ``robust_trade_score`` is not a selection key,
-    and total ΔU alone is not enough either when it only wins by tying up more capital. The
-    engine selects by ``optimal_delta_u / optimal_stake_usd`` over candidates that already pass
-    direction/coherence/edge/ΔU gates.
+    The load-bearing RED-on-revert fact: scalar ``robust_trade_score`` is not a selection key.
+    The engine selects by total ``optimal_delta_u`` over candidates that already pass
+    direction/coherence/edge/ΔU gates; utility density is only a tie-breaker.
     """
     case = _case()
     space = _outcome_space(case)
@@ -705,9 +703,9 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     assert selected_decision.economics.edge_lcb > 0.0
     assert selected_decision.economics.optimal_delta_u > 0.0
 
-    # PIN THE SELECTION KEY: the selected candidate has the MAXIMUM utility density among the
+    # PIN THE SELECTION KEY: the selected candidate has the MAXIMUM total robust utility among the
     # candidates that passed the full filter chain (direction-law-legal, coherent, executable,
-    # positive edge, positive ΔU). This is the utility-density contract.
+    # positive edge, positive ΔU). This is the live total-utility contract.
     passing = [
         d
         for d in decision.candidate_decisions
@@ -718,14 +716,8 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
         and d.economics.optimal_delta_u > 0.0
     ]
     assert passing
-    selected_density = float(decision.selected.optimal_delta_u) / max(
-        float(decision.selected.optimal_stake_usd), 1e-9
-    )
-    assert selected_density == pytest.approx(
-        max(
-            float(d.economics.optimal_delta_u) / max(float(d.economics.optimal_stake_usd), 1e-9)
-            for d in passing
-        )
+    assert float(decision.selected.optimal_delta_u) == pytest.approx(
+        max(float(d.economics.optimal_delta_u) for d in passing)
     )
 
     # Non-forecast YES reaches the same vector economics gates. If it has no
@@ -735,13 +727,13 @@ def test_decide_filters_direction_then_coherence_then_edge_then_utility_density(
     assert yes_b24 and yes_b24[0].direction_law_ok is True
 
 
-def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
-    """The engine's selection key is utility density, NOT scalar score.
+def test_select_uses_total_delta_u_not_scalar_trade_score(monkeypatch):
+    """The engine's default selection key is total robust utility, NOT scalar score.
 
     This is the isolated RED-on-revert for the selection KEY. We hand-build two passing
     candidate decisions (both direction-law-legal, coherent, executable, positive edge,
     positive ΔU) where one has a STRICTLY HIGHER scalar ``robust_trade_score`` but lower
-    robust utility density. The engine's ``_select`` must choose the density winner.
+    total robust utility. The engine's ``_select`` must choose the robust-utility winner.
     """
     case = _case()
     space = _outcome_space(case)
@@ -749,15 +741,15 @@ def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
     route_lo_scalar_hi_du = _hand_route(space, side="NO", bin_id="b24", cost=0.20)
     route_hi_scalar_lo_du = _hand_route(space, side="NO", bin_id="b22", cost=0.05)
 
-    # The density winner: lower scalar trade score, higher utility per staked dollar.
+    # The robust-utility winner: lower scalar trade score, higher total DeltaU.
     win = _hand_decision(route_lo_scalar_hi_du, edge_lcb=0.10, optimal_delta_u=0.50,
                          delta_u_at_min=0.01, robust_trade_score=0.30,
-                         optimal_stake_usd=Decimal("10"))
-    # The scalar winner: HIGHER scalar trade score, lower density (a scalar-argmax
+                         optimal_stake_usd=Decimal("100"))
+    # The scalar winner: HIGHER scalar trade score, lower total DeltaU (a scalar-argmax
     # reversion would pick this one).
     lose = _hand_decision(route_hi_scalar_lo_du, edge_lcb=0.20, optimal_delta_u=0.20,
                           delta_u_at_min=0.01, robust_trade_score=0.90,
-                          optimal_stake_usd=Decimal("100"))
+                          optimal_stake_usd=Decimal("5"))
 
     engine = FamilyDecisionEngine(
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
@@ -768,19 +760,16 @@ def test_select_uses_utility_density_not_scalar_trade_score(monkeypatch):
 
     assert reason is None
     assert selected is not None
-    # The selection is the density winner, NOT the scalar-argmax loser.
+    # The selection is the total-utility winner, NOT the scalar-argmax loser.
     assert selected.route.bin_id == "b24"
     assert selected.economics.optimal_delta_u == pytest.approx(0.50)
     # Prove the trap: the LOSER had the strictly higher scalar but was NOT selected.
     assert lose.robust_trade_score > win.robust_trade_score
-    assert (
-        float(selected.economics.optimal_delta_u) / float(selected.economics.optimal_stake_usd)
-        > float(lose.economics.optimal_delta_u) / float(lose.economics.optimal_stake_usd)
-    )
+    assert float(selected.economics.optimal_delta_u) > float(lose.economics.optimal_delta_u)
 
 
-def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monkeypatch):
-    """A high-capital low-density route must not beat a lower-capital high-density route."""
+def test_select_prefers_total_utility_over_density_by_default(monkeypatch):
+    """A lower-total-utility cheap route must not beat a higher-total-utility route."""
     case = _case()
     space = _outcome_space(case)
     high_cost_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -810,7 +799,7 @@ def test_select_prefers_capital_efficiency_over_capital_heavy_total_utility(monk
     selected, reason = engine._select([high_cost, low_cost])
 
     assert reason is None
-    assert selected is low_cost
+    assert selected is high_cost
 
 
 def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
@@ -1020,8 +1009,8 @@ def test_center_yes_dominance_uses_full_outcome_space_not_scored_subset_adjacenc
     assert selected is selected_no
 
 
-def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
-    """The terminal total-utility objective only applies when explicitly requested."""
+def test_select_utility_density_objective_is_explicit_non_default(monkeypatch):
+    """The density-first objective only applies when explicitly requested."""
     case = _case()
     space = _outcome_space(case)
     high_total_route = _hand_route(space, side="NO", bin_id="b24", cost=0.80)
@@ -1048,20 +1037,20 @@ def test_select_total_delta_u_objective_is_explicit_non_default(monkeypatch):
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
     )
-    terminal_engine = FamilyDecisionEngine(
+    density_engine = FamilyDecisionEngine(
         fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
         day0_reader=_Day0Reader(_no_obs()),
         predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
-        selection_objective="total_delta_u",
+        selection_objective="utility_density",
     )
 
     default_selected, default_reason = default_engine._select([high_total, high_density])
-    terminal_selected, terminal_reason = terminal_engine._select([high_total, high_density])
+    density_selected, density_reason = density_engine._select([high_total, high_density])
 
     assert default_reason is None
-    assert terminal_reason is None
-    assert default_selected is high_density
-    assert terminal_selected is high_total
+    assert density_reason is None
+    assert default_selected is high_total
+    assert density_selected is high_density
 
 
 def test_select_rejects_unknown_selection_objective():
