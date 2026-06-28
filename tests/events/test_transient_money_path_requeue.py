@@ -66,6 +66,19 @@ def test_venue_rejected_400_is_submit_race_transient():
     )
 
 
+def test_invalid_safe_signature_400_is_terminal_for_event_no_verbatim_requeue():
+    assert not _is_transient_money_path_reason(
+        "venue_auth_invalid_signature_400: PolyApiException[status_code=400, "
+        "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
+    )
+
+
+def test_idempotency_collision_is_terminal_for_event_no_verbatim_requeue():
+    assert not _is_transient_money_path_reason(
+        "idempotency_collision: prior attempt REJECTED"
+    )
+
+
 def test_would_cross_book_certificate_failure_is_transient():
     assert _is_transient_money_path_reason(_WOULD_CROSS_REASON)
 

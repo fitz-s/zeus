@@ -2983,6 +2983,17 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # No order exists, and replaying the same event cannot cure wallet allowance;
     # capital/allowance recovery should surface as fresh candidates/redecision.
     "pre_submit_collateral_reservation_failed",
+    # Polymarket rejected the signed order as a deterministic Safe-signature 400.
+    # The adapter already retries once after signer-bound L2 credential refresh.
+    # Requeueing the same event repeats the same invalid signed request and then
+    # usually degrades into an idempotency collision; fresh price/belief movement
+    # must arrive as a new event.
+    "venue_auth_invalid_signature_400",
+    # Existing command ownership for this idempotency key is a final disposition
+    # for this event. ACKED/FILLED/PARTIAL commands are already projected through
+    # lifecycle recovery; REJECTED/CANCELLED/EXPIRED commands should be replaced
+    # only by a fresh redecision event with a fresh executable identity.
+    "idempotency_collision",
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
