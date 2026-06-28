@@ -89,6 +89,64 @@ def test_entry_economics_allows_positive_side_matched_edge():
     assert abs(verdict["details"]["expected_profit_usd"] - 1.2) < 1e-9
 
 
+def test_entry_economics_allows_maker_price_improvement_below_qkernel_cost_basis():
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.74,
+            q_live=0.8844532853426623,
+            q_lcb_5pct=0.8165490165359833,
+            expected_edge=0.06654901653598333,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "side": "NO",
+                "payoff_q_point": 0.8844532853426623,
+                "payoff_q_lcb": 0.8165490165359833,
+                "cost": 0.75,
+                "edge_lcb": 0.06654901653598333,
+                "optimal_delta_u": 0.003585897887688278,
+                "false_edge_rate": 0.00024993751562109475,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+            },
+        ),
+        shares=20.79,
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["qkernel_cost"] == 0.75
+    assert verdict["details"]["limit_price"] == 0.74
+    assert verdict["details"]["submit_edge"] > verdict["details"]["qkernel_edge_lcb"]
+
+
+def test_entry_economics_blocks_submit_price_worse_than_qkernel_cost_basis():
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.76,
+            q_live=0.83,
+            q_lcb_5pct=0.82,
+            expected_edge=0.04,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "side": "NO",
+                "payoff_q_point": 0.83,
+                "payoff_q_lcb": 0.80,
+                "cost": 0.75,
+                "edge_lcb": 0.05,
+                "optimal_delta_u": 0.003,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+            },
+        ),
+        shares=20.0,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "submit_price_worse_than_qkernel_cost"
+
+
 def test_entry_economics_blocks_weak_jeddah_style_expensive_no_density():
     verdict = _entry_economics_component(
         _intent(

@@ -717,8 +717,10 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         reason = "qkernel_source_missing"
     elif expected_side and econ_side != expected_side:
         reason = "qkernel_side_mismatch"
-    elif econ_cost is None or abs(econ_cost - limit_price) > 1e-6:
-        reason = "qkernel_cost_limit_mismatch"
+    elif econ_cost is None:
+        reason = "qkernel_cost_missing"
+    elif limit_price > econ_cost + 1e-6:
+        reason = "submit_price_worse_than_qkernel_cost"
     elif econ_edge_lcb is None or econ_edge_lcb <= 0.0:
         reason = "qkernel_edge_lcb_non_positive"
     elif econ_edge_lcb > submit_edge + 1e-6:
@@ -755,6 +757,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             qkernel_side=econ_side,
             expected_side=expected_side,
             qkernel_source=econ_source,
+            limit_price=limit_price,
             qkernel_cost=econ_cost if econ_cost is not None else "",
             qkernel_edge_lcb=econ_edge_lcb if econ_edge_lcb is not None else "",
             qkernel_optimal_delta_u=(
@@ -783,6 +786,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         shares=submitted_shares,
         qkernel_source=econ_source,
         qkernel_side=econ_side,
+        qkernel_cost=econ_cost,
         qkernel_edge_lcb=econ_edge_lcb,
         qkernel_false_edge_rate=econ_false_edge_rate,
     )
