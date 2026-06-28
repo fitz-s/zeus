@@ -238,7 +238,15 @@ def _patch_paths(monkeypatch, tmp_path):
             b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
             b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
             b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
-            b"""<plist version="1.0"><dict><key>EnvironmentVariables</key><dict>"""
+            b"""<plist version="1.0"><dict>"""
+            b"""<key>Label</key><string>com.zeus.live-trading</string>"""
+            b"""<key>ProgramArguments</key><array>"""
+            b"""<string>/usr/bin/python3</string><string>-m</string><string>src.main</string>"""
+            b"""</array>"""
+            b"""<key>WorkingDirectory</key><string>"""
+            + str(preflight.ROOT).encode()
+            + b"""</string>"""
+            b"""<key>EnvironmentVariables</key><dict>"""
             b"""<key>ZEUS_HARVESTER_LIVE_ENABLED</key><string>1</string>"""
             b"""</dict></dict></plist>\n"""
         )
@@ -1614,6 +1622,36 @@ def test_runtime_state_dir_reads_primary_root_from_live_plist(monkeypatch, tmp_p
     )
 
     assert preflight._runtime_state_dir(plist) == runtime_root / "state"
+
+
+def test_live_trading_launchagent_installed_blocks_missing_active_plist(monkeypatch, tmp_path):
+    missing = tmp_path / "com.zeus.live-trading.plist"
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", missing)
+
+    result = preflight._live_trading_launchagent_installed_check()
+
+    assert result.ok is False
+    assert result.name == "live_trading_launchagent_installed"
+    assert "missing" in result.detail
+
+
+def test_live_trading_launchagent_installed_accepts_src_main_plist(monkeypatch, tmp_path):
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_bytes(
+        b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+        b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+        b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+        b"""<plist version="1.0"><dict>"""
+        b"""<key>Label</key><string>com.zeus.live-trading</string>"""
+        b"""<key>ProgramArguments</key><array>"""
+        b"""<string>/usr/bin/python3</string><string>-m</string><string>src.main</string>"""
+        b"""</array></dict></plist>\n"""
+    )
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+
+    result = preflight._live_trading_launchagent_installed_check()
+
+    assert result.ok is True
 
 
 def test_import_time_db_paths_follow_live_plist_primary_root(tmp_path):

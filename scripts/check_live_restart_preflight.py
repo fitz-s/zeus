@@ -209,6 +209,53 @@ def _live_main_processes() -> list[str]:
     return rows
 
 
+def _live_trading_launchagent_installed_check() -> CheckResult:
+    evidence: dict[str, Any] = {
+        "plist_path": str(LIVE_TRADING_PLIST_PATH),
+        "expected_label": "com.zeus.live-trading",
+        "expected_module": "src.main",
+    }
+    if not LIVE_TRADING_PLIST_PATH.exists():
+        return CheckResult(
+            "live_trading_launchagent_installed",
+            False,
+            "active live-trading LaunchAgent plist is missing",
+            evidence,
+        )
+    try:
+        with LIVE_TRADING_PLIST_PATH.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "live_trading_launchagent_installed",
+            False,
+            "active live-trading LaunchAgent plist is unreadable",
+            evidence,
+        )
+    label = payload.get("Label")
+    args = payload.get("ProgramArguments")
+    working_directory = payload.get("WorkingDirectory")
+    args_list = [str(arg) for arg in args] if isinstance(args, list) else []
+    evidence.update(
+        {
+            "label": label,
+            "program_arguments": args_list,
+            "working_directory": working_directory,
+        }
+    )
+    module_ok = "-m" in args_list and "src.main" in args_list
+    ok = label == "com.zeus.live-trading" and module_ok
+    return CheckResult(
+        "live_trading_launchagent_installed",
+        ok,
+        "active live-trading LaunchAgent targets src.main"
+        if ok
+        else "active live-trading LaunchAgent does not target com.zeus.live-trading src.main",
+        evidence,
+    )
+
+
 def _settings() -> dict[str, Any]:
     try:
         return json.loads(SETTINGS_PATH.read_text())
@@ -3205,6 +3252,7 @@ def evaluate() -> dict[str, Any]:
     real_submit_effective = real_submit and reactor_mode == "live"
     submit_ok = known_execution_mode and ((not armed_live) or real_submit_effective)
     checks = [
+        _live_trading_launchagent_installed_check(),
         CheckResult(
             "live_trading_process_absent",
             not _live_main_processes(),
