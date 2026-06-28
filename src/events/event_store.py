@@ -23,6 +23,9 @@ from src.events.opportunity_event import OpportunityEvent
 # carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
 # (mirrors src.events.continuous_redecision.REDECISION_EVENT_TYPE) to avoid an import cycle.
 _FORECAST_DECISION_EVENT_TYPES = frozenset({"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"})
+_DECISION_TRIGGER_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
+    {"DAY0_EXTREME_UPDATED"}
+)
 _NO_VALUE_REFUTATION_EVENT_TYPES = _FORECAST_DECISION_EVENT_TYPES | frozenset(
     {"DAY0_EXTREME_UPDATED"}
 )
@@ -156,33 +159,92 @@ class EventStore:
             raise
 
         inserted = cur.rowcount == 1
-        if inserted:
-            now = _utc_now()
-            if event.event_type in self._CHANNEL_EVENT_TYPES:
-                processing_status = "ignored"
-                processed_at = now
-                last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
-            else:
-                processing_status = "pending"
-                processed_at = None
-                last_error = None
-            self.conn.execute(
-                """
-                INSERT OR IGNORE INTO opportunity_event_processing (
-                    consumer_name, event_id, processing_status, attempt_count,
-                    processed_at, last_error, updated_at
-                ) VALUES (?, ?, ?, 0, ?, ?, ?)
-                """,
-                (
-                    self.consumer_name,
-                    event.event_id,
-                    processing_status,
-                    processed_at,
-                    last_error,
-                    now,
-                ),
-            )
+        now = _utc_now()
+        if event.event_type in self._CHANNEL_EVENT_TYPES:
+            processing_status = "ignored"
+            processed_at = now
+            last_error = "MARKET_CHANNEL_CACHE_EVENT_NOT_DECISION_TRIGGER"
+        else:
+            processing_status = "pending"
+            processed_at = None
+            last_error = None
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, attempt_count,
+                processed_at, last_error, updated_at
+            ) VALUES (?, ?, ?, 0, ?, ?, ?)
+            """,
+            (
+                self.consumer_name,
+                event.event_id,
+                processing_status,
+                processed_at,
+                last_error,
+                now,
+            ),
+        )
         return inserted
+
+    def repair_missing_processing_rows(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 1_000,
+    ) -> int:
+        """Backfill missing mutable processing rows for immutable decision events.
+
+        Older writer bugs could leave an ``opportunity_events`` row without the
+        matching ``opportunity_event_processing`` row. Such events are invisible
+        to ``fetch_pending`` forever because processing rows are the mutable
+        claim/retry surface. Repair only decision-trigger event types; market
+        channel cache events are intentionally ignored work and must not be
+        resurrected as reactor candidates.
+        """
+
+        self._require_world_event_tables()
+        parsed_decision_time = _parse_utc(decision_time).isoformat()
+        limit = max(1, int(batch_limit))
+        placeholders = ",".join("?" for _ in _DECISION_TRIGGER_EVENT_TYPES)
+        rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+              FROM opportunity_events e INDEXED BY idx_opportunity_events_type_available
+              LEFT JOIN opportunity_event_processing p
+                ON p.consumer_name = ?
+               AND p.event_id = e.event_id
+             WHERE p.event_id IS NULL
+               AND e.event_type IN ({placeholders})
+               AND e.available_at <= ?
+               AND e.received_at <= ?
+               AND (e.expires_at IS NULL OR e.expires_at > ?)
+             ORDER BY e.available_at DESC
+             LIMIT ?
+            """,
+            (
+                self.consumer_name,
+                *sorted(_DECISION_TRIGGER_EVENT_TYPES),
+                parsed_decision_time,
+                parsed_decision_time,
+                parsed_decision_time,
+                limit,
+            ),
+        ).fetchall()
+        event_ids = [str(row[0] or "") for row in rows if str(row[0] or "")]
+        if not event_ids:
+            return 0
+        now = _utc_now()
+        before = self.conn.total_changes
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, attempt_count,
+                processed_at, last_error, updated_at
+            ) VALUES (?, ?, 'pending', 0, NULL, NULL, ?)
+            """,
+            ((self.consumer_name, event_id, now) for event_id in event_ids),
+        )
+        return int(self.conn.total_changes - before)
 
     def fetch_pending(
         self, *, decision_time: str, limit: int = 100, day0_is_tradeable: bool = True

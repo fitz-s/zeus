@@ -8910,6 +8910,28 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
+        if _budget_exhausted("repair_missing_processing_rows"):
+            return
+        _step_started = time.monotonic()
+        _processing_repaired = store.repair_missing_processing_rows(
+            decision_time=decision_time.isoformat(),
+            batch_limit=min(batch_limit, 1000),
+        )
+        _log_prune_step("repair_missing_processing_rows", _step_started, _processing_repaired)
+        if _processing_repaired:
+            logger.warning(
+                "EDLI reactor: repaired %d decision events missing processing rows "
+                "so fetch_pending can claim them",
+                _processing_repaired,
+            )
+    except Exception as _missing_processing_repair_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: missing processing-row repair sweep failed "
+            "(non-fatal; normal pending events still drain): %r",
+            _missing_processing_repair_exc,
+        )
+
+    try:
         if _budget_exhausted("requeue_misclassified_local_pre_submit_rejections"):
             return
         _step_started = time.monotonic()

@@ -194,6 +194,65 @@ def test_insert_or_ignore_duplicate():
     assert conn.execute("SELECT COUNT(*) FROM opportunity_event_processing").fetchone()[0] == 1
 
 
+def test_insert_or_ignore_repairs_missing_processing_row_for_existing_event():
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = _event("snap-1", 0, "2026-05-24T04:15:00+00:00", "2026-05-24T04:16:00+00:00")
+    assert store.insert_or_ignore(event) is True
+    conn.execute(
+        "DELETE FROM opportunity_event_processing WHERE consumer_name = ? AND event_id = ?",
+        (store.consumer_name, event.event_id),
+    )
+    conn.commit()
+
+    assert store.insert_or_ignore(event) is False
+
+    row = conn.execute(
+        """
+        SELECT processing_status, attempt_count, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, event.event_id),
+    ).fetchone()
+    assert dict(row) == {
+        "processing_status": "pending",
+        "attempt_count": 0,
+        "processed_at": None,
+        "last_error": None,
+    }
+
+
+def test_repair_missing_processing_rows_backfills_decision_events_only():
+    conn = _world_conn()
+    store = EventStore(conn)
+    decision = _event(
+        "snap-1",
+        0,
+        "2026-05-24T04:15:00+00:00",
+        "2026-05-24T04:16:00+00:00",
+    )
+    channel = _channel_event("BOOK_SNAPSHOT")
+    assert store.insert_or_ignore(decision) is True
+    assert store.insert_or_ignore(channel) is True
+    conn.execute("DELETE FROM opportunity_event_processing")
+    conn.commit()
+
+    repaired = store.repair_missing_processing_rows(
+        decision_time="2026-05-24T05:00:00+00:00",
+        batch_limit=10,
+    )
+
+    assert repaired == 1
+    rows = {
+        row["event_id"]: row["processing_status"]
+        for row in conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        )
+    }
+    assert rows == {decision.event_id: "pending"}
+
+
 @pytest.mark.parametrize(
     "event_type",
     ["BEST_BID_ASK_CHANGED", "BOOK_SNAPSHOT", "NEW_MARKET_DISCOVERED"],
