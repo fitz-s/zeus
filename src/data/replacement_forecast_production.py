@@ -311,10 +311,17 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
         )
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
+            bayes_precision_fusion_quota_cooldown_seconds,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+        cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+        if cooldown_seconds > 0:
+            return {
+                "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+                "cooldown_seconds": cooldown_seconds,
+            }
         # RUN-SELECTION AUTHORITY (2026-06-19): the capture cycle is the newest cycle
         # provably fetchable by the BPF extras transport itself. The anchor lane can
         # advance through meta/bucket before the single-runs API serves the same run;
@@ -395,6 +402,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         from src.config import cities_by_name  # noqa: PLC0415
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
+            bayes_precision_fusion_quota_cooldown_seconds,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
         from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
@@ -421,6 +429,15 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             return {
                 "status": "SOURCE_CLOCK_BPF_SCOPED_NO_AFFECTED_CITIES",
                 "updated_sources": updated_sources,
+            }
+
+        cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+        if cooldown_seconds > 0:
+            return {
+                "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+                "updated_sources": updated_sources,
+                "affected_cities": affected_cities,
+                "cooldown_seconds": cooldown_seconds,
             }
 
         now = datetime.now(timezone.utc)
@@ -676,6 +693,37 @@ def _record_bayes_precision_fusion_capture_health(
     status = str(report.get("status") or "")
     if status == "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS":
         return
+    raw_transport_errors = report.get("transport_errors") or ()
+    if isinstance(raw_transport_errors, str):
+        transport_errors = (raw_transport_errors,)
+    else:
+        transport_errors = tuple(str(err) for err in raw_transport_errors)
+    quota_degraded = (
+        status == "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED"
+        or (
+            status == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+            and any(
+                "open-meteo quota exhausted" in err.lower()
+                or "too many requests" in err.lower()
+                or "429" in err.lower()
+                or "rate limit" in err.lower()
+                for err in transport_errors
+            )
+        )
+    )
+    if quota_degraded:
+        _write_scheduler_health(
+            _EXTRAS_FIXPOINT_HEALTH_JOB,
+            failed=False,
+            skipped=True,
+            skip_reason=status,
+            extra={
+                "transport_degraded": True,
+                "transport_degradation_reason": status,
+                "quota_cooldown_seconds": int(report.get("cooldown_seconds") or 0),
+            },
+        )
+        return
     if status == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED":
         cycle_raw = report.get("cycle")
         try:
@@ -879,7 +927,6 @@ def _replacement_cycle_availability_poll_if_needed(
         "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
         "legs_fetched": [],
     }
-    source_clock_updated = False
     try:
         if source_clock_report is None:
             from src.data.source_clock_update_probe import (  # noqa: PLC0415
@@ -892,7 +939,6 @@ def _replacement_cycle_availability_poll_if_needed(
         report["source_clock_updated_sources"] = source_clock_payload.get("updated_sources", [])
         report["source_clock_affected_cities"] = source_clock_payload.get("affected_cities", [])
         report["source_clock_error"] = source_clock_payload.get("error")
-        source_clock_updated = bool(source_clock_report.updated_sources)
     except Exception as exc:  # noqa: BLE001 - source-clock probe must not break anchor polling
         report["source_clock_status"] = "SOURCE_CLOCK_PROBE_FAILSOFT_SKIPPED"
         report["source_clock_error"] = str(exc)[:200]
@@ -950,7 +996,7 @@ def _replacement_cycle_availability_poll_if_needed(
     # fan-out re-resolves internally for its OWN target build; momentary disagreement costs at
     # most one benign extra pass and self-corrects next tick.
     _extras_cycle = _probe_resolved_bayes_precision_fusion_extras_cycle()
-    _should_run_extras = source_clock_updated or _extras_cycle_incomplete(cfg, _extras_cycle)
+    _should_run_extras = _extras_cycle_incomplete(cfg, _extras_cycle)
     if _should_run_extras:
         bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
         if bayes_precision_fusion_report is not None:

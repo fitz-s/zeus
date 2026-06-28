@@ -705,6 +705,45 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
     assert _processing_status(conn, event.event_id) == "processing"
 
 
+def test_sqlite_lock_during_pre_submit_gate_is_retryable_not_dead_lettered():
+    """A Window-A lock before any venue submit must leave the event retryable."""
+
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+
+    def _locked_source_truth(_event):
+        raise sqlite3.OperationalError("database is locked")
+
+    def _submit(_event, _decision_time):
+        raise AssertionError("pre-submit lock must not reach submit")
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=_locked_source_truth,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.processed == 0
+    assert result.dead_lettered == 0
+    assert result.retried == 1
+    assert result.rejection_reasons == ["WORLD_WRITE_LOCK_BUSY_PRE_SUBMIT"]
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 0,
+        "regret": 0,
+        "dead_letter": 0,
+    }
+    assert _processing_status(conn, event.event_id) == "pending"
+
+
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
     """Stale JIT price failures may return before the adapter can build a bound final intent."""
     payload = json.loads(_forecast_event(target_date="2026-05-25").payload_json)

@@ -137,6 +137,9 @@ def test_source_clock_probe_can_defer_cursor_until_download_success(tmp_path) ->
     assert not source_clock_scoped_download_allows_cursor_advance(
         {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"}
     )
+    assert not source_clock_scoped_download_allows_cursor_advance(
+        {"status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED"}
+    )
     assert source_clock_scoped_download_allows_cursor_advance(
         {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"}
     )

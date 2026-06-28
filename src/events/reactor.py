@@ -709,6 +709,7 @@ class ReactorConfig:
 # When a horizon fires the dead-letter label says WHY
 # (MONEY_PATH_HORIZON_EXPIRED:<horizon>:<last_reason>), NEVER an attempt count.
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
+_PRE_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_PRE_SUBMIT"
 _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY = "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
 
 # K2.1: once-per-process-per-base warning dedup for unregistered rejection-reason
@@ -1089,6 +1090,16 @@ class OpportunityEventReactor:
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 self._commit_event_unit()
             except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    with contextlib.suppress(Exception):
+                        self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    with contextlib.suppress(Exception):
+                        if getattr(self._store.conn, "in_transaction", False):
+                            self._store.conn.rollback()
+                    result.rejection_reasons.append(_PRE_SUBMIT_WORLD_WRITE_LOCK_RETRY)
+                    result.retried += 1
+                    return
                 self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
                 return
         finally:

@@ -179,7 +179,7 @@ class TestPollFetchDecision:
             is None
         )
 
-    def test_source_clock_change_forces_extras_same_poll(self, monkeypatch, tmp_path):
+    def test_source_clock_change_does_not_bypass_extras_coverage_gate(self, monkeypatch, tmp_path):
         import src.data.replacement_forecast_production as prod
         import src.data.source_clock_update_probe as source_clock_probe
 
@@ -240,7 +240,8 @@ class TestPollFetchDecision:
 
         assert report["source_clock_status"] == "SOURCE_CLOCK_UPDATES_CHANGED"
         assert report["source_clock_updated_sources"] == ["met_nordic"]
-        assert calls == ["extras"]
+        assert report["bayes_precision_fusion_extras_status"] == "EXTRAS_CURRENT_CYCLE_COMPLETE_SKIPPED"
+        assert calls == []
 
 
 class TestNoGuessAntibody:

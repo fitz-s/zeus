@@ -365,7 +365,7 @@ def test_retryable_transport_extras_marks_capture_health_failed(_cfg_with_db, _r
         cfg,
         {
             "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
-            "transport_errors": ["single_runs:Paris:2026-06-25:Open-Meteo quota exhausted"],
+            "transport_errors": ["single_runs:Paris:2026-06-25:connection timed out"],
         },
     )
 
@@ -373,6 +373,96 @@ def test_retryable_transport_extras_marks_capture_health_failed(_cfg_with_db, _r
     capture = health["bayes_precision_fusion_capture"]
     assert capture["status"] == "FAILED"
     assert capture["last_failure_reason"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+
+
+def test_quota_transport_extras_marks_capture_health_degraded(_cfg_with_db, _redirect_health):
+    cfg, _ = _cfg_with_db
+
+    prod._record_bayes_precision_fusion_capture_health(
+        cfg,
+        {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "transport_errors": ["single_runs:Paris:2026-06-25:Open-Meteo quota exhausted"],
+            "cooldown_seconds": 311,
+        },
+    )
+
+    health = json.loads(_redirect_health.read_text())
+    capture = health["bayes_precision_fusion_capture"]
+    assert capture["status"] == "SKIPPED"
+    assert capture["last_skip_reason"] == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    assert capture["business_liveness"] == {
+        "transport_degraded": True,
+        "transport_degradation_reason": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "quota_cooldown_seconds": 311,
+    }
+
+
+def test_quota_cooldown_extras_marks_capture_health_degraded(_cfg_with_db, _redirect_health):
+    cfg, _ = _cfg_with_db
+
+    prod._record_bayes_precision_fusion_capture_health(
+        cfg,
+        {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+            "cooldown_seconds": 241,
+        },
+    )
+
+    health = json.loads(_redirect_health.read_text())
+    capture = health["bayes_precision_fusion_capture"]
+    assert capture["status"] == "SKIPPED"
+    assert capture["last_skip_reason"] == "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED"
+    assert capture["business_liveness"] == {
+        "transport_degraded": True,
+        "transport_degradation_reason": "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+        "quota_cooldown_seconds": 241,
+    }
+
+
+def test_source_clock_scoped_capture_skips_heavy_fanout_during_quota_cooldown(
+    tmp_path, monkeypatch
+) -> None:
+    """A source-clock poll inside Open-Meteo cooldown must not re-run the full target fan-out."""
+
+    import src.data.bayes_precision_fusion_download as dl
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = ("Amsterdam",)
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 241)
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("cooldown should skip scoped BPF fan-out")
+        ),
+    )
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(tmp_path / "zeus-forecasts.db")},
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert report == {
+        "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+        "updated_sources": ("ecmwf_ifs",),
+        "affected_cities": ("Amsterdam",),
+        "cooldown_seconds": 241,
+    }
 
 
 def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _redirect_health):
@@ -434,6 +524,7 @@ def _wire_poll(monkeypatch, tmp_path, *, download_report):
     cfg = {
         "download_current_targets_enabled": True,
         "forecast_db": db,
+        "trades_db": tmp_path / "empty-zeus-trades.db",
         "download_output_dir": tmp_path,
         "download_release_lag_hours": 14.0,
     }
