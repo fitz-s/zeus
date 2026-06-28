@@ -12651,6 +12651,79 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             lambda: run_db_only_pass(_apply, conn_factory=conn_factory, label=f"recovery.{label}"),
         )
 
+    if scope == "boot_fast":
+        # Boot recovery must not perform account-wide or per-order venue reads.
+        # Live evidence 2026-06-28 showed the pre-scheduler "boot_fast" path
+        # spending minutes inside capture_venue_read_snapshot(get_order * N),
+        # which prevented the scheduler, reactor, redecision screen, Day0, and
+        # exit monitor from starting. Keep boot to local, already-durable facts
+        # that can release impossible locks; the scheduled live_tick sweep owns
+        # venue-backed reconciliation once the live loop is running.
+        _db_pass(
+            "edli_confirmed_legacy_command_repair",
+            reconcile_edli_confirmed_legacy_command_repairs,
+            "edli_confirmed_legacy_command_repair",
+        )
+        _db_pass(
+            "stale_intent_created_no_submit",
+            reconcile_stale_intent_created_no_submit,
+            "stale_intent_created_no_submit",
+            updated_before=started_at,
+        )
+        _db_pass(
+            "abandoned_unsubmitted_ghosts",
+            reconcile_abandoned_unsubmitted_ghosts,
+            "abandoned_unsubmitted_ghosts",
+            updated_before=started_at,
+        )
+        _db_pass(
+            "cancel_ack_terminal_no_fill_facts",
+            reconcile_cancel_ack_terminal_no_fill_facts,
+            "cancel_ack_terminal_no_fill_facts",
+        )
+        _db_pass(
+            "terminal_order_facts",
+            reconcile_terminal_order_facts,
+            "terminal_order_facts",
+            collect_continuations=True,
+        )
+        _db_pass(
+            "stale_terminal_no_fill_findings",
+            reconcile_stale_terminal_no_fill_findings,
+            "stale_terminal_no_fill_findings",
+        )
+        _db_pass(
+            "edli_acknowledged_venue_command_sync",
+            reconcile_edli_acknowledged_venue_command_sync,
+            "edli_acknowledged_venue_command_sync",
+        )
+        _db_pass(
+            "exit_lifecycle_alignment_repair",
+            reconcile_exit_lifecycle_alignment_repairs,
+            "exit_lifecycle_alignment_repair",
+        )
+
+        abandoned_ghosts = summary.get("abandoned_unsubmitted_ghosts")
+        abandoned_continuations = (
+            list(abandoned_ghosts.get("continuations") or [])
+            if isinstance(abandoned_ghosts, dict)
+            else []
+        )
+        terminal_order_facts = summary.get("terminal_order_facts")
+        terminal_continuations = (
+            list(terminal_order_facts.get("continuations") or [])
+            if isinstance(terminal_order_facts, dict)
+            else []
+        )
+        if terminal_continuations or abandoned_continuations:
+            summary["terminal_no_fill_continuations"] = (
+                terminal_continuations + abandoned_continuations
+            )
+        summary["scope"] = scope
+        summary["venue_snapshot_deferred"] = True
+        summary["deferred_full_sweep"] = True
+        return
+
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
         priming = _collect_recovery_priming_keys(conn, scope=scope)

@@ -44,6 +44,40 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
+def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatch):
+    """Boot-fast recovery must not block scheduler startup on CLOB reads."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["deferred_full_sweep"] is True
+    client.get_order.assert_not_called()
+    client.get_open_orders.assert_not_called()
+    client.get_trades.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
