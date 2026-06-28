@@ -231,6 +231,34 @@ def test_reconstruct_needs_family_identity_reinjection() -> None:
     snaps.close()
 
 
+def test_reconstruct_keeps_local_day_family_after_parent_enddate() -> None:
+    """Warm-lane reconstruction must not hide Day0/redecision family by endDate."""
+    topo = _topology_conn()
+    snaps = _snapshot_conn()
+
+    payload = {"city": CITY, "target_date": TARGET_DATE, "metric": METRIC}
+    rows = [
+        {**dict(r), "city": CITY, "target_date": TARGET_DATE, "temperature_metric": METRIC}
+        for r in _event_family_market_topology_rows(topo, payload)
+    ]
+
+    market = reconstruct_weather_market_from_static_topology(
+        snaps,
+        topology_rows=rows,
+        now_utc=datetime(2026, 6, 15, 13, 0, 0, tzinfo=UTC),
+    )
+
+    assert market is not None
+    assert market["hours_to_resolution"] == -1.0
+    assert len(market["outcomes"]) == _CONDITION_COUNT
+    assert market["condition_ids"] == [
+        f"condition-{index}" for index in range(1, _CONDITION_COUNT + 1)
+    ]
+
+    topo.close()
+    snaps.close()
+
+
 # ---------------------------------------------------------------------------
 # Test 2 -- CALL-SITE GUARD: the sidecar producer re-injects the
 #   family-identity fields before reconstruct.  Reverting that is immediately RED.
@@ -315,6 +343,7 @@ def test_reactor_refresher_marks_sidecar_priority_family(monkeypatch) -> None:
             "reason": "reactor_blocked_family_refresh",
             "ttl_seconds": 45.0,
             "families": [("Auckland", "2026-06-20", "low")],
+            "condition_ids": (),
         }
     ]
 

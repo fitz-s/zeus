@@ -1741,8 +1741,8 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
             # Fetch events with this tag — no closed= filter; Polymarket negRisk
             # semantic means event.closed=True on actively-tradeable multi-outcome
             # events. Client-side gate via _event_has_active_children.
-            # Pages are ordered endDate desc; once all events on a page have
-            # past endDates, deeper pages are also past — break early.
+            # Pages are ordered endDate desc, but parent endDate is not a
+            # tradeability authority; keep paging until the hard cap/empty page.
             _MAX_TAG_PAGES = 10  # hard cap; each page = 50 events
             events = []
             offset = 0
@@ -1761,20 +1761,10 @@ def _fetch_events_by_tags(*, include_slug_pattern: bool = True) -> list[dict]:
                 events.extend(batch)
                 if len(batch) < 50:
                     break
-                # Early-break: last event in page has the oldest endDate.
-                # If it's already past, remaining pages are all past events.
-                oldest_end = batch[-1].get("endDate") or batch[-1].get("end_date") or ""
-                if oldest_end:
-                    try:
-                        oldest_dt = datetime.fromisoformat(oldest_end.replace("Z", "+00:00"))
-                        if oldest_dt < now_utc:
-                            break
-                    except (ValueError, TypeError):
-                        pass
                 offset += 50
 
-            # Client-side tradeability gate: keep only events with future endDate
-            # and at least one child with acceptingOrders=True.  CLOB cross-check
+            # Client-side tradeability gate: keep events with at least one child
+            # acceptingOrders=True. Parent endDate is phase context only. CLOB cross-check
             # is skipped here (clob_crosscheck=False) — the per-child CLOB call
             # serialises hundreds of HTTP requests for a full 50-city tag scan,
             # inflating discovery from <90s to ~10min.
@@ -3677,9 +3667,10 @@ def read_persisted_weather_markets(
                 len(event["outcomes"]),
             )
             continue
-        hours_to_resolution = event.get("hours_to_resolution")
-        if hours_to_resolution is None or hours_to_resolution <= 0:
-            continue
+        # Parent market_end_at / endDate is phase context, not live visibility
+        # authority. Day0/local-day and redecision families remain economically
+        # relevant after the nominal Gamma end while child snapshots still carry
+        # executable evidence.
         events.append(event)
 
     if not events:
@@ -3894,9 +3885,8 @@ def reconstruct_weather_market_from_static_topology(
 
     if len(event["outcomes"]) != len(rows):
         return None
-    hours_to_resolution = event.get("hours_to_resolution")
-    if hours_to_resolution is None or hours_to_resolution <= 0:
-        return None
+    # Preserve local-Day0/redecision families after nominal Gamma endDate. The
+    # submit path still validates child-level executable snapshots and prices.
     event["condition_ids"] = _dedupe_condition_ids(event["condition_ids"])
     event["support_topology"]["executable_child_count"] = len(event["condition_ids"])
     event["fetched_at_utc"] = latest_seen.isoformat() if latest_seen is not None else None
