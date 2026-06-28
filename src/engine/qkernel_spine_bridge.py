@@ -253,6 +253,12 @@ class SpineDecisionResult:
     decided_by_spine: bool = True
 
 
+@dataclass(frozen=True)
+class _OverlayResult:
+    proof: Any | None
+    reason: str | None = None
+
+
 # ===========================================================================
 # (2) The reactor -> spine input mapping (built from data in scope at the seam).
 # ===========================================================================
@@ -1143,18 +1149,19 @@ def decide_family_via_spine(
             decision=decision,
         )
 
-    overlaid = _overlay_spine_economics_onto_proof(selected_proof, decision)
-    if overlaid is None:
+    overlay_result = _overlay_spine_economics_onto_proof_with_reason(selected_proof, decision)
+    if overlay_result.proof is None:
         return SpineDecisionResult(
             selected_proof=None,
             no_trade_reason=(
                 f"{NO_TRADE_SPINE_WIRING_FAULT}:QKERNEL_EXECUTION_CERTIFICATE_OVERLAY_FAILED:"
+                f"{overlay_result.reason or 'UNKNOWN'}:"
                 f"{decision.selected.candidate_id}"
             ),
             decision=decision,
         )
     return SpineDecisionResult(
-        selected_proof=overlaid,
+        selected_proof=overlay_result.proof,
         no_trade_reason=None,
         decision=decision,
     )
@@ -1354,6 +1361,13 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
 
 
 def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) -> Any | None:
+    return _overlay_spine_economics_onto_proof_with_reason(proof, decision).proof
+
+
+def _overlay_spine_economics_onto_proof_with_reason(
+    proof: Any,
+    decision: FamilyDecision,
+) -> _OverlayResult:
     """Overlay the spine decision's economics onto the selected reactor proof.
 
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` /
@@ -1373,7 +1387,7 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
 
     selected = decision.selected
     if selected is None:
-        return None
+        return _OverlayResult(None, "SELECTION_MISSING")
     selected_decision = None
     for candidate_decision in getattr(decision, "candidate_decisions", ()) or ():
         try:
@@ -1388,23 +1402,23 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         selected=selected,
     )
     if qkernel_execution_economics is None:
-        return None
+        return _OverlayResult(None, "PAYLOAD_BUILD_FAILED")
     qkernel_q_point, qkernel_q_lcb = _direct_route_probability_pair(
         qkernel_execution_economics
     )
     if qkernel_q_point is None or qkernel_q_lcb is None:
-        return None
+        return _OverlayResult(None, "INVALID_DIRECT_Q_PAIR")
     if not _qkernel_execution_direction_admitted(
         qkernel_execution_economics,
         direction=str(getattr(proof, "direction", "") or ""),
     ):
-        return None
+        return _OverlayResult(None, "DIRECTION_NOT_ADMITTED")
     if qkernel_execution_economics.get("coherence_allows") is not True:
-        return None
+        return _OverlayResult(None, "COHERENCE_BLOCKED")
     edge_lcb = float(qkernel_execution_economics["edge_lcb"])
     false_edge_rate = _qkernel_false_edge_rate(decision, selected_decision)
     if false_edge_rate is None:
-        return None
+        return _OverlayResult(None, "FALSE_EDGE_RATE_UNAVAILABLE")
     qkernel_execution_economics["false_edge_rate"] = false_edge_rate
     try:
         qkernel_execution_economics["pre_qkernel_q_posterior"] = float(
@@ -1435,9 +1449,9 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
         "passed_prefilter": edge_lcb > 0.0,
     }
     try:
-        return replace(proof, **overlay)
+        return _OverlayResult(replace(proof, **overlay))
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
-        return None
+        return _OverlayResult(None, "PROOF_REPLACE_FAILED")
 
 
 def _qkernel_execution_direction_admitted(
@@ -1503,6 +1517,10 @@ def _candidate_qkernel_execution_economics_payload(
         delta_u_at_min = float(selected.delta_u_at_min)
         optimal_delta_u = float(selected.optimal_delta_u)
         q_dot_payoff = float(selected.q_dot_payoff)
+        payoff_q_lcb_raw = getattr(selected, "payoff_q_lcb", None)
+        if payoff_q_lcb_raw is None:
+            return None
+        payoff_q_lcb = float(payoff_q_lcb_raw)
         finite_execution_values = (
             cost_value,
             edge_lcb,
@@ -1510,8 +1528,14 @@ def _candidate_qkernel_execution_economics_payload(
             delta_u_at_min,
             optimal_delta_u,
             q_dot_payoff,
+            payoff_q_lcb,
         )
         if not all(math.isfinite(value) for value in finite_execution_values):
+            return None
+        if not (0.0 <= payoff_q_lcb <= q_dot_payoff + 1e-9 <= 1.0 + 1e-9):
+            return None
+        expected_edge_lcb = payoff_q_lcb - cost_value
+        if not math.isclose(edge_lcb, expected_edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
             return None
         payload: dict[str, Any] = {
             "source": "qkernel_spine",
@@ -1520,7 +1544,7 @@ def _candidate_qkernel_execution_economics_payload(
             "candidate_id": selected.candidate_id,
             "route_id": selected.route_id,
             "payoff_q_point": q_dot_payoff,
-            "payoff_q_lcb": edge_lcb + cost_value,
+            "payoff_q_lcb": payoff_q_lcb,
             "edge_lcb": edge_lcb,
             "point_ev": point_ev,
             "delta_u_at_min": delta_u_at_min,

@@ -1296,9 +1296,11 @@ class FamilyDecisionEngine:
     ) -> tuple[CandidateDecision, ...]:
         """Deflate each candidate's served q_lcb by the empirical OOF reliability guard.
 
-        Single-serving-rule flow §6. The candidate's served q_lcb (the route's robust
-        lower bound) is ``q_lcb_route = economics.edge_lcb + cost`` (because
-        ``edge_lcb = quantile(samples @ payoff) − cost``). The guard resolves the cell
+        Single-serving-rule flow §6. The candidate's served q_lcb is the route's
+        robust payoff lower bound, ``economics.payoff_q_lcb``. It is produced in
+        the payoff-vector layer from the same q-band/payoff vector that produced
+        ``edge_lcb``; this guard does not reconstruct probability by adding cost
+        back to an edge. The guard resolves the cell
         ``(metric, lead_bucket, side, bin_position, q_lcb_bucket)`` — ``side`` is the actual
         executable YES/NO claim, and ``bin_position`` is "modal" for the forecast (modal) bin,
         "nonmodal" otherwise (a stable, NON-per-city position label) — and returns
@@ -1363,8 +1365,9 @@ class FamilyDecisionEngine:
                 econ = d.economics
                 cost = float(econ.cost.value)
                 edge_lcb = float(econ.edge_lcb)
-                # The route's served q_lcb lower bound (payoff-space, pre-deflation).
-                q_lcb_route = edge_lcb + cost
+                q_lcb_route = float(econ.payoff_q_lcb)
+                if not math.isfinite(q_lcb_route) or not (0.0 <= q_lcb_route <= 1.0):
+                    raise FamilyDecisionError("QKERNEL_PAYOFF_Q_LCB_MISSING")
                 bin_position = "modal" if d.route.bin_id == forecast_bin else "nonmodal"
                 verdict = _apply_qlcb_guard(
                     band_q_lcb=q_lcb_route,

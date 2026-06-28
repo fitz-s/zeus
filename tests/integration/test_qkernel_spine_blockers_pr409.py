@@ -817,12 +817,10 @@ def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
 
 
 # ===========================================================================
-# BLOCKER 5 — the spine->legacy overlay must not write payoff-space economics into
-# receipt-facing selected-side probability fields. qkernel is the selection authority, but
-# q_posterior/q_lcb_5pct remain the reactor proof's selected-side probability contract.
-# Writing q_dot_payoff/edge_lcb+cost into those fields created Milan-style contradictions
-# where a buy_yes proof carried a NO-like lower bound. The overlay updates selection score
-# provenance only.
+# BLOCKER 5 — the spine->legacy overlay must write one coherent qkernel-selected
+# probability authority into the proof fields consumed by receipts, submit, monitor, and
+# redecision. ``payoff_q_lcb`` is produced by the payoff-vector layer itself; the bridge
+# must not reverse-derive probability by adding cost back to an edge.
 # ===========================================================================
 def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev, side="NO"):
     """A minimal spine ``CandidateEconomics`` for the overlay."""
@@ -845,6 +843,7 @@ def _selected_economics(*, edge_lcb, cost, q_dot_payoff, point_ev, side="NO"):
             currency="probability_units",
         ),
         route_id=f"DIRECT_{route_side}:b1@proof",
+        payoff_q_lcb=float(edge_lcb) + float(cost),
     )
 
 
@@ -1028,6 +1027,42 @@ def test_overlay_rejects_nonfinite_qkernel_execution_economics():
 
     assert (
         _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.990, economics=economics)
+        is None
+    )
+
+
+def test_overlay_requires_first_class_payoff_q_lcb():
+    """The bridge must not reverse-derive route qLCB from edge_lcb + cost."""
+
+    from dataclasses import replace
+
+    economics = replace(
+        _selected_economics(
+            edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+        ),
+        payoff_q_lcb=None,
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.052, economics=economics)
+        is None
+    )
+
+
+def test_overlay_rejects_payoff_q_lcb_edge_split():
+    """The qkernel cert qLCB and edge must be one coherent pair."""
+
+    from dataclasses import replace
+
+    economics = replace(
+        _selected_economics(
+            edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+        ),
+        payoff_q_lcb=0.040,
+    )
+
+    assert (
+        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.040, economics=economics)
         is None
     )
 
