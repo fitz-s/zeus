@@ -832,6 +832,32 @@ def test_edli_live_readiness_stage_readiness_blocks_stale_source(monkeypatch, tm
     assert any(reason.startswith("EDLI_STAGE_SOURCE_HEALTH_STALE") for reason in report.reasons)
 
 
+def test_edli_live_readiness_tolerates_small_source_health_clock_skew(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    _init_stage_world_db(db_path).close()
+    source = tmp_path / "source_health.json"
+    source.write_text(
+        json.dumps(
+            {
+                "generated_at": (
+                    datetime.now(timezone.utc) + timedelta(seconds=1)
+                ).isoformat()
+            }
+        )
+    )
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+
+    report = main.evaluate_edli_stage_readiness(
+        stage="edli_live",
+        source_health_json=str(source),
+        max_age_seconds=1,
+    )
+
+    assert report.status == "PASS"
+
+
 def test_edli_live_readiness_boot_defers_self_written_status_summary_staleness(monkeypatch, tmp_path):
     import src.main as main
 

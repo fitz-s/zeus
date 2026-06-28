@@ -265,6 +265,7 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
+EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS = 5.0
 _EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
@@ -1059,7 +1060,10 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     age = (now - parsed.astimezone(timezone.utc)).total_seconds()
-    if age < 0 or age > max_age_seconds:
+    if age < -EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS:
+        return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
+    age = max(0.0, age)
+    if age > max_age_seconds:
         return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
     return []
 
