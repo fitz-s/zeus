@@ -989,7 +989,14 @@ def _actionable_certificate_intent_mismatch_reason(
     if direction and str(payload.get("direction") or "").strip() != direction:
         return "actionable_certificate_direction_mismatch"
 
-    snapshot_id = str(getattr(intent, "executable_snapshot_id", "") or "").strip()
+    snapshot_id = str(
+        getattr(
+            intent,
+            "actionable_executable_snapshot_id",
+            getattr(intent, "executable_snapshot_id", ""),
+        )
+        or ""
+    ).strip()
     payload_snapshot_id = str(payload.get("executable_snapshot_id") or "").strip()
     if snapshot_id and payload_snapshot_id and payload_snapshot_id != snapshot_id:
         return "actionable_certificate_snapshot_mismatch"
@@ -3393,6 +3400,7 @@ def _legacy_entry_intent_from_final(
         timeout_seconds=_final_intent_timeout_seconds(intent),
         decision_edge=0.0,
         executable_snapshot_id=intent.snapshot_id,
+        actionable_executable_snapshot_id=intent.snapshot_id,
         executable_snapshot_hash=intent.snapshot_hash,
         executable_cost_basis_id=intent.cost_basis_id,
         executable_cost_basis_hash=intent.cost_basis_hash,

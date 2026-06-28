@@ -1043,6 +1043,11 @@ class ExecutionIntent:
     # before persistence/submission. Do not populate this from forecast
     # decision_snapshot_id; it is market/execution truth, not model truth.
     executable_snapshot_id: str = ""
+    # Snapshot id authorized by the ActionableTradeCertificate. A live submit may
+    # recapture a fresher CLOB snapshot just before the venue call; that current
+    # snapshot stays in executable_snapshot_id while this field preserves the
+    # certificate-bound snapshot identity for the pre-submit authority guard.
+    actionable_executable_snapshot_id: str = ""
     executable_snapshot_hash: str = ""
     executable_cost_basis_id: str = ""
     executable_cost_basis_hash: str = ""
@@ -1091,6 +1096,13 @@ class ExecutionIntent:
         object.__setattr__(self, "event_id", normalized_event)
         object.__setattr__(self, "resolution_window", normalized_window)
         object.__setattr__(self, "correlation_key", normalized_correlation)
+        actionable_snapshot = str(self.actionable_executable_snapshot_id or "").strip()
+        if not actionable_snapshot:
+            object.__setattr__(
+                self,
+                "actionable_executable_snapshot_id",
+                str(self.executable_snapshot_id or "").strip(),
+            )
         if self.submit_order_type is not None and self.submit_order_type not in {
             "GTC",
             "GTD",

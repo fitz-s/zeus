@@ -176,6 +176,34 @@ def test_entry_actionable_certificate_guard_rejects_intent_payload_mismatch():
     assert "token_mismatch" in component["details"]["verification_error"]
 
 
+def test_entry_actionable_certificate_guard_allows_recaptured_current_snapshot():
+    conn = _conn_with_world_cert_table()
+    _insert_actionable(conn)
+    intent = _submit_intent(
+        executable_snapshot_id="fresh-recaptured-snapshot",
+        actionable_executable_snapshot_id="exec-1",
+    )
+
+    component = _entry_actionable_certificate_component(conn, intent)
+
+    assert component["allowed"] is True
+
+
+def test_entry_actionable_certificate_guard_rejects_authorized_snapshot_mismatch():
+    conn = _conn_with_world_cert_table()
+    _insert_actionable(conn)
+    intent = _submit_intent(
+        executable_snapshot_id="fresh-recaptured-snapshot",
+        actionable_executable_snapshot_id="wrong-authorized-snapshot",
+    )
+
+    component = _entry_actionable_certificate_component(conn, intent)
+
+    assert component["allowed"] is False
+    assert component["reason"] == "actionable_certificate_fails_current_verifier"
+    assert "snapshot_mismatch" in component["details"]["verification_error"]
+
+
 def test_entry_actionable_certificate_guard_binds_edli_execution_identity():
     conn = _conn_with_world_cert_table()
     _insert_actionable(conn)

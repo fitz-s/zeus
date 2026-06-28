@@ -1041,6 +1041,7 @@ class TestLiveOrderCommandSplit:
 
         assert legacy_intent.decision_source_context is context
         assert legacy_intent.token_id == "tok-pre-submit-audit"
+        assert legacy_intent.actionable_executable_snapshot_id == "snap-pre-submit-audit"
         assert legacy_intent.min_entry_price == pytest.approx(0.05)
         assert legacy_intent.min_expected_profit_usd == pytest.approx(0.05)
         assert legacy_intent.min_submit_edge_density == pytest.approx(0.02)

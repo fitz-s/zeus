@@ -365,6 +365,14 @@ class RejectionReason(str, Enum):
         "strategy floor. This rejects capital-inefficient micro-edge orders without "
         "misclassifying the decision as a system build failure.",
     )
+    ENTRY_ACTIONABLE_CERTIFICATE = (
+        "entry_actionable_certificate",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Executor pre-venue authority guard rejected the persisted live actionable "
+        "certificate. After final-intent snapshot recapture is represented separately, "
+        "remaining failures are structural certificate/persistence defects, not "
+        "market no-edge and not a reason to requeue the same event.",
+    )
     FILL_UP_PRESUBMIT_REREAD_ABORT = (
         "FILL_UP_PRESUBMIT_REREAD_ABORT",
         RejectionCategory.DESIGNED_GATE,

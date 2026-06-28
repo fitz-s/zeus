@@ -129,6 +129,10 @@ def test_registry_lookup_strips_detail_suffix():
             "PreSubmitRevalidated submit edge density below strategy floor",
             RejectionCategory.DESIGNED_GATE,
         ),
+        (
+            "entry_actionable_certificate:actionable_certificate_fails_current_verifier",
+            RejectionCategory.ARTIFICIAL_SUSPECT,
+        ),
         ("EDLI_LIVE_CERTIFICATE_BUILD_FAILED:cost_basis_hash missing", RejectionCategory.ARTIFICIAL_SUSPECT),
         # The exception-leak class: NEVER classifies as honest.
         ("UNIQUE constraint failed: platt_models.x", RejectionCategory.ARTIFICIAL_SUSPECT),
