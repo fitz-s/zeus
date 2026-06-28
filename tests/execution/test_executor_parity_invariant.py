@@ -64,6 +64,7 @@ def _make_db_snapshot(
     *,
     min_tick_size: str,
     direction: str = "buy_no",
+    neg_risk: bool = False,
     orderbook_json: str | None = None,
 ) -> SimpleNamespace:
     """
@@ -95,7 +96,7 @@ def _make_db_snapshot(
         executable_snapshot_hash=_SNAP_HASH,
         min_tick_size=Decimal(min_tick_size),
         min_order_size=Decimal("1.0"),
-        neg_risk=False,
+        neg_risk=neg_risk,
         selected_outcome_token_id=selected_token,
         yes_token_id=yes_token,
         no_token_id=no_token,
@@ -111,6 +112,7 @@ def _make_intent(
     tick_size: Decimal,
     expected_fill_price: Decimal,
     direction: str = "buy_no",
+    neg_risk: bool = False,
     submitted_shares: Decimal = Decimal("5.0"),
     limit_price: Decimal = Decimal("0.80"),
 ) -> FinalExecutionIntent:
@@ -146,7 +148,7 @@ def _make_intent(
         tick_size=tick_size,
         min_order_size=Decimal("1.0"),
         fee_rate=Decimal("0"),
-        neg_risk=False,
+        neg_risk=neg_risk,
         event_id="event-parity",
         resolution_window="default",
         correlation_key="intent-parity",
@@ -587,6 +589,43 @@ class TestFillPriceParityGREEN:
         assert "_desired_shares_f" in src, (
             "ERA Bug-B fix missing: must compute _desired_shares_f via float arithmetic"
         )
+
+
+# ---------------------------------------------------------------------------
+# Neg-risk provenance: certificate true may override omitted snapshot false
+# ---------------------------------------------------------------------------
+
+class TestNegRiskMonotonicParity:
+    """
+    Live executable snapshot rows can carry an omitted/stale false while the
+    EDLI certificate path has already proven the event is neg-risk.  The
+    executor guard may admit that true-monotonic repair, but must still reject
+    the inverse direction because it would drop a proven neg-risk event.
+    """
+
+    def test_cert_proven_neg_risk_true_overrides_stale_snapshot_false(self):
+        db_snap = _make_db_snapshot(min_tick_size="0.001", neg_risk=False)
+        intent = _make_intent(
+            tick_size=Decimal("0.001"),
+            expected_fill_price=Decimal("0.80"),
+            neg_risk=True,
+            submitted_shares=Decimal("5"),
+        )
+
+        result = _run_guard(intent, db_snap)
+        assert result == ("gamma-parity", "event-parity")
+
+    def test_snapshot_true_intent_false_remains_fail_closed(self):
+        db_snap = _make_db_snapshot(min_tick_size="0.001", neg_risk=True)
+        intent = _make_intent(
+            tick_size=Decimal("0.001"),
+            expected_fill_price=Decimal("0.80"),
+            neg_risk=False,
+            submitted_shares=Decimal("5"),
+        )
+
+        with pytest.raises(ValueError, match="neg_risk does not match"):
+            _run_guard(intent, db_snap)
 
 
 # ---------------------------------------------------------------------------

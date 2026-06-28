@@ -3198,7 +3198,12 @@ def _final_intent_snapshot_metadata(
         raise ValueError("FinalExecutionIntent tick_size does not match executable snapshot")
     if intent.min_order_size != snapshot.min_order_size:
         raise ValueError("FinalExecutionIntent min_order_size does not match executable snapshot")
-    if intent.neg_risk != snapshot.neg_risk:
+    # Some executable snapshots carry a stale/omitted false while the live
+    # certificate path has already proven neg-risk true. True is monotonic here;
+    # a false intent against a true snapshot remains a hard provenance mismatch.
+    if intent.neg_risk != snapshot.neg_risk and not (
+        intent.neg_risk is True and snapshot.neg_risk is False
+    ):
         raise ValueError("FinalExecutionIntent neg_risk does not match executable snapshot")
     sweep = simulate_clob_sweep(
         snapshot=snapshot,
