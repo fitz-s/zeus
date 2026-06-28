@@ -326,6 +326,48 @@ def test_armed_live_daemon_never_silently_books_live_stamped_full_pass_no_submit
     assert "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT" in dl[1]
 
 
+def test_live_active_duplicate_deferral_rejects_not_dark_full_pass():
+    """An active live order owns this candidate. That is a visible rejection for this
+    event, not a proof-accepted no-submit state. If it is incorrectly marked
+    proof_accepted=True, the armed-live invariant treats it as a silently consumed
+    tradeable entry and dead-letters it."""
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    receipt = _full_pass_receipt(
+        event,
+        submit_lane=SUBMIT_LANE_LIVE,
+        reason=(
+            "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+            "condition_id=condition-1:token_id=yes-1:direction=buy_yes"
+        ),
+        proof_accepted=False,
+    )
+    reactor, _submitted = _reactor(
+        store,
+        receipt=receipt,
+        config=ReactorConfig(
+            reactor_mode="live",
+            real_order_submit_enabled=True,
+            edli_live_operator_authorized=True,
+        ),
+    )
+
+    result = reactor.process_pending(decision_time=_DECISION_TIME)
+
+    assert result.rejected == 1
+    assert result.dead_lettered == 0
+    assert result.proof_accepted == 0
+    assert _no_submit_rows(conn, event.event_id) == []
+    row = conn.execute(
+        "SELECT rejection_stage, rejection_reason FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "EXECUTOR_EXPRESSIBILITY"
+    assert row[1].startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:")
+
+
 def test_unarmed_daemon_does_not_trip_invariant_on_live_stamp():
     """The invariant only fires on a NOMINALLY ARMED live daemon. With the operator arm
     OFF (or reactor_mode != live) a LIVE-stamped no-submit is not the incident shape and

@@ -2997,7 +2997,7 @@ def event_bound_live_adapter_from_trade_conn(
                 no_submit_receipt,
                 side_effect_status="NO_SUBMIT",
                 reason=str(exc),
-                proof_accepted=True,
+                proof_accepted=False,
             )
         except _SubmitAbortedModeFlipped as exc:
             # P0 mode-authority (operator review 2026-06-10): the proven proof mode is no

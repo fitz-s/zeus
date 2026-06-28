@@ -2838,6 +2838,8 @@ def _receipt_money_path_blocker(
         )
         if buy_no_conservative_reason is not None:
             return "TRADE_SCORE", buy_no_conservative_reason
+    if receipt.proof_accepted is False:
+        return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "NO_SUBMIT_PROOF_FALSE"
     # Task #102 — optional book-wide edge-zone admission. The always-on live
     # DELETED 2026-06-12 (operator no-caps law; gate inventory D3): the
     # edge_zone_admission "extra tightening" was a second, knob-configurable
