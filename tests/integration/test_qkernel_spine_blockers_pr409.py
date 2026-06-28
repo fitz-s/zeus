@@ -910,17 +910,17 @@ def _overlay_proof(
     return bridge._overlay_spine_economics_onto_proof(proof, decision)
 
 
-def test_overlay_preserves_probability_fields_and_updates_score():
-    """qkernel controls selection score, not receipt-facing probability authority.
+def test_overlay_threads_qkernel_probability_fields_and_updates_score():
+    """qkernel controls the selected proof's receipt/monitor probability authority.
 
-    The observed live Milan bug was created by writing payoff-space spine economics into
-    q_posterior/q_lcb_5pct, producing a buy_yes receipt with a NO-like lower bound. The
-    overlay must preserve the reactor proof's selected-side probability fields.
+    Once qkernel is the selector, entry, submit receipts, monitor, and redecision
+    must consume the same direct-route selected-side belief. The pre-qkernel scalar
+    values are preserved as certificate provenance only.
     """
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
-    new_proof = _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.052, economics=economics)
+    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.70, economics=economics)
 
     assert new_proof.q_posterior == pytest.approx(0.202)
     assert new_proof.q_lcb_5pct == pytest.approx(0.052)
@@ -936,22 +936,35 @@ def test_overlay_preserves_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["edge_lcb"] == pytest.approx(0.05)
     assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
+        0.80
+    )
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
+        0.70
+    )
 
 
-def test_overlay_rejects_direct_route_probability_authority_split():
-    """Direct qkernel routes must share the same selected-side probability as monitor."""
+def test_overlay_collapses_direct_route_probability_authority_split():
+    """Direct qkernel routes become the selected-side probability used by monitor."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
 
-    assert (
-        _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.052, economics=economics)
-        is None
+    new_proof = _overlay_proof(
+        q_posterior=0.80,
+        q_lcb_5pct=0.001,
+        economics=economics,
     )
-    assert (
-        _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.001, economics=economics)
-        is None
+
+    assert new_proof is not None
+    assert new_proof.q_posterior == pytest.approx(0.202)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
+        0.80
+    )
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
+        0.001
     )
 
 

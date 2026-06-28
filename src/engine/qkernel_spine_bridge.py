@@ -1356,16 +1356,18 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
 def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) -> Any | None:
     """Overlay the spine decision's economics onto the selected reactor proof.
 
-    The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` / ``trade_score`` /
-    ``execution_price`` etc. off the proof. The spine is the selection authority, but
-    its payoff-space fair value is not a replacement for the receipt-facing
-    selected-side probability fields. Preserve ``q_source``, ``q_posterior``, and
-    ``q_lcb_5pct`` as provenance; record qkernel execution probability as a complete
-    ``payoff_q_point`` / ``payoff_q_lcb`` pair in the guarded certificate. The executable identity
-    (row / token / execution_price / native_quote_available) is LEFT UNCHANGED — the
-    spine selected this exact executable leg, and the submit pipeline re-authorizes it
-    at submit time. Returns a NEW proof (frozen dataclass replace) so the original
-    tuple is untouched.
+    The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` /
+    ``trade_score`` / ``execution_price`` etc. off the proof. Once the spine is
+    the selection authority, those receipt-facing selected-side probability fields
+    must carry the same direct-route belief the qkernel used to rank and size the
+    leg. Otherwise entry, submit receipts, monitoring, and redecision evaluate
+    different beliefs and the live lane correctly fails closed as a wiring split.
+
+    The executable identity (row / token / execution_price /
+    native_quote_available) is LEFT UNCHANGED — the spine selected this exact
+    executable leg, and the submit pipeline re-authorizes it at submit time.
+    Returns a NEW proof (frozen dataclass replace) so the original tuple is
+    untouched.
     """
     from dataclasses import replace
 
@@ -1387,7 +1389,10 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     )
     if qkernel_execution_economics is None:
         return None
-    if not _direct_route_probability_matches_proof(proof, qkernel_execution_economics):
+    qkernel_q_point, qkernel_q_lcb = _direct_route_probability_pair(
+        qkernel_execution_economics
+    )
+    if qkernel_q_point is None or qkernel_q_lcb is None:
         return None
     if not _qkernel_execution_direction_admitted(
         qkernel_execution_economics,
@@ -1401,10 +1406,24 @@ def _overlay_spine_economics_onto_proof(proof: Any, decision: FamilyDecision) ->
     if false_edge_rate is None:
         return None
     qkernel_execution_economics["false_edge_rate"] = false_edge_rate
+    try:
+        qkernel_execution_economics["pre_qkernel_q_posterior"] = float(
+            getattr(proof, "q_posterior")
+        )
+        qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] = float(
+            getattr(proof, "q_lcb_5pct")
+        )
+    except (TypeError, ValueError):
+        pass
     overlay: dict[str, Any] = {
-        # The selected qkernel candidate is licensed by the conservative vector
-        # edge and robust utility, not by scalar point EV. Keep the score on the
-        # same conservative economics the downstream FDR/receipt surfaces consume.
+        # The selected qkernel candidate is licensed by one direct-route
+        # selected-side belief. Carry it into the legacy-named proof fields so
+        # downstream receipts, submit checks, monitor, and redecision use the same
+        # probability surface as the qkernel ranker.
+        "q_posterior": qkernel_q_point,
+        "q_lcb_5pct": qkernel_q_lcb,
+        # The score stays on the same conservative economics the downstream
+        # FDR/receipt surfaces consume.
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
@@ -1534,47 +1553,35 @@ def _candidate_qkernel_execution_economics_payload(
     return payload
 
 
-def _direct_route_probability_matches_proof(
-    proof: Any,
+def _direct_route_probability_pair(
     qkernel_execution_economics: Mapping[str, Any],
-) -> bool:
-    """Fail closed when a direct qkernel route uses a different belief than the proof.
+) -> tuple[float | None, float | None]:
+    """Return the direct-route selected-side q pair or ``(None, None)``.
 
-    The live submit path executes a single native YES/NO leg for DIRECT routes. For that
-    route, ``q_dot_payoff`` is the same selected-side probability the receipt/monitor use
-    (YES_i for buy_yes, 1-YES_i for buy_no). If the qkernel certificate is materially more
-    optimistic than the proof's point probability or lower bound, entry and monitoring are
-    no longer evaluating the same belief surface. That split produced live orders whose
-    entry proof was positive while the first monitor refresh immediately saw negative edge.
+    The live submit path executes a single native YES/NO leg for DIRECT routes. For
+    that route, ``q_dot_payoff`` is the same selected-side probability the
+    receipt/monitor must use (YES_i for buy_yes, 1-YES_i for buy_no). The guarded
+    lower bound must be conservative for that same scalar.
     """
 
     route_id = str(qkernel_execution_economics.get("route_id") or "")
     if not route_id.startswith(("DIRECT_YES:", "DIRECT_NO:")):
-        return True
-    direction = str(getattr(proof, "direction", "") or "")
-    native_side = "YES" if direction == "buy_yes" else ("NO" if direction == "buy_no" else "")
-    cert_side = str(qkernel_execution_economics.get("side") or "").upper()
-    if cert_side and native_side and cert_side != native_side:
-        return False
+        return None, None
     try:
         payoff_q_point = float(qkernel_execution_economics.get("payoff_q_point"))
         payoff_q_lcb = float(qkernel_execution_economics.get("payoff_q_lcb"))
-        proof_q_point = float(getattr(proof, "q_posterior"))
-        proof_q_lcb = float(getattr(proof, "q_lcb_5pct"))
     except (TypeError, ValueError):
-        return False
+        return None, None
     if not all(
         math.isfinite(value)
-        for value in (payoff_q_point, payoff_q_lcb, proof_q_point, proof_q_lcb)
+        for value in (payoff_q_point, payoff_q_lcb)
     ):
-        return False
-    if abs(payoff_q_point - proof_q_point) > 1e-6:
-        return False
-    # The execution lower bound may be more conservative, but never more optimistic than
-    # the receipt/monitor lower bound for the same direct leg.
-    if payoff_q_lcb > proof_q_lcb + 1e-6:
-        return False
-    return True
+        return None, None
+    if not (-1e-12 <= payoff_q_lcb <= payoff_q_point + 1e-9 <= 1.0 + 1e-9):
+        return None, None
+    payoff_q_point = min(max(payoff_q_point, 0.0), 1.0)
+    payoff_q_lcb = min(max(payoff_q_lcb, 0.0), payoff_q_point)
+    return payoff_q_point, payoff_q_lcb
 
 
 def qkernel_candidate_economics_by_bin_side(

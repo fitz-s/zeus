@@ -263,6 +263,26 @@ def _settings() -> dict[str, Any]:
         return {}
 
 
+def _live_trading_python_executable() -> str:
+    """Return the Python executable launchd will use for ``src.main``.
+
+    Preflight must validate boot with the same interpreter as the live daemon.
+    Do not inspect or echo plist EnvironmentVariables here; they may contain
+    secrets and are not needed to resolve ProgramArguments[0].
+    """
+
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST_PATH.read_bytes())
+        args = payload.get("ProgramArguments")
+        if isinstance(args, list) and args:
+            executable = str(args[0]).strip()
+            if executable:
+                return executable
+    except Exception:
+        pass
+    return sys.executable
+
+
 def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
     flags = cfg.get("feature_flags") if isinstance(cfg.get("feature_flags"), dict) else {}
     enabled = flags.get("qkernel_spine_enabled")
@@ -279,8 +299,9 @@ def _qkernel_spine_cutover_check(cfg: dict[str, Any]) -> CheckResult:
 
 
 def _src_main_boot_guard_check() -> CheckResult:
+    python_executable = _live_trading_python_executable()
     command = [
-        sys.executable,
+        python_executable,
         "-m",
         "src.main",
         "--validate-boot",
@@ -291,6 +312,11 @@ def _src_main_boot_guard_check() -> CheckResult:
         "command": command,
         "cwd": str(ROOT),
         "settings_path": str(SETTINGS_PATH),
+        "python_source": (
+            "launchagent_program_arguments"
+            if python_executable != sys.executable
+            else "current_process"
+        ),
     }
     try:
         proc = subprocess.run(

@@ -334,6 +334,7 @@ def _patch_paths(monkeypatch, tmp_path):
 
 def test_src_main_boot_guard_check_blocks_failed_validate_boot(monkeypatch):
     calls = []
+    monkeypatch.setattr(preflight, "_live_trading_python_executable", lambda: "/tmp/live-python")
 
     def _fake_run(command, **kwargs):
         calls.append((command, kwargs))
@@ -353,9 +354,13 @@ def test_src_main_boot_guard_check_blocks_failed_validate_boot(monkeypatch):
     assert result.evidence["returncode"] == 1
     assert "FAIL frozen_as_of_staleness" in result.evidence["stdout_tail"]
     assert calls
+    assert calls[0][0][0] == "/tmp/live-python"
+    assert result.evidence["command"][0] == "/tmp/live-python"
 
 
 def test_src_main_boot_guard_check_passes_validate_boot(monkeypatch):
+    monkeypatch.setattr(preflight, "_live_trading_python_executable", lambda: "/tmp/live-python")
+
     def _fake_run(command, **kwargs):
         return subprocess.CompletedProcess(
             command,
@@ -370,6 +375,39 @@ def test_src_main_boot_guard_check_passes_validate_boot(monkeypatch):
 
     assert result.ok is True
     assert result.evidence["returncode"] == 0
+    assert result.evidence["command"][0] == "/tmp/live-python"
+
+
+def test_src_main_boot_guard_uses_launchagent_python(monkeypatch, tmp_path):
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_bytes(
+        b"""<?xml version="1.0" encoding="UTF-8"?>\n"""
+        b"""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" """
+        b""""http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n"""
+        b"""<plist version="1.0"><dict>"""
+        b"""<key>Label</key><string>com.zeus.live-trading</string>"""
+        b"""<key>ProgramArguments</key><array>"""
+        b"""<string>/tmp/live-venv-python</string><string>-m</string><string>src.main</string>"""
+        b"""</array>"""
+        b"""<key>EnvironmentVariables</key><dict>"""
+        b"""<key>SECRET_SHOULD_NOT_BE_READ</key><string>redacted</string>"""
+        b"""</dict></dict></plist>\n"""
+    )
+    calls = []
+
+    def _fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+    monkeypatch.setattr(preflight.subprocess, "run", _fake_run)
+
+    result = preflight._src_main_boot_guard_check()
+
+    assert result.ok is True
+    assert calls[0][0][0] == "/tmp/live-venv-python"
+    assert result.evidence["command"][0] == "/tmp/live-venv-python"
+    assert "SECRET_SHOULD_NOT_BE_READ" not in json.dumps(result.evidence)
 
 
 def test_posterior_summary_uses_source_cycle_freshness_not_computed_age(
