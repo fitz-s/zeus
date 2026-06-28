@@ -3587,12 +3587,14 @@ def _latest_monitor_projection_evidence(
 
 def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
     from src.engine.position_belief import load_replacement_belief, monitor_belief_max_age_hours
+    from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
 
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
     repairable: list[dict[str, Any]] = []
     settlement_recoverable: list[dict[str, Any]] = []
     max_age = monitor_belief_max_age_hours()
+    source_cycle_max_age = replacement_source_cycle_max_age_hours()
     settlement_truth = _verified_settlement_truth_for(rows)
     harvester_enabled, harvester_evidence = _harvester_live_enabled()
     for row in rows:
@@ -3729,7 +3731,12 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             "covered": covered,
             "repairable": repairable,
             "settlement_recoverable": settlement_recoverable,
-            "max_age_hours": max_age,
+            "computed_at_fallback_max_age_hours": max_age,
+            "source_cycle_max_age_hours": source_cycle_max_age,
+            "freshness_contract": (
+                "source_cycle_time uses replacement source-cycle staleness; "
+                "computed_at max age is only the fallback for rows without source_cycle_time"
+            ),
             "harvester_live_enabled": harvester_enabled,
             "harvester_evidence": harvester_evidence,
         },

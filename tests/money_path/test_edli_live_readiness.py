@@ -1750,6 +1750,51 @@ def test_live_execution_command_requires_qkernel_book_certificate_match():
         )
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"direction_law_ok": False},
+        {"coherence_allows": False},
+    ],
+)
+def test_live_execution_command_rejects_qkernel_direction_or_coherence_failure(override):
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    qkernel_cert = _qkernel_execution_cert(
+        bin_id="bin-1",
+        candidate_id="DIRECT_YES:bin-1",
+        route_id="DIRECT_YES:bin-1@proof",
+        payoff_q_point=0.7,
+        payoff_q_lcb=0.6,
+        cost=0.4,
+        **override,
+    )
+    accepted = replace(
+        _accepted_receipt(event),
+        q_source="qkernel_spine",
+        qkernel_execution_economics=qkernel_cert,
+        opportunity_book=_opportunity_book_with_qkernel_cert(qkernel_cert),
+    )
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_QKERNEL_.*INVALID"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+
 def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
     from src.engine import event_reactor_adapter as adapter
 
