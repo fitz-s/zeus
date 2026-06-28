@@ -406,8 +406,8 @@ class FamilyDecision:
       path). Its ``status`` is the calibration-incident contract.
     * ``candidates`` — the ``CandidateEconomics`` for EVERY enumerated candidate (passing or
       not), so the decision is fully auditable. Empty on the ineligible path.
-    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (maximum robust utility
-      density over the survivors), or ``None`` for a no-trade.
+    * ``selected`` — the ``CandidateEconomics`` of the chosen trade (maximum total robust
+      utility over the survivors), or ``None`` for a no-trade.
     * ``no_trade_reason`` — the reason the survivor set was empty (``None`` when a trade was
       selected). Names the first gate that emptied it.
     * ``receipt_hash`` — a deterministic hash over the whole decision tuple (the receipt
