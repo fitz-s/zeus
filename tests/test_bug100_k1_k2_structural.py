@@ -323,4 +323,25 @@ def test_b047_decorator_writes_health_on_success(tmp_path, monkeypatch):
     entry = data["test_probe_ok"]
     assert entry["status"] == "OK"
     assert "last_success_at" in entry
-    assert "last_failure_reason" not in entry or entry.get("last_failure_reason") is None or True  # not asserted
+    assert "last_failure_reason" not in entry
+
+
+def test_scheduler_health_success_clears_stale_failure_reason(tmp_path, monkeypatch):
+    """An OK scheduler row must not keep a previous current-failure reason."""
+    from src.observability import scheduler_health
+
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", tmp_path / "health.json")
+
+    scheduler_health._write_scheduler_health(
+        "test_probe_recovered",
+        failed=True,
+        reason="DB write lease timed out",
+    )
+    scheduler_health._write_scheduler_health("test_probe_recovered", failed=False)
+
+    data = json.loads((tmp_path / "health.json").read_text())
+    entry = data["test_probe_recovered"]
+    assert entry["status"] == "OK"
+    assert "last_success_at" in entry
+    assert "last_failure_at" in entry
+    assert "last_failure_reason" not in entry
