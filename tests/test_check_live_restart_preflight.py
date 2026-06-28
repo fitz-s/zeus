@@ -347,6 +347,7 @@ def _patch_paths(monkeypatch, tmp_path):
             + b"""</string>"""
             b"""<key>EnvironmentVariables</key><dict>"""
             b"""<key>ZEUS_HARVESTER_LIVE_ENABLED</key><string>1</string>"""
+            b"""<key>POLYMARKET_CLOB_V2_SIGNATURE_TYPE</key><string>2</string>"""
             b"""</dict></dict></plist>\n"""
         )
     )
@@ -2758,6 +2759,51 @@ def test_preflight_blocks_unhealthy_bpf_capture_scheduler_job(monkeypatch, tmp_p
     assert sidecar["ok"] is False
     assert sidecar["evidence"]["risky"][0]["job"] == "bayes_precision_fusion_capture"
     assert sidecar["evidence"]["risky"][0]["risk"] == "scheduler_job_failed"
+
+
+def test_preflight_allows_bpf_capture_transport_degraded_skip(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    fresh = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    trade.close()
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (fresh.isoformat(), fresh.isoformat()),
+    )
+    forecasts.commit()
+    forecasts.close()
+    health = json.loads(preflight.SCHEDULER_HEALTH_PATH.read_text())
+    health["bayes_precision_fusion_capture"] = {
+        "status": "SKIPPED",
+        "last_run_at": fresh.isoformat(),
+        "last_skip_at": fresh.isoformat(),
+        "last_skip_reason": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+        "last_success_at": (fresh - timedelta(hours=6)).isoformat(),
+        "business_liveness": {
+            "transport_degraded": True,
+            "transport_degradation_reason": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "quota_cooldown_seconds": 0,
+        },
+    }
+    preflight.SCHEDULER_HEALTH_PATH.write_text(json.dumps(health))
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is True
+    sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
+    assert sidecar["ok"] is True
+    bpf = sidecar["evidence"]["jobs"]["bayes_precision_fusion_capture"]
+    assert bpf["status"] == "SKIPPED"
+    assert bpf["business_liveness"]["transport_degraded"] is True
+    assert sidecar["evidence"]["risky"] == []
 
 
 def test_preflight_blocks_forecast_live_heartbeat_missing_replacement_jobs(monkeypatch, tmp_path):

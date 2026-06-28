@@ -683,9 +683,11 @@ def _record_bayes_precision_fusion_capture_health(
     """Write component health for the BPF capture sub-lane.
 
     The parent replacement download job can succeed while the BPF capture lane
-    did not actually obtain current-cycle raw-model rows. That is not an OK
-    money-path state: materialization cannot produce a fresh fused posterior
-    without those rows. Keep this separate component fail-closed for preflight.
+    did not obtain extra current-cycle raw-model rows. Durable production health
+    distinguishes hard capture failures from quota/transport degradation:
+    ``FAILED`` is restart-blocking, while transport-degraded ``SKIPPED`` is
+    explicit degraded evidence as long as canonical live posterior freshness and
+    the materializer remain healthy.
     """
 
     from src.observability.scheduler_health import _write_scheduler_health  # noqa: PLC0415
