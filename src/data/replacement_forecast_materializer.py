@@ -350,23 +350,44 @@ def _ensure_forecast_posteriors_runtime_layer(conn: sqlite3.Connection) -> None:
         )
         columns.add("runtime_layer")
     if "trade_authority_status" in columns:
-        conn.execute(
+        has_legacy_live_rows = conn.execute(
             """
-            UPDATE forecast_posteriors
-               SET runtime_layer = ?
+            SELECT 1
+              FROM forecast_posteriors
              WHERE runtime_layer IS NULL
                AND trade_authority_status = 'LIVE_AUTHORITY'
+             LIMIT 1
+            """
+        ).fetchone()
+        if has_legacy_live_rows is not None:
+            conn.execute(
+                """
+                UPDATE forecast_posteriors
+                   SET runtime_layer = ?
+                 WHERE runtime_layer IS NULL
+                   AND trade_authority_status = 'LIVE_AUTHORITY'
+                """,
+                (LIVE_RUNTIME_LAYER,),
+            )
+    has_non_live_rows = conn.execute(
+        """
+        SELECT 1
+          FROM forecast_posteriors
+         WHERE runtime_layer IS NULL
+            OR runtime_layer != ?
+         LIMIT 1
+        """,
+        (LIVE_RUNTIME_LAYER,),
+    ).fetchone()
+    if has_non_live_rows is not None:
+        conn.execute(
+            """
+            DELETE FROM forecast_posteriors
+             WHERE runtime_layer IS NULL
+                OR runtime_layer != ?
             """,
             (LIVE_RUNTIME_LAYER,),
         )
-    conn.execute(
-        """
-        DELETE FROM forecast_posteriors
-         WHERE runtime_layer IS NULL
-            OR runtime_layer != ?
-        """,
-        (LIVE_RUNTIME_LAYER,),
-    )
     if "trade_authority_status" in columns:
         conn.execute("ALTER TABLE forecast_posteriors DROP COLUMN trade_authority_status")
 

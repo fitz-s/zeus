@@ -38,7 +38,10 @@ from src.data.replacement_forecast_materializer import (
 import src.data.replacement_forecast_materializer as materializer_mod
 from src.data.replacement_forecast_readiness import LIVE_RUNTIME_LAYER, STRATEGY_KEY
 from src.state.db import _create_readiness_state
-from src.state.schema.v2_schema import apply_canonical_schema
+from src.state.schema.v2_schema import (
+    _ensure_forecast_posteriors_runtime_layer_compatibility,
+    apply_canonical_schema,
+)
 from src.state.source_run_repo import write_source_run
 
 UTC = timezone.utc
@@ -368,6 +371,42 @@ def test_forecast_posteriors_runtime_layer_migration_preserves_legacy_live_rows(
         q_ucb_map=None,
         q_lcb_basis=_QLCB_BASIS,
     ) is False
+
+
+def test_forecast_posteriors_runtime_layer_migration_does_not_write_when_already_live() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            runtime_layer TEXT NOT NULL DEFAULT 'live'
+                CHECK (runtime_layer IN ('live')),
+            q_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors (runtime_layer, q_json) VALUES (?, ?)",
+        (LIVE_RUNTIME_LAYER, "{}"),
+    )
+
+    traced: list[str] = []
+    conn.set_trace_callback(lambda sql: traced.append(sql))
+    _ensure_forecast_posteriors_runtime_layer(conn)
+    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
+    conn.set_trace_callback(None)
+
+    forecast_posterior_mutations = [
+        sql.strip().upper()
+        for sql in traced
+        if "FORECAST_POSTERIORS" in sql.upper()
+        and (
+            sql.lstrip().upper().startswith("DELETE")
+            or sql.lstrip().upper().startswith("UPDATE")
+        )
+    ]
+    assert forecast_posterior_mutations == []
 
 
 def test_forecast_posteriors_runtime_layer_migration_repairs_invalid_observation_view() -> None:
