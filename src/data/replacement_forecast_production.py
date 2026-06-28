@@ -373,6 +373,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
     cfg: dict[str, object],
     *,
     source_clock_report: object,
+    max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object] | None:
     """Fast source-clock current capture for only updated sources and affected cities.
 
@@ -481,6 +482,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             prune_after=False,
             allow_single_runs_fallback=False,
             release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+            max_wall_clock_seconds=max_wall_clock_seconds,
         )
         report["status"] = f"SOURCE_CLOCK_SCOPED_{report.get('status')}"
         report["updated_sources"] = updated_sources

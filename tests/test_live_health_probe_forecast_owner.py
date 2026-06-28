@@ -19,6 +19,7 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "live_health_probe.py"
 FORECAST_READY_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_forecast_live_ready.py"
+OPS_HEALTH_PROBE_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ops" / "health_probe.py"
 
 
 def _load_module():
@@ -39,6 +40,22 @@ def _load_forecast_ready_module():
     return module
 
 
+def _load_ops_health_probe_module():
+    module_name = "ops_health_probe_under_test"
+    spec = importlib.util.spec_from_file_location(module_name, OPS_HEALTH_PROBE_SCRIPT_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _reset_ops_health_probe_state(module) -> None:
+    module.reds.clear()
+    module.warns.clear()
+    module.rows.clear()
+
+
 def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     module = _load_module()
     daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
@@ -51,6 +68,75 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     assert "src/execution/command_recovery.py" in daemon_paths
     assert "src/execution/exchange_reconcile.py" in daemon_paths
     assert "src/data/polymarket_client.py" in daemon_paths
+
+
+def test_ops_health_probe_ignores_stuck_job_before_latest_daemon_start(tmp_path, monkeypatch):
+    module = _load_ops_health_probe_module()
+    _reset_ops_health_probe_state(module)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "zeus-ingest.err").write_text(
+        "\n".join(
+            [
+                "2026-06-28 01:27:40,000 WARNING Execution of job skipped: maximum number of running instances reached",
+                "2026-06-28 01:36:35,000 INFO Zeus ingest daemon starting (pid=55049)",
+                "2026-06-28 01:36:41,000 INFO Job executed successfully",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "LOG_DIR", log_dir)
+    monkeypatch.setattr(module, "_now", lambda: datetime(2026, 6, 28, 6, 38, tzinfo=timezone.utc))
+
+    module.check_stuck_jobs()
+
+    assert not module.reds
+    assert ("stuck-jobs", "GREEN", "none in tail") in module.rows
+
+
+def test_ops_health_probe_flags_stuck_job_after_latest_daemon_start(tmp_path, monkeypatch):
+    module = _load_ops_health_probe_module()
+    _reset_ops_health_probe_state(module)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "zeus-ingest.err").write_text(
+        "\n".join(
+            [
+                "2026-06-28 01:36:35,000 INFO Zeus ingest daemon starting (pid=55049)",
+                "2026-06-28 01:37:40,000 WARNING Execution of job skipped: maximum number of running instances reached",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "LOG_DIR", log_dir)
+    monkeypatch.setattr(module, "_now", lambda: datetime(2026, 6, 28, 6, 38, tzinfo=timezone.utc))
+
+    module.check_stuck_jobs()
+
+    assert any("APScheduler job STALLED" in red for red in module.reds)
+    assert any(row[:2] == ("stuck-jobs", "RED") for row in module.rows)
+
+
+def test_ops_health_probe_ignores_stuck_job_after_later_success(tmp_path, monkeypatch):
+    module = _load_ops_health_probe_module()
+    _reset_ops_health_probe_state(module)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "zeus-substrate-observer.err").write_text(
+        "2026-06-28 01:44:46,865 WARNING Execution of job \"_edli_market_substrate_warm_cycle (trigger: interval[0:00:20], next run at: 2026-06-28 01:44:46 CDT)\" skipped: maximum number of running instances reached (1)",
+        encoding="utf-8",
+    )
+    (log_dir / "zeus-substrate-observer.log").write_text(
+        "2026-06-28 01:52:39,817 INFO Job \"_edli_market_substrate_warm_cycle (trigger: interval[0:00:20], next run at: 2026-06-28 01:52:46 CDT)\" executed successfully",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "LOG_DIR", log_dir)
+    monkeypatch.setattr(module, "_now", lambda: datetime(2026, 6, 28, 6, 53, tzinfo=timezone.utc))
+
+    module.check_stuck_jobs()
+
+    assert not module.reds
+    assert ("stuck-jobs", "GREEN", "none in tail") in module.rows
 
 
 def _write_json(path: Path, payload: dict) -> None:

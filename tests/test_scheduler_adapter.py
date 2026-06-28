@@ -205,9 +205,10 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
 
     changed_report = _Changed()
 
-    def _scoped_path(cfg, *, source_clock_report=None):
+    def _scoped_path(cfg, *, source_clock_report=None, max_wall_clock_seconds=None):
         assert cfg["download_current_targets_enabled"] is True
         assert source_clock_report is changed_report
+        assert max_wall_clock_seconds == 45.0
         return {
             "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "source_clock_status": "SOURCE_CLOCK_UPDATES_CHANGED",
@@ -226,6 +227,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         return changed_report
 
     monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", _probe)
+    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
     monkeypatch.setattr(
         prod,
@@ -240,6 +242,21 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["fusion_upgrade_seeds_enqueued"] == 1
     assert result["source_clock_cursor_advanced_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
+
+
+def test_replacement_availability_fast_poll_caps_scoped_download_under_cadence(monkeypatch) -> None:
+    """The heavy source-clock capture must be timeboxed below the next poll tick."""
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "20")
+    monkeypatch.delenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, raising=False)
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 15.0
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "999")
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 19.0
+
+    monkeypatch.setenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "0")
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 1.0
 
 
 def test_build_job_specs_owner_filter() -> None:

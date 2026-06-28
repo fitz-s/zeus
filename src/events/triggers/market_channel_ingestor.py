@@ -69,6 +69,7 @@ class MarketTokenMetadata:
     min_order_size: str
     neg_risk: bool
     executable_snapshot_id: str
+    market_end_at: str | None = None
 
 
 @dataclass
@@ -120,6 +121,32 @@ class MarketChannelIngestor:
         self._market_event_sink = market_event_sink
         self._deferred_market_event_sink_depth = 0
         self._deferred_market_event_sink_events: list[OpportunityEvent] = []
+
+    def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
+        metadata = self._token_metadata.get(str(token_id))
+        if metadata is None or not metadata.market_end_at:
+            return True
+        try:
+            end_at = datetime.fromisoformat(str(metadata.market_end_at).replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=UTC)
+        as_of = (now or datetime.now(UTC)).astimezone(UTC)
+        return end_at.astimezone(UTC) > as_of
+
+    def active_token_ids_open_at(
+        self,
+        *,
+        now: datetime | None = None,
+        token_ids: Iterable[str] | None = None,
+    ) -> set[str]:
+        base = (
+            set(self._active_token_ids)
+            if token_ids is None
+            else {str(token_id) for token_id in token_ids if str(token_id) in self._active_token_ids}
+        )
+        return {token_id for token_id in base if self._token_is_open_at(token_id, now=now)}
 
     def handle_message(self, message: dict[str, Any], *, received_at: str) -> EventWriteResult | MarketChannelAction | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -207,11 +234,7 @@ class MarketChannelIngestor:
         """
         from src.state.db import assert_no_world_mutex_held_for_io
 
-        target_token_ids = (
-            set(self._active_token_ids)
-            if token_ids is None
-            else {str(token_id) for token_id in token_ids if str(token_id) in self._active_token_ids}
-        )
+        target_token_ids = self.active_token_ids_open_at(token_ids=token_ids)
         results: list[EventWriteResult] = []
         for token_id in sorted(target_token_ids):
             try:
@@ -255,7 +278,7 @@ class MarketChannelIngestor:
         gap_start: str | None = None,
     ) -> OpportunityEvent | None:
         token_id = _message_token_id(message)
-        if token_id not in self._active_token_ids:
+        if token_id not in self.active_token_ids_open_at(token_ids=(token_id,)):
             return None
         metadata = self._metadata_for_message(message, token_id=token_id)
         if metadata is None:
@@ -283,7 +306,7 @@ class MarketChannelIngestor:
         token_id = _message_token_id(message)
         if not token_id and message.get("price_changes"):
             token_id = str(message["price_changes"][0].get("asset_id") or "")
-        if token_id not in self._active_token_ids:
+        if token_id not in self.active_token_ids_open_at(token_ids=(token_id,)):
             return None
         change = message.get("price_changes", [{}])[0] if message.get("price_changes") else message
         metadata = self._metadata_for_message({**message, **change}, token_id=token_id)
@@ -384,7 +407,8 @@ class MarketChannelIngestor:
 
     def _new_market_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         token_ids = [str(token) for token in message.get("clob_token_ids") or message.get("assets_ids") or []]
-        if self._active_token_ids and not (set(token_ids) & self._active_token_ids):
+        active_token_ids = self.active_token_ids_open_at()
+        if active_token_ids and not (set(token_ids) & active_token_ids):
             return None
         token_id = token_ids[0] if token_ids else str(message.get("asset_id") or "")
         metadata = self._token_metadata.get(token_id)
@@ -560,13 +584,14 @@ def active_weather_token_metadata_from_snapshots(
     if "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         predicates.append(f"(market_end_at IS NULL OR market_end_at > '{now_iso}')")
+    market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
     # Latest snapshot per market (condition_id). Without a captured_at column we
     # cannot rank temporally, so fall back to one row per condition by rowid.
     order_expr = "captured_at DESC, rowid DESC" if has_captured_at else "rowid DESC"
     latest_per_condition = f"""
         SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-               min_tick_size, min_order_size, neg_risk,
+               min_tick_size, min_order_size, neg_risk, {market_end_expr},
                ROW_NUMBER() OVER (
                    PARTITION BY condition_id ORDER BY {order_expr}
                ) AS _rn
@@ -577,7 +602,7 @@ def active_weather_token_metadata_from_snapshots(
         f"""
         WITH latest AS ({latest_per_condition})
         SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-               min_tick_size, min_order_size, neg_risk
+               min_tick_size, min_order_size, neg_risk, market_end_at
         FROM latest
         WHERE _rn = 1
         ORDER BY snapshot_id
@@ -604,7 +629,16 @@ def active_weather_token_metadata_from_snapshots(
         selected.extend(other_rows[: capped_limit - len(selected)])
 
     metadata: dict[str, MarketTokenMetadata] = {}
-    for snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk in selected:
+    for (
+        snapshot_id,
+        condition_id,
+        yes_token_id,
+        no_token_id,
+        min_tick_size,
+        min_order_size,
+        neg_risk,
+        market_end_at,
+    ) in selected:
         if yes_token_id:
             metadata.setdefault(
                 str(yes_token_id),
@@ -616,6 +650,7 @@ def active_weather_token_metadata_from_snapshots(
                     min_order_size=str(min_order_size),
                     neg_risk=bool(neg_risk),
                     executable_snapshot_id=str(snapshot_id),
+                    market_end_at=str(market_end_at) if market_end_at is not None else None,
                 ),
             )
         if no_token_id:
@@ -629,6 +664,7 @@ def active_weather_token_metadata_from_snapshots(
                     min_order_size=str(min_order_size),
                     neg_risk=bool(neg_risk),
                     executable_snapshot_id=str(snapshot_id),
+                    market_end_at=str(market_end_at) if market_end_at is not None else None,
                 ),
             )
     return metadata
@@ -681,6 +717,7 @@ def active_weather_token_metadata_for_tokens(
     extra_params = [now_iso] if "market_end_at" in columns else []
     order_value_expr = "captured_at" if "captured_at" in columns else "rowid"
     order_expr = "captured_at DESC, rowid DESC" if "captured_at" in columns else "rowid DESC"
+    market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"
 
     metadata: dict[str, MarketTokenMetadata] = {}
     for token_id in dict.fromkeys(tokens):
@@ -690,7 +727,7 @@ def active_weather_token_metadata_for_tokens(
                 conn.execute(
                     f"""
                     SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
-                           min_tick_size, min_order_size, neg_risk, {order_value_expr} AS _order_value
+                           min_tick_size, min_order_size, neg_risk, {market_end_expr}, {order_value_expr} AS _order_value
                     FROM executable_market_snapshots
                     WHERE {token_column} = ?{extra_where}
                     ORDER BY {order_expr}
@@ -702,7 +739,7 @@ def active_weather_token_metadata_for_tokens(
         if not rows:
             continue
         row = max(rows, key=lambda r: str(r[-1] or ""))
-        snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk, _ = row
+        snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk, market_end_at, _ = row
         if str(yes_token_id) == token_id:
             outcome_label = "YES"
         elif str(no_token_id) == token_id:
@@ -717,6 +754,7 @@ def active_weather_token_metadata_for_tokens(
             min_order_size=str(min_order_size),
             neg_risk=bool(neg_risk),
             executable_snapshot_id=str(snapshot_id),
+            market_end_at=str(market_end_at) if market_end_at is not None else None,
         )
     return metadata
 
@@ -841,10 +879,11 @@ class MarketChannelOnlineService:
         raw_token_ids = [str(token_id) for token_id in token_ids]
         if isinstance(token_ids, (set, frozenset)):
             raw_token_ids = sorted({str(token_id) for token_id in token_ids})
+        open_token_ids = self.ingestor.active_token_ids_open_at(token_ids=raw_token_ids)
         ordered = [
             token_id
             for token_id in dict.fromkeys(raw_token_ids)
-            if token_id in self.ingestor._active_token_ids
+            if token_id in open_token_ids
         ]
         written = 0
         for offset in range(0, len(ordered), size):
@@ -969,13 +1008,7 @@ class MarketChannelOnlineService:
         from src.state.db import assert_no_world_mutex_held_for_io
 
         gap_start_captured = gap_start or self.gap_start or received_at
-        active_token_ids = self.ingestor._active_token_ids
-        if token_ids is not None:
-            active_token_ids = {
-                str(token_id)
-                for token_id in token_ids
-                if str(token_id) in self.ingestor._active_token_ids
-            }
+        active_token_ids = self.ingestor.active_token_ids_open_at(token_ids=token_ids)
         for token_id in sorted(active_token_ids):
             try:
                 if pre_captured_books is not None and token_id in pre_captured_books:
@@ -1026,11 +1059,11 @@ class MarketChannelOnlineService:
             return 0
         gap_start_captured = self.gap_start or received_at
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
-        ordered = [
-            str(token_id)
-            for token_id in sorted({str(token_id) for token_id in token_ids})
-            if str(token_id) in self.ingestor._active_token_ids
-        ]
+        ordered = sorted(
+            self.ingestor.active_token_ids_open_at(
+                token_ids={str(token_id) for token_id in token_ids}
+            )
+        )
         written = 0
         for offset in range(0, len(ordered), size):
             chunk = ordered[offset: offset + size]
@@ -1091,12 +1124,11 @@ class MarketChannelOnlineService:
         while stop_event is None or not stop_event.is_set():
             received_at = datetime.now(UTC).isoformat()
             try:
+                active_token_ids = self.ingestor.active_token_ids_open_at()
                 seed_first = sorted(
-                    {
-                        str(token_id)
-                        for token_id in self.seed_first_token_ids
-                        if str(token_id) in self.ingestor._active_token_ids
-                    }
+                    str(token_id)
+                    for token_id in self.seed_first_token_ids
+                    if str(token_id) in active_token_ids
                 )
                 if self.fetch_orderbook is not None:
                     if seed_first:
@@ -1108,7 +1140,7 @@ class MarketChannelOnlineService:
                             logger=logger,
                             chunk_size=REST_SEED_COMMIT_CHUNK_SIZE,
                         )
-                    remaining = sorted(set(self.ingestor._active_token_ids) - set(seed_first))
+                    remaining = sorted(active_token_ids - set(seed_first))
                     self.seed_rest_books_in_chunks(
                         token_ids=remaining,
                         received_at=received_at,
@@ -1122,7 +1154,7 @@ class MarketChannelOnlineService:
                     await ws.send(
                         json.dumps(
                             {
-                                "assets_ids": sorted(self.ingestor._active_token_ids),
+                                "assets_ids": sorted(active_token_ids),
                                 "type": "market",
                                 "custom_feature_enabled": True,
                             },
@@ -1132,7 +1164,7 @@ class MarketChannelOnlineService:
                     if logger is not None:
                         logger.info(
                             "EDLI market-channel connected for %d active weather tokens",
-                            len(self.ingestor._active_token_ids),
+                            len(active_token_ids),
                         )
                     async for raw_message in ws:
                         # Hold the world-DB write mutex ONLY around the DB
@@ -1185,7 +1217,7 @@ class MarketChannelOnlineService:
                     _reconnect_at = datetime.now(UTC).isoformat()
                     if self.fetch_orderbook is not None:
                         self.reconnect_rest_books_in_chunks(
-                            token_ids=self.ingestor._active_token_ids,
+                            token_ids=self.ingestor.active_token_ids_open_at(),
                             received_at=_reconnect_at,
                             world_mutex=_world_mutex,
                             commit=commit,

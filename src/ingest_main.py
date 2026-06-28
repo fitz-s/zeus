@@ -46,6 +46,7 @@ logger = logging.getLogger("zeus.ingest")
 _scheduler: Any | None = None
 FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS"
+REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 
@@ -90,6 +91,32 @@ def _replacement_availability_poll_seconds() -> int:
             raw,
         )
         return 60
+
+
+def _replacement_source_clock_download_budget_seconds(poll_seconds: int | None = None) -> float:
+    """Wall-clock budget for the source-clock scoped download body.
+
+    The source-clock poll is cadence-sensitive: one updated source must not turn
+    the ingest daemon into a multi-minute downloader that causes APScheduler
+    max_instances skips and stale forecast serving records. Keep the body below
+    the next poll while leaving a small scheduler/logging margin.
+    """
+    cadence_s = float(poll_seconds if poll_seconds is not None else _replacement_availability_poll_seconds())
+    default_s = max(5.0, min(45.0, cadence_s - 5.0))
+    raw = os.environ.get(REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "").strip()
+    if not raw:
+        return default_s
+    try:
+        requested = float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using %.1fs replacement source-clock download budget",
+            REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV,
+            raw,
+            default_s,
+        )
+        return default_s
+    return max(1.0, min(requested, max(1.0, cadence_s - 1.0)))
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -1082,6 +1109,9 @@ def _replacement_availability_poll_tick():
     report = _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         cfg,
         source_clock_report=source_clock_report,
+        max_wall_clock_seconds=_replacement_source_clock_download_budget_seconds(
+            _replacement_availability_poll_seconds()
+        ),
     )
     if report is None:
         return None

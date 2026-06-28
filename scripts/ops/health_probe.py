@@ -160,6 +160,17 @@ def check_wal() -> None:
 
 
 # === 3. STUCK APSCHEDULER JOBS ("maximum number of running instances reached")
+def _chicago_log_dt(ts: str) -> datetime | None:
+    """Parse a naive Zeus daemon log timestamp in America/Chicago."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromisoformat(ts.replace("T", " ").split(",")[0])
+        return dt.replace(tzinfo=ZoneInfo("America/Chicago"))
+    except Exception:
+        return None
+
+
 def _age_min_chicago(ts: str) -> float | None:
     """Age of a naive 'YYYY-MM-DD HH:MM:SS' stamp logged in America/Chicago.
 
@@ -167,22 +178,28 @@ def _age_min_chicago(ts: str) -> float | None:
     naive (no offset). Interpreting these as UTC would mis-age by the CDT/CST
     offset and hide a genuinely-stuck job. Parse them in their real tz.
     """
-    try:
-        from zoneinfo import ZoneInfo
-
-        dt = datetime.fromisoformat(ts.replace("T", " ").split(",")[0])
-        dt = dt.replace(tzinfo=ZoneInfo("America/Chicago"))
-        return (_now() - dt).total_seconds() / 60.0
-    except Exception:
+    dt = _chicago_log_dt(ts)
+    if dt is None:
         return None
+    return (_now() - dt).total_seconds() / 60.0
 
 
 def check_stuck_jobs() -> None:
     pat = re.compile(r"maximum number of running instances reached", re.I)
     ts_pat = re.compile(r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+    job_pat = re.compile(r'job "([^"]+)"', re.I)
+    success_pat = re.compile(r'Job "[^"]+" executed successfully')
+    start_pat = re.compile(r"(?:daemon starting|starting daemon).*pid=", re.I)
     if not LOG_DIR.exists():
         rows.append(("stuck-jobs", "WARN", "no logs/ dir"))
         return
+
+    def _job_key(line: str) -> str | None:
+        m = job_pat.search(line)
+        if not m:
+            return None
+        return str(m.group(1)).split(" (trigger:", 1)[0]
+
     hits: list[tuple[str, float]] = []  # (job-ish line, age_min)
     # APScheduler "max instances reached" lands in the daemons' *.err streams,
     # not *.log — scan both, newest-modified first.
@@ -191,18 +208,57 @@ def check_stuck_jobs() -> None:
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
         reverse=True,
     )
+    tails: dict[Path, str] = {}
     for log in log_files:
         try:
             # tail ~400 lines cheaply
-            tail = subprocess.run(
+            tails[log] = subprocess.run(
                 ["tail", "-n", "400", str(log)], capture_output=True, text=True, timeout=10
             ).stdout
         except Exception:
             continue
+
+    def _stream_key(log: Path) -> str:
+        return log.name.rsplit(".", 1)[0]
+
+    latest_start_by_stream: dict[str, datetime] = {}
+    latest_success_by_stream_job: dict[tuple[str, str], datetime] = {}
+    for log, tail in tails.items():
+        stream = _stream_key(log)
+        for line in tail.splitlines():
+            m = ts_pat.search(line)
+            if not m:
+                continue
+            dt = _chicago_log_dt(m.group(1))
+            if dt is None:
+                continue
+            if start_pat.search(line) and (
+                stream not in latest_start_by_stream or dt > latest_start_by_stream[stream]
+            ):
+                latest_start_by_stream[stream] = dt
+            if success_pat.search(line):
+                job_key = _job_key(line)
+                compound_key = (stream, job_key or "")
+                if job_key and (
+                    compound_key not in latest_success_by_stream_job
+                    or dt > latest_success_by_stream_job[compound_key]
+                ):
+                    latest_success_by_stream_job[compound_key] = dt
+
+    for log, tail in tails.items():
+        stream = _stream_key(log)
+        latest_start = latest_start_by_stream.get(stream)
         for line in tail.splitlines():
             if pat.search(line):
                 m = ts_pat.search(line)
-                age = _age_min_chicago(m.group(1)) if m else None
+                hit_dt = _chicago_log_dt(m.group(1)) if m else None
+                if latest_start is not None and hit_dt is not None and hit_dt <= latest_start:
+                    continue
+                job_key = _job_key(line)
+                latest_success = latest_success_by_stream_job.get((stream, job_key or ""))
+                if latest_success is not None and hit_dt is not None and hit_dt <= latest_success:
+                    continue
+                age = (_now() - hit_dt).total_seconds() / 60.0 if hit_dt is not None else None
                 hits.append((log.name, age if age is not None else 1e9))
     recent = [(n, a) for n, a in hits if a <= STUCK_JOB_WINDOW_MIN]
     if recent:

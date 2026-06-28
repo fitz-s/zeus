@@ -1107,6 +1107,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     release_lag_hours: float = 14.0,
     forecast_hours: int = 120,
     retention_days: int = RETENTION_DAYS,
+    max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object]:
     """Capture (forward single_runs + fixed-lead previous_runs) the 8 extra OM models for each
     current target and persist into raw_model_forecasts on a SINGLE zeus-forecasts.db connection
@@ -1169,6 +1170,17 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     domain_excluded: list[str] = []
     transport_errors: list[str] = []
     abort_transport = False
+    started_monotonic = time.monotonic()
+    wall_clock_deadline = (
+        started_monotonic + float(max_wall_clock_seconds)
+        if max_wall_clock_seconds is not None and float(max_wall_clock_seconds) >= 0.0
+        else None
+    )
+    timeboxed = False
+    timebox_unattempted_target_groups = 0
+
+    def _timebox_expired() -> bool:
+        return wall_clock_deadline is not None and time.monotonic() >= wall_clock_deadline
 
     # ROW-LEVEL SKIP (2026-06-09, K-root instance #5 resolution): preload the logical keys
     # already persisted for THIS cycle so a re-run only fetches what is MISSING. This replaces
@@ -1261,8 +1273,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     for t in target_list:
         targets_by_city_date[(t.city, t.target_date)].append(t)
 
-    for (city, target_date), city_targets in targets_by_city_date.items():
+    target_groups = list(targets_by_city_date.items())
+    for group_index, ((city, target_date), city_targets) in enumerate(target_groups):
         if abort_transport:
+            break
+        if _timebox_expired():
+            timeboxed = True
+            timebox_unattempted_target_groups = len(target_groups) - group_index
             break
         # All targets for the same (city, target_date) share lat/lon/timezone/lead_days.
         ref = city_targets[0]
@@ -1272,7 +1289,13 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # LEGACY PATH: per-model per-metric fetchers (test injection compatibility).
             # Iterates the old per-model loop so injected stubs work unchanged.
             for t in city_targets:
+                if _timebox_expired():
+                    timeboxed = True
+                    break
                 for model in requested_models:
+                    if _timebox_expired():
+                        timeboxed = True
+                        break
                     if not _model_in_domain(model, lat=t.latitude, lon=t.longitude, lead_days=int(t.lead_days)):
                         key = f"{model}:{t.city}"
                         domain_excluded.append(key)
@@ -1336,6 +1359,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                             "endpoint": "previous_runs",
                             **_bayes_precision_fusion_product_identity(model, "previous_runs", t),
                         })
+                if timeboxed:
+                    break
         else:
             # BATCHED PATH (R1+R2+R3): ONE single_runs call + ONE previous_runs call per
             # (city, target_date, cycle), covering all in-domain models and both metrics.
@@ -1393,6 +1418,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
             # ONE batched single_runs fetch covers all in-domain models + both metrics.
             for single_run, single_models in sorted(single_models_by_run.items()):
+                if _timebox_expired():
+                    timeboxed = True
+                    break
                 sv_map = _default_live_fetch_batched(
                     models=single_models,
                     latitude=ref.latitude,
@@ -1452,7 +1480,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # Domain gate applies; cadence gate does NOT apply (previous_runs values are
             # historical and valid regardless of which cycle issued the request).
             prev_models: list[str] = []
-            for model in all_models if include_previous_runs else []:
+            if timeboxed:
+                prev_models = []
+            for model in all_models if include_previous_runs and not timeboxed else []:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
                     continue  # domain_excluded already logged above
                 # R4a: check both metrics already in immutable history.
@@ -1464,6 +1494,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     prev_models.append(model)
 
             # ONE batched previous_runs fetch covers all models with missing history.
+            if prev_models and not abort_transport:
+                if _timebox_expired():
+                    timeboxed = True
+                    prev_models = []
             if prev_models and not abort_transport:
                 pv_map = _default_previous_runs_fetch_batched(
                     models=prev_models,
@@ -1509,11 +1543,14 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             chunk_written, _ = _persist_chunk_with_lock_retry(forecast_db, rows)
             total_written += chunk_written
             rows = []
+        if timeboxed:
+            timebox_unattempted_target_groups = len(target_groups) - group_index - 1
+            break
 
     # ---- CHUNKED-DURABLE persist happened per city×date above; final pass prunes only ----
     written = total_written
     pruned = 0
-    if prune_after:
+    if prune_after and not timeboxed:
         _, pruned = _persist_chunk_with_lock_retry(forecast_db, (), cutoff_iso=cutoff_iso)
 
     if domain_excluded:
@@ -1556,7 +1593,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # retryable only when transport prevented every current single-runs row, or
     # when a quota-style abort stopped the remaining target fan-out.
     status = (
-        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+        if timeboxed
+        else "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
         if transport_errors and (abort_transport or not single_success_models)
         else "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
@@ -1572,6 +1611,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "domain_excluded": tuple(sorted(set(domain_excluded))),
         "transport_errors": tuple(transport_errors),
         "transport_aborted_remaining_targets": abort_transport,
+        "timeboxed_incomplete": timeboxed,
+        "timebox_unattempted_target_groups": timebox_unattempted_target_groups,
+        "max_wall_clock_seconds": max_wall_clock_seconds,
         # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
         "global_models_expected": len(global_models_expected),
         "global_models_dropped_scoped": sorted(global_single_dropped_scoped),

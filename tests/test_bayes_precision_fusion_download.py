@@ -120,6 +120,38 @@ def test_download_no_targets_writes_nothing(tmp_path) -> None:
     assert report["written_row_count"] == 0
 
 
+def test_download_timebox_returns_incomplete_without_fetching_targets(tmp_path, monkeypatch) -> None:
+    """Source-clock fast path can be retried next tick; it must not run past its wall budget."""
+    import src.data.bayes_precision_fusion_download as dl
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+
+    def _unexpected_single(*_args, **_kwargs):
+        raise AssertionError("timeboxed download must stop before the HTTP fetch")
+
+    def _unexpected_previous(*_args, **_kwargs):
+        raise AssertionError("timeboxed download must stop before the HTTP fetch")
+
+    monkeypatch.setattr(dl, "_default_live_fetch_batched", _unexpected_single)
+    monkeypatch.setattr(dl, "_default_previous_runs_fetch_batched", _unexpected_previous)
+
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        targets=_two_city_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+        max_wall_clock_seconds=0,
+    )
+
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+    assert report["timeboxed_incomplete"] is True
+    assert report["timebox_unattempted_target_groups"] == 2
+    assert report["written_row_count"] == 0
+
+
 # =====================================================================================
 # (c) FAIL-SOFT per model: a raising fetch drops only that model
 # =====================================================================================
@@ -490,6 +522,7 @@ def test_batched_single_runs_transport_failure_is_retryable_not_empty_success(tm
         }
 
     monkeypatch.setattr(dl, "_default_live_fetch_batched", _single_batch_fail)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
 
     def _previous_batch(**kwargs):
         previous_calls.append(tuple(kwargs["models"]))

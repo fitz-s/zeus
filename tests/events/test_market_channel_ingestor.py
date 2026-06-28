@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 import pytest
@@ -1251,6 +1252,7 @@ def test_universe_excludes_settled_markets_by_market_end_at():
     md = active_weather_token_metadata_from_snapshots(conn, now=now)
 
     assert "yes-live" in md and "no-live" in md, "live (future-ending) market must be covered"
+    assert md["yes-live"].market_end_at == "2026-06-05T12:00:00+00:00"
     assert "yes-dead" not in md, "settled market (market_end_at<=now) leaked into channel universe"
     assert "no-dead" not in md
 
@@ -1310,6 +1312,60 @@ def test_universe_includes_market_with_null_end_at():
 
     md = active_weather_token_metadata_from_snapshots(conn, now=now)
     assert "yes-null" in md, "NULL market_end_at must be kept (cannot prove settled)"
+
+
+def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
+    """A running market-channel thread must not keep yesterday's token universe forever."""
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-live": MarketTokenMetadata(
+            condition_id="0xcondition",
+            token_id="token-live",
+            outcome_label="YES",
+            min_tick_size="0.01",
+            min_order_size="5",
+            neg_risk=False,
+            executable_snapshot_id="snap-live",
+            market_end_at="2999-01-01T00:00:00+00:00",
+        ),
+        "token-expired": MarketTokenMetadata(
+            condition_id="0xcondition",
+            token_id="token-expired",
+            outcome_label="YES",
+            min_tick_size="0.01",
+            min_order_size="5",
+            neg_risk=False,
+            executable_snapshot_id="snap-expired",
+            market_end_at="2000-01-01T00:00:00+00:00",
+        ),
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+    )
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=_fake_book)
+
+    fetch_calls: list[str] = []
+
+    def recording_fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        if token_id == "token-expired":
+            raise AssertionError("expired token must not be REST fetched")
+        return _fake_book(token_id)
+
+    service.fetch_orderbook = recording_fetch
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["token-expired", "token-live"],
+        received_at="2026-06-28T06:45:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+    )
+
+    assert written == 1
+    assert fetch_calls == ["token-live"]
+    assert ingestor.active_token_ids_open_at() == {"token-live"}
 
 
 def test_universe_filter_absent_market_end_at_column_is_noop():
