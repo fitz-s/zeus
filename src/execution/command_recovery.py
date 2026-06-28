@@ -688,31 +688,31 @@ def _maybe_attach_forecasts_for_recovery(conn: sqlite3.Connection) -> None:
 
 def _edli_live_order_events_ref(conn: sqlite3.Connection) -> str | None:
     _maybe_attach_world_for_recovery(conn)
+    if _table_exists(conn, "edli_live_order_events"):
+        return "edli_live_order_events"
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_events"):
         return "world.edli_live_order_events"
-    if _table_exists(conn, "edli_live_order_events"):
-        return "edli_live_order_events"
     return None
 
 
 def _edli_live_order_projection_ref(conn: sqlite3.Connection) -> str | None:
     _maybe_attach_world_for_recovery(conn)
+    if _table_exists(conn, "edli_live_order_projection"):
+        return "edli_live_order_projection"
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_projection"):
         return "world.edli_live_order_projection"
-    if _table_exists(conn, "edli_live_order_projection"):
-        return "edli_live_order_projection"
     return None
 
 
 def _edli_live_cap_ref(conn: sqlite3.Connection, table: str) -> str | None:
     _maybe_attach_world_for_recovery(conn)
+    if _table_exists(conn, table):
+        return table
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     if "world" in attached and _attached_table_exists(conn, "world", table):
         return f"world.{table}"
-    if _table_exists(conn, table):
-        return table
     return None
 
 

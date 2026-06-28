@@ -65,7 +65,7 @@ class _Recorder:
         self.client_calls.append((method, set(self._open.keys()), dict(self._open)))
 
 
-def _make_conn_factory(db_path: Path, recorder: _Recorder):
+def _make_conn_factory(db_path: Path, recorder: _Recorder, *, attach_world_path: Path | None = None):
     from src.state.db import init_schema
 
     class _RecordingConnection(sqlite3.Connection):
@@ -77,6 +77,8 @@ def _make_conn_factory(db_path: Path, recorder: _Recorder):
         c = sqlite3.connect(str(db_path), factory=_RecordingConnection)
         c.row_factory = sqlite3.Row
         init_schema(c)
+        if attach_world_path is not None:
+            c.execute("ATTACH DATABASE ? AS world", (str(attach_world_path),))
         recorder.on_open(c, "factory")
         return c
 
@@ -237,6 +239,7 @@ def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot
     from src.execution import command_recovery, venue_sync_contract
 
     db_path = tmp_path / "recovery-live-tick-post-submit-unknown.db"
+    world_path = tmp_path / "empty-world-with-legacy-edli-tables.db"
     aggregate_id = "event-fast:intent-fast:token-fast"
     execution_command_id = "edli_exec_cmd:event-fast:intent-fast:token-fast:buy_no"
     seed_conn = sqlite3.connect(str(db_path))
@@ -315,9 +318,14 @@ def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot
     )
     seed_conn.commit()
     seed_conn.close()
+    world_conn = sqlite3.connect(str(world_path))
+    from src.state.db import init_schema as init_world_schema
+    init_world_schema(world_conn)
+    world_conn.commit()
+    world_conn.close()
 
     recorder = _Recorder()
-    factory = _make_conn_factory(db_path, recorder)
+    factory = _make_conn_factory(db_path, recorder, attach_world_path=world_path)
     client = _RecordingClient(recorder, open_orders=[], trades=[])
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
 
