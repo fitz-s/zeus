@@ -12085,9 +12085,11 @@ def reconcile_unresolved_commands(
 
     ``scope="full"`` keeps the historical complete sweep. ``scope="live_tick"``
     is for the live order daemon's frequent scheduler cadence: it reconciles the
-    critical in-flight command surface, then leaves heavier projection, partial,
-    and maker-fill maintenance for the full sweep / sidecar owner so the trading
-    reactor is not starved by a boot-time recovery storm.
+    critical in-flight command surface, terminal/no-fill locks, and current
+    partial/fill maintenance without holding one long-lived DB connection.
+    ``scope="boot_fast"`` is narrower: it clears submit/cap/family locks before
+    scheduler start, but deliberately skips historical maker-fill economics and
+    partial-remainder maintenance so boot cannot be delayed by old filled rows.
 
     DB connection: if conn is None, opens get_trade_connection_with_world_required()
     internally (with a try/finally to close). CycleRunner passes the per-cycle
@@ -12113,7 +12115,7 @@ def reconcile_unresolved_commands(
         2026-06-11. Reconciliation SEMANTICS are unchanged: each pass body runs
         verbatim against a venue snapshot captured off-lock.
     """
-    if scope not in {"full", "live_tick"}:
+    if scope not in {"full", "live_tick", "boot_fast"}:
         raise ValueError(f"unsupported command recovery scope: {scope!r}")
     if conn is not None and scope != "full":
         raise ValueError("non-full command recovery scopes require conn=None")
@@ -12443,7 +12445,7 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         _harvest(find_unresolved_commands(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
-    if scope == "live_tick":
+    if scope in {"live_tick", "boot_fast"}:
         for candidate_fn in (
             _local_orphan_no_fill_candidates,
             _terminal_point_order_candidates,
@@ -12453,10 +12455,11 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
                 _harvest(candidate_fn(conn))
             except Exception:  # noqa: BLE001
                 logger.debug("recovery: priming candidate %s failed", candidate_fn.__name__, exc_info=True)
-        try:
-            _harvest(_partial_remainder_candidates(conn, updated_before=None))
-        except Exception:  # noqa: BLE001
-            logger.debug("recovery: priming candidate _partial_remainder_candidates failed", exc_info=True)
+        if scope == "live_tick":
+            try:
+                _harvest(_partial_remainder_candidates(conn, updated_before=None))
+            except Exception:  # noqa: BLE001
+                logger.debug("recovery: priming candidate _partial_remainder_candidates failed", exc_info=True)
         return {
             "order_ids": order_ids,
             "idempotency_keys": idem_keys,
@@ -12653,37 +12656,38 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         ),
     )
 
-    if scope == "live_tick":
+    if scope in {"live_tick", "boot_fast"}:
         # Keep the high-cadence live tick light, but do not defer terminal
         # no-fill release for zero-exposure pending entries. A confirmed local
         # CANCEL_ACKED fact, or a pre-primed point-order terminal read, is enough
         # to clear the duplicate lock; waiting for the full sweep leaves stale
         # ghosts in the live money path.
-        # Confirmed maker/exit fills are even higher priority: they close live
-        # exposure and unblock close-before-open redecision leases, so run them
-        # before broader terminal-order maintenance that may contend on locks.
-        from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+        # live_tick also handles current fill/partial maintenance. boot_fast
+        # does not: those historical rows are not required before scheduler
+        # start, and live evidence showed they can add minutes to daemon boot.
+        if scope == "live_tick":
+            from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
 
-        _db_pass(
-            "recorded_maker_fill_economics",
-            reconcile_recorded_maker_fill_economics,
-            "recorded_maker_fill_economics",
-            advanced_key="corrected",
-            fold_stayed=False,
-            observed_at=started_at,
-        )
-        _db_pass(
-            "closed_shift_bin_exit_leases",
-            release_closed_shift_bin_exit_leases,
-            "closed_shift_bin_exit_leases",
-            observed_at=started_at,
-        )
-        _db_pass(
-            "stale_rebalance_entry_leases",
-            release_stale_rebalance_entry_leases,
-            "stale_rebalance_entry_leases",
-            observed_at=started_at,
-        )
+            _db_pass(
+                "recorded_maker_fill_economics",
+                reconcile_recorded_maker_fill_economics,
+                "recorded_maker_fill_economics",
+                advanced_key="corrected",
+                fold_stayed=False,
+                observed_at=started_at,
+            )
+            _db_pass(
+                "closed_shift_bin_exit_leases",
+                release_closed_shift_bin_exit_leases,
+                "closed_shift_bin_exit_leases",
+                observed_at=started_at,
+            )
+            _db_pass(
+                "stale_rebalance_entry_leases",
+                release_stale_rebalance_entry_leases,
+                "stale_rebalance_entry_leases",
+                observed_at=started_at,
+            )
         _client_pass("local_orphan_no_fill_findings",
                      reconcile_local_orphan_no_fill_findings,
                      "local_orphan_no_fill_findings")
@@ -12726,13 +12730,14 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
         )
-        _client_pass(
-            "partial_remainders",
-            reconcile_partial_remainders,
-            "partial_remainders",
-            updated_before=started_at,
-        )
-        summary["scope"] = "live_tick"
+        if scope == "live_tick":
+            _client_pass(
+                "partial_remainders",
+                reconcile_partial_remainders,
+                "partial_remainders",
+                updated_before=started_at,
+            )
+        summary["scope"] = scope
         summary["deferred_full_sweep"] = True
         return
 

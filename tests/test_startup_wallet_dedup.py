@@ -172,6 +172,20 @@ def test_current_none_warms_from_fresh_collateral_snapshot(monkeypatch):
     assert record.source == "collateral_ledger_snapshot"
 
 
+def test_current_none_does_not_warm_from_stale_collateral_snapshot(monkeypatch):
+    """Freshness remains fail-closed: startup may use the sidecar snapshot only
+    while it is still inside the collateral-ledger freshness bound.
+    """
+    _install_trade_db_snapshot(value_usd=1098.62, age_seconds=3600.0)
+    counter = _CurrentCounter(returns_none=True)
+    monkeypatch.setattr(bankroll_provider, "current", counter)
+
+    main_mod._startup_wallet_check(clob=None)
+
+    assert counter.calls == 1
+    assert bankroll_provider.cached() is None
+
+
 def test_injected_clob_does_not_touch_bankroll_provider(monkeypatch):
     """TEST-INJECTION UNTOUCHED: clob=<fake> uses the fake's get_balance and never
     calls bankroll_provider.current (counter stays 0)."""

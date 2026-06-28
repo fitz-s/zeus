@@ -226,6 +226,44 @@ def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_
     assert "recorded_maker_fill_economics" in summary
 
 
+def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path):
+    """Boot recovery must clear submit locks without blocking scheduler start on
+    historical maker-fill economics or partial-remainder maintenance.
+    """
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-boot-fast.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(seed_conn, command_id="cmd-boot-fast")
+    h._advance_to_submitting(seed_conn, command_id="cmd-boot-fast", venue_order_id="vord-boot-fast")
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-boot-fast": {"orderID": "vord-boot-fast", "status": "LIVE"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="boot_fast",
+    )
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["deferred_full_sweep"] is True
+    assert summary["scanned"] == 1
+    assert "partial_remainders" not in summary
+    assert "recorded_maker_fill_economics" not in summary
+
+
 def test_live_tick_scope_projects_live_order_positive_matched_size(monkeypatch, tmp_path):
     """Boot/live cadence must ingest partial maker fills before redecision."""
     import tests.test_command_recovery as h

@@ -5972,8 +5972,10 @@ def _edli_boot_command_recovery_once() -> None:
     The periodic ``edli_command_recovery`` job starts about a minute after boot.
     That is too late for restart-relevant live-order projections that can keep
     family locks active or leave old pre-submit payloads in the restart gate.
-    This boot pass uses the same live_tick recovery contract as the scheduler
-    job, before any new entry order can be produced.
+    This boot pass uses a narrower boot_fast recovery contract before any new
+    entry order can be produced. It clears submit/cap/family locks that can
+    block entry, while leaving heavier maker-fill and partial-remainder
+    maintenance for the scheduled live_tick job after the scheduler starts.
     """
 
     edli_cfg = _settings_section("edli", {})
@@ -5984,7 +5986,7 @@ def _edli_boot_command_recovery_once() -> None:
     from src.execution.command_recovery import reconcile_unresolved_commands
     from src.state.db import get_trade_connection_with_world_required
 
-    summary = reconcile_unresolved_commands(scope="live_tick")
+    summary = reconcile_unresolved_commands(scope="boot_fast")
     try:
         from src.execution.edli_absence_resolver import take_boot_auto_resolution_continuations
 

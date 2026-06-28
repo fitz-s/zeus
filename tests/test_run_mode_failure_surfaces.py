@@ -832,7 +832,7 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
 
 
 def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> None:
-    """Boot must clear restart-relevant EDLI order state before first reactor tick."""
+    """Boot must clear restart-relevant EDLI order locks before first reactor tick."""
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
     import src.state.db as state_db
@@ -867,7 +867,7 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
 
     main_module._edli_boot_command_recovery_once()
 
-    assert calls == ["live_tick"]
+    assert calls == ["boot_fast"]
     assert refresh_calls == [fake_conn]
     assert fake_conn.closed is True
 
