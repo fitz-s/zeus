@@ -381,6 +381,67 @@ def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
     assert commit_counts == [4, 8, 10]
 
 
+def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
+        for idx in range(3)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=cache,
+    )
+    fetch_calls: list[str] = []
+    commit_counts: list[int] = []
+
+    def fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    class FlakyWorldMutex:
+        def __init__(self) -> None:
+            self.enters = 0
+
+        def __enter__(self):
+            self.enters += 1
+            if self.enters == 2:
+                raise TimeoutError("world write busy")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+    written = service.seed_rest_books_in_chunks(
+        token_ids=[f"token-{idx}" for idx in range(3)],
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=FlakyWorldMutex(),
+        commit=lambda: commit_counts.append(
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        ),
+        chunk_size=1,
+    )
+
+    assert written == 1
+    assert fetch_calls == ["token-0", "token-1"]
+    assert commit_counts == [2]
+    assert service.rest_seed_backpressure_count == 1
+    assert service.rest_seed_backpressure_reason == "world write busy"
+    assert (
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        == 2
+    )
+
+
 def test_rest_seed_uses_batch_orderbook_fetch_when_available():
     from contextlib import nullcontext
 

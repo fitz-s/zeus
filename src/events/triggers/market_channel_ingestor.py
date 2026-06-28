@@ -824,6 +824,8 @@ class MarketChannelOnlineService:
     max_refresh_actions_per_window: int = 5
     refresh_window_seconds: float = 60.0
     seed_first_token_ids: set[str] = field(default_factory=set)
+    rest_seed_backpressure_count: int = 0
+    rest_seed_backpressure_reason: str | None = None
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
 
@@ -875,6 +877,8 @@ class MarketChannelOnlineService:
 
         if self.fetch_orderbook is None:
             return 0
+        self.rest_seed_backpressure_count = 0
+        self.rest_seed_backpressure_reason = None
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
         raw_token_ids = [str(token_id) for token_id in token_ids]
         if isinstance(token_ids, (set, frozenset)):
@@ -906,15 +910,28 @@ class MarketChannelOnlineService:
             if not pre_captured_books:
                 continue
             with self.ingestor.defer_market_event_sink():
-                with world_mutex:
-                    results = self.ingestor.seed_from_rest(
-                        self.fetch_orderbook,
-                        received_at=received_at,
-                        pre_cached=pre_captured_books,
-                        token_ids=pre_captured_books.keys(),
-                    )
-                    if commit is not None:
-                        commit()
+                try:
+                    with world_mutex:
+                        results = self.ingestor.seed_from_rest(
+                            self.fetch_orderbook,
+                            received_at=received_at,
+                            pre_cached=pre_captured_books,
+                            token_ids=pre_captured_books.keys(),
+                        )
+                        if commit is not None:
+                            commit()
+                except TimeoutError as exc:
+                    self.rest_seed_backpressure_count += 1
+                    self.rest_seed_backpressure_reason = str(exc)
+                    if logger is not None:
+                        logger.warning(
+                            "EDLI market-channel REST seed write backpressure: "
+                            "written=%d remaining=%d reason=%s",
+                            written,
+                            max(0, len(ordered) - offset),
+                            exc,
+                        )
+                    break
                 self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:

@@ -2262,7 +2262,7 @@ def _edli_refresh_held_position_quote_evidence(
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
-        return {
+        result = {
             "held_priority_token_ids": len(held_token_ids),
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_events": int(written),
@@ -2272,6 +2272,11 @@ def _edli_refresh_held_position_quote_evidence(
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
+        if service.rest_seed_backpressure_count:
+            result["backpressure"] = True
+            result["write_backpressure_count"] = service.rest_seed_backpressure_count
+            result["write_backpressure_reason"] = service.rest_seed_backpressure_reason
+        return result
     finally:
         try:
             if conn is not None:
@@ -2407,7 +2412,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
-        return {
+        result = {
             "candidate_priority_token_ids": len(candidate_token_ids),
             "open_rest_priority_token_ids": len(open_rest_token_ids),
             "quote_priority_token_ids": len(priority_token_ids),
@@ -2419,6 +2424,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
+        if service.rest_seed_backpressure_count:
+            result["backpressure"] = True
+            result["write_backpressure_count"] = service.rest_seed_backpressure_count
+            result["write_backpressure_reason"] = service.rest_seed_backpressure_reason
+        return result
     finally:
         try:
             if conn is not None:
