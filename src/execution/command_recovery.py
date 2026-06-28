@@ -726,6 +726,15 @@ def _decision_certificates_ref(conn: sqlite3.Connection) -> str | None:
     return None
 
 
+def _decision_integrity_quarantine_ref(conn: sqlite3.Connection) -> str | None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "trade" in attached and _attached_table_exists(conn, "trade", "decision_integrity_quarantine"):
+        return "trade.decision_integrity_quarantine"
+    if "main" in attached and _table_exists(conn, "decision_integrity_quarantine"):
+        return "decision_integrity_quarantine"
+    return None
+
+
 def _market_events_ref(conn: sqlite3.Connection) -> str | None:
     _maybe_attach_forecasts_for_recovery(conn)
     _maybe_attach_world_for_recovery(conn)
@@ -2607,6 +2616,98 @@ def _edli_certificate_payload(
     return {}
 
 
+def _decision_certificate_is_quarantined(
+    conn: sqlite3.Connection,
+    *,
+    certificate_hash: str,
+) -> bool:
+    certificate_hash = str(certificate_hash or "").strip()
+    if not certificate_hash:
+        return False
+    q_ref = _decision_integrity_quarantine_ref(conn)
+    if q_ref is None:
+        return False
+    try:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
+    except Exception:  # pragma: no cover - import fallback for degraded recovery shells
+        DECISION_CERTIFICATES_TABLE = "decision_certificates"
+        REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+    row = conn.execute(
+        f"""
+        SELECT 1
+          FROM {q_ref}
+         WHERE table_name = ?
+           AND row_id = ?
+           AND reason_code = ?
+         LIMIT 1
+        """,
+        (DECISION_CERTIFICATES_TABLE, certificate_hash, REASON_INVALID_LIVE_ACTIONABLE),
+    ).fetchone()
+    return row is not None
+
+
+def _verified_edli_actionable_payload(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    token_id: str,
+) -> dict:
+    """Return EDLI Actionable payload only when it is live-consumable now."""
+
+    ref = _decision_certificates_ref(conn)
+    if ref is None or not event_id:
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT semantic_key, certificate_hash, payload_json
+          FROM {ref}
+         WHERE certificate_type = 'ActionableTradeCertificate'
+           AND semantic_key LIKE ?
+         ORDER BY created_at DESC
+         LIMIT 50
+        """,
+        (f"%{event_id}%",),
+    ).fetchall()
+    for row in rows:
+        record = _dict_row(row)
+        payload = _json_mapping(record.get("payload_json"))
+        if not _edli_certificate_matches_token(
+            payload,
+            semantic_key=str(record.get("semantic_key") or ""),
+            token_id=token_id,
+        ):
+            continue
+        cert_hash = str(record.get("certificate_hash") or "").strip()
+        if _decision_certificate_is_quarantined(conn, certificate_hash=cert_hash):
+            logger.warning(
+                "recovery: EDLI Actionable certificate is quarantined; refusing "
+                "entry projection authority event_id=%s token_id=%s certificate_hash=%s",
+                event_id,
+                token_id,
+                cert_hash,
+            )
+            return {}
+        try:
+            from src.decision_kernel.verifier import _verify_actionable_payload
+
+            _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "recovery: EDLI Actionable certificate fails current verifier; refusing "
+                "entry projection authority event_id=%s token_id=%s certificate_hash=%s error=%s",
+                event_id,
+                token_id,
+                cert_hash,
+                exc,
+            )
+            return {}
+        return payload
+    return {}
+
+
 def _market_event_identity_for_condition(conn: sqlite3.Connection, condition_id: str) -> dict:
     ref = _market_events_ref(conn)
     if ref is None or not condition_id:
@@ -2748,9 +2849,8 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         or command.get("snapshot_condition_id")
         or ""
     ).strip()
-    actionable = _edli_certificate_payload(
+    actionable = _verified_edli_actionable_payload(
         conn,
-        certificate_type="ActionableTradeCertificate",
         event_id=event_id,
         token_id=selected_token_id,
     )
@@ -3848,6 +3948,174 @@ def reconcile_edli_entry_posterior_projection_repairs(
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             logger.error(
                 "recovery: EDLI entry posterior projection repair failed for position %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+_INVALID_ENTRY_AUTHORITY_OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
+INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON = "invalid_entry_actionable_certificate_authority"
+
+
+def _invalid_open_entry_authority_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not all(_table_exists(conn, table) for table in ("position_current", "venue_commands")):
+        return []
+    if _decision_certificates_ref(conn) is None:
+        return []
+    phase_placeholders = ", ".join("?" for _ in _INVALID_ENTRY_AUTHORITY_OPEN_PHASES)
+    rows = conn.execute(
+        f"""
+        WITH latest_entry AS (
+            SELECT
+                pc.*,
+                cmd.command_id AS entry_command_id,
+                cmd.decision_id AS entry_decision_id,
+                cmd.token_id AS entry_selected_token_id,
+                cmd.state AS entry_command_state,
+                cmd.venue_order_id AS entry_venue_order_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY pc.position_id
+                    ORDER BY datetime(cmd.created_at) DESC, cmd.command_id DESC
+                ) AS rn
+              FROM position_current pc
+              JOIN venue_commands cmd
+                ON cmd.position_id = pc.position_id
+             WHERE pc.phase IN ({phase_placeholders})
+               AND cmd.intent_kind = 'ENTRY'
+               AND cmd.side = 'BUY'
+        )
+        SELECT *
+          FROM latest_entry
+         WHERE rn = 1
+        """,
+        tuple(_INVALID_ENTRY_AUTHORITY_OPEN_PHASES),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        candidate = _dict_row(row)
+        event_id = _edli_event_id_from_decision_id(str(candidate.get("entry_decision_id") or ""))
+        if not event_id:
+            continue
+        payload = _verified_edli_actionable_payload(
+            conn,
+            event_id=event_id,
+            token_id=str(candidate.get("entry_selected_token_id") or ""),
+        )
+        if payload:
+            continue
+        candidate["entry_event_id"] = event_id
+        candidate["quarantine_reason"] = INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON
+        out.append(candidate)
+    return out
+
+
+def _quarantine_open_entry_invalid_authority(
+    conn: sqlite3.Connection,
+    *,
+    candidate: Mapping[str, Any],
+) -> bool:
+    from src.state.ledger import append_many_and_project
+
+    position_id = str(candidate.get("position_id") or "").strip()
+    if not position_id:
+        return False
+    idempotency_key = f"{position_id}:invalid_entry_authority_quarantine"
+    if (
+        _table_exists(conn, "position_events")
+        and conn.execute(
+            "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        is not None
+    ):
+        return False
+    now = _now_iso()
+    phase_before = str(candidate.get("phase") or "")
+    sequence_no = _latest_position_sequence(conn, position_id) + 1
+    projection_cols = _table_columns(conn, "position_current")
+    projection = {
+        column: candidate.get(column)
+        for column in projection_cols
+        if column in candidate
+    }
+    projection.update(
+        {
+            "position_id": position_id,
+            "phase": "quarantined",
+            "trade_id": candidate.get("trade_id") or position_id,
+            "chain_state": "entry_authority_quarantined",
+            "exit_reason": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+            "updated_at": now,
+        }
+    )
+    payload = {
+        "schema_version": 1,
+        "reason": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+        "proof_class": "open_position_entry_actionable_certificate_not_current_valid",
+        "position_id": position_id,
+        "phase_before": phase_before,
+        "phase_after": "quarantined",
+        "entry_command_id": str(candidate.get("entry_command_id") or ""),
+        "entry_decision_id": str(candidate.get("entry_decision_id") or ""),
+        "entry_event_id": str(candidate.get("entry_event_id") or ""),
+        "entry_selected_token_id": str(candidate.get("entry_selected_token_id") or ""),
+        "entry_command_state": str(candidate.get("entry_command_state") or ""),
+        "entry_venue_order_id": str(candidate.get("entry_venue_order_id") or ""),
+        "source_proof": {
+            "source_function": "command_recovery.reconcile_invalid_open_entry_authority_quarantines",
+            "source_reason": "EDLI entry certificate is quarantined, missing, or fails current verifier",
+        },
+    }
+    event = {
+        "event_id": f"{position_id}:invalid_entry_authority_quarantined:{sequence_no}",
+        "position_id": position_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "REVIEW_REQUIRED",
+        "occurred_at": now,
+        "phase_before": phase_before or None,
+        "phase_after": "quarantined",
+        "strategy_key": str(candidate.get("strategy_key") or "center_buy"),
+        "decision_id": str(candidate.get("entry_decision_id") or ""),
+        "snapshot_id": candidate.get("decision_snapshot_id"),
+        "order_id": candidate.get("order_id") or candidate.get("entry_venue_order_id"),
+        "command_id": str(candidate.get("entry_command_id") or ""),
+        "caused_by": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+        "idempotency_key": idempotency_key,
+        "venue_status": str(candidate.get("entry_command_state") or ""),
+        "source_module": "src.execution.command_recovery",
+        "env": _latest_position_env(conn, position_id),
+        "payload_json": json.dumps(payload, sort_keys=True),
+    }
+    append_many_and_project(conn, [event], projection)
+    return True
+
+
+def reconcile_invalid_open_entry_authority_quarantines(conn: sqlite3.Connection) -> dict:
+    """Quarantine open positions whose EDLI entry certificate is no longer live-valid."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _invalid_open_entry_authority_candidates(conn):
+        summary["scanned"] += 1
+        position_id = str(candidate.get("position_id") or "")
+        sp_name = "sp_invalid_entry_authority_" + "".join(
+            ch if ch.isalnum() else "_" for ch in position_id
+        )[:80]
+        conn.execute("SAVEPOINT " + sp_name)
+        try:
+            advanced = _quarantine_open_entry_invalid_authority(conn, candidate=candidate)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT " + sp_name)
+            conn.execute("RELEASE SAVEPOINT " + sp_name)
+            logger.error(
+                "recovery: invalid open entry authority quarantine failed for position %s: %s",
                 position_id,
                 exc,
             )
@@ -11592,6 +11860,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += edli_entry_posterior_summary["stayed"]
         summary["errors"] += edli_entry_posterior_summary["errors"]
 
+        invalid_entry_authority_summary = reconcile_invalid_open_entry_authority_quarantines(conn)
+        summary["invalid_open_entry_authority_quarantine"] = invalid_entry_authority_summary
+        summary["advanced"] += invalid_entry_authority_summary["advanced"]
+        summary["stayed"] += invalid_entry_authority_summary["stayed"]
+        summary["errors"] += invalid_entry_authority_summary["errors"]
+
         hard_terminal_projection_summary = reconcile_hard_terminal_position_projection_repairs(conn)
         summary["hard_terminal_position_projection_repair"] = hard_terminal_projection_summary
         summary["advanced"] += hard_terminal_projection_summary["advanced"]
@@ -12045,6 +12319,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_edli_entry_posterior_projection_repairs,
                  "edli_entry_posterior_projection_repair",
                  client_kw=True)
+    _db_pass("invalid_open_entry_authority_quarantine",
+             reconcile_invalid_open_entry_authority_quarantines,
+             "invalid_open_entry_authority_quarantine")
     _db_pass("hard_terminal_position_projection_repair",
              reconcile_hard_terminal_position_projection_repairs,
              "hard_terminal_position_projection_repair")

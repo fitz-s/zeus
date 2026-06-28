@@ -782,6 +782,224 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     )
 
 
+def _edli_event_id_from_decision_id(decision_id: object) -> str:
+    parts = str(decision_id or "").split(":")
+    if len(parts) >= 2 and parts[0] == "edli_exec_cmd":
+        return parts[1]
+    return ""
+
+
+def _open_entry_actionable_certificate_authority_check(rows: list[sqlite3.Row]) -> CheckResult:
+    """Block restart when an open EDLI entry is backed by quarantined/invalid authority."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "world_db": str(WORLD_DB),
+        "scoped_open_position_count": len(rows),
+    }
+    if not rows:
+        return CheckResult(
+            "open_entry_actionable_certificate_authority",
+            True,
+            "no open positions require entry certificate authority checks",
+            evidence,
+        )
+    position_ids = [
+        str(row["position_id"] or "")
+        for row in rows
+        if str(row["position_id"] or "").strip()
+    ]
+    if not position_ids:
+        return CheckResult(
+            "open_entry_actionable_certificate_authority",
+            True,
+            "no open positions with ids require entry certificate authority checks",
+            evidence,
+        )
+    try:
+        from src.decision_kernel.errors import CertificateVerificationError
+        from src.decision_kernel.verifier import _verify_actionable_payload
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "open_entry_actionable_certificate_authority",
+            False,
+            "could not load current actionable verifier",
+            evidence,
+        )
+    quarantined_hashes = _decision_certificate_quarantine_hashes(
+        table_name=DECISION_CERTIFICATES_TABLE,
+        reason_code=REASON_INVALID_LIVE_ACTIONABLE,
+    )
+    evidence["quarantined_count"] = len(quarantined_hashes)
+    risky: list[dict[str, Any]] = []
+    checked = 0
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "venue_commands"):
+                evidence["missing_tables"] = {
+                    "main.venue_commands": _table_exists(conn, "main", "venue_commands"),
+                }
+                return CheckResult(
+                    "open_entry_actionable_certificate_authority",
+                    True,
+                    "venue_commands table absent; no EDLI entry command authority check applied",
+                    evidence,
+                )
+            placeholders = ",".join("?" for _ in position_ids)
+            command_rows = conn.execute(
+                f"""
+                WITH latest_entry AS (
+                    SELECT
+                        position_id,
+                        command_id,
+                        decision_id,
+                        token_id,
+                        state,
+                        venue_order_id,
+                        created_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY position_id
+                            ORDER BY datetime(created_at) DESC, command_id DESC
+                        ) AS rn
+                      FROM main.venue_commands
+                     WHERE intent_kind = 'ENTRY'
+                       AND side = 'BUY'
+                       AND position_id IN ({placeholders})
+                )
+                SELECT *
+                  FROM latest_entry
+                 WHERE rn = 1
+                """,
+                tuple(position_ids),
+            ).fetchall()
+            edli_command_rows = [
+                cmd for cmd in command_rows if _edli_event_id_from_decision_id(cmd["decision_id"])
+            ]
+            if not edli_command_rows:
+                evidence["checked_count"] = 0
+                evidence["risky_count"] = 0
+                evidence["risky"] = []
+                return CheckResult(
+                    "open_entry_actionable_certificate_authority",
+                    True,
+                    "no open EDLI entry positions require Actionable certificate authority checks",
+                    evidence,
+                )
+            if not _table_exists(conn, "world", "decision_certificates"):
+                evidence["missing_tables"] = {
+                    "world.decision_certificates": False,
+                }
+                return CheckResult(
+                    "open_entry_actionable_certificate_authority",
+                    False,
+                    "entry certificate authority table is unavailable",
+                    evidence,
+                )
+            for cmd in edli_command_rows:
+                event_id = _edli_event_id_from_decision_id(cmd["decision_id"])
+                checked += 1
+                cert_rows = conn.execute(
+                    """
+                    SELECT certificate_id, certificate_hash, decision_time, payload_json
+                      FROM world.decision_certificates
+                     WHERE certificate_type = 'ActionableTradeCertificate'
+                       AND semantic_key LIKE ?
+                     ORDER BY datetime(created_at) DESC, certificate_id DESC
+                     LIMIT 50
+                    """,
+                    (f"%{event_id}%",),
+                ).fetchall()
+                selected_token_id = str(cmd["token_id"] or "").strip()
+                matched_cert: sqlite3.Row | None = None
+                matched_payload: dict[str, Any] | None = None
+                for cert_row in cert_rows:
+                    try:
+                        payload = json.loads(str(cert_row["payload_json"] or "{}"))
+                    except Exception:
+                        payload = {}
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    payload_token = str(payload.get("token_id") or "").strip()
+                    semantic_match = selected_token_id and payload_token == selected_token_id
+                    if not semantic_match and selected_token_id:
+                        semantic_match = selected_token_id in str(cert_row["certificate_id"] or "")
+                    if semantic_match or not selected_token_id:
+                        matched_cert = cert_row
+                        matched_payload = payload
+                        break
+                item = {
+                    "position_id": cmd["position_id"],
+                    "command_id": cmd["command_id"],
+                    "command_state": cmd["state"],
+                    "venue_order_id": cmd["venue_order_id"],
+                    "decision_id": cmd["decision_id"],
+                    "event_id": event_id,
+                    "token_id": selected_token_id,
+                }
+                if matched_cert is None or matched_payload is None:
+                    risky.append({**item, "risk": "open_edli_entry_missing_actionable_certificate"})
+                    continue
+                cert_hash = str(matched_cert["certificate_hash"] or "")
+                if cert_hash in quarantined_hashes:
+                    risky.append(
+                        {
+                            **item,
+                            "risk": "open_edli_entry_actionable_certificate_quarantined",
+                            "certificate_hash": cert_hash,
+                            "certificate_id": matched_cert["certificate_id"],
+                        }
+                    )
+                    continue
+                try:
+                    _verify_actionable_payload(
+                        type("_PayloadCarrier", (), {"payload": matched_payload})()
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if not isinstance(exc, CertificateVerificationError):
+                        reason = f"{type(exc).__name__}: {exc}"
+                    else:
+                        reason = str(exc)
+                    risky.append(
+                        {
+                            **item,
+                            "risk": "open_edli_entry_actionable_certificate_fails_current_verifier",
+                            "certificate_hash": cert_hash,
+                            "certificate_id": matched_cert["certificate_id"],
+                            "reason": reason,
+                            "city": matched_payload.get("city"),
+                            "target_date": matched_payload.get("target_date"),
+                            "bin_label": matched_payload.get("bin_label"),
+                            "direction": matched_payload.get("direction"),
+                            "q_live": matched_payload.get("q_live"),
+                            "q_lcb_5pct": matched_payload.get("q_lcb_5pct"),
+                        }
+                    )
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "open_entry_actionable_certificate_authority",
+            False,
+            "could not inspect open entry certificate authority",
+            evidence,
+        )
+    evidence["checked_count"] = checked
+    evidence["risky_count"] = len(risky)
+    evidence["risky"] = risky[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    return CheckResult(
+        "open_entry_actionable_certificate_authority",
+        not risky,
+        "open EDLI entry positions are backed by current-valid Actionable certificates"
+        if not risky
+        else "open EDLI entry positions are backed by quarantined or invalid Actionable certificates",
+        evidence,
+    )
+
+
 def _decision_certificate_quarantine_hashes(
     *,
     table_name: str,
@@ -2877,6 +3095,7 @@ def evaluate() -> dict[str, Any]:
         _collateral_snapshot_freshness_check(),
         _edli_live_order_presubmit_shape_check(),
         _live_actionable_certificate_semantics_check(),
+        _open_entry_actionable_certificate_authority_check(rows),
         _position_current_projection_integrity_check(projection_rows),
         _open_entry_submit_economics_check(rows),
         _resting_venue_command_lifecycle_alignment_check(),

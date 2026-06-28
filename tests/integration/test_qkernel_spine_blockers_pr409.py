@@ -1115,6 +1115,8 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
         q_lcb_guard_basis="OOF_WILSON_95",
         q_lcb_guard_abstained=False,
         q_lcb_guard_cell_key="cell",
+        direction_law_ok=True,
+        coherence_allows=True,
     )
     decision = SimpleNamespace(
         selected=economics,

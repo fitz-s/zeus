@@ -734,12 +734,21 @@ def _insert_actionable_certificate_for_recovery(
     token_id: str = "tok-001",
     q_live: float = 0.37,
     direction: str = "buy_yes",
+    payoff_q_point: float | None = None,
+    quarantine: bool = False,
 ) -> str:
     q_lcb = max(0.0, q_live - 0.05)
     side = "YES" if direction == "buy_yes" else "NO"
+    payoff_q_point = q_live if payoff_q_point is None else payoff_q_point
+    payoff_q_lcb = q_lcb
+    cost = min(0.01, max(0.001, payoff_q_lcb / 2.0)) if payoff_q_lcb > 0 else 0.01
+    edge_lcb = payoff_q_lcb - cost
     payload = {
         "event_id": event_id,
         "event_type": "FORECAST_SNAPSHOT_READY",
+        "causal_snapshot_id": "forecast-snap-edli",
+        "family_id": "family-test",
+        "candidate_id": f"{side}:bin-test:DIRECT_{side}:bin-test@proof",
         "condition_id": "condition-test",
         "token_id": token_id,
         "city": "Karachi",
@@ -751,14 +760,34 @@ def _insert_actionable_certificate_for_recovery(
         "unit": "C",
         "q_live": q_live,
         "q_lcb_5pct": q_lcb,
+        "c_fee_adjusted": 0.51,
+        "c_cost_95pct": 0.51,
+        "p_fill_lcb": 0.5,
+        "trade_score": max(edge_lcb, 0.01),
+        "action_score": max(edge_lcb, 0.01),
+        "executable_snapshot_id": "ems-test",
+        "fdr_family_id": "fdr-family-test",
+        "kelly_decision_id": "kelly-test",
+        "risk_decision_id": "risk-test",
+        "live_cap_usage_id": "live-cap-test",
+        "native_quote_available": True,
+        "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "selection_authority_applied": "qkernel_spine",
         "qkernel_execution_economics": {
             "source": "qkernel_spine",
             "side": side,
-            "payoff_q_point": q_live,
-            "payoff_q_lcb": q_lcb,
+            "candidate_id": f"{side}:bin-test:DIRECT_{side}:bin-test@proof",
+            "route_id": f"DIRECT_{side}:bin-test@proof",
+            "bin_id": "bin-test",
+            "payoff_q_point": payoff_q_point,
+            "payoff_q_lcb": payoff_q_lcb,
+            "cost": cost,
+            "edge_lcb": edge_lcb,
+            "optimal_delta_u": max(edge_lcb, 0.01),
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
         },
-        "causal_snapshot_id": "forecast-snap-edli",
         "final_intent_id": f"intent:{event_id}:{token_id}",
     }
     payload_json = json.dumps(payload, sort_keys=True)
@@ -784,6 +813,28 @@ def _insert_actionable_certificate_for_recovery(
             cert_hash,
         ),
     )
+    if quarantine:
+        from src.state.decision_integrity_quarantine import (
+            DECISION_CERTIFICATES_TABLE,
+            REASON_INVALID_LIVE_ACTIONABLE,
+        )
+        from src.state.schema.decision_integrity_quarantine_schema import ensure_table
+
+        ensure_table(conn)
+
+        conn.execute(
+            """
+            INSERT INTO decision_integrity_quarantine
+                (table_name, row_id, reason_code, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                DECISION_CERTIFICATES_TABLE,
+                cert_hash,
+                REASON_INVALID_LIVE_ACTIONABLE,
+                "2026-04-26T00:00:02Z",
+            ),
+        )
     return cert_hash
 
 
@@ -4332,19 +4383,44 @@ class TestRecoveryResolutionTable:
             {
                 "event_id": event_id,
                 "event_type": "FORECAST_SNAPSHOT_READY",
+                "causal_snapshot_id": "source-run-1",
+                "family_id": "family-condition-1",
+                "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
                 "condition_id": "condition-1",
                 "direction": "buy_no",
                 "token_id": token_id,
+                "strategy_key": "opening_inertia",
                 "q_live": 0.81,
                 "q_lcb_5pct": 0.76,
+                "c_fee_adjusted": 0.55,
+                "c_cost_95pct": 0.55,
+                "p_fill_lcb": 0.5,
+                "trade_score": 0.75,
+                "action_score": 0.75,
+                "executable_snapshot_id": "ems-token-bound",
+                "fdr_family_id": "fdr-token-bound",
+                "kelly_decision_id": "kelly-token-bound",
+                "risk_decision_id": "risk-token-bound",
+                "live_cap_usage_id": "cap-token-bound",
+                "final_intent_id": final_intent_id,
+                "native_quote_available": True,
+                "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
                 "selection_authority_applied": "qkernel_spine",
                 "qkernel_execution_economics": {
                     "source": "qkernel_spine",
                     "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                    "route_id": "DIRECT_NO:bin-33@proof",
+                    "bin_id": "bin-33",
                     "payoff_q_point": 0.81,
                     "payoff_q_lcb": 0.76,
+                    "cost": 0.01,
+                    "edge_lcb": 0.75,
+                    "optimal_delta_u": 0.75,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
                 },
-                "causal_snapshot_id": "source-run-1",
             },
             "2026-06-07T00:00:00Z",
         )
@@ -4467,10 +4543,7 @@ class TestRecoveryResolutionTable:
             },
         )
 
-        assert trade_case["entry_method"] == "venue_fact_recovery"
-        assert trade_case["selected_method"] == "venue_fact_recovery"
-        assert trade_case["discovery_mode"] == "venue_fact_recovery"
-        assert trade_case["p_posterior"] == pytest.approx(0.81)
+        assert trade_case == {}
 
     def test_edli_filled_entry_repair_recovers_missing_bin_label_from_clob_market_identity(
         self,
@@ -4545,11 +4618,44 @@ class TestRecoveryResolutionTable:
             {
                 "event_id": event_id,
                 "event_type": "FORECAST_SNAPSHOT_READY",
+                "causal_snapshot_id": "source-run-clob",
+                "family_id": "family-condition-test",
+                "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
                 "condition_id": condition_id,
                 "direction": "buy_no",
                 "token_id": no_token_id,
+                "strategy_key": "opening_inertia",
                 "q_live": 0.82,
-                "causal_snapshot_id": "source-run-clob",
+                "q_lcb_5pct": 0.77,
+                "c_fee_adjusted": 0.55,
+                "c_cost_95pct": 0.55,
+                "p_fill_lcb": 0.5,
+                "trade_score": 0.76,
+                "action_score": 0.76,
+                "executable_snapshot_id": "ems-clob",
+                "fdr_family_id": "fdr-clob",
+                "kelly_decision_id": "kelly-clob",
+                "risk_decision_id": "risk-clob",
+                "live_cap_usage_id": "cap-clob",
+                "final_intent_id": final_intent_id,
+                "native_quote_available": True,
+                "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
+                "selection_authority_applied": "qkernel_spine",
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33@proof",
+                    "route_id": "DIRECT_NO:bin-33@proof",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.82,
+                    "payoff_q_lcb": 0.77,
+                    "cost": 0.01,
+                    "edge_lcb": 0.76,
+                    "optimal_delta_u": 0.76,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
             },
             "2026-06-07T00:00:00Z",
         )
@@ -4827,6 +4933,86 @@ class TestRecoveryResolutionTable:
             "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone() is None
 
+    def test_live_edli_entry_projection_refuses_quarantined_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-quarantined-cert"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-quarantined")
+        _append_order_fact(
+            conn,
+            order_id="ord-edli-quarantined",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.37,
+            direction="buy_yes",
+            quarantine=True,
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
+    def test_live_edli_entry_projection_refuses_current_invalid_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-invalid-current-cert"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-invalid-current")
+        _append_order_fact(
+            conn,
+            order_id="ord-edli-invalid-current",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.06,
+            direction="buy_yes",
+            payoff_q_point=0.20,
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
     def test_edli_entry_posterior_projection_repair_backfills_existing_zero(
         self,
         conn,
@@ -4875,6 +5061,130 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert current["p_posterior"] == pytest.approx(0.42)
         assert current["entry_method"] == "qkernel_spine"
+
+    def test_edli_entry_posterior_projection_repair_refuses_quarantined_actionable_certificate(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-existing-quarantined"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-existing-quarantined")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.42,
+            direction="buy_yes",
+            quarantine=True,
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Karachi', 'Karachi',
+                '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
+                'buy_yes', 'C', 0.06, 5.0, 0.06, 0.012,
+                0.0, 'forecast-snap-old', 'ens_member_counting', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-existing-quarantined', 'partial',
+                '2026-04-26T00:05:00Z', 'high'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_edli_entry_posterior_projection_repairs,
+        )
+
+        summary = reconcile_edli_entry_posterior_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        current = conn.execute(
+            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["p_posterior"] == 0.0
+        assert current["entry_method"] == "ens_member_counting"
+
+    def test_invalid_open_entry_authority_repair_quarantines_active_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-active-invalid-authority"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id)
+        _advance_to_acked(conn, venue_order_id="ord-edli-active-invalid-authority")
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.37,
+            direction="buy_yes",
+            quarantine=True,
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares
+            ) VALUES (
+                'pos-001', 'active', 'condition-test', 'Karachi', 'Karachi',
+                '2026-05-17', 'Will the highest temperature in Karachi be 40C on May 17?',
+                'buy_yes', 'C', 0.06, 5.0, 0.06, 0.012,
+                0.37, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-001', 'tok-001-no',
+                'condition-test', 'ord-edli-active-invalid-authority', 'partial',
+                '2026-04-26T00:05:00Z', 'high', 5.0
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+            reconcile_invalid_open_entry_authority_quarantines,
+        )
+
+        summary = reconcile_invalid_open_entry_authority_quarantines(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "exit_reason": INVALID_ENTRY_AUTHORITY_QUARANTINE_REASON,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, command_id, payload_json
+              FROM position_events
+             WHERE position_id = 'pos-001'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["phase_before"] == "active"
+        assert event["phase_after"] == "quarantined"
+        assert event["command_id"] == "cmd-001"
+        assert payload["proof_class"] == "open_position_entry_actionable_certificate_not_current_valid"
 
     def test_edli_entry_authority_projection_repair_backfills_legacy_method(
         self,
