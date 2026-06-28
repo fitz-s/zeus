@@ -95,7 +95,6 @@ def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
         "entry_bankroll": 1000.0,
         "exposure_gate_hit": False,
         "entries_paused": False,
-        "block_registry": type("ClearRegistry", (), {"is_clear": lambda self, stage: True})(),
     }
     assert _discovery_gates_allow_entries(**all_clear) is True
     assert _discovery_gates_allow_entries(**{**all_clear, "has_quarantine": True}) is False

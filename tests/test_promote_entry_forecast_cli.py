@@ -292,7 +292,6 @@ def test_unarm_dry_run(
     assert "DRY-RUN" in out
     # untouched
     assert json.loads(cutover.read_text())["state"] == "LIVE_ENABLED"
-    assert not (patched_state_dir / "auto_pause_failclosed.tombstone").exists()
 
 
 def test_unarm_commit_writes(
@@ -307,5 +306,4 @@ def test_unarm_commit_writes(
     payload = json.loads(cutover.read_text())
     assert payload["state"] == "NORMAL"
     assert payload["transitions"][-1]["to"] == "NORMAL"
-    assert (patched_state_dir / "auto_pause_failclosed.tombstone").exists()
     assert "NOT executed" in out

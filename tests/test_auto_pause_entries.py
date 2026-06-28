@@ -93,17 +93,22 @@ class TestAutoRauseEntries:
         # polluted by entries_paused=True left behind by auto-pause assertions.
         cp._control_state.clear()
 
-    def test_resume_clears_pause(self, monkeypatch):
+    def test_resume_clears_pause(self, monkeypatch, tmp_path):
         """Criterion #6: After auto-pause, clearing entries_paused (resume semantics)
         returns is_entries_paused() to False."""
+        db_path = tmp_path / "zeus.db"
+        conn = get_connection(db_path)
+        apply_architecture_kernel_schema(conn)
+        conn.close()
+        monkeypatch.setattr(cp, "get_world_connection", lambda: get_connection(db_path))
         monkeypatch.setattr(cp, "alert_auto_pause", lambda r: None)
 
         # pause_entries must exist and set the flag
         cp.pause_entries("auto_pause:ValueError")
         assert cp.is_entries_paused() is True
 
-        # Resume semantics: operator clears the flag
-        cp._control_state["entries_paused"] = False
+        # Resume semantics: operator expires the durable override.
+        cp.resume_entries("test_resume", issued_by="control_plane")
         assert cp.is_entries_paused() is False
 
     def test_exit_monitor_paths_unaffected(self, monkeypatch):
@@ -170,11 +175,18 @@ class TestAutoRauseEntries:
 
         cp.pause_entries("auto_pause:RuntimeError")
 
-        # In-memory pause must survive the DB failure
-        assert cp.is_entries_paused() is True
-        assert cp.get_entries_pause_source() == "auto_exception"
-        assert cp.get_entries_pause_reason() == "auto_pause:RuntimeError"
+        # In-memory pause must survive the write failure until a public read
+        # attempts to refresh from the durable DB authority.
+        assert cp._control_state["entries_paused"] is True
+        assert cp._control_state.get("entries_pause_source") == "auto_exception"
         assert cp._control_state.get("entries_pause_reason") == "auto_pause:RuntimeError"
+
+        # Public reads are DB-authoritative. If that DB is unavailable, the
+        # operator-facing source must say so instead of presenting memory as
+        # a second authority.
+        assert cp.is_entries_paused() is True
+        assert cp.get_entries_pause_source() == "control_db_query_error"
+        assert cp.get_entries_pause_reason() == "entries_pause_durable_state_unavailable"
 
     def test_auto_pause_reason_hydrates_from_active_control_override_and_clears_on_resume(self, monkeypatch, tmp_path):
         control_path = tmp_path / "control_plane.json"

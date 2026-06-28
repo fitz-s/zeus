@@ -191,22 +191,6 @@ def alert_auto_pause(reason_code: str) -> None:
     )
 
 
-def _auto_pause_tombstone_path():
-    return state_path("auto_pause_failclosed.tombstone")
-
-
-def _clear_auto_pause_tombstone() -> None:
-    """Clear the fail-closed tombstone after an explicit operator resume."""
-    import os
-    try:
-        os.remove(_auto_pause_tombstone_path())
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.error("Failed to clear auto-pause tombstone on resume: %s", exc)
-
-
-
 AUTO_PAUSE_OVERRIDE_ID = "control_plane:global:entries_paused"
 
 
@@ -407,7 +391,6 @@ def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
         )
-        _clear_auto_pause_tombstone()
         expire_control_override(
             conn,
             override_id="control_plane:global:edge_threshold_multiplier",
@@ -647,7 +630,6 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 override_id="control_plane:global:entries_paused",
                 expired_at=issued_at,
             )
-            _clear_auto_pause_tombstone()
             expire_control_override(
                 conn,
                 override_id="control_plane:global:edge_threshold_multiplier",

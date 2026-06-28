@@ -56,21 +56,17 @@ except Exception as e:
     print(f"db_err={e}")
     raise SystemExit(0)
 
-# Read status_summary for funnel + gate 11
+# Read status_summary for funnel + current blocker count
 try:
     ss = json.load(open('state/status_summary.json'))
     cycle = ss.get('cycle',{})
     funnel = ss.get('lifecycle_funnel',{}).get('counts',{})
-    g11_state = "unknown"
-    for b in cycle.get('block_registry',[]):
-        if b.get('name') == 'evaluate_entry_forecast_rollout_gate':
-            g11_state = b.get('state','unknown')
-            break
+    blockers = sum(1 for b in cycle.get('block_registry',[]) if b.get('state') in ('blocking', 'unknown'))
 except Exception:
     funnel = {}
-    g11_state = "unknown"
+    blockers = "unknown"
 
-print(f"src[3h={mx2t3_src}/{mn2t3_src} 6h={mx2t6_src}/{mn2t6_src}] pr[3h={mx2t3_pr}/{mn2t3_pr} 6h={mx2t6_pr}/{mn2t6_pr}] latest={latest} g11={g11_state} fn={funnel.get('evaluated','?')}/{funnel.get('selected','?')}/{funnel.get('submitted','?')}/{funnel.get('filled','?')}")
+print(f"src[3h={mx2t3_src}/{mn2t3_src} 6h={mx2t6_src}/{mn2t6_src}] pr[3h={mx2t3_pr}/{mn2t3_pr} 6h={mx2t6_pr}/{mn2t6_pr}] latest={latest} blockers={blockers} fn={funnel.get('evaluated','?')}/{funnel.get('selected','?')}/{funnel.get('submitted','?')}/{funnel.get('filled','?')}")
 PY
 )
   last=$(cat "$STATE_FILE" 2>/dev/null)

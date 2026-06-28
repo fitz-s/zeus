@@ -55,7 +55,6 @@ RISK_DB = STATE_DIR / "risk_state.db"
 POSITIONS_JSON = STATE_DIR / "positions.json"
 STATUS_JSON = STATE_DIR / "status_summary.json"
 SCHEDULER_HEALTH_JSON = STATE_DIR / "scheduler_jobs_health.json"
-AUTO_PAUSE_TOMBSTONE = STATE_DIR / "auto_pause_failclosed.tombstone"
 FORECAST_ROW_COUNT_EVIDENCE_JSON = STATE_DIR / "k2_forecasts_daily_row_count.json"
 
 TODAY = date.today().isoformat()
@@ -2389,7 +2388,6 @@ def _add_p4_runtime_checks(
     env: dict[str, str],
     scheduler_health_path: Path,
     forecast_row_count_evidence_path: Path,
-    auto_pause_tombstone_path: Path,
     status_summary_path: Path,
 ) -> None:
     wu_key_present = bool((env.get("WU_API_KEY") or "").strip())
@@ -2420,22 +2418,6 @@ def _add_p4_runtime_checks(
     _add_p4_forecast_row_count_check(
         report,
         evidence_path=forecast_row_count_evidence_path,
-    )
-
-    tombstone_present = auto_pause_tombstone_path.exists()
-    tombstone_detail = (
-        "auto-pause tombstone absent"
-        if not tombstone_present
-        else "auto-pause tombstone present: "
-        + auto_pause_tombstone_path.read_text(encoding="utf-8", errors="replace").strip()
-    )
-    _add_p4_check(
-        report,
-        check_id="p4.4_8.auto_pause_tombstone_absent",
-        met=not tombstone_present,
-        detail=tombstone_detail,
-        code="p4_auto_pause_tombstone_present",
-        lane="4.8",
     )
 
     payload, error = _load_json_object(status_summary_path)
@@ -2527,7 +2509,6 @@ def build_p4_readiness_report(
     scheduler_health_path: Path | None = None,
     forecast_row_count_evidence_path: Path | None = None,
     status_summary_path: Path | None = None,
-    auto_pause_tombstone_path: Path | None = None,
 ) -> dict:
     """Return a read-only P4 readiness report for post-P3 blockers."""
     report = _new_report("p4-readiness", world_db)
@@ -2621,10 +2602,6 @@ def build_p4_readiness_report(
         forecast_row_count_evidence_path=(
             forecast_row_count_evidence_path
             or effective_state_dir / "k2_forecasts_daily_row_count.json"
-        ),
-        auto_pause_tombstone_path=(
-            auto_pause_tombstone_path
-            or effective_state_dir / "auto_pause_failclosed.tombstone"
         ),
         status_summary_path=status_summary_path or effective_state_dir / "status_summary.json",
     )

@@ -494,7 +494,7 @@ class HeartbeatSupervisor:
             try:
                 self._heartbeat_id = await self._post_heartbeat_once(self._heartbeat_id)
                 self.record_success()
-            except Exception as exc:  # fail closed, surface through status/tombstone
+            except Exception as exc:  # fail closed, surface through status
                 # Polymarket echoes the rejected heartbeat_id in the 400 body.
                 # Treating that value as a fresh hint can pin the lease owner to
                 # a known-bad token until a later timeout resets the chain, which

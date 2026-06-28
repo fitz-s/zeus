@@ -1,15 +1,12 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
-"""Entries Block Registry — single source of truth for 'why are entries blocked?'.
+"""Entries Block Registry — runtime snapshot for current entry blockers.
 
-13 gates spread across 5 categories.  Each gate has one adapter in
-``src/control/block_adapters/``.  Call ``EntriesBlockRegistry.from_runtime(deps)``
-to bind the registry to live runtime deps, then use ``enumerate_blocks()``,
-``blocking_blocks()``, ``is_clear()``, ``first_blocker()`` to interrogate it.
-
-Phase 1 (this PR): observational only.  The registry is a read-only
-side-channel — existing cycle_runner.py:752 logic is NOT changed.
+Only probes whose BLOCKING or UNKNOWN state reflects an actual live entry
+blocker belong here. Retired gates, duplicate derived fields, and
+informational-only probes are intentionally excluded so the registry cannot
+display fake blocking state.
 """
 
 from __future__ import annotations
@@ -25,32 +22,27 @@ if TYPE_CHECKING:
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
 class BlockCategory(str, Enum):
-    FILE_FAIL_CLOSED  = "file_fail_closed"   # gates 1, 2
-    DB_CONTROL_PLANE  = "db_control_plane"   # gates 3, 4, 5
-    RISKGUARD         = "riskguard"          # gates 6, 7, 8
-    RUNTIME_HEALTH    = "runtime_health"     # gates 9, 10
-    OPERATOR_ROLLOUT  = "operator_rollout"   # gates 11, 12, 13
+    DB_CONTROL_PLANE  = "db_control_plane"
+    RISKGUARD         = "riskguard"
+    RUNTIME_HEALTH    = "runtime_health"
 
 
 class BlockStage(str, Enum):
-    DISCOVERY = "discovery"   # blocks at cycle_runner.py:752 short-circuit
-    EVALUATOR = "evaluator"   # blocks inside evaluator phase (gate 11 only)
+    DISCOVERY = "discovery"
 
 
 class BlockState(str, Enum):
     CLEAR    = "clear"
     BLOCKING = "blocking"
-    UNKNOWN  = "unknown"   # adapter probe raised — fail-closed (treat as BLOCKING)
+    UNKNOWN  = "unknown"   # adapter probe raised; unknown in the operator snapshot
 
 
 # ── Priority order for first_blocker() ────────────────────────────────────────
 
 _CATEGORY_PRIORITY: dict[BlockCategory, int] = {
-    BlockCategory.FILE_FAIL_CLOSED : 0,
-    BlockCategory.DB_CONTROL_PLANE : 1,
-    BlockCategory.RUNTIME_HEALTH   : 2,
-    BlockCategory.RISKGUARD        : 3,
-    BlockCategory.OPERATOR_ROLLOUT : 4,
+    BlockCategory.DB_CONTROL_PLANE : 0,
+    BlockCategory.RUNTIME_HEALTH   : 1,
+    BlockCategory.RISKGUARD        : 2,
 }
 
 
@@ -61,7 +53,7 @@ class Block:
     """Probe result for one gate.  Immutable — adapters return fresh instances."""
 
     id: int
-    """1-13, matches GATE_AUDIT.yaml."""
+    """Stable runtime blocker id."""
 
     name: str
     """Stable kebab/snake_case identifier."""
@@ -74,7 +66,7 @@ class Block:
     """Populated only when state == BLOCKING or UNKNOWN."""
 
     state_source: str
-    """Human-readable: 'file:state/auto_pause_failclosed.tombstone'."""
+    """Human-readable source descriptor."""
 
     source_file_line: str
     """'src/control/control_plane.py:385' — citation that adapter probes."""
@@ -112,20 +104,20 @@ class Block:
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 class EntriesBlockRegistry:
-    """Single source of truth for 'why are entries blocked right now?'.
+    """Operator snapshot for current runtime entry blockers.
 
     USAGE::
 
         registry = EntriesBlockRegistry.from_runtime(deps)
         blocks   = registry.enumerate_blocks(stage=BlockStage.DISCOVERY)
         blockers = registry.blocking_blocks(stage=BlockStage.DISCOVERY)
-        if not registry.is_clear(BlockStage.DISCOVERY):
-            first = registry.first_blocker(BlockStage.DISCOVERY)
+        first = registry.first_blocker(BlockStage.DISCOVERY)
 
-    Phase 1: all 13 adapters are probed lazily on the first call to any
-    method, then cached for the lifetime of the registry instance.  Each
-    cycle creates a new registry instance, so there is no cross-cycle
-    staleness.
+    The registry is not a hidden entry gate. Runtime entry authority remains
+    the explicit ``_discovery_gates_allow_entries`` argument list in
+    ``src.engine.cycle_runner``. Adapters are probed lazily on the first call
+    to any method, then cached for the lifetime of the registry instance. Each
+    cycle creates a new registry instance, so there is no cross-cycle staleness.
     """
 
     def __init__(self, adapters: Sequence["BlockAdapter"]) -> None:
@@ -135,7 +127,7 @@ class EntriesBlockRegistry:
 
     @classmethod
     def from_runtime(cls, deps: "RegistryDeps") -> "EntriesBlockRegistry":
-        """Build registry with all 13 adapters, bound to live runtime deps."""
+        """Build registry with current runtime-blocking adapters."""
         from src.control.block_adapters import ALL_ADAPTERS  # avoid circular at import time
         registry = cls([adapter_cls() for adapter_cls in ALL_ADAPTERS])
         registry._deps = deps
@@ -155,8 +147,8 @@ class EntriesBlockRegistry:
             try:
                 block = adapter.probe(self._deps)
             except Exception as exc:  # noqa: BLE001
-                # Fail-closed safety net — individual adapter already wraps in
-                # try/except, but protect the registry itself too.
+                # Individual adapters already wrap their own exceptions, but
+                # protect the snapshot itself so observability still emits.
                 block = Block(
                     id=adapter.id,
                     name=adapter.name,
@@ -193,24 +185,20 @@ class EntriesBlockRegistry:
         self,
         stage: BlockStage | Literal["all"] = "all",
     ) -> list[Block]:
-        """Return only blocks with state == BLOCKING or UNKNOWN (fail-closed)."""
+        """Return blocks that are blocking or unknown in the operator snapshot."""
         return [
             b for b in self.enumerate_blocks(stage)
             if b.state in (BlockState.BLOCKING, BlockState.UNKNOWN)
         ]
 
     def is_clear(self, stage: BlockStage = BlockStage.DISCOVERY) -> bool:
-        """Return True iff no gate at this stage is BLOCKING or UNKNOWN.
-
-        UNKNOWN is treated as BLOCKING (fail-closed per spec).
-        """
+        """Return True iff no snapshot probe is BLOCKING or UNKNOWN."""
         return len(self.blocking_blocks(stage)) == 0
 
     def first_blocker(self, stage: BlockStage) -> Optional[Block]:
-        """Return highest-priority blocking gate.
+        """Return highest-priority blocking snapshot probe.
 
-        Priority order: FILE_FAIL_CLOSED > DB_CONTROL_PLANE > RUNTIME_HEALTH
-        > RISKGUARD > OPERATOR_ROLLOUT.
+        Priority order: DB_CONTROL_PLANE > RUNTIME_HEALTH > RISKGUARD.
         Within category, smaller ``id`` wins.
         """
         blockers = self.blocking_blocks(stage)

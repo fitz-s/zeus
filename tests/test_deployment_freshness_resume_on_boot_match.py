@@ -13,7 +13,7 @@ now matches boot SHA), any lingering deployment_freshness_4h_divergence pause
 must be automatically cleared so entries are not perpetually blocked.
 
 Coverage:
-  R1: SHA match → pause cleared (tombstone gone, control_overrides expired, log emitted)
+  R1: SHA match → pause cleared (control_overrides expired, log emitted)
   R2: SHA mismatch → pause NOT cleared (operator must investigate)
   R3: entries not paused → no-op (resume_entries not called)
   R4: entries paused for different reason → not touched by auto-resume

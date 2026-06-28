@@ -837,6 +837,50 @@ def test_exit_lifecycle_skips_inactive_position_before_order_status_check(conn):
     assert stats["skipped_inactive"] == 1
 
 
+def test_exit_lifecycle_does_not_treat_closed_string_as_terminal(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-closed-string-pending-exit",
+        market_id="mkt-closed-string-pending-exit",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-27",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        order_status="sell_pending_confirmation",
+        last_exit_order_id="ord-closed-string-pending-exit",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+    )
+    position.state = "closed"
+    portfolio = PortfolioState(positions=[position])
+
+    class FakeClob:
+        calls = 0
+
+        def get_order_status(self, order_id):
+            assert order_id == "ord-closed-string-pending-exit"
+            self.calls += 1
+            return {"status": "LIVE"}
+
+    clob = FakeClob()
+    stats = exit_lifecycle.check_pending_exits(portfolio, clob, conn=conn)
+
+    assert clob.calls == 1
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert "skipped_inactive" not in stats
+
+
 def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position

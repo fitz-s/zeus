@@ -1,7 +1,7 @@
 # Created: 2026-05-04
 # Last reused/audited: 2026-05-04
 # Authority basis: docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
-"""Gate 6: risk_allows_new_entries_predicate adapter.
+"""Blocker 6: risk_allows_new_entries_predicate adapter.
 
 Probes: db:risk_state (latest row) — uses deps.risk_state_db_connection_factory()
 Blocks when: risk_level != RiskLevel.GREEN.
@@ -68,5 +68,5 @@ class RiskLevelAdapter:
                 owner_module="src.riskguard.riskguard",
                 owner_function="tick_with_portfolio",
                 raw_probe={"exception": str(exc)},
-                notes="probe raised — fail-closed",
+                notes="probe raised — unknown in snapshot",
             )

@@ -112,8 +112,8 @@ os.replace(tmp, state_path)
 print(f"  wrote {state_path} :: state=LIVE_ENABLED")
 PY
 
-# ---- 3) Expire entries_paused override + clear auto-pause tombstone ----
-echo "[arm_live_mode] step 3/3 — expire entries_paused + clear tombstone"
+# ---- 3) Expire entries_paused override + clear legacy pause files ----
+echo "[arm_live_mode] step 3/3 — expire entries_paused + clear legacy pause files"
 .venv/bin/python - <<PY
 import sys
 sys.path.insert(0, ".")
@@ -132,10 +132,8 @@ PY
 
 # control_overrides is a VIEW over control_overrides_history (B070), so
 # direct UPDATE is illegal — must INSERT an 'expire' row via the
-# canonical helper. The tombstone is a separate signal: when a cycle
-# auto-pauses on an exception it writes
-# state/auto_pause_failclosed.tombstone. is_entries_paused() OR's the
-# override and the tombstone, so both must be cleared.
+# canonical helper. The tombstone/streak files are retired legacy artifacts;
+# clear them if present so old state cannot confuse operators.
 TOMBSTONE="state/auto_pause_failclosed.tombstone"
 if [[ -f "$TOMBSTONE" ]]; then
   printf "  removing tombstone "

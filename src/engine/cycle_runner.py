@@ -15,10 +15,9 @@ from datetime import datetime, timezone
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
 from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
-# 2026-05-04 (live-block antibody — structural fix #4): single source of truth
-# for "why are entries blocked right now?" across all 13 stacked gates.
-# Phase 1 is observational — registry snapshot is logged + emitted into the
-# cycle JSON before the existing L752 short-circuit.  Existing logic unchanged.
+# 2026-05-04 (live-block antibody — structural fix #4): operator snapshot for
+# "why are entries blocked right now?" across current runtime blocker probes.
+# Runtime entry authority remains _discovery_gates_allow_entries() below.
 # See docs/operations/task_2026-05-04_live_block_root_cause/REGISTRY_DESIGN.md
 from src.control.entries_block_registry import (
     BlockStage,
@@ -363,7 +362,6 @@ def _discovery_gates_allow_entries(
     entry_bankroll,
     exposure_gate_hit: bool,
     entries_paused: bool,
-    block_registry,
 ) -> bool:
     """Return True only when ALL entry-blocking conditions are clear.
 
@@ -375,16 +373,10 @@ def _discovery_gates_allow_entries(
 
     Fail-closed rules:
     - Any non-GREEN risk_level → blocked (fails closed on unknown future levels).
-    - block_registry is None (construction failed) → blocked. Registry-unavailable
-      is treated as is_clear=False to preserve the fail-closed contract. This is
-      intentional: a broken safety registry is itself a blocking condition.
-    - block_registry.is_clear(BlockStage.DISCOVERY) is False → blocked.
     - Status dicts missing the "entry" key default to not allowing submit.
     - Degraded/unknown forecast freshness blocks entries while monitor/exit
       lanes continue; it is not an observability-only tag.
     """
-    if block_registry is None or not block_registry.is_clear(BlockStage.DISCOVERY):
-        return False
     return (
         chain_ready
         and not has_quarantine
@@ -1026,31 +1018,20 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # posture surfaces only when it is the *sole* block.
     if entries_blocked_reason is None and _current_posture != "NORMAL":
         entries_blocked_reason = f"posture={_current_posture}"
-    # ── BLOCK-REGISTRY BUILD (codereview-may19.md P0-1) ─────────────────────
-    # Build registry first; _block_registry=None means construction failed and
-    # the gate FAIL-CLOSES (registry-unavailable is itself a blocking condition).
-    # Snapshot is written to summary JSON for diagnostics regardless of gate outcome.
-    # CI gate `tests/test_no_unregistered_block_predicate.py` enforces all block
-    # predicates are registered adapters.
-    _block_registry = None  # fail-closed default; set below on success
+    # ── BLOCK-REGISTRY SNAPSHOT ───────────────────────────────────────────────
+    # The registry is observability only. Entry authority is the explicit
+    # _discovery_gates_allow_entries() inputs below; a broken snapshot must not
+    # become an extra runtime blocker.
     try:
-        import os as _os
-        from pathlib import Path as _Path
         from src.state.db import get_world_connection as _get_world_conn, get_connection as _get_db_conn, RISK_DB_PATH as _RISK_DB_PATH
-        from src.riskguard import riskguard as _riskguard_mod
         from src.control import heartbeat_supervisor as _heartbeat_mod
         from src.control import ws_gap_guard as _ws_gap_mod
-        from src.control import entry_forecast_rollout as _rollout_gate_mod
         _block_registry = EntriesBlockRegistry.from_runtime(
             RegistryDeps(
-                state_dir=_Path(STATE_DIR),
                 db_connection_factory=_get_world_conn,
                 risk_state_db_connection_factory=lambda: _get_db_conn(_RISK_DB_PATH),
-                riskguard_module=_riskguard_mod,
                 heartbeat_module=_heartbeat_mod,
                 ws_gap_guard_module=_ws_gap_mod,
-                rollout_gate_module=_rollout_gate_mod,
-                env=dict(_os.environ),
             )
         )
         _block_snapshot = _block_registry.enumerate_blocks(stage="all")
@@ -1066,8 +1047,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         )
         summary["block_registry"] = [b.to_dict() for b in _block_snapshot]
     except Exception as _registry_exc:  # noqa: BLE001
-        # Registry construction failed — _block_registry stays None.
-        # The gate will fail-closed: _block_registry=None → gate returns False.
         logger.warning(
             "ENTRIES_BLOCK_REGISTRY_SNAPSHOT_FAILED cycle=%s exc=%s: %s",
             summary.get("cycle_id", "?"),
@@ -1080,7 +1059,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # _discovery_gates_allow_entries() is the SINGLE authority for entry dispatch.
     # It consumes all known blockers as explicit kwargs. Status dicts missing the
     # "entry" key default to not allowing submit (fail-closed per PR #54 fix-up).
-    # _block_registry=None (construction failed above) → gate fails closed.
     if _discovery_gates_allow_entries(
         risk_level=risk_level,
         heartbeat_status=_heartbeat_status,
@@ -1095,7 +1073,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         entry_bankroll=entry_bankroll,
         exposure_gate_hit=exposure_gate_hit,
         entries_paused=entries_paused,
-        block_registry=_block_registry,
     ):
         try:
             p_dirty, t_dirty = _execute_discovery_phase(

@@ -60,7 +60,6 @@ _PENDING_EXIT_SCAN_INACTIVE_STATES = frozenset(
         "admin_closed",
         "quarantined",
         "economically_closed",
-        "closed",
     }
 )
 
