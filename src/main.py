@@ -6874,6 +6874,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             all_families = set(family_keys) | rest_pull_families | held_reemit_families
         expired_unadmitted = 0
         expired_stale_pending = 0
+        expired_rest_pull_blockers = 0
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
@@ -6928,6 +6929,13 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     decision_time=received_at,
                     supersede_stale_admitted=True,
                 )
+                expired_rest_pull_blockers = (
+                    _edli_supersede_pending_redecisions_for_rest_pull_families(
+                        world_prune,
+                        rest_pull_families,
+                        decision_time=received_at,
+                    )
+                )
                 world_prune.commit()
             finally:
                 prune_mutex.release()
@@ -6974,6 +6982,13 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 world,
                 set(all_families),
                 decision_time=received_at,
+            )
+            expired_rest_pull_blockers += (
+                _edli_supersede_pending_redecisions_for_rest_pull_families(
+                    world,
+                    rest_pull_families,
+                    decision_time=received_at,
+                )
             )
             current_pending = _edli_pending_entity_keys(world, event_types=(REDECISION_EVENT_TYPE,))
             fresh_events = []
@@ -7031,13 +7046,15 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             "entry_families=%d rest_pulls=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
-            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d expired_stale_pending=%d",
+            "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d "
+            "expired_stale_pending=%d expired_rest_pull_blockers=%d",
             len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
             len(held_reemit_families),
             len(all_families),
             len(pending_families),
             len(set(all_families) & pending_families),
             len(emitted), cancelled, expired_unadmitted, expired_stale_pending,
+            expired_rest_pull_blockers,
         )
         if confirm_refresh_summary:
             logger.info(
@@ -8013,6 +8030,94 @@ def _preserve_recent_rest_pull_redecision(
     except Exception:  # noqa: BLE001
         return False
     return 0.0 <= age_seconds < float(_REDECISION_REST_PULL_EXPIRY_GRACE_SECONDS)
+
+
+def _edli_supersede_pending_redecisions_for_rest_pull_families(
+    world_conn,
+    rest_pull_families: set[tuple[str, str, str]],
+    *,
+    decision_time: str,
+) -> int:
+    """Expire generic pending redecision rows that would suppress a rest-pull emit.
+
+    A live OPEN maker rest that has fired ``rest_pull`` is command-management
+    evidence: the order must be cancelled/repriced through a durable
+    ``redecision_origin=rest_pull`` row. A generic market-price or entry-screen
+    pending event for the same family is not equivalent because the rest may
+    disappear from the open-rest set after cancel; if that generic row is the one
+    preserved, the cancel/reprice continuity proof can be lost.
+
+    Only unclaimed ``pending`` rows are superseded. Claimed/processing rows may
+    already be inside the reactor and are left to the normal lease/stale paths.
+    """
+
+    clean_families = {
+        (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        for city, target_date, metric in rest_pull_families or set()
+        if str(city or "").strip()
+        and str(target_date or "").strip()
+        and str(metric or "").strip() in {"high", "low"}
+    }
+    if not clean_families:
+        return 0
+    from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
+
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT e.event_id, e.payload_json
+              FROM opportunity_event_processing p
+                   INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e ON e.event_id = p.event_id
+             WHERE p.consumer_name = 'edli_reactor_v1'
+               AND p.processing_status = 'pending'
+               AND e.event_type = ?
+             ORDER BY p.updated_at ASC
+             LIMIT 5000
+            """,
+            (_REDECISION_EVENT_TYPE,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return 0
+    expire_ids: list[str] = []
+    for row in rows:
+        try:
+            event_id = str(row[0] or "")
+            payload = json.loads(str(row[1] or "{}"))
+            family = (
+                str(payload.get("city") or "").strip(),
+                str(payload.get("target_date") or "").strip(),
+                str(payload.get("metric") or "").strip(),
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not event_id or family not in clean_families:
+            continue
+        if _redecision_payload_origin(payload) == "rest_pull":
+            continue
+        expire_ids.append(event_id)
+    if not expire_ids:
+        return 0
+    now = str(decision_time)
+    changed = 0
+    for start in range(0, len(expire_ids), 250):
+        chunk = expire_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = world_conn.execute(
+            f"""
+            UPDATE opportunity_event_processing
+               SET processing_status = 'expired',
+                   processed_at = ?,
+                   updated_at = ?,
+                   last_error = 'REDECISION_SUPERSEDED_BY_REST_PULL:open_rest_requires_cancel_reprice'
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND processing_status = 'pending'
+               AND event_id IN ({placeholders})
+            """,
+            (now, now, *chunk),
+        )
+        changed += int(cur.rowcount or 0)
+    return changed
 
 
 def _edli_expire_unadmitted_redecision_pending(

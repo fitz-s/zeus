@@ -872,6 +872,137 @@ def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
     assert tuple(row) == ("pending", None)
 
 
+def test_rest_pull_supersedes_generic_pending_redecision_blocker():
+    """A live rest-pull must not be suppressed by an older generic pending row."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    generic_payload = dataclasses.asdict(
+        _ready_payload(
+            city="Ankara",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-generic",
+            snapshot_id="snap-generic",
+        )
+    )
+    generic_payload["redecision_origin"] = "market_price"
+    generic = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Ankara|2026-06-29|high|run-generic",
+        source="market-channel",
+        observed_at="2026-06-28T04:20:00+00:00",
+        available_at="2026-06-28T04:20:00+00:00",
+        received_at="2026-06-28T04:20:00+00:00",
+        causal_snapshot_id="snap-generic",
+        payload=generic_payload,
+        priority=50,
+        created_at="2026-06-28T04:20:00+00:00",
+    )
+    rest_payload = dict(generic_payload)
+    rest_payload["source_run_id"] = "run-rest"
+    rest_payload["snapshot_id"] = "snap-rest"
+    rest_payload["redecision_origin"] = "rest_pull"
+    rest_pull = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Ankara|2026-06-29|high|run-rest",
+        source="rest-pull",
+        observed_at="2026-06-28T04:21:00+00:00",
+        available_at="2026-06-28T04:21:00+00:00",
+        received_at="2026-06-28T04:21:00+00:00",
+        causal_snapshot_id="snap-rest",
+        payload=rest_payload,
+        priority=50,
+        created_at="2026-06-28T04:21:00+00:00",
+    )
+    store.insert_or_ignore(generic)
+    store.insert_or_ignore(rest_pull)
+
+    expired = main._edli_supersede_pending_redecisions_for_rest_pull_families(
+        world,
+        {("Ankara", "2026-06-29", "high")},
+        decision_time="2026-06-28T04:22:00+00:00",
+    )
+
+    rows = dict(
+        world.execute(
+            """
+            SELECT e.entity_key, p.processing_status || ':' || COALESCE(p.last_error, '')
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE p.consumer_name = ?
+            """,
+            (store.consumer_name,),
+        ).fetchall()
+    )
+    assert expired == 1
+    assert rows[generic.entity_key] == (
+        "expired:REDECISION_SUPERSEDED_BY_REST_PULL:open_rest_requires_cancel_reprice"
+    )
+    assert rows[rest_pull.entity_key] == "pending:"
+
+
+def test_rest_pull_supersede_leaves_processing_redecision_alone():
+    """The rest-pull blocker cleanup must not terminalize an in-flight reactor claim."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    payload = dataclasses.asdict(
+        _ready_payload(
+            city="Ankara",
+            target_date="2026-06-29",
+            metric="high",
+            source_run_id="run-processing",
+            snapshot_id="snap-processing",
+        )
+    )
+    payload["redecision_origin"] = "market_price"
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Ankara|2026-06-29|high|run-processing",
+        source="market-channel",
+        observed_at="2026-06-28T04:20:00+00:00",
+        available_at="2026-06-28T04:20:00+00:00",
+        received_at="2026-06-28T04:20:00+00:00",
+        causal_snapshot_id="snap-processing",
+        payload=payload,
+        priority=50,
+        created_at="2026-06-28T04:20:00+00:00",
+    )
+    store.insert_or_ignore(event)
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processing',
+               claimed_at = '2026-06-28T04:21:00+00:00',
+               updated_at = '2026-06-28T04:21:00+00:00'
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    )
+
+    expired = main._edli_supersede_pending_redecisions_for_rest_pull_families(
+        world,
+        {("Ankara", "2026-06-29", "high")},
+        decision_time="2026-06-28T04:22:00+00:00",
+    )
+
+    row = world.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("processing", None)
+
+
 def test_old_rest_pull_redecision_still_expires_without_current_edge():
     """The rest-pull grace is a continuity window, not an infinite pending queue."""
 
