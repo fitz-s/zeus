@@ -1656,11 +1656,11 @@ def test_day0_emit_is_reactor_budgeted():
     assert "EDLI day0 emit budget exhausted" in emit_src
 
 
-def test_redecision_screen_belief_read_filters_venue_closed_families():
-    """Continuous entry refresh must not revive venue-closed belief rows."""
+def test_redecision_screen_belief_read_filters_forecast_only_inadmissible_families():
+    """Continuous entry refresh must not spend money-path refresh on stale target-day beliefs."""
 
     src = inspect.getsource(main._edli_continuous_redecision_screen_cycle)
-    assert "_all_latest_beliefs(world_ro, decision_time=received_at)" in src
+    assert "forecast_only_admissible=True" in src
     assert "_all_latest_beliefs(world_ro)" not in src
 
 
@@ -1681,13 +1681,14 @@ def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_change
     world.row_factory = sqlite3.Row
     init_schema(world)
     store = EventStore(world)
+    now = datetime.now(timezone.utc).isoformat()
     event = make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
         entity_key="Paris|2026-06-26|high|run-1",
         source="forecast",
-        observed_at="2026-06-26T10:00:00+00:00",
-        available_at="2026-06-26T10:00:00+00:00",
-        received_at="2026-06-26T10:00:00+00:00",
+        observed_at=now,
+        available_at=now,
+        received_at=now,
         payload=ForecastSnapshotReadyPayload(
             city="Paris",
             target_date="2026-06-26",
@@ -1713,18 +1714,18 @@ def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_change
             coverage_completeness_status="COMPLETE",
             coverage_readiness_status="LIVE_ELIGIBLE",
         ),
-        created_at="2026-06-26T10:00:00+00:00",
+        created_at=now,
     )
     store.insert_or_ignore(event)
     world.execute(
         """
         UPDATE opportunity_event_processing
            SET processing_status = 'processed',
-               processed_at = '2026-06-26T10:00:01+00:00',
-               updated_at = '2026-06-26T10:00:01+00:00'
+               processed_at = ?,
+               updated_at = ?
          WHERE consumer_name = ? AND event_id = ?
         """,
-        (store.consumer_name, event.event_id),
+        (now, now, store.consumer_name, event.event_id),
     )
     payload = {
         "event_id": event.event_id,
@@ -1750,8 +1751,8 @@ def test_requeue_misclassified_local_pre_submit_rejections_reports_actual_change
             json.dumps(payload, sort_keys=True),
             "payload-hash-1",
             "existing_executor",
-            "2026-06-26T10:00:02+00:00",
-            "2026-06-26T10:00:02+00:00",
+            now,
+            now,
             1,
         ),
     )

@@ -186,7 +186,7 @@ def test_latest_belief_reader_uses_bounded_sql_latest_window():
     assert "sorted(" not in src
 
 
-def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
+def test_latest_belief_reader_filters_forecast_only_inadmissible_families():
     conn = _mem_world()
     _cache_yes_belief(
         conn,
@@ -210,6 +210,7 @@ def test_latest_belief_reader_skips_venue_closed_families_at_decision_time():
     beliefs = cr._all_latest_beliefs(
         conn,
         decision_time="2026-06-01T13:00:00+00:00",
+        forecast_only_admissible=True,
     )
 
     assert {belief.target_date for belief in beliefs} == {"2026-06-02"}

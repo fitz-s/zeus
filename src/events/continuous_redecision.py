@@ -615,11 +615,32 @@ def _decision_time_utc(decision_time: str | datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _belief_venue_closed(belief: CachedBelief, *, decision_time_utc: datetime | None) -> bool:
+def _belief_forecast_only_admissible(
+    belief: CachedBelief,
+    *,
+    decision_time_utc: datetime | None,
+) -> bool:
     if decision_time_utc is None:
         return False
     metric = str(belief.metric or _metric_from_family_id(belief.family_id) or "").strip()
     if metric not in {"high", "low"}:
+        return False
+    try:
+        from src.strategy.market_phase import market_phase_admits
+
+        return market_phase_admits(
+            city=str(belief.city or "").strip(),
+            target_date=str(belief.target_date or "").strip(),
+            metric=metric,
+            decision_time=decision_time_utc,
+            market_row={},
+        )
+    except Exception:
+        return False
+
+
+def _belief_venue_closed(belief: CachedBelief, *, decision_time_utc: datetime | None) -> bool:
+    if decision_time_utc is None:
         return False
     try:
         from src.strategy.market_phase import family_venue_closed
@@ -638,6 +659,7 @@ def _all_latest_beliefs(
     *,
     decision_time: str | datetime | None = None,
     scan_limit: int | None = None,
+    forecast_only_admissible: bool = False,
 ) -> list[CachedBelief]:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
@@ -665,6 +687,7 @@ def _all_latest_beliefs(
           FROM probability_trace_fact
          WHERE decision_id >= ?
            AND decision_id < ?
+         ORDER BY recorded_at DESC, trace_id DESC
          LIMIT ?
         """,
         (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
@@ -675,6 +698,11 @@ def _all_latest_beliefs(
     for row in rows:
         belief = _row_to_belief(row)
         if belief is None:
+            continue
+        if forecast_only_admissible and not _belief_forecast_only_admissible(
+            belief,
+            decision_time_utc=decision_time_utc,
+        ):
             continue
         if _belief_venue_closed(belief, decision_time_utc=decision_time_utc):
             continue
@@ -1530,7 +1558,11 @@ def screen_entry_redecisions(
 
     Pure read on both DBs. NO HTTP, NO writes. The reactor's scheduler job owns ``acted_state``."""
     if beliefs is None:
-        beliefs = _all_latest_beliefs(world_conn, decision_time=decision_time)
+        beliefs = _all_latest_beliefs(
+            world_conn,
+            decision_time=decision_time,
+            forecast_only_admissible=True,
+        )
     # Collect every condition_id referenced by a cached belief (one price read for the batch).
     all_cids: set[str] = set()
     for belief in beliefs:

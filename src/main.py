@@ -6494,7 +6494,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         world_ro = get_world_connection_read_only()
         trade_ro = get_trade_connection_read_only()
         try:
-            all_beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
+            all_beliefs = _all_latest_beliefs(
+                world_ro,
+                decision_time=received_at,
+                forecast_only_admissible=True,
+            )
             beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
                 all_beliefs,
                 max_families=rd_cap,
@@ -6697,7 +6701,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             world_ro = get_world_connection_read_only()
             trade_ro = get_trade_connection_read_only()
             try:
-                all_beliefs = _all_latest_beliefs(world_ro, decision_time=received_at)
+                all_beliefs = _all_latest_beliefs(
+                    world_ro,
+                    decision_time=received_at,
+                    forecast_only_admissible=True,
+                )
                 beliefs = _edli_filter_beliefs_to_family_keys(
                     all_beliefs,
                     screened_belief_keys,
