@@ -2966,6 +2966,10 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # receipt.reason or the bare status when reason is empty).
     "REJECTED",
     "PRE_SUBMIT_ERROR",
+    # Pre-venue collateral/allowance failed before a submit can be attempted.
+    # No order exists, and replaying the same event cannot cure wallet allowance;
+    # capital/allowance recovery should surface as fresh candidates/redecision.
+    "pre_submit_collateral_reservation_failed",
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",

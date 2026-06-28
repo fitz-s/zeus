@@ -7188,6 +7188,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 "edli_redecision_screen: confirmation_refresh_summary=%r",
                 confirm_refresh_summary,
             )
+    except sqlite3.OperationalError as exc:
+        if not _edli_is_sqlite_lock_error(exc):
+            raise
+        logger.warning(
+            "edli_redecision_screen skipped: database locked during read/write "
+            "coordination; no venue side effect attempted and next tick will retry: %s",
+            exc,
+        )
     finally:
         _edli_redecision_screen_lock.release()
 

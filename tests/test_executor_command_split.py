@@ -271,6 +271,7 @@ def _make_entry_intent(
         q_live=0.99,
         q_lcb_5pct=0.95,
         expected_edge=0.07,
+        min_entry_price=0.05,
         min_expected_profit_usd=0.05,
         min_submit_edge_density=0.02,
         qkernel_execution_economics={
@@ -1955,6 +1956,22 @@ class TestLiveOrderCommandSplit:
             raise CollateralInsufficient("pusd_allowance_insufficient")
 
         monkeypatch.setattr(
+            "src.execution.executor._entry_actionable_certificate_component",
+            lambda *args, **kwargs: {
+                "component": "entry_actionable_certificate",
+                "allowed": True,
+                "reason": "allowed",
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        monkeypatch.setattr(
             "src.execution.executor._reserve_collateral_for_buy",
             fail_reservation,
         )
@@ -1994,6 +2011,61 @@ class TestLiveOrderCommandSplit:
         unknown_count, unknown_markets = count_unknown_side_effects(mem_conn)
         assert unknown_count == 0
         assert unknown_markets == ()
+
+    def test_pre_command_collateral_failure_does_not_append_unknown_command_event(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """Collateral preflight before insert_command has no command row to annotate."""
+        from src.execution.executor import _live_order
+        from src.state.collateral_ledger import CollateralInsufficient
+
+        intent = _make_entry_intent(mem_conn)
+
+        def fail_preflight(*args, **kwargs):
+            raise CollateralInsufficient("pusd_allowance_insufficient")
+
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_buy",
+            fail_preflight,
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_actionable_certificate_component",
+            lambda *args, **kwargs: {
+                "component": "entry_actionable_certificate",
+                "allowed": True,
+                "reason": "allowed",
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+
+        with patch("src.state.venue_command_repo.append_event") as append_event_mock, patch(
+            "src.data.polymarket_client.PolymarketClient"
+        ) as MockClient:
+            result = _live_order(
+                trade_id="trd-pre-command-collateral",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-pre-command-collateral",
+            )
+
+        assert result.status == "rejected"
+        assert result.command_state == "REJECTED"
+        assert result.reason is not None
+        assert "pre_submit_collateral_reservation_failed" in result.reason
+        append_event_mock.assert_not_called()
+        MockClient.assert_not_called()
+        assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        assert mem_conn.execute("SELECT COUNT(*) FROM venue_command_events").fetchone()[0] == 0
 
     def test_executionprice_validation_runs_before_persist(self, mem_conn):
         """NaN limit_price: ExecutionPrice rejects before any DB write.

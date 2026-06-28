@@ -110,6 +110,14 @@ def test_empty_reason_not_transient():
     assert not _is_transient_money_path_reason("")
 
 
+def test_pre_submit_collateral_failure_is_terminal():
+    assert not _is_transient_money_path_reason(
+        "pre_submit_collateral_reservation_failed: "
+        "pusd_allowance_insufficient: required_micro=6856200 "
+        "available_allowance_micro=0 allowance_micro=0"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reactor-level relationship tests
 # ---------------------------------------------------------------------------

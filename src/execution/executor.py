@@ -2594,6 +2594,17 @@ def _current_command_state_value(conn: sqlite3.Connection, command_id: str) -> s
         return str(row[0])
 
 
+def _venue_command_exists(conn: sqlite3.Connection, command_id: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1",
+            (command_id,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
 def _submit_ack_already_persisted(
     conn: sqlite3.Connection,
     *,
@@ -4114,30 +4125,44 @@ def execute_exit_order(
             )
         except CollateralInsufficient as exc:
             rej_time = datetime.now(timezone.utc).isoformat()
-            try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
-                    occurred_at=rej_time,
-                    payload={
-                        "reason": "pre_submit_collateral_reservation_failed",
-                        "detail": str(exc),
-                        "exception_type": type(exc).__name__,
-                        "side_effect_boundary_crossed": False,
-                        "sdk_submit_attempted": False,
-                    },
-                )
-                if _own_conn:
-                    conn.commit()
-            except Exception as inner:
-                logger.error(
-                    "execute_exit_order: SUBMIT_REJECTED append_event failed after "
-                    "pre-submit collateral reservation failure (command_id=%s "
-                    "trade_id=%s): inner=%s original=%s",
+            if _venue_command_exists(conn, command_id):
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=rej_time,
+                        payload={
+                            "reason": "pre_submit_collateral_reservation_failed",
+                            "detail": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "side_effect_boundary_crossed": False,
+                            "sdk_submit_attempted": False,
+                        },
+                    )
+                    if _own_conn:
+                        conn.commit()
+                except Exception as inner:
+                    logger.error(
+                        "execute_exit_order: SUBMIT_REJECTED append_event failed after "
+                        "pre-submit collateral reservation failure (command_id=%s "
+                        "trade_id=%s): inner=%s original=%s",
+                        command_id,
+                        intent.trade_id,
+                        inner,
+                        exc,
+                    )
+            else:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.warning(
+                    "execute_exit_order: pre-command collateral rejection "
+                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
+                    "no order placed: %s",
                     command_id,
                     intent.trade_id,
-                    inner,
                     exc,
                 )
             return OrderResult(
@@ -5269,30 +5294,44 @@ def _live_order(
             )
         except CollateralInsufficient as exc:
             rej_time = datetime.now(timezone.utc).isoformat()
-            try:
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type="SUBMIT_REJECTED",
-                    occurred_at=rej_time,
-                    payload={
-                        "reason": "pre_submit_collateral_reservation_failed",
-                        "detail": str(exc),
-                        "exception_type": type(exc).__name__,
-                        "side_effect_boundary_crossed": False,
-                        "sdk_submit_attempted": False,
-                    },
-                )
-                if _own_conn:
-                    conn.commit()
-            except Exception as inner:
-                logger.error(
-                    "_live_order: SUBMIT_REJECTED append_event failed after "
-                    "pre-submit collateral reservation failure (command_id=%s "
-                    "trade_id=%s): inner=%s original=%s",
+            if _venue_command_exists(conn, command_id):
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="SUBMIT_REJECTED",
+                        occurred_at=rej_time,
+                        payload={
+                            "reason": "pre_submit_collateral_reservation_failed",
+                            "detail": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "side_effect_boundary_crossed": False,
+                            "sdk_submit_attempted": False,
+                        },
+                    )
+                    if _own_conn:
+                        conn.commit()
+                except Exception as inner:
+                    logger.error(
+                        "_live_order: SUBMIT_REJECTED append_event failed after "
+                        "pre-submit collateral reservation failure (command_id=%s "
+                        "trade_id=%s): inner=%s original=%s",
+                        command_id,
+                        trade_id,
+                        inner,
+                        exc,
+                    )
+            else:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.warning(
+                    "_live_order: pre-command collateral rejection "
+                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
+                    "no order placed: %s",
                     command_id,
                     trade_id,
-                    inner,
                     exc,
                 )
             return OrderResult(
