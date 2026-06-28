@@ -2137,15 +2137,24 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
     rest = [item for item in records if not _is_forecast_decision_lane_item(item)]
     if not rest:
         return records
+    start_with_forecast = _is_forecast_decision_lane_item(records[0])
     out: list[dict] = []
     i = j = 0
     while i < len(forecast) or j < len(rest):
-        if i < len(forecast):
-            out.append(forecast[i])
-            i += 1
-        if j < len(rest):
-            out.append(rest[j])
-            j += 1
+        if start_with_forecast:
+            if i < len(forecast):
+                out.append(forecast[i])
+                i += 1
+            if j < len(rest):
+                out.append(rest[j])
+                j += 1
+        else:
+            if j < len(rest):
+                out.append(rest[j])
+                j += 1
+            if i < len(forecast):
+                out.append(forecast[i])
+                i += 1
     return out
 
 
