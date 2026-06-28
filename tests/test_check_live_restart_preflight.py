@@ -1956,6 +1956,31 @@ def test_venue_point_order_truth_alignment_blocks_when_point_and_open_reads_fail
     assert result.evidence["risky"][0]["risk"] == "venue_point_order_read_failed"
 
 
+def test_venue_point_order_truth_alignment_blocks_unknown_point_status(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(trade_db, fact_state="LIVE", matched_size="0")
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    fake_adapter = _FakeVenuePointAdapter(
+        {
+            "venue-order-1": {
+                "id": "venue-order-1",
+                "status": "UNKNOWN",
+            }
+        }
+    )
+    fake_adapter.orders = {}
+    fake_adapter.get_order = lambda order_id: {"id": order_id, "status": "UNKNOWN"}
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", lambda: (_FakeVenueClient(), fake_adapter))
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is False
+    assert result.evidence["risky"][0]["risk"] == "venue_point_order_status_unknown"
+
+
 def test_venue_point_order_truth_alignment_accepts_projected_partial_match(
     monkeypatch,
     tmp_path,

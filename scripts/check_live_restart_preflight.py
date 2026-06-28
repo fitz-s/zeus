@@ -1237,6 +1237,22 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
                         }
                     )
                     continue
+            if _venue_status(payload) in {"", "UNKNOWN"}:
+                try:
+                    fallback_payload = _find_open_order_payload(adapter, venue_order_id)
+                except Exception as open_exc:  # noqa: BLE001
+                    risky.append(
+                        {
+                            "command_id": command_id,
+                            "venue_order_id": venue_order_id,
+                            "risk": "venue_point_order_status_unknown",
+                            "point_status": _venue_status(payload),
+                            "open_orders_error": repr(open_exc),
+                        }
+                    )
+                    continue
+                if fallback_payload is not None:
+                    payload = fallback_payload
             status = _venue_status(payload)
             venue_matched = _payload_matched_size(payload)
             local_matched = _decimal_float(command.get("latest_fact_matched_size")) or 0.0
@@ -1256,6 +1272,8 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             }
             if payload is None:
                 risky.append({**item, "risk": "venue_point_order_not_found"})
+            elif status in {"", "UNKNOWN"}:
+                risky.append({**item, "risk": "venue_point_order_status_unknown"})
             elif venue_matched is None and status in VENUE_POINT_MATCH_STATUSES:
                 risky.append({**item, "risk": "venue_point_order_matched_size_missing"})
             else:
