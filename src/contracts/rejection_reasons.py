@@ -344,6 +344,49 @@ class RejectionReason(str, Enum):
         "Fresh-book mode witness diverged from the proven execution_mode_intent; "
         "fail-closed abort + re-rank (never an inline mode rebuild).",
     )
+    FILL_UP_PRESUBMIT_REREAD_ABORT = (
+        "FILL_UP_PRESUBMIT_REREAD_ABORT",
+        RejectionCategory.DESIGNED_GATE,
+        "A same-token fill-up passed admission, but the pre-submit reread found fresh "
+        "family exposure that makes the residual unsafe. No venue call has occurred; "
+        "the fill-up lease is aborted and the next live event must re-decide from "
+        "current position truth.",
+    )
+    FILL_UP_NO_SUBMIT = (
+        "FILL_UP_NO_SUBMIT",
+        RejectionCategory.DESIGNED_GATE,
+        "Continuous redecision evaluated a held same-token fill-up and deliberately "
+        "submitted no order (for example belief did not strengthen, target exposure "
+        "is already reached, residual is below venue minimum, or a family lease is "
+        "already active).",
+    )
+    SHIFT_BIN_EXIT_OLD_LEG_PENDING = (
+        "SHIFT_BIN_EXIT_OLD_LEG_PENDING",
+        RejectionCategory.DESIGNED_GATE,
+        "A shift-to-better-bin decision found the old family leg still live. The "
+        "correct action is close-before-open: submit or await the old-leg exit, not "
+        "open the new bin in parallel.",
+    )
+    SHIFT_BIN_EXIT_ONLY_COMPLETE = (
+        "SHIFT_BIN_EXIT_ONLY_COMPLETE",
+        RejectionCategory.DESIGNED_GATE,
+        "A shift-bin old-leg exit completed, but the fresh family selection changed "
+        "before the new entry. The shift lease is closed without submitting the stale "
+        "new-bin entry.",
+    )
+    SHIFT_BIN_ENTRY_IN_FLIGHT = (
+        "SHIFT_BIN_ENTRY_IN_FLIGHT",
+        RejectionCategory.DESIGNED_GATE,
+        "A shift-bin entry is already submitted, unknown, partially filled, or under "
+        "review. The existing command owns the family until venue/chain truth advances.",
+    )
+    SHIFT_BIN_NO_SUBMIT = (
+        "SHIFT_BIN_NO_SUBMIT",
+        RejectionCategory.DESIGNED_GATE,
+        "Continuous redecision evaluated a sibling-bin shift and deliberately "
+        "submitted no order because the shift lease or family exposure made a new "
+        "action unsafe or unnecessary.",
+    )
     LEGACY_INJECTED_TEST_SUBMIT = (
         "legacy_injected_test_submit",
         RejectionCategory.DESIGNED_GATE,
