@@ -2969,6 +2969,19 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"]["no_matching_open_orders"] is True
         assert payload["required_predicates"]["no_matching_trades"] is True
 
+    def test_live_tick_primes_acked_order_before_projection_creates_terminal_candidate(
+        self,
+        conn,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-late-candidate")
+
+        from src.execution.command_recovery import _collect_recovery_priming_keys
+
+        priming = _collect_recovery_priming_keys(conn, scope="live_tick")
+
+        assert "ord-late-candidate" in priming["order_ids"]
+
     def test_acked_terminal_point_order_missing_matched_size_stays(
         self,
         conn,

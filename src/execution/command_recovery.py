@@ -12446,6 +12446,25 @@ def _accumulate(
     summary["errors"] += pass_summary["errors"]
 
 
+def _active_venue_command_priming_rows(conn: sqlite3.Connection) -> list[dict]:
+    if not _table_exists(conn, "venue_commands"):
+        return []
+    active_states = tuple(sorted(_ACKED_ORDER_STATES | _PARTIAL_REMAINDER_STATES))
+    placeholders = ",".join("?" for _ in active_states)
+    rows = conn.execute(
+        f"""
+        SELECT command_id, venue_order_id, idempotency_key, intent_kind, state
+          FROM venue_commands
+         WHERE state IN ({placeholders})
+           AND COALESCE(venue_order_id, '') != ''
+           AND intent_kind IN ('ENTRY', 'EXIT')
+         ORDER BY updated_at, command_id
+        """,
+        active_states,
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
 def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "full") -> dict:
     """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
 
@@ -12479,6 +12498,10 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         _harvest(find_unresolved_commands(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
+    try:
+        _harvest(_active_venue_command_priming_rows(conn))
+    except Exception:  # noqa: BLE001 — a missing table just means no candidates
+        logger.debug("recovery: priming candidate _active_venue_command_priming_rows failed", exc_info=True)
     if scope in {"live_tick", "boot_fast"}:
         for candidate_fn in (
             _local_orphan_no_fill_candidates,
