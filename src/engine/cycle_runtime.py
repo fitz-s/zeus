@@ -911,9 +911,7 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "conditionId": condition_id,
         "questionID": question_id,
         "tradability_authority": "persisted_snapshot_reconstruction",
-        "active": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
-        "closed": False,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
-        "enableOrderBook": True,  # identity-pass only; CLOB re-checks tradeability_status authoritatively
+        "identity_only": True,
         "negRisk": neg_risk,
         "clobTokenIds": [yes_token, no_token],
     }
@@ -924,13 +922,7 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "market_id": condition_id,
         "question_id": question_id,
         "gamma_market_id": gamma_market_id,
-        # Tradability flags hardcoded True for Gamma-identity pass only.
-        # capture_executable_market_snapshot re-checks tradeability_status, crossed-book,
-        # and _assert_clob_identity against live CLOB — those are the authoritative gates.
-        "active": True,
-        "closed": False,
-        "enable_orderbook": True,
-        "executable": True,
+        "identity_only": True,
         "neg_risk": neg_risk,
         "market_start_at": _iso(getattr(snapshot, "market_start_at", None)),
         "market_end_at": _iso(getattr(snapshot, "market_end_at", None)),
