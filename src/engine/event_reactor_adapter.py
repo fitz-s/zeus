@@ -8262,17 +8262,23 @@ def _passive_maker_context_from_authorities(
         quote_payload=quote_payload,
         actionable_payload=actionable.payload,
     )
-    best_bid = quote_payload.get("best_bid")
-    best_ask = quote_payload.get("best_ask")
-    if best_bid in (None, "") or best_ask in (None, ""):
+    best_bid = _optional_float(quote_payload.get("best_bid"))
+    best_ask = _optional_float(quote_payload.get("best_ask"))
+    if best_bid is None and best_ask is None:
         raise ValueError("QUOTE_FEASIBILITY_BID_ASK_REQUIRED")
+    if best_bid is not None and best_ask is not None and best_bid > best_ask:
+        raise ValueError("QUOTE_FEASIBILITY_CROSSED_BOOK")
     quote_available_at = quote_feasibility_cert.header.source_available_at
     snapshot_available_at = executable_snapshot_cert.header.source_available_at
     if quote_available_at is None:
         raise ValueError("QUOTE_FEASIBILITY_SOURCE_AVAILABLE_AT_REQUIRED")
     if snapshot_available_at is None:
         raise ValueError("EXECUTABLE_SNAPSHOT_SOURCE_AVAILABLE_AT_REQUIRED")
-    spread_usd = max(0.0, float(best_ask) - float(best_bid))
+    spread_usd = (
+        max(0.0, float(best_ask) - float(best_bid))
+        if best_bid is not None and best_ask is not None
+        else 0.0
+    )
     p_fill_lcb = float(actionable.payload.get("p_fill_lcb") or 0.0)
     # Adverse-selection proxy (§4 Dim 4.2): A ~= recent belief volatility x spread.
     # Belief volatility is sourced from the actionable's prior-cycle posterior when
@@ -8292,8 +8298,9 @@ def _passive_maker_context_from_authorities(
         "queue_depth_ahead": queue_depth_ahead,
         "adverse_selection_score": adverse_selection_score,
         "orderbook_hash_age_ms": int(max(0.0, (decision_time - snapshot_available_at).total_seconds() * 1000.0)),
-        "best_bid": float(best_bid),
-        "best_ask": float(best_ask),
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread_observed": best_bid is not None and best_ask is not None,
     }
 
 
