@@ -872,6 +872,19 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
     assert fake_conn.closed is True
 
 
+def test_main_orders_boot_command_recovery_before_reactor_registration() -> None:
+    """Boot-recoverable restart drift must be consumed before any entry reactor can submit."""
+    import inspect
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+
+    boot_idx = source.index("_edli_boot_command_recovery_once()")
+    reactor_idx = source.index("id=\"edli_event_reactor\"")
+    start_idx = source.index("scheduler.start()")
+    assert boot_idx < reactor_idx < start_idx
+
+
 def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) -> None:
     """A no-fill terminal order recovery must continue the redecision chain."""
     import src.execution.command_recovery as command_recovery
