@@ -88,6 +88,7 @@ _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
+_DAY0_NOWCAST_MAX_OBSERVATION_AVAILABILITY_LAG = timedelta(hours=6)
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
@@ -795,6 +796,35 @@ def _record_nowcast_write_failure(*, market_slug: str, trade_id: str) -> int:
             market_slug,
         )
     return _nowcast_consecutive_write_failures
+
+
+def _parse_day0_nowcast_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _day0_nowcast_freshness_rejection_reason(
+    *,
+    observation_time: str | None,
+    observation_available_at: str | None,
+) -> str | None:
+    if not observation_available_at:
+        return None
+    observed_at = _parse_day0_nowcast_timestamp(observation_time)
+    available_at = _parse_day0_nowcast_timestamp(observation_available_at)
+    if observed_at is None or available_at is None:
+        return "day0_nowcast_observation_clock_unparseable"
+    lag = available_at - observed_at
+    if lag > _DAY0_NOWCAST_MAX_OBSERVATION_AVAILABILITY_LAG:
+        return f"day0_nowcast_observation_stale:lag_hours={lag.total_seconds() / 3600.0:.2f}"
+    return None
 
 
 def _ens_result_phase2_keys(ens_result: dict) -> tuple[
@@ -2843,6 +2873,21 @@ def _maybe_write_day0_nowcast(
     if temporal_context is None:
         return
     if not observation_time:
+        return
+    freshness_rejection = _day0_nowcast_freshness_rejection_reason(
+        observation_time=observation_time,
+        observation_available_at=observation_available_at,
+    )
+    if freshness_rejection:
+        logger.debug(
+            "T5 nowcast: stale observation clock for %s target_date=%s "
+            "observation_time=%s observation_available_at=%s reason=%s",
+            getattr(position, "trade_id", "?"),
+            target_d.isoformat(),
+            observation_time,
+            observation_available_at,
+            freshness_rejection,
+        )
         return
     _metric_str = (
         temperature_metric.temperature_metric

@@ -226,6 +226,18 @@ def test_lane_writes_null_unverified_when_availability_absent(monkeypatch) -> No
     conn.close()
 
 
+def test_lane_skips_stale_observation_available_at(monkeypatch) -> None:
+    conn = _deployed_shape_conn()
+    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
+
+    _bind_store_to_conn(monkeypatch, conn)
+    _call_lane(conn, obs_avail="2026-06-17T14:00:00+00:00")
+
+    rows = conn.execute("SELECT * FROM day0_nowcast_runs").fetchall()
+    assert rows == []
+    conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # AUTO-BOOTSTRAP: with NO fit, the lane persists identity fit and writes.
 # --------------------------------------------------------------------------- #
