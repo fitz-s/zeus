@@ -30,7 +30,7 @@ Verdicts (both directions, both metrics):
 
 Settlement-grade extreme sources (provenance-ordered):
   1. WU live obs (THE settlement reference) — throttled per (city, date); margin 0.
-  2. METAR fast-lane memo (same physical station, ~3-9 min fresh) — admitted only
+  2. Same-station fast-tail memo (same physical station, ~3-9 min fresh) — admitted only
      for settlement-faithful cities (config/wu_metar_divergence.json), with a
      divergence margin derived from the SAME calibration artifact:
        empirical threshold <= 1.0 (feeds measured byte-identical post-rounding)
@@ -60,8 +60,10 @@ logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
 #: Throttle for the WU live-obs source (per city+date) — WU's own cadence is
-#: 30-60 min; the METAR memo carries the fast path.
+#: 30-60 min; the same-station memo carries the fast path.
 _WU_FETCH_INTERVAL_S = 600.0
+SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
+COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
 _WU_MEMO: dict[tuple[str, str], tuple[float, Optional[float], Optional[float]]] = {}
 _WU_MEMO_LOCK = threading.Lock()
 
@@ -72,7 +74,7 @@ class HardFactVerdict:
     reason: str
     metric: str
     rounded_extreme: float
-    source: str  # "wu_api" | "metar_fast_lane" | "wu_api+metar_fast_lane"
+    source: str  # "wu_api" | "same_station_fast_tail" | "wu_api+same_station_fast_tail"
 
 
 @dataclass(frozen=True)
@@ -391,10 +393,10 @@ def settlement_grade_effective_extreme(
     if metar_value is None:
         return float(wu_value), wu_source
     if wu_value is None:
-        return float(metar_value), "metar_fast_lane"
+        return float(metar_value), SAME_STATION_FAST_TAIL_SOURCE
     if metric == "high":
-        return float(max(wu_value, metar_value)), f"{wu_source}+metar_fast_lane"
-    return float(min(wu_value, metar_value)), f"{wu_source}+metar_fast_lane"
+        return float(max(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
+    return float(min(wu_value, metar_value)), f"{wu_source}+{SAME_STATION_FAST_TAIL_SOURCE}"
 
 
 def evaluate_hard_fact_exit(

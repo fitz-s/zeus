@@ -3859,17 +3859,13 @@ def _build_event_bound_no_submit_receipt_core(
         qkernel_spine_enabled,
     )
 
-    # DAY0 -> LEGACY (consult_review_pr409_round2.md §3): the spine bridge reads no day0
-    # observation (_NoDay0Reader), so a day0 family must NOT be decided by the spine (it
-    # could price physically impossible bins below the observed running high / above the
-    # observed running low). day0 events are NOT in _FORECAST_DECISION_EVENT_TYPES, so
-    # they fall through to the LEGACY decision path — the existing, tested day0 lane —
-    # which keeps day0 TRADING (no revenue-lane regression). An earlier version
-    # hard-blocked day0 to a typed QKERNEL_DAY0_NOT_WIRED no-trade, which both killed the
-    # day0 lane and churned the money-path requeue every cycle. Routing day0 to legacy
-    # keeps the spine away from day0 AND keeps day0 trading; wiring day0 INTO the spine
-    # (a real Day0Reader) is the follow-up arc. Flag OFF / any non-forecast type ->
-    # legacy decision path unchanged.
+    # DAY0 -> OBSERVATION LANE (consult_review_pr409_round2.md §3): the forecast
+    # qkernel bridge reads no Day0 observation yet, so a Day0 family must NOT be
+    # decided by the forecast spine (it could price physically impossible bins
+    # below the observed running high / above the observed running low). Day0 events
+    # are NOT in _FORECAST_DECISION_EVENT_TYPES, so they are selected by the existing
+    # observation-aware selector seam. Forecast events with the qkernel flag OFF do
+    # NOT use that seam as a fallback; they emit QKERNEL_SPINE_REQUIRED.
     _spine_flag_on = qkernel_spine_enabled()
     _is_day0_event = event.event_type in _DAY0_LANE_EVENT_TYPES
     _spine_eligible_event = event.event_type in _FORECAST_DECISION_EVENT_TYPES

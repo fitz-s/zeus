@@ -4469,7 +4469,7 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
             rounded_extreme=20.0,
-            source="metar_fast_lane",
+            source="same_station_fast_tail",
         ),
     )
     monkeypatch.setattr(
@@ -4537,7 +4537,7 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
             rounded_extreme=20.0,
-            source="metar_fast_lane",
+            source="same_station_fast_tail",
         ),
     )
     monkeypatch.setattr(

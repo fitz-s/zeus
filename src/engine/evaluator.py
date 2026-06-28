@@ -184,11 +184,12 @@ from src.types.temperature import TemperatureDelta
 logger = logging.getLogger(__name__)
 CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = 0.02
 DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
-    # "metar_fast_lane": Option-B METAR fast-lane fallback (day0_obs_fastlane_plan §4.2).
     # Same physical settlement station as WU (ICAO identity enforced by
-    # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py).
-    # Only fires when WU result is absent/stale/coverage-incomplete.
-    "wu_icao": frozenset({"wu_api", "metar_fast_lane"}),
+    # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py). This is
+    # not a cross-source fallback: the AWC METAR channel is admitted only as a
+    # faster distribution tail for the same station when WU's live distribution
+    # is absent/stale/coverage-incomplete.
+    "wu_icao": frozenset({"wu_api", "same_station_fast_tail", "wu_api+same_station_fast_tail"}),
     # Hong Kong has no valid WU/VHHH route; the live Day0 monitor source is the
     # HKO native accumulator only.
     "hko": frozenset({"hko_hourly_accumulator"}),

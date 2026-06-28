@@ -699,7 +699,7 @@ def test_materializer_day0_allows_elapsed_om9_hours_covered_by_observed_extreme(
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="metar_fast_lane",
+        day0_observed_extreme_source="same_station_fast_tail",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=2,
     )
@@ -716,7 +716,7 @@ def test_materializer_day0_blocks_om9_missing_future_hours_after_observed_extrem
         computed_at=_dt(18),
         expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
         day0_observed_extreme_c=26.0,
-        day0_observed_extreme_source="metar_fast_lane",
+        day0_observed_extreme_source="same_station_fast_tail",
         day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
         day0_observed_extreme_sample_count=2,
     )

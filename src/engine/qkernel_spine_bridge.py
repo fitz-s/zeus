@@ -10,19 +10,19 @@
 """qkernel_spine_bridge — the Wave-5B cutover bridge from the live reactor to the
 rebuilt q-kernel spine.
 
-This module is the ONLY place the reactor's per-family decision is routed through
-``src/decision/family_decision_engine.FamilyDecisionEngine.decide()``. It exists so
-the reactor seam edit stays a single ``if/else`` branch: when the
-``qkernel_spine_enabled`` flag is ON, the reactor calls
-:func:`decide_family_via_spine` here; when OFF, the legacy decision path runs
-byte-for-byte unchanged and NOTHING in this module is imported on the hot path.
+This module is the ONLY place the reactor's forecast-family decision is routed
+through ``src/decision/family_decision_engine.FamilyDecisionEngine.decide()``.
+When the ``qkernel_spine_enabled`` flag is ON, forecast families call
+:func:`decide_family_via_spine` here. When it is OFF or unreadable, forecast
+families no-trade with ``QKERNEL_SPINE_REQUIRED`` at the reactor seam; they do
+not fall back to the old scalar selector.
 
 WHAT IT DOES (the cutover contract):
 
-  1. ``qkernel_spine_enabled()`` — reads the single boolean cutover flag from
-     ``settings["feature_flags"]["qkernel_spine_enabled"]`` (default False) using the
-     SAME accessor the other reactor flags use (no new config mechanism). A config
-     read fault keeps the OFF default (fail-closed to legacy).
+  1. ``qkernel_spine_enabled()`` — reads the single boolean live-authority flag
+     from ``settings["feature_flags"]["qkernel_spine_enabled"]``. A config read
+     fault returns False; the reactor converts that to a typed no-trade, never to
+     a live fallback selector.
 
   2. ``decide_family_via_spine(...)`` — builds the spine inputs from the
      reactor-native data already in scope at the ``_generate_candidate_proofs`` /
@@ -189,20 +189,20 @@ def _spine_debias_authority(case: ForecastCase):  # noqa: ARG001 — identity co
 # ===========================================================================
 
 def qkernel_spine_enabled() -> bool:
-    """The single Wave-5B cutover/rollback flag (default False).
+    """The single forecast qkernel live-authority flag.
 
     Read from ``settings["feature_flags"]["qkernel_spine_enabled"]`` using the SAME
     accessor the other reactor feature flags use (e.g. the replacement-authority
-    flag reads ``settings["feature_flags"][...]``). A config read fault keeps the OFF
-    default — fail-closed to the legacy decision path. When False, the reactor's
-    legacy per-family decision path is byte-for-byte unchanged and this bridge is
-    never on the decision path.
+    flag reads ``settings["feature_flags"][...]``). A config read fault returns
+    False; forecast families then emit ``QKERNEL_SPINE_REQUIRED`` at the reactor
+    seam. Disabling the flag is not a license to route live forecast money through
+    a fallback selector.
     """
     try:
         from src.config import settings
 
         return bool(settings["feature_flags"].get("qkernel_spine_enabled", False))
-    except Exception:  # noqa: BLE001 — fail-closed to legacy on any config fault
+    except Exception:  # noqa: BLE001 — reactor turns False into QKERNEL_SPINE_REQUIRED.
         return False
 
 

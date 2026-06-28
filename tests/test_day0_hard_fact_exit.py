@@ -394,7 +394,7 @@ class TestSourceDiscipline:
             city=_tokyo(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective == pytest.approx(26.0)
-        assert source == "metar_fast_lane"
+        assert source == "same_station_fast_tail"
 
     def test_metar_kill_at_unmeasured_city_carries_default_margin(self, monkeypatch):
         """default_guess city: the METAR extreme is shifted by the conservative
@@ -431,7 +431,7 @@ class TestSourceDiscipline:
             city=_tokyo(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective == pytest.approx(27.0)  # absorbing compose: max
-        assert source == "wu_api+metar_fast_lane"
+        assert source == "wu_api+same_station_fast_tail"
 
     def test_no_source_yields_none(self, monkeypatch):
         _set_metar_memo(monkeypatch, None)
@@ -453,7 +453,7 @@ class TestLaneEndToEnd:
         _set_metar_memo(monkeypatch, 26)
         verdict = evaluate_hard_fact_exit(position=_position(), city=_tokyo(), now=NOW)
         assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
-        assert verdict.source == "metar_fast_lane"
+        assert verdict.source == "same_station_fast_tail"
 
     def test_buy_no_death_ride_is_closed(self, monkeypatch):
         """Reviewer 'worst way to lose money #1': buy_no on the shoulder the
@@ -830,7 +830,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
             reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
-            metric="high", rounded_extreme=26.0, source="metar_fast_lane",
+            metric="high", rounded_extreme=26.0, source="same_station_fast_tail",
         )
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
         assert summary.get("day0_hard_fact_exits") == 1
@@ -839,7 +839,7 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         exits = [r for r in results if getattr(r, "should_exit", False)]
         assert exits, "the dead-bin exit decision must be recorded despite the write failure"
         assert any("DAY0_HARD_FACT_BIN_DEAD" in str(getattr(r, "exit_reason", "")) for r in exits)
-        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # shadow mode: decision made, no real order
+        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # submit-disabled fixture: decision made, no order
 
     def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=None)
