@@ -711,6 +711,18 @@ scripts:
   deep_heartbeat.py: {class: runtime_support}
   reconcile_realized_fees.py: {class: diagnostic_report_writer, write_targets: [stdout, state/fee_reconciliation.json], read_targets: [state], required_tests: [tests/test_fee_authority.py], reuse_when: "Refit the realized taker-fee evidence artifact after new fills; READ-ONLY over zeus_trades.db via mode=ro.", canonical_command: "python3 scripts/reconcile_realized_fees.py [--dry-run]"}
   deploy_live.py: {class: runtime_support, required_tests: [tests/test_ops_scripts_smoke.py], reuse_when: "Restart a live launchd daemon safely: refuses launchctl kickstart while the live checkout's src/ or config/ is uncommitted or unpushed (--allow-dirty bypasses loudly).", do_not_use_when: "Do not use to deploy untested code; the gate is a tree-cleanliness check, not a correctness check.", canonical_command: "python3 scripts/deploy_live.py status|restart <daemon|all>"}
+  restore_live_trading_launchagent.py:
+    class: repair
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: null
+    read_targets: ["~/Library/LaunchAgents/com.zeus.live-trading.plist.*"]
+    write_targets: ["~/Library/LaunchAgents/com.zeus.live-trading.plist"]
+    canonical_command: "python3 scripts/restore_live_trading_launchagent.py [--apply]"
+    reuse_when: "Restore a missing active com.zeus.live-trading LaunchAgent plist from a validated disabled/backup plist without loading or starting launchd."
+    do_not_use_when: "Do not use as a live restart gate; it only restores the active plist file. Run check_live_restart_preflight.py after restore and before any launchctl load/kickstart."
+    required_tests: [tests/test_restore_live_trading_launchagent.py]
   digest_profiles_export.py:
     class: config_writer
     reason: "Derived digest_profiles.py mirror exporter; YAML remains canonical until an operator-approved truth-source flip."
