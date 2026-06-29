@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-06-29
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -3536,6 +3536,191 @@ def test_monitor_entry_selection_guard_invalidates_unarmed_qkernel_hold():
     assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_EXIT"
     assert "selection_guard_side_not_armed" in decision.reason
     assert summary["entry_selection_guard_invalid_positions"] == 1
+
+
+def test_monitor_entry_selection_guard_does_not_force_exit_over_fresh_positive_edge():
+    """Historical entry-guard invalidity cannot override current positive monitor EV."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, decision_id, intent_kind, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ENTRY', ?, ?)
+        """,
+        (
+            "cmd-unarmed",
+            "pos-unarmed-positive-now",
+            "edli_exec_cmd:agg-unarmed:edli_intent:agg-unarmed:tok:tok:buy_yes",
+            "2026-06-29T12:00:00+00:00",
+            "2026-06-29T12:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, occurred_at, payload_json
+        ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            "agg-unarmed",
+            "2026-06-29T12:00:00+00:00",
+            json.dumps(
+                {
+                    "direction": "buy_yes",
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "selection_guard_basis": "SIDE_NOT_ARMED",
+                        "selection_guard_abstained": False,
+                        "selection_guard_q_safe": 0.0,
+                        "selection_guard_cell_key": "YES|tail|nonmodal|pb2",
+                        "payoff_q_lcb": 0.0,
+                        "cost": 0.07,
+                        "edge_lcb": 0.0,
+                    },
+                }
+            ),
+        ),
+    )
+    pos = _make_position(
+        trade_id="pos-unarmed-positive-now",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+        shares=85.17,
+        chain_shares=85.17,
+        entry_method="qkernel_spine",
+        selected_method="qkernel_spine",
+    )
+    pos.last_monitor_prob = 0.3392837479
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = 0.2800396534
+    pos.last_monitor_market_price = 0.0592440945
+    pos.last_monitor_market_price_is_fresh = True
+    summary = {}
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=conn,
+        pos=pos,
+        exit_context=SimpleNamespace(best_bid=0.052),
+        summary=summary,
+    )
+
+    assert decision is not None
+    assert decision.should_exit is False
+    assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_HOLD_CURRENT_EDGE"
+    assert "current_edge=0.2800" in decision.reason
+    assert summary["entry_selection_guard_invalid_current_ev_holds"] == 1
+
+
+def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_posterior():
+    """Entry must not trade a stale posterior after live raw inputs have advanced."""
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    for model in ("ecmwf_ifs", "gfs", "icon"):
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model,
+                "Singapore",
+                "2026-07-01",
+                "high",
+                "2026-06-29T12:00:00+00:00",
+                "single_runs",
+                "COVERED",
+                "2026-06-29T12:20:00+00:00",
+                "2026-06-29T12:10:00+00:00",
+            ),
+        )
+
+    reason = adapter._replacement_live_input_lag_reason(
+        conn,
+        family=SimpleNamespace(
+            city="Singapore",
+            target_date="2026-07-01",
+            metric="high",
+        ),
+        decision_time=datetime(2026, 6, 29, 13, 0, tzinfo=timezone.utc),
+        posterior_source_cycle_time="2026-06-29T06:00:00+00:00",
+    )
+
+    assert reason is not None
+    assert "source_cycle_time_raw_model_forecasts_lag" in reason
+    assert "latest_raw_cycle=2026-06-29T12:00:00+00:00" in reason
+    assert "posterior_cycle=2026-06-29T06:00:00+00:00" in reason
+
+
+def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monkeypatch):
+    """With replacement live, missing posterior evidence is a blocker, not a legacy fallback."""
+    from src.engine import event_reactor_adapter as adapter
+
+    monkeypatch.setattr(adapter, "_replacement_authority_enabled", lambda: True)
+    monkeypatch.setattr(
+        adapter,
+        "_forecast_authority_payload_from_posterior",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fail_if_legacy_snapshot_called(*_args, **_kwargs):
+        raise AssertionError("legacy forecast snapshot fallback was called")
+
+    monkeypatch.setattr(
+        adapter,
+        "_forecast_snapshot_row_for_event",
+        _fail_if_legacy_snapshot_called,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior",
+    ):
+        adapter._forecast_authority_payload_and_clock(
+            sqlite3.connect(":memory:"),
+            event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            family=SimpleNamespace(city="Singapore", target_date="2026-07-01", metric="high"),
+            payload={},
+            decision_time=datetime(2026, 6, 29, 13, 0, tzinfo=timezone.utc),
+        )
 
 
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):

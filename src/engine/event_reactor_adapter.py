@@ -9211,6 +9211,180 @@ _POSTERIOR_APPLIED_VALIDATIONS: tuple[str, ...] = (
 )
 
 
+def _parse_source_cycle_utc(value: object) -> datetime | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _latest_raw_model_input_cycle_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+) -> datetime | None:
+    table_ref = _authority_table_ref(conn, "raw_model_forecasts")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
+    if not required.issubset(columns):
+        return None
+    predicates = ["city = ?", "target_date = ?", "metric = ?"]
+    params: list[object] = [family.city, family.target_date, family.metric]
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    if "endpoint" in columns:
+        predicates.append("endpoint = 'single_runs'")
+    if "coverage_status" in columns:
+        predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
+    if "captured_at" in columns:
+        predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
+        params.append(decision_iso)
+    if "source_available_at" in columns:
+        predicates.append(
+            "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
+        )
+        params.append(decision_iso)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT source_cycle_time
+              FROM {table_ref}
+             WHERE {' AND '.join(predicates)}
+               AND datetime(source_cycle_time) <= datetime(?)
+             GROUP BY source_cycle_time
+             HAVING COUNT(DISTINCT model) >= 3
+             ORDER BY datetime(source_cycle_time) DESC
+             LIMIT 1
+            """,
+            tuple([*params, decision_iso]),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
+        return None
+    if row is None:
+        return None
+    try:
+        raw_value = row["source_cycle_time"]
+    except Exception:  # noqa: BLE001
+        raw_value = row[0]
+    return _parse_source_cycle_utc(raw_value)
+
+
+def _latest_raw_artifact_input_cycle_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+) -> datetime | None:
+    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    if table_ref is None:
+        return None
+    columns = _table_ref_columns(conn, table_ref)
+    required = {
+        "source_cycle_time",
+        "captured_at",
+        "source_available_at",
+        "artifact_metadata_json",
+    }
+    if not required.issubset(columns):
+        return None
+    predicates = [
+        "json_extract(artifact_metadata_json, '$.city') = ?",
+        "json_extract(artifact_metadata_json, '$.target_date') = ?",
+        "json_extract(artifact_metadata_json, '$.metric') = ?",
+        "datetime(captured_at) <= datetime(?)",
+        "datetime(source_available_at) <= datetime(?)",
+    ]
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    params: list[object] = [
+        family.city,
+        family.target_date,
+        family.metric,
+        decision_iso,
+        decision_iso,
+    ]
+    if "source_id" in columns:
+        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
+    try:
+        row = conn.execute(
+            f"""
+            SELECT source_cycle_time
+              FROM {table_ref}
+             WHERE {' AND '.join(predicates)}
+               AND datetime(source_cycle_time) <= datetime(?)
+             GROUP BY source_cycle_time
+             ORDER BY datetime(source_cycle_time) DESC
+             LIMIT 1
+            """,
+            tuple([*params, decision_iso]),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
+        return None
+    if row is None:
+        return None
+    try:
+        raw_value = row["source_cycle_time"]
+    except Exception:  # noqa: BLE001
+        raw_value = row[0]
+    return _parse_source_cycle_utc(raw_value)
+
+
+def _latest_live_input_cycle_for_family(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+) -> tuple[datetime | None, str | None]:
+    candidates = [
+        (
+            _latest_raw_model_input_cycle_for_family(
+                conn, family=family, decision_time=decision_time
+            ),
+            "source_cycle_time_raw_model_forecasts_lag",
+        ),
+        (
+            _latest_raw_artifact_input_cycle_for_family(
+                conn, family=family, decision_time=decision_time
+            ),
+            "source_cycle_time_raw_forecast_artifacts_lag",
+        ),
+    ]
+    candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
+    if not candidates:
+        return None, None
+    return max(candidates, key=lambda item: item[0])
+
+
+def _replacement_live_input_lag_reason(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    decision_time: datetime,
+    posterior_source_cycle_time: object,
+) -> str | None:
+    posterior_cycle = _parse_source_cycle_utc(posterior_source_cycle_time)
+    if posterior_cycle is None:
+        return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
+    latest_raw_cycle, basis = _latest_live_input_cycle_for_family(
+        conn, family=family, decision_time=decision_time
+    )
+    if latest_raw_cycle is None or latest_raw_cycle <= posterior_cycle:
+        return None
+    lag_hours = (latest_raw_cycle - posterior_cycle).total_seconds() / 3600.0
+    return (
+        f"basis={basis or 'source_cycle_time_live_input_lag'}:"
+        f"latest_raw_cycle={latest_raw_cycle.isoformat()}:"
+        f"posterior_cycle={posterior_cycle.isoformat()}:"
+        f"lag_h={lag_hours:.2f}"
+    )
+
+
 def _forecast_authority_payload_from_posterior(
     conn: sqlite3.Connection,
     *,
@@ -9234,9 +9408,9 @@ def _forecast_authority_payload_from_posterior(
       * ``snapshot_id`` == the neutral ``rmf-...`` ``event.causal_snapshot_id`` (causal eq);
       * ``members_json_hash`` is read by BOTH the forecast and belief cells from this one dict.
 
-    FAIL-CLOSED: returns ``None`` (→ caller's ensemble path, which then raises if no ensemble row)
-    when the posterior row, the raw_model_forecasts member set, or the city config is missing, or
-    fewer than 3 decorrelated members survive — never fabricates a cert.
+    FAIL-CLOSED: returns ``None`` only for ordinary missing posterior evidence. If a newer live
+    raw input exists than the selected posterior's source cycle, this raises a typed blocker so the
+    replacement lane cannot fall back to legacy ensemble evidence and trade on an old belief.
     """
     city_config = runtime_cities_by_name().get(family.city)
     if city_config is None:
@@ -9282,6 +9456,14 @@ def _forecast_authority_payload_from_posterior(
     ) = prow
     if not p_identity_hash or not p_source_cycle_time:
         return None
+    raw_lag_reason = _replacement_live_input_lag_reason(
+        conn,
+        family=family,
+        decision_time=decision_time,
+        posterior_source_cycle_time=p_source_cycle_time,
+    )
+    if raw_lag_reason is not None:
+        raise ValueError(f"REPLACEMENT_LIVE_INPUT_LAG:{raw_lag_reason}")
     # The decorrelated multi-model member set for this family/cycle (the SAME set the spine used).
     members = _spine_multimodel_members_for_event(
         conn, event=event, family=family, decision_time=decision_time
@@ -9440,6 +9622,7 @@ def _forecast_authority_payload_and_clock(
         )
         if posterior is not None:
             return posterior
+        raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior")
     allow_latest = event.event_type == "DAY0_EXTREME_UPDATED"
     snapshot = _forecast_snapshot_row_for_event(
         conn,
@@ -14600,6 +14783,14 @@ def _replacement_authority_probability_and_fdr_proof(
     # examined. Observability only; never read back into any gate.
     if provenance_capture is not None:
         provenance_capture["replacement_bundle"] = replacement_bundle
+    raw_lag_reason = _replacement_live_input_lag_reason(
+        conn,
+        family=family,
+        decision_time=decision_time,
+        posterior_source_cycle_time=replacement_bundle.source_cycle_time,
+    )
+    if raw_lag_reason is not None:
+        raise ValueError(f"REPLACEMENT_0_1_LIVE_INPUT_LAG:{raw_lag_reason}")
     # FIX 1 (2026-06-09) — q-mode live eligibility gate. Real submit is allowed ONLY when the
     # replacement posterior's q was built as a live Normal carrier
     # (FUSED_NORMAL_FULL/PARTIAL or ANCHOR_ONLY_CURRENT). Every other mode (soft-anchor fallback,

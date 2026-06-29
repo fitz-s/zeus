@@ -1,5 +1,5 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-06-29
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
 #                  family sizing), Fitz §1 (structural decision > patch).
 
@@ -220,12 +220,16 @@ _BLOCKING_EXPOSURE_PHASES = frozenset(
         "acked",
         "live",
         "partial",
+        "partially_matched",
         "partially_filled",
+        "matched",
         "filled",
         "submit_unknown_side_effect",
         "unknown",
         "review_required",
         "submitted",
+        "submitting",
+        "quarantined",
     }
 )
 
@@ -404,7 +408,7 @@ _TRADE_ORDER_BLOCKING_STATES = frozenset(
 )
 _TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTIAL"})
 _TRADE_POSITION_BLOCKING_PHASES = frozenset(
-    {"pending_entry", "active", "day0_window", "pending_exit"}
+    {"pending_entry", "active", "day0_window", "pending_exit", "quarantined"}
 )
 
 
@@ -537,6 +541,15 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     ) -> None:
         if not (city and target_date and metric):
             return
+        phase_text = str(phase or "pending_entry")
+        phase_blocks = (
+            phase_text.lower() in _BLOCKING_EXPOSURE_PHASES
+            or phase_text.upper() in _TRADE_COMMAND_BLOCKING_STATES
+            or phase_text.upper() in _TRADE_ORDER_BLOCKING_STATES
+            or phase_text.upper() in _TRADE_FACT_BLOCKING_STATES
+        )
+        if not phase_blocks:
+            return
         exposure = WeatherFamilyExposure(
             key=WeatherFamilyKey(
                 str(city),
@@ -545,7 +558,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
                 str(market_family_id or ""),
             ),
             bin_label=str(bin_label or ""),
-            phase=str(phase or "pending_entry"),
+            phase=phase_text,
             position_id=str(position_id or ""),
         )
         dedupe_key = (
@@ -717,12 +730,26 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     me_slug = _column_expr(me_cols, "me", "market_slug")
     me_range_label = _column_expr(me_cols, "me", "range_label")
     me_outcome = _column_expr(me_cols, "me", "outcome")
+    slug_metric_expr = (
+        "CASE "
+        f"WHEN LOWER(COALESCE({me_slug}, {snap_slug}, {vc_market_id}, '')) "
+        "LIKE '%lowest-temperature%' THEN 'low' "
+        f"WHEN LOWER(COALESCE({me_slug}, {snap_slug}, {vc_market_id}, '')) "
+        "LIKE '%highest-temperature%' THEN 'high' "
+        "ELSE NULL END"
+    )
+    me_metric = _column_expr(
+        me_cols,
+        "me",
+        "temperature_metric",
+        default=slug_metric_expr,
+    )
     market_table = _qualified_table(market_schema, "market_events")
     command_identity_sql = f"""
         SELECT DISTINCT
             me.city,
             me.target_date,
-            me.temperature_metric,
+            {me_metric} AS temperature_metric,
             COALESCE({me_slug}, {snap_slug}, {vc_market_id}, {env_condition}, {snap_condition}) AS market_family_id,
             COALESCE({me_range_label}, {me_outcome}, {env_label}, {snap_label}) AS bin_label,
             vc.state AS phase,

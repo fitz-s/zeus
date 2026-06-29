@@ -145,7 +145,7 @@ def _latest_raw_single_runs_cycle(
     """Latest captured raw live-input cycle for the same family, if present."""
 
     columns = _table_columns(conn, "raw_model_forecasts")
-    required = {"city", "target_date", "metric", "source_cycle_time"}
+    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
     predicates = ["city = ?", "target_date = ?", "metric = ?"]
@@ -170,6 +170,7 @@ def _latest_raw_single_runs_cycle(
             WHERE {' AND '.join(predicates)}
               AND datetime(source_cycle_time) <= datetime(?)
             GROUP BY source_cycle_time
+            HAVING COUNT(DISTINCT model) >= 3
             ORDER BY datetime(source_cycle_time) DESC
             LIMIT 1
             """,
@@ -253,6 +254,13 @@ def _latest_live_input_cycle(
     temperature_metric: str,
     now: datetime,
 ) -> tuple[datetime | None, str | None]:
+    raw_single_runs_cycle = _latest_raw_single_runs_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        now=now,
+    )
     raw_artifact_cycle = _latest_raw_artifact_cycle(
         conn,
         city=city,
@@ -260,9 +268,14 @@ def _latest_live_input_cycle(
         temperature_metric=temperature_metric,
         now=now,
     )
-    if raw_artifact_cycle is None:
+    candidates = [
+        (raw_single_runs_cycle, "source_cycle_time_raw_model_forecasts_lag"),
+        (raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"),
+    ]
+    candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
+    if not candidates:
         return None, None
-    return raw_artifact_cycle, "source_cycle_time_raw_forecast_artifacts_lag"
+    return max(candidates, key=lambda item: item[0])
 
 
 def _match_bin(q: Mapping[str, object], bin_label: str) -> tuple[str, float] | None:

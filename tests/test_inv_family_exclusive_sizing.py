@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-05-20; last_reviewed=2026-06-18; last_reused=2026-06-29
 # Purpose: Relationship antibody (Fitz §3) — mutually-exclusive weather bins
 #          (one city/date/metric partition) must NOT emit independent live
 #          scalar orders; live selection must use family payoff efficiency.
@@ -618,6 +618,47 @@ def test_trade_db_family_exposures_include_open_position_without_command_row(tmp
     ]
 
 
+def test_trade_db_family_exposures_include_quarantined_chain_position(tmp_path) -> None:
+    """Chain-positive quarantined holdings are still real exposure for family gates."""
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-quarantine.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("pos-quarantined", CITY, TARGET_DATE, METRIC, "20-21°F", "quarantined", 0.0, 7.0, 0.0, 5.53),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC),
+            bin_label="20-21°F",
+            phase="quarantined",
+            position_id="pos-quarantined",
+        )
+    ]
+
+
 def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp_path) -> None:
     import sqlite3
 
@@ -685,6 +726,127 @@ def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp
             position_id="cmd-1",
         )
     ]
+
+
+def test_trade_db_family_exposure_infers_metric_from_live_market_slug_schema(tmp_path) -> None:
+    """Live trade DB market_events lacks temperature_metric; slug still carries metric."""
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-live-market-schema.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            envelope_id TEXT,
+            snapshot_id TEXT,
+            market_id TEXT,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT
+        );
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            event_slug TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT
+        );
+        CREATE TABLE market_events (
+            market_slug TEXT,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?, ?, ?, ?)",
+        ("env-1", "cond-1", "tok-yes-1", "YES"),
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?)",
+        (
+            "snap-1",
+            "cond-1",
+            "highest-temperature-in-chicago-on-june-1-2026",
+            "tok-yes-1",
+            "YES",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "highest-temperature-in-chicago-on-june-1-2026",
+            CITY,
+            TARGET_DATE,
+            "cond-1",
+            "tok-yes-1",
+            "20-21°F",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("cmd-1", "", "env-1", "snap-1", "cond-1", "ENTRY", "ACKED"),
+    )
+
+    exposures = weather_family_exposures_from_trade_db(conn)
+
+    assert exposures == [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, "high", "highest-temperature-in-chicago-on-june-1-2026"),
+            bin_label="20-21°F",
+            phase="ACKED",
+            position_id="cmd-1",
+        )
+    ]
+
+
+def test_trade_db_family_exposure_drops_nonblocking_voided_projection(tmp_path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "family-exposure-voided-projection.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("pos-void", CITY, TARGET_DATE, METRIC, "20-21°F", "voided", 5.0, 0.0, 1.0, 0.0),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, ?, ?)",
+        ("cmd-void", "pos-void", "ENTRY", "CANCELLED"),
+    )
+
+    assert weather_family_exposures_from_trade_db(conn) == []
 
 
 def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_path) -> None:
@@ -1061,6 +1223,32 @@ def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
 
     assert _count_trades(out) == 2
     assert all(d.rejection_stage == "" for d in out)
+
+
+def test_existing_acked_family_exposure_blocks_new_scalar_entry() -> None:
+    decisions = [_trade_decision(_BIN_SPECS[2], size_usd=20.0, forward_edge=0.07)]
+    exposures = [
+        WeatherFamilyExposure(
+            key=WeatherFamilyKey(CITY, TARGET_DATE, METRIC, "per-bin-market-slug"),
+            bin_label="20-21°F",
+            phase="ACKED",
+            position_id="cmd-live",
+        )
+    ]
+
+    out = dedup_mutually_exclusive_families(
+        decisions,
+        city=CITY,
+        target_date=TARGET_DATE,
+        temperature_metric=METRIC,
+        market_family_id="different-per-bin-market-slug",
+        existing_exposures=exposures,
+        enabled=True,
+    )
+
+    assert _count_trades(out) == 0
+    assert out[0].rejection_reason_enum is NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP
+    assert "existing_position_id='cmd-live'" in out[0].rejection_reason_detail
 
 
 def test_family_ranked_sizing_does_not_accumulate_sibling_exposure() -> None:

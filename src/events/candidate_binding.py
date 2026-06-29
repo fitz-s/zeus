@@ -155,7 +155,11 @@ def bind_event_to_candidate_family(
         "candidates": [candidate.binding_payload() for candidate in candidates],
     }
     binding_hash = sha256_text(canonical_json(binding_payload))
-    family_id = "edli_family_" + binding_hash[:24]
+    family_id = _stable_weather_family_id(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+    )
     return EventBoundCandidateFamily(
         family_id=family_id,
         event_id=event.event_id,
@@ -182,6 +186,24 @@ def _payload_dict(event: OpportunityEvent) -> dict:
     if not isinstance(payload, dict):
         raise CandidateBindingError("event payload_json must decode to an object")
     return payload
+
+
+def _stable_weather_family_id(*, city: str, target_date: str, metric: str) -> str:
+    """Stable live identity for one mutually-exclusive weather outcome family.
+
+    ``binding_hash`` remains the immutable audit hash for the exact trigger event
+    and topology. ``family_id`` is the live mutex / redecision identity; it must
+    not include event_id or snapshot_id, otherwise every forecast refresh looks
+    like a new family and duplicate/exposure gates cannot see the prior order.
+    """
+
+    identity = {
+        "kind": "weather_family_v1",
+        "city": str(city),
+        "target_date": str(target_date),
+        "metric": str(metric),
+    }
+    return "edli_family_" + sha256_text(canonical_json(identity))[:24]
 
 
 def _required_payload_text(payload: dict, field_name: str) -> str:

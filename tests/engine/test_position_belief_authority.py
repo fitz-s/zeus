@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-29
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -364,6 +364,48 @@ class TestLoadReplacementBelief:
         validation = belief.freshness_validation()
         assert "latest_raw_cycle_time=" not in validation
         assert validation.endswith(";fresh")
+
+    def test_newer_materializable_raw_model_cycle_marks_posterior_stale(self, forecasts_db):
+        """A full raw_model cycle is a live upstream input and must stale old posterior belief."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
+        for model in ("ecmwf_ifs", "gfs", "icon"):
+            conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    city, target_date, metric, source_cycle_time, endpoint,
+                    coverage_status, captured_at, source_available_at, model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "Karachi",
+                    "2026-06-12",
+                    "high",
+                    (NOW - timedelta(hours=6)).isoformat(),
+                    "single_runs",
+                    "COVERED",
+                    (NOW - timedelta(hours=5, minutes=30)).isoformat(),
+                    (NOW - timedelta(hours=5, minutes=45)).isoformat(),
+                    model,
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is False
+        assert belief.freshness_basis == "source_cycle_time_raw_model_forecasts_lag"
+        assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
+        assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
 
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot
@@ -764,7 +806,10 @@ class TestMonitorPrimaryAuthority:
                 temp_current REAL,
                 running_max REAL,
                 running_min REAL,
-                authority TEXT NOT NULL
+                authority TEXT NOT NULL,
+                causality_status TEXT NOT NULL,
+                source_role TEXT NOT NULL,
+                training_allowed INTEGER NOT NULL
             )
             """
         )
@@ -772,24 +817,25 @@ class TestMonitorPrimaryAuthority:
             """
             INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, utc_timestamp,
-                temp_current, running_max, running_min, authority
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                temp_current, running_max, running_min, authority,
+                causality_status, source_role, training_allowed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     "Moscow", "2026-06-25", "ogimet_metar_uuww",
                     "Europe/Moscow", "2026-06-25T00:00:00+00:00",
-                    None, 16.0, 14.0, "VERIFIED",
+                    None, 16.0, 14.0, "VERIFIED", "OK", "runtime_monitoring", 0,
                 ),
                 (
                     "Moscow", "2026-06-25", "ogimet_metar_uuww",
                     "Europe/Moscow", "2026-06-25T01:00:00+00:00",
-                    None, 18.0, 13.0, "VERIFIED",
+                    None, 18.0, 13.0, "VERIFIED", "OK", "runtime_monitoring", 0,
                 ),
                 (
                     "Moscow", "2026-06-25", "ogimet_metar_uuww",
                     "Europe/Moscow", "2026-06-25T02:00:00+00:00",
-                    None, 17.0, 13.5, "VERIFIED",
+                    None, 17.0, 13.5, "VERIFIED", "OK", "runtime_monitoring", 0,
                 ),
             ],
         )
@@ -808,6 +854,14 @@ class TestMonitorPrimaryAuthority:
                 "settlement_source_type": "noaa",
             },
         )()
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                fixed = datetime(2026, 6, 25, 2, 10, tzinfo=timezone.utc)
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        monkeypatch.setattr(mr, "datetime", FixedDateTime)
 
         obs = mr._fetch_day0_observation(city, date(2026, 6, 25))
 

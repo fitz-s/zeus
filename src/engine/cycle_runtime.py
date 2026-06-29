@@ -2960,6 +2960,39 @@ def _entry_selection_guard_exit_decision(
         }
     )
 
+    current_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
+    current_prob_fresh = bool(getattr(pos, "last_monitor_prob_is_fresh", False))
+    current_price_fresh = bool(getattr(pos, "last_monitor_market_price_is_fresh", False))
+    if (
+        current_prob_fresh
+        and current_price_fresh
+        and current_edge is not None
+        and current_edge > 0.0
+    ):
+        summary["entry_selection_guard_invalid_current_ev_holds"] = (
+            summary.get("entry_selection_guard_invalid_current_ev_holds", 0) + 1
+        )
+        from src.state.portfolio import ExitDecision as _ExitDecision
+
+        return _ExitDecision(
+            False,
+            (
+                "ENTRY_SELECTION_GUARD_INVALID_HOLD_CURRENT_EDGE "
+                f"({verdict.get('invalid_reason')}; current_edge={current_edge:.4f})"
+            ),
+            urgency="normal",
+            trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_CURRENT_EDGE",
+            selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+            applied_validations=list(
+                dict.fromkeys(
+                    [
+                        *(getattr(pos, "applied_validations", []) or []),
+                        "entry_selection_guard_invalid_current_edge_hold",
+                    ]
+                )
+            ),
+        )
+
     shares = _position_real_exposure_shares(pos)
     try:
         best_bid = float(getattr(exit_context, "best_bid", 0.0) or 0.0)
