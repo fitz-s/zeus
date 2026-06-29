@@ -7795,6 +7795,29 @@ def _edli_prune_pending_working_set(
         )
 
     try:
+        if _budget_exhausted("archive_expired_candidates"):
+            return
+        _step_started = time.monotonic()
+        _archived = store.archive_expired_candidates(
+            decision_time=decision_time.isoformat(),
+            batch_limit=batch_limit,
+        )
+        _log_prune_step("archive_expired_candidates", _step_started, _archived)
+        if _archived:
+            logger.info(
+                "EDLI reactor: archived %d expired (target-local-day-ended) "
+                "candidates → 'expired' (excluded from future scans; batch_limit=%d)",
+                _archived,
+                batch_limit,
+            )
+    except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
+        logger.warning(
+            "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
+            "fetch_pending read floor still drops strictly-past rows): %r",
+            _sweep_exc,
+    )
+
+    try:
         if _budget_exhausted("repair_missing_processing_rows"):
             return
         _step_started = time.monotonic()
@@ -7862,29 +7885,6 @@ def _edli_prune_pending_working_set(
             "(non-fatal; normal pending events still drain): %r",
             _static_close_recovery_exc,
         )
-
-    try:
-        if _budget_exhausted("archive_expired_candidates"):
-            return
-        _step_started = time.monotonic()
-        _archived = store.archive_expired_candidates(
-            decision_time=decision_time.isoformat(),
-            batch_limit=batch_limit,
-        )
-        _log_prune_step("archive_expired_candidates", _step_started, _archived)
-        if _archived:
-            logger.info(
-                "EDLI reactor: archived %d expired (target-local-day-ended) "
-                "candidates → 'expired' (excluded from future scans; batch_limit=%d)",
-                _archived,
-                batch_limit,
-            )
-    except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
-        logger.warning(
-            "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
-            "fetch_pending read floor still drops strictly-past rows): %r",
-            _sweep_exc,
-    )
 
     try:
         if _budget_exhausted("archive_superseded_channel_events"):

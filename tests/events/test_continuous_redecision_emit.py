@@ -1865,6 +1865,7 @@ def test_reactor_prune_archives_orphan_processing_rows():
     src = inspect.getsource(main._edli_prune_pending_working_set)
     assert "archive_orphan_processing_rows" in src
     assert src.index("archive_orphan_processing_rows") < src.index("archive_expired_candidates")
+    assert src.index("archive_expired_candidates") < src.index("repair_missing_processing_rows")
 
 
 def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
