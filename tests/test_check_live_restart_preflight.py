@@ -1601,6 +1601,35 @@ def test_resting_exit_order_blocks_when_phase_is_not_boot_recoverable(monkeypatc
     assert result.evidence["risky"][0]["risk"] == "resting_exit_order_without_pending_exit_lifecycle"
 
 
+def test_resting_entry_order_is_boot_recoverable_when_projection_repair_can_hydrate():
+    item = {
+        "command_id": "cmd-entry",
+        "intent_kind": "ENTRY",
+        "latest_fact_state": "PARTIALLY_MATCHED",
+        "position_phase": None,
+    }
+
+    recoverable = preflight._resting_venue_command_boot_recoverable(
+        item,
+        "resting_entry_order_without_entry_lifecycle",
+        entry_projection_recoverable={
+            "cmd-entry": {
+                "restart_resolution": "command_recovery.filled_entry_projection_repair",
+                "repair_action": "project_partial_or_filled_entry_order_into_active_position",
+                "city": "Moscow",
+                "target_date": "2026-07-01",
+                "direction": "buy_no",
+                "bin_label": "Moscow 28C",
+            }
+        },
+    )
+
+    assert recoverable is not None
+    assert recoverable["risk"] == "resting_entry_order_without_entry_lifecycle"
+    assert recoverable["restart_resolution"] == "command_recovery.filled_entry_projection_repair"
+    assert recoverable["repair_action"] == "project_partial_or_filled_entry_order_into_active_position"
+
+
 def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"

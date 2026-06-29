@@ -1776,6 +1776,9 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
             """,
             tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
         ).fetchall()
+        entry_projection_recoverable = _resting_entry_projection_recoverable_commands(conn)
+    if entry_projection_recoverable:
+        evidence["entry_projection_recoverable_count"] = len(entry_projection_recoverable)
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
     boot_recoverable: list[dict[str, Any]] = []
@@ -1794,7 +1797,11 @@ def _resting_venue_command_lifecycle_alignment_check() -> CheckResult:
         elif not phase:
             risk = "resting_order_missing_position_projection"
         if risk:
-            recoverable = _resting_venue_command_boot_recoverable(item, risk)
+            recoverable = _resting_venue_command_boot_recoverable(
+                item,
+                risk,
+                entry_projection_recoverable=entry_projection_recoverable,
+            )
             if recoverable is not None:
                 boot_recoverable.append(recoverable)
             else:
@@ -1844,13 +1851,80 @@ def _payload_has_exit_fill_economics(raw: object, fallback_price: object) -> boo
     return _positive_float(fallback_price) is not None
 
 
+def _resting_entry_projection_recoverable_commands(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    try:
+        from src.execution.command_recovery import (
+            _decision_log_trade_case_for_command,
+            _latest_unprojected_filled_entry_candidates,
+            _latest_unprojected_live_entry_candidates,
+        )
+    except Exception:
+        return {}
+
+    recoverable: dict[str, dict[str, Any]] = {}
+    candidate_sources = (
+        (
+            "command_recovery.live_entry_projection_repair",
+            "project_acknowledged_entry_order_into_pending_entry",
+            _latest_unprojected_live_entry_candidates,
+        ),
+        (
+            "command_recovery.filled_entry_projection_repair",
+            "project_partial_or_filled_entry_order_into_active_position",
+            _latest_unprojected_filled_entry_candidates,
+        ),
+    )
+    for restart_resolution, repair_action, candidate_fn in candidate_sources:
+        try:
+            candidates = candidate_fn(conn)
+        except Exception:
+            continue
+        for candidate in candidates:
+            command_id = str(candidate.get("command_id") or "").strip()
+            if not command_id:
+                continue
+            try:
+                trade_case, _source_id = _decision_log_trade_case_for_command(conn, candidate)
+            except Exception:
+                trade_case = {}
+            if not trade_case:
+                continue
+            recoverable[command_id] = {
+                "restart_resolution": restart_resolution,
+                "repair_action": repair_action,
+                "city": trade_case.get("city"),
+                "target_date": trade_case.get("target_date"),
+                "direction": trade_case.get("direction"),
+                "bin_label": trade_case.get("bin_label") or trade_case.get("range_label"),
+            }
+    return recoverable
+
+
 def _resting_venue_command_boot_recoverable(
     item: dict[str, Any],
     risk: str,
+    *,
+    entry_projection_recoverable: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     intent_kind = str(item.get("intent_kind") or "").upper()
     fact_state = str(item.get("latest_fact_state") or "").upper()
     phase = str(item.get("position_phase") or "")
+    command_id = str(item.get("command_id") or "").strip()
+    entry_repair = (entry_projection_recoverable or {}).get(command_id)
+    if (
+        entry_repair is not None
+        and risk in {
+            "resting_entry_order_without_entry_lifecycle",
+            "resting_order_missing_position_projection",
+        }
+        and intent_kind == "ENTRY"
+        and fact_state in {"LIVE", "OPEN", "RESTING", "PARTIALLY_MATCHED", "PARTIAL"}
+    ):
+        return {
+            **item,
+            **entry_repair,
+            "risk": risk,
+        }
     if (
         risk == "resting_exit_order_without_pending_exit_lifecycle"
         and intent_kind == "EXIT"
