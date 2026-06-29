@@ -3000,14 +3000,10 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=False,
             )
         except _SubmitAbortedModeFlipped as exc:
-            # P0 mode-authority (operator review 2026-06-10): the proven proof mode is no
-            # longer executable on the fresh book (or is missing — fail-closed). This is a
-            # FIRST-CLASS deferral, not a build failure: the proof WAS valid (proof_accepted
-            # stays True), we abort this submit and let the next cycle do a full re-rank. The
-            # reason string is DERIVED from the lifecycle state machine's terminal state
-            # (single source of truth), exactly as the recapture FAMILY_REVERSED / day0-cap
-            # aborts derive theirs — so the receipt reason and the lifecycle state can never
-            # disagree. NEVER a default taker submit.
+            # Fresh book evidence invalidated the previously built intent before
+            # the venue boundary. No venue side effect exists and the final intent
+            # is no longer accepted; the reactor classifies the typed reason and
+            # re-decides from fresh evidence when it is transient.
             return dataclass_replace(
                 no_submit_receipt,
                 side_effect_status="NO_SUBMIT",
@@ -3015,7 +3011,7 @@ def event_bound_live_adapter_from_trade_conn(
                     f"{_SUBMIT_ABORT_RECEIPT_REASON[CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED]}"
                     f":{exc}"
                 ),
-                proof_accepted=True,
+                proof_accepted=False,
             )
         except Exception as exc:
             if _live_order_build_phase == "building_live_order_certificates":
@@ -3054,7 +3050,7 @@ def event_bound_live_adapter_from_trade_conn(
                     submitted=False,
                     side_effect_status="NO_SUBMIT",
                     reason=_strategy_floor_abort,
-                    proof_accepted=True,
+                    proof_accepted=False,
                 )
             return dataclass_replace(
                 no_submit_receipt,

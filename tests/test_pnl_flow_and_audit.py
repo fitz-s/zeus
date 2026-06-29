@@ -1483,7 +1483,7 @@ def test_inv_status_fallback_bankroll_uses_initial_bankroll(monkeypatch, tmp_pat
     assert status["portfolio"]["total_pnl"] == pytest.approx(expected_total)
     assert status["portfolio"]["effective_bankroll"] == pytest.approx(expected_initial)
     assert status["portfolio"]["effective_bankroll_derivation"] == "wallet_equity_no_pnl"
-    assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
+    assert status["truth"]["compatibility_inputs"]["bankroll_resolution_source"] == "bankroll_provider"
 
 
 def test_inv_write_status_preserves_cycle_when_refreshing_without_summary(monkeypatch, tmp_path):

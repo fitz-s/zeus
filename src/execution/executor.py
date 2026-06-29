@@ -46,6 +46,7 @@ from src.architecture.decorators import capability, protects
 from src.state.db import (
     get_trade_connection_with_world_required,
 )
+from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +165,8 @@ def _exit_order_type(selected_order_type: str) -> str:
     return normalized
 
 
-_ENTRY_DUPLICATE_TERMINAL_PHASES = frozenset(
-    {"voided", "economically_closed", "settled", "quarantined", "admin_closed"}
+_ENTRY_DUPLICATE_NON_OPEN_PHASES = frozenset(
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
 )
 _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
     {
@@ -1318,7 +1319,7 @@ def _entry_duplicate_same_token_component(
         }
 
     if _table_exists(conn, "position_current"):
-        phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
         rows = conn.execute(
             f"""
             SELECT position_id, phase, order_id, shares, cost_basis_usd
@@ -1331,7 +1332,7 @@ def _entry_duplicate_same_token_component(
                 token,
                 token,
                 candidate_position_id,
-                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+                *sorted(_ENTRY_DUPLICATE_NON_OPEN_PHASES),
             ),
         ).fetchall()
         for row in rows:
@@ -1346,7 +1347,7 @@ def _entry_duplicate_same_token_component(
             }
 
     if _table_exists(conn, "venue_commands"):
-        terminal_phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_TERMINAL_PHASES)
+        non_open_phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
         open_state_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_OPEN_COMMAND_STATES)
         terminal_no_exposure_placeholders = ",".join(
             "?" for _ in _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES
@@ -1366,7 +1367,7 @@ def _entry_duplicate_same_token_component(
                         vc.state = 'FILLED'
                     AND (
                             pc.phase IS NULL
-                         OR pc.phase NOT IN ({terminal_phase_placeholders})
+                         OR pc.phase NOT IN ({non_open_phase_placeholders})
                     )
                  )
                  OR (
@@ -1381,7 +1382,7 @@ def _entry_duplicate_same_token_component(
                 token,
                 candidate_position_id,
                 *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
-                *sorted(_ENTRY_DUPLICATE_TERMINAL_PHASES),
+                *sorted(_ENTRY_DUPLICATE_NON_OPEN_PHASES),
                 *sorted(_ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES),
                 *sorted(_ENTRY_DUPLICATE_OPEN_COMMAND_STATES),
             ),

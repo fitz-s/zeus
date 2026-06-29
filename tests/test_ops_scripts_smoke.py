@@ -339,6 +339,17 @@ def test_deploy_live_resolves_repo_from_live_trading_plist(tmp_path, monkeypatch
     assert dl._resolve_live_repo() == str(live_repo.resolve())
 
 
+def test_deploy_live_resolve_repo_fails_closed_without_live_plist(tmp_path, monkeypatch):
+    dl = _load("deploy_live_missing_plist", "deploy_live.py")
+    monkeypatch.delenv("ZEUS_LIVE_REPO", raising=False)
+    monkeypatch.setattr(dl, "LIVE_TRADING_PLIST", tmp_path / "missing.plist")
+    monkeypatch.setattr(dl, "LIVE_REPO", "")
+
+    with pytest.raises(RuntimeError, match="unreadable live-trading plist"):
+        dl._resolve_live_repo()
+    assert dl.main(["status"]) == 2
+
+
 def test_deploy_live_gate_refuses_dirty(tmp_path, capsys):
     """The clean-tree gate refuses a dirty/unpushed checkout and respects --allow-dirty."""
     dl = _load("deploy_live_smoke2", "deploy_live.py")

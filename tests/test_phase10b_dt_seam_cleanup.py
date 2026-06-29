@@ -1734,7 +1734,7 @@ class TestRCPV2RowCountSensor:
         assert status["portfolio"]["bankroll"] == pytest.approx(211.37)
         assert status["portfolio"]["bankroll_object_identity"] == "wallet_equity"
         assert status["portfolio"]["effective_bankroll_derivation"] == "wallet_equity_no_pnl"
-        assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider"
+        assert status["truth"]["compatibility_inputs"]["bankroll_resolution_source"] == "bankroll_provider"
 
     def test_bankroll_semantics_rejects_unproven_riskguard_bankroll(self, tmp_path, monkeypatch):
         """Relationship: legacy risk rows cannot promote wallet+PnL into status bankroll."""
@@ -1891,7 +1891,7 @@ class TestRCPV2RowCountSensor:
         assert status["portfolio"]["bankroll"] is None
         assert status["portfolio"]["bankroll_truth_status"] == "missing"
         assert status["portfolio"]["effective_bankroll_derivation"] == "missing_wallet_truth"
-        assert status["truth"]["compatibility_inputs"]["bankroll_fallback_source"] == "bankroll_provider_unavailable"
+        assert status["truth"]["compatibility_inputs"]["bankroll_resolution_source"] == "bankroll_provider_unavailable"
         assert "bankroll_truth_missing" in status["risk"]["infrastructure_issues"]
 
 

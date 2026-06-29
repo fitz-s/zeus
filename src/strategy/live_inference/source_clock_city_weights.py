@@ -203,6 +203,7 @@ def fixed_weight_center_from_values(
     city: str,
     values_c_by_source: Mapping[str, float],
     path: str | Path | None = None,
+    allow_incomplete: bool = False,
 ) -> FixedWeightCenter | None:
     scheme = scheme_for_city(city, path=path)
     if scheme is None:
@@ -219,6 +220,8 @@ def fixed_weight_center_from_values(
             missing.append(source)
             continue
         used[source] = float(configured_weight)
+    if missing and not allow_incomplete:
+        return None
     total = sum(used.values())
     if total <= 0.0:
         return None

@@ -3,7 +3,7 @@
 #          (one city/date/metric partition) must NOT emit independent live
 #          scalar orders; live selection must use family payoff efficiency.
 # Reuse: Run when family-exclusive optimization, weather bin portfolio selection, or live
-#        family fallback semantics change.
+#        ranked-family selection semantics change.
 # Authority basis: operator P0-1 live-money spec 2026-05-20/21 (mutually-exclusive weather
 #                  family sizing), family portfolio optimizer.
 
@@ -66,7 +66,7 @@ from src.strategy.family_exclusive_dedup import (
 from src.engine.evaluator import (
     _expected_profit_usd_for_edge,
     _live_entry_economic_floor_rejection,
-    _projects_exposure_during_family_fallback_sizing,
+    _projects_exposure_during_family_ranked_sizing,
     _source_quality_kelly_haircut,
     _source_quality_policy_rejection,
     _strategy_entry_price_floor_block_reason,
@@ -922,14 +922,14 @@ def test_weather_family_decision_is_first_class_single_leg_intent() -> None:
     assert family_decision.portfolio.family_key == WeatherFamilyKey(CITY, TARGET_DATE, METRIC)
     assert family_decision.portfolio.selected_leg is low_price_tail
     assert family_decision.portfolio.selected_legs == (low_price_tail,)
-    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail,)
+    assert family_decision.portfolio.ranked_candidate_legs == (low_price_tail,)
     assert family_decision.portfolio.objective.startswith("expected_log_growth_payoff_vector")
     assert family_decision.portfolio.payoff_matrix
     assert [d.dropped_bin for d in family_decision.dropped] == ["22-23°F"]
 
 
-def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decisions() -> None:
-    """Scalar fallback alternatives need a typed ordered intent before they may submit."""
+def test_family_decision_does_not_emit_scalar_ranked_siblings_as_live_decisions() -> None:
+    """Scalar ranked alternatives need a typed ordered intent before they may submit."""
 
     bins = {s[2]: s for s in _BIN_SPECS}
     low_price_tail = _bin_edge(bins["26°F or above"], entry_price=0.02, forward_edge=0.02)
@@ -947,7 +947,7 @@ def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decision
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is low_price_tail
-    assert family_decision.portfolio.fallback_candidate_legs == (low_price_tail,)
+    assert family_decision.portfolio.ranked_candidate_legs == (low_price_tail,)
     assert [d.dropped_bin for d in family_decision.dropped] == [
         "22-23°F",
         "20-21°F",
@@ -955,8 +955,8 @@ def test_family_decision_does_not_emit_scalar_fallback_siblings_as_live_decision
     ]
 
 
-def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monkeypatch) -> None:
-    """Live-disabled buy_no is a structural non-executable leg, not fallback capacity."""
+def test_family_decision_excludes_live_disabled_buy_no_from_ranked_slots(monkeypatch) -> None:
+    """Live-disabled buy_no is a structural non-executable leg, not ranked capacity."""
 
     flags = dict(evaluator_module.settings["feature_flags"])
     flags[BUY_NO_NATIVE_QUOTE_EVIDENCE_FLAG] = True
@@ -969,10 +969,10 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
         direction="buy_no",
     )
     best_buy_yes = _bin_edge(bins["22-23°F"], entry_price=0.45, forward_edge=0.07)
-    fallback_buy_yes = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
+    alternative_buy_yes = _bin_edge(bins["20-21°F"], entry_price=0.18, forward_edge=0.04)
 
     family_decision = build_weather_family_decision(
-        [live_disabled_buy_no, best_buy_yes, fallback_buy_yes],
+        [live_disabled_buy_no, best_buy_yes, alternative_buy_yes],
         city=CITY,
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
@@ -980,8 +980,8 @@ def test_family_decision_excludes_live_disabled_buy_no_from_fallback_slots(monke
     )
 
     assert family_decision is not None
-    assert family_decision.portfolio.selected_leg is fallback_buy_yes
-    assert family_decision.portfolio.fallback_candidate_legs == (fallback_buy_yes,)
+    assert family_decision.portfolio.selected_leg is alternative_buy_yes
+    assert family_decision.portfolio.ranked_candidate_legs == (alternative_buy_yes,)
     assert [d.dropped_bin for d in family_decision.dropped] == [
         "26°F or above",
         "22-23°F",
@@ -1017,17 +1017,17 @@ def test_family_decision_all_live_disabled_buy_no_does_not_self_drop(monkeypatch
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_leg is buy_no_a
-    assert family_decision.portfolio.fallback_candidate_legs == (buy_no_a,)
+    assert family_decision.portfolio.ranked_candidate_legs == (buy_no_a,)
     assert [d.dropped_bin for d in family_decision.dropped] == ["20-21°F"]
 
 
-def test_runtime_dedup_collapses_scalar_fallback_candidates_before_submit() -> None:
-    """Ranked scalar fallbacks are not one execution intent and must not all submit."""
+def test_runtime_dedup_collapses_scalar_ranked_candidates_before_submit() -> None:
+    """Ranked scalar alternatives are not one execution intent and must not all submit."""
 
     decisions = _family_after_fdr()
     for rank, decision in enumerate(decisions, start=1):
-        decision.family_fallback_rank = rank
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = rank
+        decision.family_ranked_candidate_count = len(decisions)
 
     out = dedup_mutually_exclusive_families(
         decisions,
@@ -1046,8 +1046,8 @@ def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
 
     decisions = _family_after_fdr()[:2]
     for decision in decisions:
-        decision.family_fallback_rank = 1
-        decision.family_fallback_candidate_count = len(decisions)
+        decision.family_ranked_candidate_rank = 1
+        decision.family_ranked_candidate_count = len(decisions)
         decision.family_portfolio_leg_role = "portfolio_selected"
 
     out = dedup_mutually_exclusive_families(
@@ -1063,24 +1063,24 @@ def test_runtime_dedup_preserves_multi_leg_portfolio_selected_legs() -> None:
     assert all(d.rejection_stage == "" for d in out)
 
 
-def test_family_fallback_sizing_does_not_accumulate_sibling_exposure() -> None:
-    """Risk sizing sees ranked fallback siblings as alternate attempts, not a basket."""
+def test_family_ranked_sizing_does_not_accumulate_sibling_exposure() -> None:
+    """Risk sizing sees ranked siblings as alternate attempts, not a basket."""
 
-    assert not _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=1,
-        family_fallback_candidate_count=3,
+    assert not _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=1,
+        family_ranked_candidate_count=3,
     )
-    assert not _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=2,
-        family_fallback_candidate_count=3,
+    assert not _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=2,
+        family_ranked_candidate_count=3,
     )
-    assert _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=0,
-        family_fallback_candidate_count=0,
+    assert _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=0,
+        family_ranked_candidate_count=0,
     )
-    assert _projects_exposure_during_family_fallback_sizing(
-        family_fallback_rank=1,
-        family_fallback_candidate_count=1,
+    assert _projects_exposure_during_family_ranked_sizing(
+        family_ranked_candidate_rank=1,
+        family_ranked_candidate_count=1,
     )
 
 
@@ -1369,10 +1369,10 @@ def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallba
     bins = {s[2]: s for s in _BIN_SPECS}
     edge_a = _bin_edge(bins["20-21°F"], entry_price=0.20, forward_edge=0.20)
     edge_b = _bin_edge(bins["22-23°F"], entry_price=0.20, forward_edge=0.20)
-    scalar_fallback = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
+    scalar_alternative = _bin_edge(bins["26°F or above"], entry_price=0.70, forward_edge=0.01)
 
     family_decision = build_weather_family_decision(
-        [edge_a, edge_b, scalar_fallback],
+        [edge_a, edge_b, scalar_alternative],
         city=CITY,
         target_date=TARGET_DATE,
         temperature_metric=METRIC,
@@ -1381,7 +1381,7 @@ def test_multi_leg_family_decision_executes_selected_portfolio_not_scalar_fallba
 
     assert family_decision is not None
     assert family_decision.portfolio.selected_legs == (edge_a, edge_b)
-    assert family_decision.portfolio.fallback_candidate_legs == (edge_a, edge_b)
+    assert family_decision.portfolio.ranked_candidate_legs == (edge_a, edge_b)
     assert [d.dropped_bin for d in family_decision.dropped] == ["26°F or above"]
 
 

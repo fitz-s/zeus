@@ -28,6 +28,10 @@ _SOURCE_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("dmi_", "dmi"),
     ("kma_", "kma"),
     ("jma_", "jma"),
+    # Station-calibrated official forecasts (HKO 9-day, etc.) — each agency is its own
+    # decorrelated provider family (the station forecast is independent of the gridded models).
+    ("hko_", "hko"),
+    ("cwa_", "cwa"),
 )
 
 MarketReactionBucket = Literal[

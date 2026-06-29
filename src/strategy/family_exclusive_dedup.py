@@ -58,16 +58,15 @@ BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_FLAG = "BUY_NO_NATIVE_QUOTE_EVIDENCE_SUBMIT_
 ENV_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = "ZEUS_LIVE_FAMILY_PORTFOLIO_MAX_LEGS"
 DEFAULT_FAMILY_PORTFOLIO_MAX_LEGS_LIVE = 1
 # Hard cap on a family portfolio's worst-case loss (USD). When set, the
-# optimizer rejects portfolios with ``max_loss_usd > cap`` (returns None) so
-# the caller falls back to the single-leg safety selector. Default None = no cap (relies
-# on per-leg Kelly + portfolio_heat to bound exposure).
+# optimizer rejects portfolios with ``max_loss_usd > cap``. Default None = no cap
+# (relies on per-leg Kelly + portfolio_heat to bound exposure).
 ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD = "ZEUS_FAMILY_PORTFOLIO_MAX_LOSS_USD"
 
 
 def _family_portfolio_max_legs() -> int:
     """Live max_legs for the Stage B family portfolio optimizer.
 
-    Unknown or invalid values fall back to the live default.
+    Unknown or invalid values use the live default.
     """
     try:
         raw = os.environ.get(
@@ -82,7 +81,7 @@ def _family_portfolio_max_legs() -> int:
 def _family_portfolio_max_loss_usd() -> float | None:
     """Optional hard-cap on Stage B portfolio worst-case loss (USD).
 
-    Returns None when unset, disabled, or invalid (fail-open: no cap).
+    Returns None when unset, disabled, or invalid.
     """
     raw = os.environ.get(ENV_FAMILY_PORTFOLIO_MAX_LOSS_USD, "").strip()
     if not raw:
@@ -102,7 +101,7 @@ MUTUALLY_EXCLUSIVE_FAMILY_DEDUP = "mutually_exclusive_family_dedup"
 # loss-cap rejection path. NoTradeReason enum bump is deferred until the next
 # DB-migration PR (SV15 CHECK constraint requires schema_version bump + re-pin).
 # The string constant matches the MUTUALLY_EXCLUSIVE_FAMILY_DEDUP pattern so
-# operators can grep / aggregate optimizer loss-cap fallbacks from logs.
+# operators can grep / aggregate optimizer loss-cap rejections from logs.
 # See architecture/market_cost_seam_executable_uncertainty_2026_05_27.md
 # section Wave 4.
 FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED = "family_portfolio_loss_cap_exceeded"
@@ -189,13 +188,13 @@ class ExclusiveOutcomePortfolio:
     capital_cost_usd: float = 0.0
     capital_efficiency: float = 0.0
     max_loss_usd: float = 0.0
-    fallback_candidate_legs: tuple[Any, ...] = ()
+    ranked_candidate_legs: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.selected_legs:
             object.__setattr__(self, "selected_legs", (self.selected_leg,))
-        if not self.fallback_candidate_legs:
-            object.__setattr__(self, "fallback_candidate_legs", self.selected_legs)
+        if not self.ranked_candidate_legs:
+            object.__setattr__(self, "ranked_candidate_legs", self.selected_legs)
 
 
 @dataclass(frozen=True)
@@ -1375,7 +1374,7 @@ def buy_no_native_quote_evidence_submit_enabled() -> bool:
 
 
 def _edge_live_family_executable_rejection_reason(edge: Any) -> str | None:
-    """Return structural live-execution reason before a leg consumes fallback rank."""
+    """Return structural live-execution reason before a leg consumes ranked selection."""
 
     structural = _edge_family_candidate_rejection_reason(edge)
     if structural:
@@ -1546,12 +1545,6 @@ def build_weather_family_decision(
 
     # Wave 4 (2026-05-27): max_legs controls the live family portfolio optimizer.
     max_legs = _family_portfolio_max_legs()
-    try:
-        fallback_candidate_count = int(
-            os.environ.get("ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES", "3")
-        )
-    except ValueError:
-        fallback_candidate_count = 3
     portfolio = optimize_exclusive_outcome_portfolio(
         candidate_edges,
         city=city,
@@ -1564,13 +1557,12 @@ def build_weather_family_decision(
     if portfolio is None:
         return None
     # Wave 4: hard-cap on worst-case family loss. When the cap is set and the
-    # optimizer's portfolio exceeds it, return None so the caller can use the
-    # deterministic single-leg safety selector. Fail-open (no cap) when env unset.
+    # optimizer's portfolio exceeds it, reject this family decision explicitly.
     loss_cap = _family_portfolio_max_loss_usd()
     if loss_cap is not None and float(portfolio.max_loss_usd) > loss_cap:
         logger.warning(
             "[%s] city=%s target=%s metric=%s "
-            "max_loss_usd=%.4f > cap=%.4f - falling back to single-leg safety selector",
+            "max_loss_usd=%.4f > cap=%.4f - rejecting family portfolio",
             FAMILY_PORTFOLIO_LOSS_CAP_EXCEEDED.upper(),
             city, target_date, temperature_metric,
             float(portfolio.max_loss_usd), loss_cap,
@@ -1580,30 +1572,29 @@ def build_weather_family_decision(
     selected_legs = list(portfolio.selected_legs)
     if len(selected_legs) > 1:
         # A multi-leg family portfolio is a coherent payoff vector. Ranked
-        # scalar siblings are not interchangeable fallback legs for it; replacing
-        # one selected leg requires re-optimizing the portfolio, not appending the
-        # old scalar fallback queue.
-        fallback_candidates = selected_legs
+        # scalar siblings are not interchangeable alternatives for it; replacing
+        # one selected leg requires re-optimizing the portfolio.
+        ranked_candidates = selected_legs
     else:
         # A scalar entry has no first-class ordered-alternative intent today.
-        # Emitting ranked sibling fallbacks as separate should_trade decisions lets
+        # Emitting ranked sibling alternatives as separate should_trade decisions lets
         # the submit loop race a second same-family order after an unknown first
         # attempt. Keep only the optimized leg until ordered alternatives are a
         # typed execution-intent primitive.
-        fallback_candidates = [portfolio.selected_leg]
+        ranked_candidates = [portfolio.selected_leg]
     portfolio = ExclusiveOutcomePortfolio(
         family_key=portfolio.family_key,
         selected_leg=portfolio.selected_leg,
         selected_legs=portfolio.selected_legs,
-        fallback_candidate_legs=tuple(fallback_candidates),
+        ranked_candidate_legs=tuple(ranked_candidates),
         candidate_legs=portfolio.candidate_legs,
         candidate_leg_descriptors=portfolio.candidate_leg_descriptors,
         selection_score=portfolio.selection_score,
         expected_net_profit_usd=portfolio.expected_net_profit_usd,
         expected_fill_probability=portfolio.expected_fill_probability,
         objective=(
-            f"{portfolio.objective}:ranked_executable_fallback_top_"
-            f"{len(fallback_candidates)}"
+            f"{portfolio.objective}:ranked_selected_legs_top_"
+            f"{len(ranked_candidates)}"
         ),
         payoff_matrix=portfolio.payoff_matrix,
         posterior_vector=portfolio.posterior_vector,
@@ -1615,8 +1606,8 @@ def build_weather_family_decision(
         capital_efficiency=portfolio.capital_efficiency,
         max_loss_usd=portfolio.max_loss_usd,
     )
-    selected_set = set(id(edge) for edge in portfolio.fallback_candidate_legs)
-    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.fallback_candidate_legs)
+    selected_set = set(id(edge) for edge in portfolio.ranked_candidate_legs)
+    kept_bin = ",".join(_edge_bin_label(edge) for edge in portfolio.ranked_candidate_legs)
     dropped: list[FamilyPreselectionDrop] = []
     for edge, rejection_reason in excluded_blocked_edges:
         dropped.append(
@@ -1779,7 +1770,7 @@ def dedup_mutually_exclusive_families(
         portfolio_selected = [
             i
             for i in idxs
-            if int(getattr(decisions[i], "family_fallback_candidate_count", 0) or 0) > 1
+            if int(getattr(decisions[i], "family_ranked_candidate_count", 0) or 0) > 1
             and str(getattr(decisions[i], "family_portfolio_leg_role", "") or "")
             == "portfolio_selected"
         ]
@@ -1787,8 +1778,8 @@ def dedup_mutually_exclusive_families(
             selected_set = set(portfolio_selected)
             for i in portfolio_selected:
                 validations = getattr(decisions[i], "applied_validations", None)
-                if isinstance(validations, list) and "family_ranked_executable_fallback" not in validations:
-                    validations.append("family_ranked_executable_fallback")
+                if isinstance(validations, list) and "family_ranked_executable_alternative" not in validations:
+                    validations.append("family_ranked_executable_alternative")
             for i in idxs:
                 if i in selected_set:
                     continue
@@ -1800,10 +1791,10 @@ def dedup_mutually_exclusive_families(
                 d.rejection_reason_detail = (
                     f"family={city}|{target_date}|{temperature_metric} "
                     f"dropped_bin={_decision_bin_label(d)!r} "
-                    "(portfolio selected legs only; scalar fallback alternative not live)"
+                    "(portfolio selected legs only; ranked scalar alternative not live)"
                 )
             logger.info(
-                "[MUTUALLY_EXCLUSIVE_FAMILY_FALLBACK_CANDIDATES] family=%s candidate_count=%d",
+                "[MUTUALLY_EXCLUSIVE_FAMILY_RANKED_CANDIDATES] family=%s candidate_count=%d",
                 "|".join(key),
                 len(portfolio_selected),
             )

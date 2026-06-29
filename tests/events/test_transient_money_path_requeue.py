@@ -366,12 +366,9 @@ def test_mode_flipped_is_transient():
 
 def test_mode_flipped_no_submit_state_requeues_not_consumed():
     """ANTIBODY (live 2026-06-11 17:30:20Z, Busan x2): MODE_FLIPPED arrives as a
-    VERIFIED NO_SUBMIT *state* (P0-1), not a rejection — it bypassed the
-    _reject_or_retry_post_submit classifier and was terminally consumed as
-    proof_accepted while the fresh ask carried +6.7% conservative EV
-    (q_lcb 0.828 vs ask 0.77). The NO_SUBMIT branch must classify transient
-    reasons BEFORE persisting the receipt: the event requeues PENDING and the
-    aborted attempt writes no receipt."""
+    typed no-side-effect NO_SUBMIT state (P0-1). It must be classified as a
+    transient stale-decision-vs-fresh-book abort before persistence: the event
+    requeues PENDING and the aborted attempt writes no receipt."""
     conn, store = _store()
     event = _event("snap-mf")
     store.insert_or_ignore(event)
@@ -379,7 +376,7 @@ def test_mode_flipped_no_submit_state_requeues_not_consumed():
     def _submit(ev, _decision_time):
         return EventSubmissionReceipt(
             submitted=False,
-            proof_accepted=True,
+            proof_accepted=False,
             event_id=ev.event_id,
             causal_snapshot_id=ev.causal_snapshot_id,
             city="Busan",

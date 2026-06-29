@@ -206,6 +206,44 @@ def test_runtime_observation_authority_captures_missing_case(trade_conn):
     assert high is None
 
 
+def test_runtime_observation_authority_marks_non_settlement_source_non_authoritative(trade_conn):
+    from src.engine.cycle_runtime import build_settlement_day_observation_authority_row
+
+    city = SimpleNamespace(name="Chicago", timezone="America/Chicago", settlement_unit="F")
+    observation = SimpleNamespace(
+        current_temp=73.0,
+        high_so_far=74.2,
+        low_so_far=61.0,
+        source="openmeteo_hourly",
+        observation_time="2026-05-24T13:00:00-05:00",
+        unit="F",
+        causality_status="OK",
+        station_id="",
+        sample_count=12,
+        first_sample_time="2026-05-24T00:00:00-05:00",
+        last_sample_time="2026-05-24T13:00:00-05:00",
+        coverage_status="NON_SETTLEMENT_SOURCE",
+        observation_available_at="2026-05-24T18:07:00Z",
+    )
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    row = build_settlement_day_observation_authority_row(
+        city=city,
+        target_date="2026-05-24",
+        temperature_metric="high",
+        decision_time=decision_time,
+        market_phase="settlement_day",
+        observation=observation,
+        coverage_status="NON_SETTLEMENT_SOURCE",
+        recorded_at=decision_time.isoformat(),
+    )
+
+    assert row["coverage_status"] == "NON_SETTLEMENT_SOURCE"
+    assert row["source_authorized_for_settlement"] == 0
+    assert row["freshness_status"] == "DEGRADED"
+    assert json.loads(row["payload_json"])["coverage_status_raw"] == "NON_SETTLEMENT_SOURCE"
+
+
 # ---------------------------------------------------------------------------
 # FIX-2 — day0 truth classification persisted on the opportunity row.
 # ---------------------------------------------------------------------------

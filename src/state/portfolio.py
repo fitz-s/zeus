@@ -2902,7 +2902,9 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
     return ordered
 
 
-INACTIVE_RUNTIME_STATES = frozenset({"voided", "settled", "economically_closed", "quarantined", "admin_closed"})
+INACTIVE_RUNTIME_STATES = frozenset(
+    set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
+)
 LEGACY_NONVOCABULARY_INACTIVE_STATES = frozenset({"quarantine_fill_failed", "quarantine_void_failed"})
 NO_EXPOSURE_CHAIN_STATES = frozenset(
     {
@@ -3460,32 +3462,33 @@ def has_same_token_open(state: PortfolioState, token_id: str) -> bool:
     )
 
 
-# Derived from canonical INACTIVE_RUNTIME_STATES — single source of truth (Fitz #1).
+# Non-open runtime phases used by the direct DB dedup query. This is intentionally
+# broader than terminal lifecycle states because economically_closed has no live exposure.
 # tuple(sorted(...)) for stable SQL placeholder order.
-_TERMINAL_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
+_NON_OPEN_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
 
 
 def has_same_token_open_db(conn, token_id: str) -> bool:
     """Decision-time dedup gate: queries position_current directly at call time.
     Non-terminal phases: active, day0_window, pending_exit, pending_entry,
-      phantom_not_on_chain, and any future non-terminal state.
-    Terminal (excluded): voided, economically_closed, settled, quarantined,
+      phantom_not_on_chain, and any future open state.
+    Non-open (excluded): voided, economically_closed, settled, quarantined,
       admin_closed.
 
     Checks BOTH token_id (YES side) and no_token_id (NO side) columns so buy_no
     positions are not invisible to the dedup gate.
 
     Uses a parameterized NOT IN — placeholders built from the fixed-length
-    _TERMINAL_PHASES tuple (internal constant, not user input). This f-string
+    _NON_OPEN_PHASES tuple (internal constant, not user input). This f-string
     SQL site is registered in scripts/check_dynamic_sql.py baseline.
     """
-    placeholders = ",".join("?" * len(_TERMINAL_PHASES))
+    placeholders = ",".join("?" * len(_NON_OPEN_PHASES))
     row = conn.execute(
         f"""SELECT 1 FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
             AND phase NOT IN ({placeholders})
             LIMIT 1""",
-        (token_id, token_id, *_TERMINAL_PHASES),
+        (token_id, token_id, *_NON_OPEN_PHASES),
     ).fetchone()
     return row is not None
 

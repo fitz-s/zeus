@@ -365,12 +365,13 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
             ))
         if not targets:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
-        return download_bayes_precision_fusion_extra_raw_inputs(
+        result = download_bayes_precision_fusion_extra_raw_inputs(
             forecast_db=Path(str(forecast_db)),
             cycle=cycle,
             targets=targets,
             release_lag_hours=release_lag_hours,
         )
+        return result
     except Exception as exc:  # noqa: BLE001 - fail-soft: extras accrual never breaks the cycle
         logger.warning("BAYES_PRECISION_FUSION extra-model capture skipped (fail-soft): %s", exc)
         return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}

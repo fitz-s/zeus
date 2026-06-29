@@ -30,6 +30,7 @@ from src.contracts.execution_intent import DecisionSourceContext
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     LifecyclePhase,
+    TERMINAL_STATES,
     enter_day0_window_runtime_state,
     initial_entry_runtime_state_for_order_status,
     is_terminal_state,
@@ -90,9 +91,7 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
-_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(
-    {"settled", "voided", "admin_closed", "quarantined"}
-)
+_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES)
 _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
     {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
 )
@@ -2273,6 +2272,10 @@ def _increment_summary_counter(summary: dict, key: str, amount: int = 1) -> None
     summary[key] = int(summary.get(key, 0) or 0) + amount
 
 
+def _mark_observability_degraded(summary: dict) -> None:
+    summary["observability_degraded"] = True
+
+
 def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException) -> None:
     """Fail loud + count a swallowed decision/telemetry-lane write failure.
 
@@ -2280,7 +2283,7 @@ def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException
     INDISTINGUISHABLE from a lane that simply had nothing to write — that
     blindness is what let edli_no_submit_receipts sit dead from 2026-06-06
     with nobody noticing. This preserves the existing fail-soft behavior
-    (``summary['degraded']`` is still set exactly as before, the cycle is NOT
+    (``summary['observability_degraded']`` is set, the cycle is NOT
     blocked) but additionally (a) emits a logger.error naming the lane and the
     exception, and (b) increments a per-lane failure counter on the summary so
     a downstream liveness check can name a lane that is failing every cycle.
@@ -2288,7 +2291,7 @@ def _record_lane_write_failure(summary: dict, lane_name: str, exc: BaseException
     failures = summary.setdefault("lane_write_failures", {})
     if isinstance(failures, dict):
         failures[lane_name] = int(failures.get(lane_name, 0) or 0) + 1
-    summary["degraded"] = True  # preserve existing behavior
+    _mark_observability_degraded(summary)
     logger.error("LANE WRITE FAILED lane=%s err=%r", lane_name, exc)
 
 
@@ -2367,9 +2370,9 @@ def _record_final_intent_frontier(
         "target_date": str(getattr(candidate, "target_date", "") or ""),
         "temperature_metric": str(getattr(candidate, "temperature_metric", "") or ""),
         "decision_id": str(getattr(decision, "decision_id", "") or ""),
-        "rank": int(getattr(decision, "family_fallback_rank", 0) or 0),
-        "family_fallback_candidate_count": int(
-            getattr(decision, "family_fallback_candidate_count", 0) or 0
+        "rank": int(getattr(decision, "family_ranked_candidate_rank", 0) or 0),
+        "family_ranked_candidate_count": int(
+            getattr(decision, "family_ranked_candidate_count", 0) or 0
         ),
         "bin": str(getattr(getattr(edge, "bin", None), "label", "") or ""),
         "direction": str(getattr(edge, "direction", "") or ""),
@@ -4900,19 +4903,27 @@ def _observation_time_to_local_date(observation_time, timezone_name: str):
 
 def _normalize_observation_coverage_status(raw: str) -> str:
     """Map the two runtime coverage/availability vocabularies onto the canonical
-    MISSING / STALE / LOW / OK set the operator audit query expects.
+    MISSING / STALE / NON_SETTLEMENT_SOURCE / LOW / OK set the operator audit
+    query expects.
 
-    Success path emits OK / DIAGNOSTIC_FALLBACK (obs.coverage_status); failure
-    path emits DATA_UNAVAILABLE / DATA_STALE / RATE_LIMITED / CHAIN_UNAVAILABLE
-    (_availability_status_for_exception). The raw value is preserved in
-    payload_json; this is only the canonical column value.
+    Settlement-bound observation paths emit OK / LOW_COVERAGE /
+    WINDOW_INCOMPLETE. Explicitly requested non-settlement observation paths emit
+    NON_SETTLEMENT_SOURCE. Old DIAGNOSTIC_FALLBACK rows are accepted here only as
+    durable pre-cutover aliases and are never emitted by new observation code.
+    Failure paths emit DATA_UNAVAILABLE / DATA_STALE / RATE_LIMITED /
+    CHAIN_UNAVAILABLE (_availability_status_for_exception). The raw value is
+    preserved in payload_json; this is only the canonical column value.
     """
     value = str(raw or "").strip().upper()
     if value in {"OK"}:
         return "OK"
     if value in {"DATA_STALE", "STALE", "RATE_LIMITED"}:
         return "STALE"
-    if value in {"DIAGNOSTIC_FALLBACK", "LOW"}:
+    if value in {"NON_SETTLEMENT_SOURCE"}:
+        return "NON_SETTLEMENT_SOURCE"
+    if value in {"DIAGNOSTIC_FALLBACK"}:
+        return "NON_SETTLEMENT_SOURCE"
+    if value in {"LOW", "LOW_COVERAGE", "WINDOW_INCOMPLETE"}:
         return "LOW"
     if value in {"DATA_UNAVAILABLE", "CHAIN_UNAVAILABLE", "MISSING", "", "UNKNOWN"}:
         return "MISSING"
@@ -4960,8 +4971,8 @@ def build_settlement_day_observation_authority_row(
 
     Field semantics:
       source_authorized_for_settlement — 1 when the obs came from the
-        settlement-bound source path (coverage_status == "OK"); 0 for diagnostic
-        fallbacks; None when no obs was fetched.
+        settlement-bound source path (coverage_status == "OK"); 0 for
+        non-settlement sources; None when no obs was fetched.
       local_date_matches_target — 1 when the observation timestamp's local date
         (city tz) equals target_date. The whole-point field for catching
         wrong-date/source fakes. None when un-computable or no obs.
@@ -5015,7 +5026,7 @@ def build_settlement_day_observation_authority_row(
     sample_count = getattr(observation, "sample_count", None)
 
     # source_authorized_for_settlement: settlement-bound path yields
-    # coverage_status="OK"; diagnostic fallbacks yield "DIAGNOSTIC_FALLBACK".
+    # coverage_status="OK"; non-settlement sources yield NON_SETTLEMENT_SOURCE.
     source_authorized = 1 if obs_coverage == "OK" else 0
 
     # local_date_matches_target: compare obs timestamp local date to target_date.
@@ -5028,8 +5039,8 @@ def build_settlement_day_observation_authority_row(
         except (ValueError, TypeError):
             local_match = None
 
-    # freshness_status: derived from coverage. OK obs is FRESH; diagnostic or
-    # other coverage is DEGRADED (the settlement source did not produce it).
+    # freshness_status: derived from coverage. OK obs is FRESH; non-settlement
+    # or incomplete coverage is DEGRADED (not execution-authorizing truth).
     freshness = "FRESH" if obs_coverage == "OK" else "DEGRADED"
 
     def _f(value):
@@ -5153,7 +5164,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         if int(family_frontier.get("blocked_existing_family_exposure", 0) or 0) > 0:
             return "family_exposure_block"
         if (
-            int(family_frontier.get("fallback_candidates", 0) or 0) > 0
+            int(family_frontier.get("ranked_candidates", 0) or 0) > 0
             and int(execution_frontier.get("final_intent_built", 0) or 0) == 0
         ):
             return "execution_viability_failure"
@@ -5222,7 +5233,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 # signal evidence, settlement_day_observation_authority, ...) flows
                 # through here. A swallowed exception is indistinguishable from a
                 # lane with nothing to write; name + count it so a dead lane fails
-                # loud. Behavior preserved: degraded still set, cycle not blocked.
+                # loud. Observability degradation is recorded; the cycle is not blocked.
                 deps.logger.warning("Derived discovery write failed for %s: %s", name, exc)
                 _record_lane_write_failure(summary, name, exc)
             else:
@@ -5459,7 +5470,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     summary[f"forward_market_substrate_{key}"] = int(result.get(key) or 0)
             if status in {"written_with_conflicts", "skipped_invalid_schema"}:
                 deps.logger.warning("Forward market substrate degraded: %s", result)
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
 
             from src.state.db import log_market_source_contract_topology_facts
 
@@ -5486,7 +5497,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 deps.logger.warning(
                     "Market source-contract topology degraded: %s", source_contract_result
                 )
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
 
         def _write_guarded() -> None:
             try:
@@ -5495,8 +5506,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 # AB3: record the substrate-specific status fields, then RE-RAISE so
                 # the central _flush_derived_writes handler is the single place that
                 # logs + counts the failure (no double-count, no false success).
-                # Net behavior is identical to the prior internal swallow: degraded
-                # gets set and the cycle is not blocked — the swallow simply moves
+                # Net behavior is identical to the prior internal swallow: observability
+                # degradation is recorded and the cycle is not blocked — the swallow simply moves
                 # up one frame to the uniform fail-loud path.
                 summary["forward_market_substrate_status"] = "error"
                 summary["forward_market_substrate_error"] = str(exc)
@@ -5628,10 +5639,10 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             )
             summary["forward_market_price_linkage_status"] = str(linkage_result.get("status", ""))
             if _forward_price_linkage_status_degraded(summary["forward_market_price_linkage_status"]):
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
         except Exception as exc:
             # AB3: direct (non-queued) price-linkage telemetry-lane write. Was
-            # logged but uncounted; now counted. degraded + status preserved.
+            # logged but uncounted; now counted with explicit observability degradation.
             deps.logger.warning(
                 "Executable snapshot price linkage write failed for %s %s %s: %s",
                 city_name,
@@ -5935,7 +5946,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 summary["cycle_backpressure_elapsed_seconds"] = elapsed
                 summary["cycle_backpressure_markets_evaluated"] = market_index
                 summary["cycle_backpressure_markets_skipped"] = markets_skipped
-                summary["degraded"] = True
+                _mark_observability_degraded(summary)
                 deps.logger.warning(
                     "Discovery cycle backpressure: truncated %s after %.1fs budget=%.1fs evaluated=%s skipped=%s",
                     mode.value,
@@ -6254,7 +6265,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             # one underlying event. This single structural hook (NOT a
             # per-callsite cap) admits one coherent optimized family intent:
             # either one scalar best leg or all selected legs of a typed
-            # multi-leg portfolio. Ranked fallback siblings are not parallel
+            # multi-leg portfolio. Ranked scalar alternatives are not parallel
             # live submit intents. Gate default ON in live; fail-safe (only
             # ever removes entries). Authority: operator P0-1 live-money spec
             # 2026-05-20/21 (mutually-exclusive weather family sizing).
@@ -6304,7 +6315,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 _frontier_increment("family_frontier", "families_seen")
                 _frontier_increment(
                     "family_frontier",
-                    "fallback_candidates",
+                    "ranked_candidates",
                     sum(1 for _d in decisions if getattr(_d, "should_trade", False)),
                 )
                 _frontier_increment(
@@ -6395,8 +6406,8 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         _no_trade_conn.close()
             if decisions:
                 # Accumulate FDR health metrics into cycle summary
-                if any(getattr(d, "fdr_fallback_fired", False) for d in decisions):
-                    summary["fdr_fallback_fired"] = True
+                if any(getattr(d, "fdr_family_scan_unavailable", False) for d in decisions):
+                    summary["fdr_family_scan_unavailable"] = True
                 family_sizes = [getattr(d, "fdr_family_size", 0) for d in decisions if getattr(d, "fdr_family_size", 0) > 0]
                 if family_sizes:
                     summary["fdr_family_size"] = summary.get("fdr_family_size", 0) + family_sizes[0]
@@ -6420,30 +6431,34 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                     ]
                     _ = edges_payload
                 except Exception as exc:
-                    deps.logger.error("telemetry write failed, cycle flagged degraded: %s", exc, exc_info=True)
+                    deps.logger.error(
+                        "telemetry write failed, cycle observability degraded: %s",
+                        exc,
+                        exc_info=True,
+                    )
                     _record_lane_write_failure(summary, "decision_evidence_build", exc)
-            family_fallback_submit_satisfied = False
+            family_ranked_submit_satisfied = False
             for d in decisions:
                 if False:
                     _ = d.calibration
                 strategy_key = _resolve_strategy_key(d) if d.edge else ""
                 if d.should_trade and d.edge and d.tokens:
                     is_live_env = str(env or "").strip().lower() == "live"
-                    family_fallback_candidate_count = int(
-                        getattr(d, "family_fallback_candidate_count", 0) or 0
+                    family_ranked_candidate_count = int(
+                        getattr(d, "family_ranked_candidate_count", 0) or 0
                     )
                     family_portfolio_leg_role = str(
                         getattr(d, "family_portfolio_leg_role", "") or ""
                     )
                     if (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_submit_satisfied
+                        family_ranked_candidate_count > 1
+                        and family_ranked_submit_satisfied
                         and family_portfolio_leg_role != "portfolio_selected"
                     ):
                         summary["no_trades"] += 1
                         rejection_stage = "ANTI_CHURN"
                         rejection_reasons = [
-                            "mutually_exclusive_family_fallback_not_attempted_after_submit"
+                            "mutually_exclusive_family_ranked_alternative_not_attempted_after_submit"
                         ]
                         _record_opportunity_fact(
                             candidate,
@@ -6475,7 +6490,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 edge_context_json=d.edge_context_json,
                                 applied_validations=[
                                     *list(d.applied_validations),
-                                    "family_ranked_executable_fallback_skipped_after_submit",
+                                    "family_ranked_alternative_skipped_after_submit",
                                 ],
                                 bin_labels=parseable_labels,
                                 p_raw_vector=d.p_raw.tolist() if getattr(d, "p_raw", None) is not None else [],
@@ -6925,7 +6940,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         rejection_reasons=[],
                     )
                     result = None
-                    family_fallback_attempt_accepted = False
+                    family_ranked_attempt_accepted = False
                     live_frontier_stage = "final_intent_contract"
                     live_frontier_attempt_counted = False
                     try:
@@ -7022,7 +7037,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                             submitted_limit = float(final_limit_decimal)
                             submit_rejected = str(getattr(result, "status", "") or "") == "rejected"
-                            family_fallback_attempt_accepted = not submit_rejected
+                            family_ranked_attempt_accepted = not submit_rejected
                             if submit_rejected:
                                 submit_rejected_reason = getattr(result, "reason", None) or "submit_rejected"
                                 _increment_summary_counter(summary, "submit_rejected")
@@ -7125,7 +7140,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 d.edge.bin.label,
                                 decision_id=str(d.decision_id) if d.decision_id else "",
                             )
-                            family_fallback_attempt_accepted = (
+                            family_ranked_attempt_accepted = (
                                 str(getattr(result, "status", "") or "") != "rejected"
                             )
                     except Exception as exc:
@@ -7215,7 +7230,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                             )
                         )
                         continue
-                    if family_fallback_attempt_accepted:
+                    if family_ranked_attempt_accepted:
                         shoulder_ledger_error = _record_submitted_shoulder_exposure(
                             conn=conn,
                             city_name=city.name,
@@ -7231,14 +7246,14 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 d.decision_id,
                                 shoulder_ledger_error,
                             )
-                            summary["degraded"] = True
+                            _mark_observability_degraded(summary)
                             summary["entries_paused"] = True
                             pause_error = _freeze_entries_after_shoulder_ledger_failure(
                                 shoulder_ledger_error,
                                 logger=deps.logger,
                             )
                             if pause_error:
-                                summary["degraded"] = True
+                                _mark_observability_degraded(summary)
                                 summary["shoulder_exposure_pause_error"] = pause_error
                             if isinstance(getattr(d, "tokens", None), dict):
                                 d.tokens.setdefault("shoulder_exposure_ledger_error", shoulder_ledger_error)
@@ -7291,22 +7306,22 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                         }
                     )
                     if (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_attempt_accepted
+                        family_ranked_candidate_count > 1
+                        and family_ranked_attempt_accepted
                     ):
-                        family_fallback_submit_satisfied = True
+                        family_ranked_submit_satisfied = True
                     if (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_attempt_accepted
+                        family_ranked_candidate_count > 1
+                        and family_ranked_attempt_accepted
                         and family_portfolio_leg_role != "portfolio_selected"
                     ):
-                        summary["family_fallback_selected_rank"] = int(
-                            getattr(d, "family_fallback_rank", 0) or 0
+                        summary["family_ranked_selected_rank"] = int(
+                            getattr(d, "family_ranked_candidate_rank", 0) or 0
                         )
-                        summary["family_fallback_candidate_count"] = family_fallback_candidate_count
+                        summary["family_ranked_candidate_count"] = family_ranked_candidate_count
                     elif (
-                        family_fallback_candidate_count > 1
-                        and family_fallback_attempt_accepted
+                        family_ranked_candidate_count > 1
+                        and family_ranked_attempt_accepted
                         and family_portfolio_leg_role == "portfolio_selected"
                     ):
                         summary["family_portfolio_selected_submits"] = (

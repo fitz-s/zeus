@@ -636,8 +636,8 @@ class LiveLaneDarkInvariantError(RuntimeError):
 
     The combination (nominally-armed live daemon + proof_accepted=True +
     side_effect_status=NO_SUBMIT + submit_lane="LIVE") is IMPOSSIBLE for a genuine
-    full-pass: the live lane either SUBMITs, returns a SUBMIT_DISABLED build, or
-    carries a TYPED abort reason (never a default no-submit). If this combination
+    full-pass: the live lane either submits, produces an execution terminal, or
+    returns a typed pre-venue abort with proof_accepted=False. If this combination
     reaches persistence the live lane silently ate a tradeable full-pass entry —
     the 2026-06-12 11:51-12:12Z silent-kill incident — so we RAISE instead of
     persisting a kill indistinguishable from normal no-submit accounting.
@@ -646,16 +646,6 @@ class LiveLaneDarkInvariantError(RuntimeError):
     submit_lane="NO_SUBMIT_ADAPTER" + a named live block cause and is NOT impacted by
     this invariant (it persists, honestly labelled).
     """
-
-
-_LIVE_LANE_TYPED_NO_SUBMIT_ABORT_REASONS: frozenset[str] = frozenset({
-    "SUBMIT_ABORTED_BELOW_MIN_ORDER",
-    "SUBMIT_ABORTED_EDGE_REVERSED",
-    "SUBMIT_ABORTED_FAMILY_REVERSED",
-    "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
-    "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR",
-    "SUBMIT_ABORTED_EDGE_DENSITY_BELOW_STRATEGY_FLOOR",
-})
 
 
 @dataclass
@@ -2110,9 +2100,10 @@ class OpportunityEventReactor:
             # accepted terminal. If the daemon is NOMINALLY ARMED (reactor_mode=live AND
             # the operator arm is on — read the SAME way the main.py selector reads it,
             # no second authority) the receipt MUST NOT carry submit_lane="LIVE": the
-            # live lane never produces a full-pass NO_SUBMIT with proof_accepted — it
-            # SUBMITs, returns a SUBMIT_DISABLED build, or carries a typed abort reason.
-            # submit_lane="LIVE" here means the live lane silently ate a tradeable entry
+            # live lane never produces a full-pass NO_SUBMIT with proof_accepted; a
+            # typed pre-venue abort is proof_accepted=False and is routed through
+            # visible rejection/retry classification. submit_lane="LIVE" here means
+            # the live lane silently ate a tradeable entry
             # (the 11:51-12:12Z incident). Raise rather than persist the kill. Receipts
             # from the honest control-blocked lane (submit_lane="NO_SUBMIT_ADAPTER" + named
             # cause) and legacy pre-stamp receipts (submit_lane=None) pass through.
@@ -2179,9 +2170,6 @@ class OpportunityEventReactor:
             and receipt.side_effect_status == "NO_SUBMIT"
             and receipt.submit_lane == "LIVE"
         ):
-            reason_base = _money_path_reason_base(str(receipt.reason or ""))
-            if reason_base in _LIVE_LANE_TYPED_NO_SUBMIT_ABORT_REASONS:
-                return
             raise LiveLaneDarkInvariantError(
                 "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT: a proof_accepted NO_SUBMIT receipt "
                 f"stamped submit_lane=LIVE reached the persist boundary on an armed live "

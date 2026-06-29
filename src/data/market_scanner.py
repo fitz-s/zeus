@@ -228,19 +228,18 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
 
     if per_city_limit != 0:
         return None
-    direct_clob_threshold = _full_family_direct_clob_prefetch_candidate_threshold()
     try:
         configured = int(
             os.environ.get(
                 "ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK",
-                str(direct_clob_threshold),
+                "500",
             )
         )
     except ValueError:
-        configured = direct_clob_threshold
+        configured = 500
     if configured <= 0:
         return None
-    return min(configured, direct_clob_threshold)
+    return configured
 
 
 def _snapshot_market_refresh_urgency(market: dict[str, Any]) -> int:
@@ -4171,6 +4170,7 @@ def _prefetch_selected_orderbooks(
     deadline: float | None = None,
     max_retry_chunks: int | None = None,
     primary_chunk_size: int | None = None,
+    failed_token_sink: set[str] | None = None,
 ) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
@@ -4246,6 +4246,8 @@ def _prefetch_selected_orderbooks(
         except Exception as exc:
             if len(chunk) <= retry_chunk_size:
                 logger.warning("Batch orderbook prefetch chunk failed (%d tokens): %s", len(chunk), exc)
+                if failed_token_sink is not None:
+                    failed_token_sink.update(str(token) for token in chunk)
                 return {}
             logger.warning(
                 "Batch orderbook prefetch chunk failed (%d tokens); retrying in %d-token chunks: %s",
@@ -4282,6 +4284,8 @@ def _prefetch_selected_orderbooks(
                         len(sub_chunk),
                         sub_exc,
                     )
+                    if failed_token_sink is not None:
+                        failed_token_sink.update(str(token) for token in sub_chunk)
                     continue
                 if isinstance(sub_books, dict):
                     split_books.update(sub_books)
@@ -4333,6 +4337,16 @@ def _candidates_missing_prefetched_orderbooks(
             continue
         missing.append(candidate)
     return missing
+
+
+def _empty_orderbook_identity_book(token_id: str) -> dict[str, Any]:
+    return {
+        "asset_id": str(token_id),
+        "market": str(token_id),
+        "bids": [],
+        "asks": [],
+        "synthetic_identity_reason": "batch_books_missing_priority_identity",
+    }
 
 
 def _remaining_attemptable_snapshot_candidates(
@@ -4431,7 +4445,8 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
     if not token_id:
         return None
     try:
-        depth = json.loads(str(row.get("depth_before_json") or "{}"))
+        raw_depth = str(row.get("depth_before_json") or "").strip()
+        depth = json.loads(raw_depth) if raw_depth else {}
     except json.JSONDecodeError:
         return None
     if not isinstance(depth, dict):
@@ -4442,11 +4457,22 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
         bids = []
     if not isinstance(asks, list):
         asks = []
+    if not bids and row.get("best_bid_before") not in (None, ""):
+        bids = [{"price": str(row.get("best_bid_before")), "size": "1"}]
+    if not asks and row.get("best_ask_before") not in (None, ""):
+        asks = [{"price": str(row.get("best_ask_before")), "size": "1"}]
     if not asks:
         return None
     gamma_market_raw = outcome.get("gamma_market_raw")
     if not isinstance(gamma_market_raw, dict):
         gamma_market_raw = {}
+    book: dict[str, Any] = {
+        "asset_id": token_id,
+        "market": token_id,
+        "bids": bids,
+        "asks": asks,
+        "hash": str(row.get("book_hash_before") or ""),
+    }
     tick_size = _first_field(outcome, "min_tick_size", "tick_size", "minimum_tick_size", "minTickSize")
     if tick_size is None:
         tick_size = _first_field(gamma_market_raw, "min_tick_size", "tick_size", "minimum_tick_size", "minTickSize")
@@ -4456,27 +4482,22 @@ def _orderbook_from_feasibility_row(row: dict[str, Any], *, outcome: dict[str, A
     neg_risk = _boolish_market_field(outcome, "neg_risk", "negRisk", "negative_risk")
     if neg_risk is None:
         neg_risk = _boolish_market_field(gamma_market_raw, "neg_risk", "negRisk", "negative_risk")
-    if tick_size is None or min_order_size is None or neg_risk is None:
-        return None
-    try:
-        tick_dec = Decimal(str(tick_size))
-        min_order_dec = Decimal(str(min_order_size))
-    except (InvalidOperation, TypeError, ValueError):
-        return None
-    if not tick_dec.is_finite() or tick_dec <= Decimal("0"):
-        return None
-    if not min_order_dec.is_finite() or min_order_dec <= Decimal("0"):
-        return None
-    book: dict[str, Any] = {
-        "asset_id": token_id,
-        "market": token_id,
-        "bids": bids,
-        "asks": asks,
-        "hash": str(row.get("book_hash_before") or ""),
-        "tick_size": str(tick_dec),
-        "min_order_size": str(min_order_dec),
-        "neg_risk": bool(neg_risk),
-    }
+    if tick_size is not None:
+        try:
+            tick_dec = Decimal(str(tick_size))
+            if tick_dec.is_finite() and tick_dec > Decimal("0"):
+                book["tick_size"] = str(tick_dec)
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+    if min_order_size is not None:
+        try:
+            min_order_dec = Decimal(str(min_order_size))
+            if min_order_dec.is_finite() and min_order_dec > Decimal("0"):
+                book["min_order_size"] = str(min_order_dec)
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+    if neg_risk is not None:
+        book["neg_risk"] = bool(neg_risk)
     return book
 
 
@@ -4658,6 +4679,11 @@ def refresh_executable_market_substrate_snapshots(
         max_candidates = _snapshot_capture_max_candidates_per_tick(
             per_city_limit=per_city_limit,
         )
+        if (
+            priority_conditions
+            and len(priority_conditions) <= _priority_direct_clob_prefetch_condition_limit()
+        ):
+            max_candidates = None
         selected_candidate_keys: set[tuple[int, str, str]] = set()
 
         def _candidate_key(item: tuple) -> tuple[int, str, str]:
@@ -4833,6 +4859,7 @@ def refresh_executable_market_substrate_snapshots(
         and not full_family_direct_clob_prefetch_enabled
     )
     network_book_candidates = candidates_needing_network_books
+    failed_prefetch_tokens: set[str] = set()
     if priority_full_family_direct_clob_prefetch:
         network_book_candidates = [
             candidate
@@ -4860,9 +4887,11 @@ def refresh_executable_market_substrate_snapshots(
                 deadline=prefetch_deadline,
                 max_retry_chunks=(0 if full_family_capture else None),
                 primary_chunk_size=full_family_primary_chunk_size,
+                failed_token_sink=failed_prefetch_tokens,
             )
         )
     prefetch_missing_skipped = 0
+    prefetch_missing_identity_captured = 0
     clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}
     for index, (_recency, _priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
@@ -4894,16 +4923,18 @@ def refresh_executable_market_substrate_snapshots(
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         priority_candidate = str(condition_id or "").strip() in priority_conditions
-        if (
-            full_family_capture
-            and
-            batch_orderbook_supported
-            and selected_token
-            and prefetched_book is None
-        ):
-            skipped += 1
-            prefetch_missing_skipped += 1
-            continue
+        if full_family_capture and batch_orderbook_supported and selected_token and prefetched_book is None:
+            if (
+                priority_candidate
+                and priority_direct_clob_scope_allowed
+                and selected_token not in failed_prefetch_tokens
+            ):
+                prefetched_book = _empty_orderbook_identity_book(selected_token)
+                prefetch_missing_identity_captured += 1
+            else:
+                skipped += 1
+                prefetch_missing_skipped += 1
+                continue
         attempted += 1
         prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
         lock_retry_count = _snapshot_capture_sqlite_lock_retries()
@@ -5025,6 +5056,7 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
         "prefetch_missing_skipped": prefetch_missing_skipped,
+        "prefetch_missing_identity_captured": prefetch_missing_identity_captured,
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
         "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
         "direct_clob_prefetch_priority_condition_limit": priority_direct_clob_condition_limit,

@@ -3589,7 +3589,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     assert summary["forward_market_substrate_status"] == "written"
     assert summary["forward_market_substrate_market_events_inserted"] == 1
     assert summary["forward_market_substrate_price_rows_inserted"] == 2
-    assert not summary.get("degraded", False)
+    assert not summary.get("observability_degraded", False)
     assert not readiness.ready
     assert "economics_engine_not_implemented" in readiness.blockers
 
@@ -3640,7 +3640,7 @@ def test_discovery_phase_forward_market_substrate_missing_schema_is_nonblocking(
 
     assert summary["forward_market_substrate_status"] == "skipped_missing_tables"
     assert summary["candidates"] == 1
-    assert not summary.get("degraded", False)
+    assert not summary.get("observability_degraded", False)
 
 
 def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(monkeypatch, tmp_path):
@@ -3691,7 +3691,7 @@ def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(monkey
     conn.close()
 
     assert summary["forward_market_substrate_status"] == "skipped_invalid_schema"
-    assert summary["degraded"] is True
+    assert summary["observability_degraded"] is True
     assert summary["candidates"] == 1
 
 
@@ -4113,8 +4113,8 @@ def test_live_reprice_failure_records_final_intent_frontier_reason(tmp_path, mon
         sizing_bankroll=100.0,
         kelly_multiplier_used=0.25,
         execution_fee_rate=0.0,
-        family_fallback_rank=1,
-        family_fallback_candidate_count=3,
+        family_ranked_candidate_rank=1,
+        family_ranked_candidate_count=3,
     )
 
     def _reprice_fails(*args, **kwargs):
@@ -4183,7 +4183,7 @@ def test_live_reprice_failure_records_final_intent_frontier_reason(tmp_path, mon
             "temperature_metric": "high",
             "decision_id": "d-reprice-frontier",
             "rank": 1,
-            "family_fallback_candidate_count": 3,
+            "family_ranked_candidate_count": 3,
             "bin": "39-40°F",
             "direction": "buy_yes",
             "strategy_key": "center_buy",
@@ -8639,7 +8639,7 @@ def test_run_cycle_surfaces_fdr_family_scan_failure_without_entries(monkeypatch,
                 decision_id="fdr-down",
                 rejection_stage="FDR_FAMILY_SCAN_UNAVAILABLE",
                 rejection_reasons=["full-family FDR scan unavailable; entry selection failed closed"],
-                fdr_fallback_fired=True,
+                fdr_family_scan_unavailable=True,
                 fdr_family_size=0,
             )
         ],
@@ -8653,7 +8653,7 @@ def test_run_cycle_surfaces_fdr_family_scan_failure_without_entries(monkeypatch,
     conn.close()
     artifact_payload = json.loads(artifact_row["artifact_json"])
 
-    assert summary["fdr_fallback_fired"] is True
+    assert summary["fdr_family_scan_unavailable"] is True
     assert summary["trades"] == 0
     assert summary["no_trades"] == 1
     assert summary["candidates"] == 1
@@ -14186,7 +14186,7 @@ def test_live_discovery_phase_truncates_candidate_evaluation_on_backpressure(mon
     assert summary["cycle_backpressure_reason"] == "market_evaluation_budget_exceeded"
     assert summary["cycle_backpressure_markets_evaluated"] == 1
     assert summary["cycle_backpressure_markets_skipped"] == 2
-    assert summary["degraded"] is True
+    assert summary["observability_degraded"] is True
     conn.close()
 
 

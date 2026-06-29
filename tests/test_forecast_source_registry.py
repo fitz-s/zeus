@@ -27,6 +27,7 @@ from src.data.forecast_source_registry import (
     gate_source_role,
     stable_payload_hash,
 )
+from src.data.forecast_source_registry import SOURCES
 from src.signal.ensemble_signal import EnsembleSignal
 from src.state.db import init_schema
 
@@ -80,7 +81,7 @@ def test_operator_decision_gated_source_blocked_when_artifact_absent(tmp_path) -
 def test_operator_decision_gated_source_blocked_when_env_flag_unset(tmp_path) -> None:
     evidence = (
         tmp_path
-        / "docs/operations/task_2026-04-26_ultimate_plan/r3/evidence/"
+        / "docs/operations/task_2026-04-26_ultimate_plan/r3/docs/historical_evidence/"
         "tigge_ingest_decision_2026-04-27.md"
     )
     evidence.parent.mkdir(parents=True)
@@ -102,10 +103,19 @@ def test_openmeteo_live_ensemble_is_monitor_fallback_not_entry_primary() -> None
         gate_source_role(source, "entry_primary")
 
 
+def test_station_forecast_sources_are_not_entry_primary() -> None:
+    for source_id in ("hko_fnd", "cwa_township"):
+        source = SOURCES[source_id]
+        assert source.enabled_by_default is False
+        assert "entry_primary" not in source.allowed_roles
+        with pytest.raises(SourceNotEnabled, match="entry_primary"):
+            gate_source_role(source, "entry_primary")
+
+
 def test_gated_source_active_when_artifact_present_AND_env_flag_set(tmp_path) -> None:
     evidence = (
         tmp_path
-        / "docs/operations/task_2026-04-26_ultimate_plan/r3/evidence/"
+        / "docs/operations/task_2026-04-26_ultimate_plan/r3/docs/historical_evidence/"
         "tigge_ingest_decision_2026-04-27.md"
     )
     evidence.parent.mkdir(parents=True)
@@ -123,7 +133,7 @@ def test_gated_source_active_when_artifact_present_AND_env_flag_set(tmp_path) ->
 def test_calibration_source_id_for_lookup_keeps_bucket_identity_explicit() -> None:
     assert calibration_source_id_for_lookup("tigge") == "tigge_mars"
     assert calibration_source_id_for_lookup("tigge_mars") == "tigge_mars"
-    assert calibration_source_id_for_lookup("ecmwf_open_data") == "ecmwf_open_data"
+    assert calibration_source_id_for_lookup("ecmwf_open_data") == "tigge_mars"
     assert calibration_source_id_for_lookup("openmeteo_ensemble_ecmwf_ifs025") is None
     assert calibration_source_id_for_lookup("gfs025") is None
     assert calibration_source_id_for_lookup(None) is None
@@ -169,7 +179,7 @@ def test_tigge_gate_open_routes_through_ingest_not_openmeteo(monkeypatch, tmp_pa
     )
     evidence = (
         tmp_path
-        / "docs/operations/task_2026-04-26_ultimate_plan/r3/evidence/"
+        / "docs/operations/task_2026-04-26_ultimate_plan/r3/docs/historical_evidence/"
         "tigge_ingest_decision_2026-04-27.md"
     )
     evidence.parent.mkdir(parents=True)
@@ -196,7 +206,7 @@ def test_tigge_gate_open_missing_payload_raises_typed_configuration_error(monkey
 
     evidence = (
         tmp_path
-        / "docs/operations/task_2026-04-26_ultimate_plan/r3/evidence/"
+        / "docs/operations/task_2026-04-26_ultimate_plan/r3/docs/historical_evidence/"
         "tigge_ingest_decision_2026-04-27.md"
     )
     evidence.parent.mkdir(parents=True)

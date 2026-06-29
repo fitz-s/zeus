@@ -47,7 +47,7 @@ ForecastDegradationLevel = Literal[
     "DIAGNOSTIC_NON_EXECUTABLE",
 ]
 ForecastTradeAuthorityStatus = Literal[
-    "LIVE_AUTHORITY",
+    "live",
     "BLOCKED",
     "COMPARATOR_ONLY",
     "DISABLED",
@@ -405,6 +405,28 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         allowed_roles=("diagnostic",),
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),
+    # ---- Station-calibrated official forecasts (HKO 9-day, CWA, ...) -----------------
+    # These adapters are retained as non-entry research inputs until their source-clock baskets
+    # have the same durable evidence and operator promotion as the gridded live sources. They must
+    # not be admitted into entry_primary or live materialization by registry membership alone.
+    "hko_fnd": ForecastSourceSpec(
+        source_id="hko_fnd",
+        tier="experimental",
+        kind="scheduled_collector",
+        model_name="hko_fnd",
+        enabled_by_default=False,
+        allowed_roles=(),
+        degradation_level="EXPERIMENTAL_DISABLED",
+    ),
+    "cwa_township": ForecastSourceSpec(
+        source_id="cwa_township",
+        tier="experimental",
+        kind="scheduled_collector",
+        model_name="cwa_township",
+        enabled_by_default=False,
+        allowed_roles=(),
+        degradation_level="EXPERIMENTAL_DISABLED",
+    ),
     # The fused derived posterior product (replaces the single-anchor center/spread when
     # the BAYES_PRECISION_FUSION flag is ON; blocked until settlement evidence promotes it).
     "the_path_bayes_precision_fusion": ForecastSourceSpec(
@@ -434,7 +456,7 @@ REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
         high_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         low_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
         expected_members=51,
-        trade_authority_status="LIVE_AUTHORITY",
+        trade_authority_status="live",
         training_allowed=True,
     ),
     "R1": ForecastProductSpec(
@@ -698,7 +720,7 @@ def select_empirical_replacement_strategy(
     blocked_reasons: set[str] = set()
     for row in evidence:
         product = replacement_forecast_product(row.label)
-        if product.trade_authority_status == "LIVE_AUTHORITY":
+        if product.trade_authority_status == "live":
             blocked_reasons.add("BASELINE_NOT_REPLACEMENT_CANDIDATE")
             continue
         if product.trade_authority_status not in {"BLOCKED", "COMPARATOR_ONLY"}:

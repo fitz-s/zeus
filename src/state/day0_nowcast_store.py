@@ -41,6 +41,14 @@ IDENTITY_FIT_RUN_ID = "hpf_v1_identity_conservative_v1"
 IDENTITY_FIT_ARTIFACT_ID = "hpf_v1"
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 def _clean_identity_part(value: object) -> str:
     if value is None:
         return ""
@@ -249,6 +257,9 @@ def write_platt_fit(
 
     try:
         with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+            from src.state.db import _create_day0_horizon_platt_fits
+
+            _create_day0_horizon_platt_fits(conn)
             # The deployed column is `fit_version` (TEXT NOT NULL); the Python
             # contract names the same semantic value `fit_artifact_id` on the
             # HorizonPlattFit dataclass. Map dataclass.fit_artifact_id -> SQL
@@ -448,6 +459,8 @@ def read_latest_platt_fit(
         conn.row_factory = sqlite3.Row
 
     try:
+        if not _table_exists(conn, "day0_horizon_platt_fits"):
+            return None
         # Deployed column is `fit_version` (TEXT NOT NULL); it stores the semantic
         # fit_artifact_id value (e.g. "hpf_v1"). The Python API keeps the
         # fit_artifact_id keyword but must filter on the real SQL column. (The

@@ -105,7 +105,7 @@ def test_observation_context_live_hook_marks_wu_station_match_live_authority():
     assert observation["observation_available_at"] == "2026-05-24T18:07:00+00:00"
 
 
-def test_observation_context_live_hook_blocks_diagnostic_fallback():
+def test_observation_context_live_hook_blocks_non_settlement_source():
     city = SimpleNamespace(
         name="Chicago",
         timezone="America/Chicago",
@@ -122,7 +122,7 @@ def test_observation_context_live_hook_blocks_diagnostic_fallback():
         low_so_far=61.0,
         current_temp=73.0,
         unit="F",
-        coverage_status="DIAGNOSTIC_FALLBACK",
+        coverage_status="NON_SETTLEMENT_SOURCE",
     )
 
     observation = observation_context_to_live_observation(

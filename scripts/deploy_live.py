@@ -37,16 +37,7 @@ SAFETY
     preflight passes for trading-daemon restarts.
     `status` never changes anything.
 
-END-STATE (documented, NOT implemented here)
-    The durable fix is per-worktree plist deploys: each deployable worktree
-    gets its own `com.zeus.<daemon>` plist pointing at that worktree's
-    interpreter + src tree, and `deploy_live.py promote <worktree>` atomically
-    swaps the live plist symlink + kickstarts. That removes the shared-live-
-    checkout hazard entirely (no tree is ever "the live one" mid-edit). It
-    requires editing launchd plists, which is operator-level, so it is left
-    as the documented end-state rather than built now.
-
-USAGE
+    USAGE
     .venv/bin/python scripts/deploy_live.py status
     .venv/bin/python scripts/deploy_live.py restart live-trading
     .venv/bin/python scripts/deploy_live.py restart all --allow-dirty
@@ -74,16 +65,35 @@ def _resolve_live_repo() -> str:
         return str(Path(explicit).expanduser().resolve())
     try:
         payload = plistlib.loads(LIVE_TRADING_PLIST.read_bytes())
-    except Exception:
-        return "/Users/leofitz/zeus"
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot resolve live checkout: unreadable live-trading plist {LIVE_TRADING_PLIST}"
+        ) from exc
     working_dir = payload.get("WorkingDirectory")
     if isinstance(working_dir, str) and working_dir.strip():
         return str(Path(working_dir).expanduser().resolve())
-    return "/Users/leofitz/zeus"
+    raise RuntimeError(
+        f"cannot resolve live checkout: {LIVE_TRADING_PLIST} has no WorkingDirectory"
+    )
+
+
+def _resolve_initial_live_repo() -> str:
+    try:
+        return _resolve_live_repo()
+    except RuntimeError:
+        return ""
+
+
+def _require_live_repo() -> str:
+    if LIVE_REPO:
+        return LIVE_REPO
+    raise RuntimeError(
+        "live checkout is unresolved; set ZEUS_LIVE_REPO or fix the live-trading plist"
+    )
 
 
 # The LIVE checkout the daemon boots from. Tests may still monkeypatch this.
-LIVE_REPO = _resolve_live_repo()
+LIVE_REPO = _resolve_initial_live_repo()
 
 # launchd GUI domain for the operator user (gui/<uid>); ZEUS_GUI_DOMAIN overrides.
 GUI_DOMAIN = os.environ.get("ZEUS_GUI_DOMAIN") or f"gui/{os.getuid()}"
@@ -113,8 +123,9 @@ RUNTIME_PATHSPECS = ["src/", "config/", "scripts/", "deploy/launchd/"]
 def _git(*args: str, repo: str | None = None) -> subprocess.CompletedProcess:
     # Read LIVE_REPO at call time (not as a default-arg binding) so tests and
     # callers that point the gate at a different checkout are honored.
+    checkout = repo or _require_live_repo()
     return subprocess.run(
-        ["git", "-C", repo or LIVE_REPO, *args],
+        ["git", "-C", checkout, *args],
         capture_output=True, text=True, timeout=20.0,
     )
 
@@ -229,6 +240,11 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
+    try:
+        _require_live_repo()
+    except RuntimeError as exc:
+        print(f"REFUSING status — {exc}", file=sys.stderr)
+        return 2
     branch = current_branch()
     unpushed, push_detail = unpushed_state(branch)
     dirty = dirty_runtime_files()
@@ -252,6 +268,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
 
 def _gate(allow_dirty: bool) -> tuple[bool, list[str]]:
     """Return (ok_to_restart, blockers). ok=False means refuse."""
+    try:
+        _require_live_repo()
+    except RuntimeError as exc:
+        return False, [str(exc)]
     branch = current_branch()
     blockers: list[str] = []
     dirty = dirty_runtime_files()
@@ -278,14 +298,15 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
 
     if "com.zeus.live-trading" not in labels:
         return True, "preflight not required for this daemon"
-    py = os.path.join(LIVE_REPO, ".venv", "bin", "python")
+    live_repo = _require_live_repo()
+    py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
     cmd = [py, "scripts/check_live_restart_preflight.py", "--json"]
     try:
         res = subprocess.run(
             cmd,
-            cwd=LIVE_REPO,
+            cwd=live_repo,
             capture_output=True,
             text=True,
             timeout=120.0,

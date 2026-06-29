@@ -48,7 +48,7 @@ class ReplacementForecastMetricIdentity:
             raise ValueError("replacement metric identity cannot use baseline calibration data_version")
         if self.training_allowed:
             raise ValueError("replacement metric identity cannot carry training authority")
-        if self.trade_authority_status == "LIVE_AUTHORITY":
+        if self.trade_authority_status == "live":
             raise ValueError("replacement metric identity cannot carry live trade authority")
 
 
@@ -97,7 +97,7 @@ def replacement_forecast_metric_identity(
     if temperature_metric not in {"high", "low"}:
         raise ValueError("temperature_metric must be 'high' or 'low'")
     product = replacement_forecast_product(product_label)
-    if product.label == "B0" or product.trade_authority_status == "LIVE_AUTHORITY":
+    if product.label == "B0" or product.trade_authority_status == "live":
         raise ValueError("baseline products are not replacement metric identities")
     metric = temperature_metric  # type: ignore[assignment]
     data_version = _data_version_for_metric(product, metric)

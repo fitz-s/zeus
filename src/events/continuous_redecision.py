@@ -1326,8 +1326,8 @@ def read_freshest_executable_prices(
 
     ``executable_market_snapshots`` is native to the selected outcome token: a NO row's
     ``orderbook_top_ask`` is the cost to buy NO, not a YES ask. Prefer native
-    selected-token rows for each side and use the complement only as a fallback
-    when the opposite side has not been captured. Each quote carries the source
+    selected-token rows for each side and infer the opposite-side quote only from
+    the same binary market identity when that side has not been captured. Each quote carries the source
     snapshot's ``freshness_deadline`` so the screen's stale-price guard (R7) is
     exact. Crossed or non-finite books are skipped (no phantom edge)."""
     if not condition_ids:
@@ -1663,7 +1663,7 @@ def _row_tick_size(row: sqlite3.Row | tuple) -> float:
 def _side_books_by_condition(
     rows: list[sqlite3.Row | tuple],
 ) -> dict[str, dict[str, dict[str, float | str]]]:
-    """Return side-native books with complement fallback, keyed by condition and buy side."""
+    """Return native books plus binary-complement inferred books by condition and buy side."""
 
     native: dict[tuple[str, str], dict[str, float | str]] = {}
     inferred: dict[tuple[str, str], dict[str, float | str]] = {}

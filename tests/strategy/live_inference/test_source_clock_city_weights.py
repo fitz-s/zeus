@@ -62,7 +62,7 @@ def test_loads_grid_aware_scheme_schema(tmp_path: Path) -> None:
     assert scheme.one_scheme_status == "GRID_CAP10_LIVE_READY"
 
 
-def test_fixed_weight_center_renormalizes_missing_source(tmp_path: Path) -> None:
+def test_fixed_weight_center_rejects_missing_source_by_default(tmp_path: Path) -> None:
     path = tmp_path / "city_one_scheme_final.csv"
     path.write_text(
         "city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
@@ -74,6 +74,24 @@ def test_fixed_weight_center_renormalizes_missing_source(tmp_path: Path) -> None
         city="Seoul",
         values_c_by_source={"ecmwf_ifs": 20.0},
         path=path,
+    )
+
+    assert center is None
+
+
+def test_fixed_weight_center_allows_incomplete_only_when_requested(tmp_path: Path) -> None:
+    path = tmp_path / "city_one_scheme_final.csv"
+    path.write_text(
+        "city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
+        "Seoul,SOURCE_SELECTOR_FIT,ecmwf_ifs+kma_ldps,ecmwf_ifs:0.75+kma_ldps:0.25,200,True,FINAL_ONE_SCHEME_PASS\n",
+        encoding="utf-8",
+    )
+
+    center = fixed_weight_center_from_values(
+        city="Seoul",
+        values_c_by_source={"ecmwf_ifs": 20.0},
+        path=path,
+        allow_incomplete=True,
     )
 
     assert center is not None

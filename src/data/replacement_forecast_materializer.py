@@ -287,6 +287,31 @@ def _replacement_is_live_layer(
         return False
 
 
+def _registered_source_clock_entry_ineligible(sources: Sequence[str]) -> tuple[str, ...]:
+    """Registered source-clock members that are not allowed to feed live entry."""
+
+    try:
+        from src.data.forecast_source_registry import SOURCES, source_allows_role  # noqa: PLC0415
+    except Exception:
+        return ()
+    blocked: list[str] = []
+    for source in sources:
+        source_id = str(source or "").strip()
+        if not source_id:
+            continue
+        spec = SOURCES.get(source_id)
+        if spec is None:
+            continue
+        if (
+            spec.tier == "disabled"
+            or not bool(spec.enabled_by_default)
+            or spec.degradation_level != "OK"
+            or not source_allows_role(spec, "entry_primary")
+        ):
+            blocked.append(source_id)
+    return tuple(blocked)
+
+
 def _anchor_data_version(metric: str) -> str:
     return ANCHOR_HIGH_DATA_VERSION if metric == "high" else ANCHOR_LOW_DATA_VERSION
 
@@ -1552,10 +1577,49 @@ def _replacement_bayes_precision_fusion_override(
                         _source_values[str(_m)] = float(_value)
                     except (TypeError, ValueError):
                         continue
-                _source_clock_center = fixed_weight_center_from_values(
-                    city=request.city,
-                    values_c_by_source=_source_values,
+                _entry_ineligible_sources = _registered_source_clock_entry_ineligible(
+                    _scheme.final_sources
                 )
+                _source_clock_center = None
+                if _entry_ineligible_sources:
+                    try:
+                        import logging  # noqa: PLC0415
+
+                        logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                            "source-clock one-scheme center skipped for %s %s %s: registered "
+                            "sources are not entry_primary eligible: %s",
+                            request.city,
+                            metric,
+                            target_date,
+                            list(_entry_ineligible_sources),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    _source_clock_center = fixed_weight_center_from_values(
+                        city=request.city,
+                        values_c_by_source=_source_values,
+                    )
+                    if _source_clock_center is None:
+                        _incomplete_probe = fixed_weight_center_from_values(
+                            city=request.city,
+                            values_c_by_source=_source_values,
+                            allow_incomplete=True,
+                        )
+                        if _incomplete_probe is not None and _incomplete_probe.missing_sources:
+                            try:
+                                import logging  # noqa: PLC0415
+
+                                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                                    "source-clock one-scheme center skipped for %s %s %s: missing "
+                                    "configured sources %s; live center is not renormalized",
+                                    request.city,
+                                    metric,
+                                    target_date,
+                                    list(_incomplete_probe.missing_sources),
+                                )
+                            except Exception:
+                                pass
                 if _source_clock_center is not None:
                     _source_clock_used_models = tuple(_source_clock_center.used_weights)
                     _mu_diagonal = float(_source_clock_center.mu_c)

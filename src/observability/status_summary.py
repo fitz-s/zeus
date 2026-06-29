@@ -41,17 +41,14 @@ from src.state.db import (
     query_strategy_health_snapshot,
 )
 from src.state.decision_chain import query_no_trade_cases
+from src.state.lifecycle_manager import TERMINAL_STATES
 from src.state.truth_files import annotate_truth_payload, read_truth_json
 
 logger = logging.getLogger(__name__)
 
 STATUS_PATH = state_path("status_summary.json")
 LEGACY_POSITIONS_PATH = state_path("positions.json")
-_TERMINAL_LEGACY_POSITION_STATES = {
-    "settled",
-    "voided",
-    "quarantined",
-    "admin_closed",
+_LEGACY_JSON_INACTIVE_POSITION_STATES = set(TERMINAL_STATES) | {
     "closed",
     "exited",
 }
@@ -64,7 +61,7 @@ _TERMINAL_ENTRY_ORDER_STATUSES = {
     "rejected",
     "voided",
 }
-_TERMINAL_ENTRY_PHASES = {"settled", "voided", "admin_closed", "quarantined"}
+_TERMINAL_ENTRY_PHASES = set(TERMINAL_STATES)
 _TERMINAL_VENUE_ORDER_STATES = {
     "MATCHED",
     "FILLED",
@@ -409,15 +406,15 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
-    fallback_risk_level = str(
+    observed_risk_level = str(
         cycle.get("risk_level")
         or risk.get("level")
         or risk.get("riskguard_level")
         or ""
     )
-    if fallback_risk_level:
-        risk.setdefault("level", fallback_risk_level)
-        risk.setdefault("riskguard_level", risk.get("level", fallback_risk_level))
+    if observed_risk_level:
+        risk.setdefault("level", observed_risk_level)
+        risk.setdefault("riskguard_level", risk.get("level", observed_risk_level))
     risk["consistency_check"] = {
         "ok": not consistency_issues,
         "issues": consistency_issues,
@@ -863,7 +860,7 @@ def _is_nonterminal_legacy_position(row: dict) -> bool:
     if not (row.get("trade_id") or row.get("market_id") or row.get("condition_id")):
         return False
     state = _legacy_position_state(row)
-    return state not in _TERMINAL_LEGACY_POSITION_STATES
+    return state not in _LEGACY_JSON_INACTIVE_POSITION_STATES
 
 
 def _legacy_positions_artifact_summary(position_view: dict) -> dict:
@@ -1498,7 +1495,7 @@ def write_status(cycle_summary: dict = None) -> None:
         "strategy": strategy_summary,
         "execution": {
             "fdr_family_size": int((cycle_summary or {}).get("fdr_family_size", 0)),
-            "fdr_fallback_fired": bool((cycle_summary or {}).get("fdr_fallback_fired", False)),
+            "fdr_family_scan_unavailable": bool((cycle_summary or {}).get("fdr_family_scan_unavailable", False)),
         },
         "execution_capability": _get_execution_capability_status(),
         "calibration_serving": {},
@@ -1542,7 +1539,7 @@ def write_status(cycle_summary: dict = None) -> None:
     bankroll_truth_authority = risk_bankroll_truth_authority if risk_bankroll_provenance_ok else None
     bankroll_truth_status = "present" if risk_bankroll_provenance_ok else "missing"
     bankroll_derivation = "riskguard_effective_bankroll" if risk_bankroll_provenance_ok else None
-    bankroll_fallback_source = None
+    bankroll_resolution_source = None
     bankroll_rejected_source = None
     if risk_effective_bankroll is not None and not risk_bankroll_provenance_ok:
         bankroll_rejected_source = "riskguard_unproven"
@@ -1560,7 +1557,7 @@ def write_status(cycle_summary: dict = None) -> None:
         if initial_bankroll is not None:
             bankroll_truth_source = "cycle_summary.wallet_balance_usd"
             bankroll_truth_authority = "runtime_summary"
-            bankroll_fallback_source = "cycle_summary.wallet_balance_usd"
+            bankroll_resolution_source = "cycle_summary.wallet_balance_usd"
     if initial_bankroll is None:
         # Removed 2026-05-04: previously fell back to retired config-literal
         # capital. Now query the on-chain wallet via bankroll_provider;
@@ -1576,9 +1573,9 @@ def write_status(cycle_summary: dict = None) -> None:
             initial_bankroll = round(float(_record.value_usd), 2)
             bankroll_truth_source = str(getattr(_record, "source", None) or "polymarket_wallet")
             bankroll_truth_authority = str(getattr(_record, "authority", None) or "canonical")
-            bankroll_fallback_source = "bankroll_provider"
+            bankroll_resolution_source = "bankroll_provider"
         else:
-            bankroll_fallback_source = "bankroll_provider_unavailable"
+            bankroll_resolution_source = "bankroll_provider_unavailable"
     if effective_bankroll is None:
         if initial_bankroll is not None:
             # Definition A: status bankroll preserves wallet-equity identity.
@@ -1814,11 +1811,11 @@ def write_status(cycle_summary: dict = None) -> None:
     compatibility_inputs: dict[str, object] = {}
     if current_regime_started_at:
         compatibility_inputs["strategy_tracker_current_regime_started_at"] = current_regime_started_at
-    if bankroll_fallback_source is not None:
+    if bankroll_resolution_source is not None:
         # Removed 2026-05-04: the previous config-cap fallback label is gone.
         # Live truth now flows from bankroll_provider.current(); when it returns None the field stays
         # null and DATA_DEGRADED surfaces upstream — no config-literal smuggle.
-        compatibility_inputs["bankroll_fallback_source"] = bankroll_fallback_source
+        compatibility_inputs["bankroll_resolution_source"] = bankroll_resolution_source
     if bankroll_rejected_source is not None:
         compatibility_inputs["bankroll_rejected_source"] = bankroll_rejected_source
     if compatibility_inputs:

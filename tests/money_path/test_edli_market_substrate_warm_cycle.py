@@ -256,12 +256,15 @@ def test_pending_family_refresh_orders_money_path_urgency_before_target_date():
         assert redecision_pos < target_pos
 
 
-def test_full_family_capture_default_batch_is_small_enough_for_direct_clob():
-    """The warm producer must make real snapshot progress, not select 500 misses."""
+def test_full_family_capture_cap_is_decoupled_from_direct_clob_threshold():
+    """Candidate selection cap and direct /book prefetch threshold serve different purposes."""
 
-    assert market_scanner._snapshot_capture_max_candidates_per_tick(per_city_limit=0) <= (
+    assert market_scanner._snapshot_capture_max_candidates_per_tick(per_city_limit=0) > (
         market_scanner._full_family_direct_clob_prefetch_candidate_threshold()
     )
+    src = inspect.getsource(market_scanner.refresh_executable_market_substrate_snapshots)
+    assert "max_candidates = None" in src
+    assert "len(priority_conditions) <= _priority_direct_clob_prefetch_condition_limit()" in src
 
 
 def test_priority_direct_clob_uses_selected_priority_subset():
@@ -978,6 +981,131 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
+
+
+def test_priority_family_expands_to_condition_priority_for_captured_books(monkeypatch):
+    """A priority family must become concrete condition priority, not just a label sort."""
+
+    family = ("Shanghai", "2026-06-29", "high")
+    world_conn = _pending_family_conn("event-1", *family)
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-shanghai-on-june-29-2026",
+            "city": "Shanghai",
+            "target_date": "2026-06-29",
+            "temperature_metric": "high",
+            "condition_id": "cond-30",
+            "token_id": "yes-30",
+            "range_label": "30C",
+        },
+        {
+            "market_slug": "highest-temperature-in-shanghai-on-june-29-2026",
+            "city": "Shanghai",
+            "target_date": "2026-06-29",
+            "temperature_metric": "high",
+            "condition_id": "cond-31",
+            "token_id": "yes-31",
+            "range_label": "31C",
+        },
+    ]
+    cached_market = {
+        "slug": "highest-temperature-in-shanghai-on-june-29-2026",
+        "city": SimpleNamespace(name="Shanghai"),
+        "target_date": "2026-06-29",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-30",
+                "market_id": "cond-30",
+                "token_id": "yes-30",
+                "no_token_id": "no-30",
+                "question_id": "q-30",
+            },
+            {
+                "condition_id": "cond-31",
+                "market_id": "cond-31",
+                "token_id": "yes-31",
+                "no_token_id": "no-31",
+                "question_id": "q-31",
+            },
+        ],
+    }
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    monkeypatch.setattr(topology_rows_module, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(substrate_observer, "_edli_current_held_position_family_keys", lambda: set())
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    captured_kwargs: list[dict] = []
+
+    def _refresh(_conn, *, markets, **kwargs):
+        captured_kwargs.append(kwargs)
+        return {
+            "attempted": 4,
+            "inserted": 4,
+            "direct_clob_prefetch_selected_priority_condition_count": len(
+                kwargs.get("priority_condition_ids") or []
+            ),
+        }
+
+    monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 29, 0, 0, tzinfo=timezone.utc),
+        extra_priority_families=[family],
+        include_pending_families=False,
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["priority_condition_ids_requested"] == 2
+    assert set(captured_kwargs[0]["priority_condition_ids"]) == {"cond-30", "cond-31"}
+
+
+def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):
+    """Scheduler OK must mean the producer made a usable business tick."""
+
+    import src.ingest.substrate_observer_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+
+    wrapped = daemon._scheduler_job("edli_market_substrate_warm")(
+        lambda: {
+            "status": "priority_unserviced_cross_process_lock_busy",
+            "scheduler_failed": True,
+            "scheduler_failure_reason": "cross-process executable substrate refresh already running",
+        }
+    )
+    result = wrapped()
+
+    assert result["scheduler_failed"] is True
+    assert writes == [
+        {
+            "job_name": "edli_market_substrate_warm",
+            "failed": True,
+            "reason": "cross-process executable substrate refresh already running",
+            "extra": result,
+        }
+    ]
 
 
 def test_market_discovery_cycle_yields_to_money_path_priority(monkeypatch):

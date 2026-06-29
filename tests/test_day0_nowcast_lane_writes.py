@@ -355,6 +355,22 @@ def test_write_platt_fit_round_trips_on_deployed_shape() -> None:
     conn.close()
 
 
+def test_write_platt_fit_creates_owned_table_when_missing() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    assert day0_nowcast_store.read_latest_platt_fit(fit_artifact_id="hpf_v1", conn=conn) is None
+    day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)
+
+    stored = conn.execute(
+        "SELECT fit_version, schema_version, source FROM day0_horizon_platt_fits"
+    ).fetchone()
+    assert stored["fit_version"] == "hpf_v1"
+    assert stored["schema_version"] == 4
+    assert stored["source"] == "live_fit"
+    conn.close()
+
+
 def test_write_platt_fit_idempotent_on_rerun() -> None:
     conn = _deployed_shape_conn()
     day0_nowcast_store.write_platt_fit(_identity_fit(), conn=conn)

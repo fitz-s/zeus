@@ -360,7 +360,6 @@ state_machines:
       routing without adding command/lifecycle states. Registered here so
       CI treats new all-caps runtime authority as explicit, not accidental.
     states:
-      - ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES
       - ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS
       - ZEUS_PRE_SUBMIT_INNER_IO_TIMEOUT_SECONDS
       - ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS
@@ -784,12 +783,12 @@ state_machines:
   obs_coverage_status:
     description: >
       Observation coverage status emitted by ObservationClient and stamped on
-      settlement_day_observation_authority rows. DIAGNOSTIC_FALLBACK indicates
-      the obs pipeline returned a result but via a degraded/fallback path (e.g.
-      stale open-meteo archive). Observability-only — never gates a trade.
-      OBS-AUTHORITY-FOUNDATION 2026-05-23.
+      settlement_day_observation_authority rows. NON_SETTLEMENT_SOURCE means an
+      explicitly requested non-settlement observation source returned a value,
+      but it is not source-authorized settlement truth and cannot authorize a
+      live Day0 hard fact. OBS-AUTHORITY-FOUNDATION 2026-05-23.
     states:
-      - DIAGNOSTIC_FALLBACK
+      - NON_SETTLEMENT_SOURCE
 
   collection_frontier:
     owner: src/data/collection_frontier.py

@@ -63,6 +63,7 @@ from src.state.portfolio import (
     save_portfolio,
     void_position,
 )
+from src.state.lifecycle_manager import TERMINAL_STATES
 from src.state.strategy_tracker import get_tracker, save_tracker
 from src.observability.counters import increment as _cnt_inc
 
@@ -167,7 +168,7 @@ def _canonical_phase_before_for_settlement(pos) -> str:
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 
-_TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
+_TERMINAL_PHASES = frozenset(TERMINAL_STATES)
 _HARVESTER_STAGE2_TRADE_TABLES = (
     "position_events",
     "position_current",

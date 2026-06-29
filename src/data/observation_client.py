@@ -110,6 +110,7 @@ class Day0ObservationContext:
 logger = logging.getLogger(__name__)
 SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
 COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
+NON_SETTLEMENT_SOURCE_COVERAGE = "NON_SETTLEMENT_SOURCE"
 
 # =============================================================================
 # WU PUBLIC WEB KEY — NOT A SECRET. DO NOT FLAG. [REVIEW-SAFE: WU_PUBLIC_KEY]
@@ -576,9 +577,9 @@ def get_current_observation(
     """Get the current target-date observation for executable Day0 signal.
 
     Default calls are settlement-source-bound and fail closed when the city's
-    configured source class is unsupported here. Diagnostic callers may opt into
-    non-settlement alternates, but those contexts must not be treated as
-    executable source truth downstream.
+    configured source class is unsupported here. Explicit callers may opt into
+    non-settlement alternates for operator visibility, but those contexts are
+    stamped ``NON_SETTLEMENT_SOURCE`` and must not authorize execution.
 
     For wu_icao cities: when the WU timeseries result is None, stale (>1 h
     age), or coverage-incomplete, the implementation falls through to the
@@ -832,7 +833,7 @@ def _fetch_iem_asos(
             sample_count=1,
             first_sample_time=local_valid,
             last_sample_time=local_valid,
-            coverage_status="DIAGNOSTIC_FALLBACK",
+            coverage_status=NON_SETTLEMENT_SOURCE_COVERAGE,
             observation_available_at=datetime.now(timezone.utc).isoformat(),
             provider_reported_time=None,  # IEM ASOS has no separate reported-at field
         )
@@ -854,7 +855,7 @@ def _fetch_openmeteo_hourly(
 ) -> Optional[dict]:
     try:
         if not quota_tracker.can_call():
-            logger.warning("Open-Meteo quota blocked observation fallback for %s", city.name)
+            logger.warning("Open-Meteo quota blocked non-settlement observation for %s", city.name)
             return None
 
         temp_unit = "fahrenheit" if city.settlement_unit == "F" else "celsius"
@@ -909,7 +910,7 @@ def _fetch_openmeteo_hourly(
             sample_count=len(selected),
             first_sample_time=selected[0][2],
             last_sample_time=raw_time,
-            coverage_status="DIAGNOSTIC_FALLBACK",
+            coverage_status=NON_SETTLEMENT_SOURCE_COVERAGE,
             observation_available_at=datetime.now(timezone.utc).isoformat(),
             provider_reported_time=None,
         )

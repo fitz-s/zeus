@@ -489,7 +489,7 @@ class EdgeDecision:
     spread: float = 0.0
     n_edges_found: int = 0
     n_edges_after_fdr: int = 0
-    fdr_fallback_fired: bool = False
+    fdr_family_scan_unavailable: bool = False
     fdr_family_size: int = 0
     sizing_bankroll: float = 0.0
     kelly_multiplier_used: float = 0.0
@@ -521,8 +521,8 @@ class EdgeDecision:
     # Persisted to no_trade_events by cycle_runtime after evaluate_candidate returns.
     rejection_reason_enum: Optional["NoTradeReason"] = None
     rejection_reason_detail: Optional[str] = None
-    family_fallback_rank: int = 0
-    family_fallback_candidate_count: int = 0
+    family_ranked_candidate_rank: int = 0
+    family_ranked_candidate_count: int = 0
     family_portfolio_selected_leg_count: int = 0
     family_portfolio_leg_role: str = ""
 
@@ -671,19 +671,19 @@ def _current_cluster_exposure_for_sizing(
     )
 
 
-def _projects_exposure_during_family_fallback_sizing(
+def _projects_exposure_during_family_ranked_sizing(
     *,
-    family_fallback_rank: int,
-    family_fallback_candidate_count: int,
+    family_ranked_candidate_rank: int,
+    family_ranked_candidate_count: int,
     family_portfolio_leg_role: str = "",
 ) -> bool:
-    """Fallback siblings are mutually exclusive attempts, not additive exposure."""
+    """Ranked siblings are mutually exclusive attempts, not additive exposure."""
 
     if str(family_portfolio_leg_role or "") == "portfolio_selected":
         return True
     return not (
-        int(family_fallback_candidate_count or 0) > 1
-        and int(family_fallback_rank or 0) > 0
+        int(family_ranked_candidate_count or 0) > 1
+        and int(family_ranked_candidate_rank or 0) > 0
     )
 
 
@@ -1427,6 +1427,11 @@ def _live_entry_economic_floor_rejection(
             effective_expected_profit_usd * fill_probability
             - adverse_selection_cost_usd
         )
+    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
+        return (
+            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
+            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
+        )
     if effective_expected_profit_usd < policy.min_expected_profit_usd:
         display_profit = effective_expected_profit_usd if passive_order else expected_profit_usd
         detail = (
@@ -1442,11 +1447,6 @@ def _live_entry_economic_floor_rejection(
             "EXPECTED_PROFIT_BELOW_LIVE_FLOOR("
             f"{display_profit:.4f}<${policy.min_expected_profit_usd:.2f}; "
             f"strategy={strategy_key}{detail})"
-        )
-    if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
-        return (
-            "ULTRA_LOW_PRICE_NOT_AUTHORIZED("
-            f"{final_limit_price:.4f}<={policy.min_entry_price:.2f}; strategy={strategy_key})"
         )
     return None
 
@@ -1924,7 +1924,7 @@ def _entry_forecast_evidence_errors(
 ) -> list[str]:
     """Validate the executable-entry forecast evidence contract.
 
-    Monitor/diagnostic fallbacks may have weaker provenance, but entry must not
+    Non-entry forecast sources may have weaker provenance, but entry must not
     proceed unless the forecast source, timing, payload hash, and authority
     fields are explicit enough to audit later and are knowable before the
     decision was made.
@@ -3099,7 +3099,7 @@ _ENTRY_COMMAND_TERMINAL_NO_FILL_STATES = frozenset(
 _ENTRY_ORDER_FACT_TERMINAL_NO_FILL_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
-_ENTRY_DEDUP_TERMINAL_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
+_ENTRY_DEDUP_NON_OPEN_PHASES = tuple(sorted(INACTIVE_RUNTIME_STATES))
 
 
 def _has_positive_trade_fact_for_command(conn, command_id: str) -> bool:
@@ -3223,7 +3223,7 @@ def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
             AND phase NOT IN (?,?,?,?,?)""",
-        (token_id, token_id, *_ENTRY_DEDUP_TERMINAL_PHASES),
+        (token_id, token_id, *_ENTRY_DEDUP_NON_OPEN_PHASES),
     ).fetchall()
     for row in rows:
         if _pending_entry_terminal_no_fill_cleared(conn, row):
@@ -5338,13 +5338,13 @@ def evaluate_candidate(
     else:
         edges = analysis.find_edges(n_bootstrap=n_bootstrap)
         edge_scan_trace = []
-    _fdr_fallback = False
+    _fdr_family_scan_unavailable = False
     _fdr_selection_unexecutable = ""
     try:
         full_family_hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=n_bootstrap)
     except Exception as exc:
         logger.error("Full-family hypothesis scan unavailable; failing closed for entry selection: %s", exc, exc_info=True)
-        _fdr_fallback = True
+        _fdr_family_scan_unavailable = True
         full_family_hypotheses = []
     _fdr_family_size = len(full_family_hypotheses)
     entry_validations.append("bootstrap_ci")
@@ -5356,7 +5356,7 @@ def evaluate_candidate(
     # its result was never consumed — dead audit weight. Attesting
     # family_complete=True over that subset would be a structural lie under the
     # Q4 contract; the full-family path here is the only trustworthy selector.
-    if _fdr_fallback:
+    if _fdr_family_scan_unavailable:
         filtered = []
     elif full_family_hypotheses:
         selected_edge_keys = _selected_edge_keys_from_full_family(
@@ -5383,7 +5383,7 @@ def evaluate_candidate(
             "Full-family scan returned 0 hypotheses for %s/%s; failing closed",
             candidate.city.name, candidate.target_date,
         )
-        _fdr_fallback = True
+        _fdr_family_scan_unavailable = True
         filtered = []
     entry_validations.append("fdr_filter")
     try:
@@ -5429,7 +5429,7 @@ def evaluate_candidate(
         logger.warning("Failed to record selection family facts: %s", exc)
 
     if not filtered:
-        if _fdr_fallback:
+        if _fdr_family_scan_unavailable:
             stage = "FDR_FAMILY_SCAN_UNAVAILABLE"
             rejection_reasons = ["full-family FDR scan unavailable; entry selection failed closed"]
             rejection_reasons.append(_edge_scan_trace_frontier_detail(edge_scan_trace))
@@ -5462,11 +5462,11 @@ def evaluate_candidate(
             spread=_ensemble_spread_value(ensemble_spread, ens),
             n_edges_found=len(edges),
             n_edges_after_fdr=0,
-            fdr_fallback_fired=_fdr_fallback,
+            fdr_family_scan_unavailable=_fdr_family_scan_unavailable,
             fdr_family_size=_fdr_family_size,
             rejection_reason_enum=(
                 NoTradeReason.UNCATEGORIZED
-                if _fdr_fallback or _fdr_selection_unexecutable
+                if _fdr_family_scan_unavailable or _fdr_selection_unexecutable
                 else NoTradeReason.CONFIDENCE_BAND_INSUFFICIENT
                 if stage == "EDGE_INSUFFICIENT"
                 else NoTradeReason.UNCATEGORIZED
@@ -5490,32 +5490,32 @@ def evaluate_candidate(
         outcome_probabilities=p_cal,
     )
     family_preselection_drops = list(family_decision.dropped) if family_decision else []
-    family_fallback_rank_by_edge_id: dict[int, int] = {}
+    family_ranked_candidate_rank_by_edge_id: dict[int, int] = {}
     family_portfolio_role_by_edge_id: dict[int, str] = {}
     family_portfolio_selected_leg_count = 0
-    family_fallback_candidate_count = 0
+    family_ranked_candidate_count = 0
     if family_decision is not None:
-        fallback_candidates = tuple(
-            getattr(family_decision.portfolio, "fallback_candidate_legs", ())
+        ranked_candidates = tuple(
+            getattr(family_decision.portfolio, "ranked_candidate_legs", ())
             or family_decision.portfolio.selected_legs
         )
         selected_leg_ids = {
             id(edge) for edge in getattr(family_decision.portfolio, "selected_legs", ())
         }
         family_portfolio_selected_leg_count = len(selected_leg_ids)
-        filtered = list(fallback_candidates)
-        family_fallback_candidate_count = len(fallback_candidates)
-        family_fallback_rank_by_edge_id = {
+        filtered = list(ranked_candidates)
+        family_ranked_candidate_count = len(ranked_candidates)
+        family_ranked_candidate_rank_by_edge_id = {
             id(edge): rank
-            for rank, edge in enumerate(fallback_candidates, start=1)
+            for rank, edge in enumerate(ranked_candidates, start=1)
         }
         family_portfolio_role_by_edge_id = {
             id(edge): (
                 "portfolio_selected"
                 if id(edge) in selected_leg_ids
-                else "fallback_alternative"
+                else "ranked_alternative"
             )
-            for edge in fallback_candidates
+            for edge in ranked_candidates
         }
     family_preselection_rejections: list[EdgeDecision] = []
     for drop in family_preselection_drops:
@@ -5541,9 +5541,9 @@ def evaluate_candidate(
                 spread=_ensemble_spread_value(ensemble_spread, ens),
                 n_edges_found=len(edges),
                 n_edges_after_fdr=n_edges_after_fdr_before_family_preselection,
-                fdr_fallback_fired=_fdr_fallback,
+                fdr_family_scan_unavailable=_fdr_family_scan_unavailable,
                 fdr_family_size=_fdr_family_size,
-                family_fallback_candidate_count=family_fallback_candidate_count,
+                family_ranked_candidate_count=family_ranked_candidate_count,
                 rejection_reason_enum=NoTradeReason.MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
                 rejection_reason_detail=(
                     f"family={city.name}|{target_date}|{temperature_metric.temperature_metric} "
@@ -5569,16 +5569,16 @@ def evaluate_candidate(
     for edge in filtered:
         _decisions_before_edge = len(decisions)
         decision_validations = list(entry_validations)
-        family_fallback_rank = family_fallback_rank_by_edge_id.get(id(edge), 0)
+        family_ranked_candidate_rank = family_ranked_candidate_rank_by_edge_id.get(id(edge), 0)
         family_portfolio_leg_role = family_portfolio_role_by_edge_id.get(id(edge), "")
-        family_fallback_candidate = (
-            family_fallback_candidate_count > 1
-            and family_fallback_rank > 0
+        family_ranked_candidate = (
+            family_ranked_candidate_count > 1
+            and family_ranked_candidate_rank > 0
         )
         if family_portfolio_leg_role == "portfolio_selected":
             decision_validations.append("family_portfolio_selected_leg")
-        elif family_fallback_candidate:
-            decision_validations.append("family_fallback_risk_not_cumulative")
+        elif family_ranked_candidate:
+            decision_validations.append("family_ranked_alternative_not_cumulative")
         if edge.support_index is None:
             decisions.append(EdgeDecision(
                 False,
@@ -6441,14 +6441,14 @@ def evaluate_candidate(
             sizing_bankroll=sizing_bankroll,
             kelly_multiplier_used=km * risk_throttle,
             execution_fee_rate=fee_rate,
-            family_fallback_rank=family_fallback_rank,
-            family_fallback_candidate_count=family_fallback_candidate_count,
+            family_ranked_candidate_rank=family_ranked_candidate_rank,
+            family_ranked_candidate_count=family_ranked_candidate_count,
             family_portfolio_selected_leg_count=family_portfolio_selected_leg_count,
             family_portfolio_leg_role=family_portfolio_leg_role,
         ))
-        if _projects_exposure_during_family_fallback_sizing(
-            family_fallback_rank=family_fallback_rank,
-            family_fallback_candidate_count=family_fallback_candidate_count,
+        if _projects_exposure_during_family_ranked_sizing(
+            family_ranked_candidate_rank=family_ranked_candidate_rank,
+            family_ranked_candidate_count=family_ranked_candidate_count,
             family_portfolio_leg_role=family_portfolio_leg_role,
         ):
             projected_total_exposure_usd += size
@@ -6463,9 +6463,9 @@ def evaluate_candidate(
                 (_decisions_before_edge, len(decisions), _ebt)
             )
 
-    if _fdr_fallback or _fdr_family_size:
+    if _fdr_family_scan_unavailable or _fdr_family_size:
         from dataclasses import replace
-        decisions = [replace(d, fdr_fallback_fired=_fdr_fallback, fdr_family_size=_fdr_family_size) for d in decisions]
+        decisions = [replace(d, fdr_family_scan_unavailable=_fdr_family_scan_unavailable, fdr_family_size=_fdr_family_size) for d in decisions]
 
     # LIVE-PROB-P0 (schema-34): stamp tail-mass evidence onto ALL returned decisions
     # so probability_trace_fact columns are populated regardless of gate mode.
@@ -6696,7 +6696,9 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             and source_role == "entry_primary"
         )
         causality_status = "OK" if training_allowed else (
-            "RUNTIME_ONLY_FALLBACK" if source_role != "entry_primary" or degradation_level != "OK" else "UNKNOWN"
+            "NON_ENTRY_FORECAST_SOURCE"
+            if source_role != "entry_primary" or degradation_level != "OK"
+            else "UNKNOWN"
         )
         authority = "VERIFIED" if degradation_level == "OK" and source_role == "entry_primary" else "UNVERIFIED"
         provenance_json = json.dumps({

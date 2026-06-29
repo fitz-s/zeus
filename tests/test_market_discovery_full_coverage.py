@@ -927,6 +927,7 @@ def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatc
     # back to None so this lock test is order-independent.)
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must not scan"))
 
     substrate_observer._market_discovery_cycle()
@@ -948,6 +949,7 @@ def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
     # capture/lock path this test exercises (order-independent — see note above).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: [_make_market("Miami", 1)])
 
     def _raise_refresh(*args, **kwargs):
@@ -2256,8 +2258,8 @@ def test_small_priority_refresh_defers_without_per_token_book_reads(monkeypatch)
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
-def test_priority_refresh_defers_partial_batch_misses(monkeypatch):
-    """Partial /books responses capture only priced sides; missing sides retry later."""
+def test_priority_refresh_captures_partial_batch_misses_as_identity(monkeypatch):
+    """Partial /books responses capture missing priority sides as non-executable identity."""
 
     monkeypatch.setenv(
         "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
@@ -2308,10 +2310,11 @@ def test_priority_refresh_defers_partial_batch_misses(monkeypatch):
         )
 
     assert singular_calls == []
-    assert captured_books == [expected_tokens[0]]
-    assert summary["attempted"] == 1
-    assert summary["inserted"] == 1
-    assert summary["prefetch_missing_skipped"] == 1
+    assert captured_books == expected_tokens
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["prefetch_missing_identity_captured"] == 1
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
@@ -2611,9 +2614,11 @@ def test_priority_condition_missing_batch_book_still_attempts_capture(monkeypatc
             priority_condition_ids={priority_condition},
         )
 
-    assert captured == [("buy_yes", None), ("buy_no", None)]
+    expected_tokens = [market["outcomes"][0]["token_id"], market["outcomes"][0]["no_token_id"]]
+    assert captured == [("buy_yes", expected_tokens[0]), ("buy_no", expected_tokens[1])]
     assert summary["attempted"] == 2
     assert summary["prefetch_missing_skipped"] == 0
+    assert summary["prefetch_missing_identity_captured"] == 2
     assert summary["inserted"] == 2
     assert summary["executable_substrate_coverage_status"] == "FULL"
 

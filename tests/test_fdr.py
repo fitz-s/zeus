@@ -1325,7 +1325,7 @@ class TestSelectionFamilySubstrate:
         assert len(decisions) == 1
         assert decisions[0].should_trade is False
         assert decisions[0].rejection_stage == "FDR_FAMILY_SCAN_UNAVAILABLE"
-        assert decisions[0].fdr_fallback_fired is True
+        assert decisions[0].fdr_family_scan_unavailable is True
         assert decisions[0].fdr_family_size == 0
         assert decisions[0].n_edges_found == 1
         assert decisions[0].n_edges_after_fdr == 0
@@ -1334,7 +1334,7 @@ class TestSelectionFamilySubstrate:
         """Case 3: scan succeeds but returns [] — anomalous (any market has bins).
 
         The evaluator must NOT fall back to legacy fdr_filter; it must fail closed
-        and set fdr_fallback_fired=True so observability surfaces the anomaly.
+        and set fdr_family_scan_unavailable=True so observability surfaces the anomaly.
         """
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
         # boundary_ambiguous=0 (see _seed_ensemble_snapshots_row helper).
@@ -1555,7 +1555,7 @@ class TestSelectionFamilySubstrate:
         assert len(decisions) == 1
         assert decisions[0].should_trade is False
         assert decisions[0].rejection_stage == "FDR_FAMILY_SCAN_UNAVAILABLE"
-        assert decisions[0].fdr_fallback_fired is True
+        assert decisions[0].fdr_family_scan_unavailable is True
         assert decisions[0].fdr_family_size == 0
         assert decisions[0].n_edges_found == 1
         assert decisions[0].n_edges_after_fdr == 0

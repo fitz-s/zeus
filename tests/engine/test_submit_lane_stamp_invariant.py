@@ -289,8 +289,14 @@ def test_persist_boundary_raises_on_live_stamped_full_pass_no_submit():
         reactor._assert_no_submit_lane_invariant(receipt)
 
 
-def test_persist_boundary_allows_live_typed_submit_abort_no_submit():
-    """A live-lane submit recapture abort is a typed no-side-effect terminal, not dark."""
+def test_persist_boundary_rejects_live_typed_abort_when_marked_proof_accepted():
+    """A typed pre-venue abort is not a proof-accepted live no-submit.
+
+    If an adapter emits the old shape (proof_accepted=True + NO_SUBMIT + LIVE
+    stamp), the persist boundary must still treat it as the silent-kill
+    signature. Valid typed abort receipts use proof_accepted=False and route
+    through rejection/retry classification before this boundary.
+    """
     conn, store = _store()
     event = _forecast_event()
     receipt = _full_pass_receipt(
@@ -311,11 +317,12 @@ def test_persist_boundary_allows_live_typed_submit_abort_no_submit():
         ),
     )
 
-    reactor._assert_no_submit_lane_invariant(receipt)
+    with pytest.raises(LiveLaneDarkInvariantError):
+        reactor._assert_no_submit_lane_invariant(receipt)
 
 
-def test_armed_live_daemon_books_typed_submit_abort_no_submit():
-    """Profit-floor recapture aborts should not dead-letter the redecision lane."""
+def test_armed_live_daemon_rejects_profit_floor_abort_as_visible_decline():
+    """Profit-floor recapture aborts have no venue side effect and no accepted intent."""
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -326,6 +333,7 @@ def test_armed_live_daemon_books_typed_submit_abort_no_submit():
             "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:"
             "PreSubmitRevalidated expected profit below strategy floor"
         ),
+        proof_accepted=False,
     )
     reactor, _submitted = _reactor(
         store,
@@ -339,12 +347,18 @@ def test_armed_live_daemon_books_typed_submit_abort_no_submit():
 
     result = reactor.process_pending(decision_time=_DECISION_TIME)
 
-    assert result.dead_lettered == 0
     assert result.retried == 0
-    assert result.proof_accepted == 1
-    rows = _no_submit_rows(conn, event.event_id)
-    assert len(rows) == 1
-    assert "SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR" in rows[0][0]
+    assert result.dead_lettered == 0
+    assert result.rejected == 1
+    assert result.proof_accepted == 0
+    assert _no_submit_rows(conn, event.event_id) == []
+    row = conn.execute(
+        "SELECT rejection_stage, rejection_reason FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "EXECUTOR_EXPRESSIBILITY"
+    assert row[1].startswith("SUBMIT_ABORTED_EXPECTED_PROFIT_BELOW_STRATEGY_FLOOR:")
 
 
 def test_armed_live_daemon_never_silently_books_live_stamped_full_pass_no_submit():
