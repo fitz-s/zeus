@@ -479,12 +479,12 @@ def _open_rest_condition_id_from_snapshot(
     return condition_id or None
 
 
-def _open_rest_family_rows_for_refresh(
+def _open_rest_scope_rows_for_refresh(
     trade_conn,
     *,
     forecasts_conn=None,
-) -> list[tuple[str, str, str]]:
-    """Families with live unfilled entry rests that need fresh executable books."""
+) -> list[tuple[tuple[str, str, str], str]]:
+    """Live unfilled entry rests as (family, condition_id) refresh scope."""
 
     try:
         command_cols = {
@@ -495,6 +495,10 @@ def _open_rest_family_rows_for_refresh(
             str(row[1])
             for row in trade_conn.execute("PRAGMA table_info(venue_order_facts)").fetchall()
         }
+        position_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
         state_select = "state" if "state" in command_cols else "'' AS state"
         state_filter = (
             "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
@@ -502,6 +506,9 @@ def _open_rest_family_rows_for_refresh(
         token_select = "token_id" if "token_id" in command_cols else "'' AS token_id"
         snapshot_select = "snapshot_id" if "snapshot_id" in command_cols else "'' AS snapshot_id"
         remaining_select = "remaining_size" if "remaining_size" in fact_cols else "NULL AS remaining_size"
+        position_condition_select = (
+            "condition_id" if "condition_id" in position_cols else "'' AS condition_id"
+        )
         commands = trade_conn.execute(
             f"""
             SELECT command_id, position_id, venue_order_id, {state_select}, {token_select}, {snapshot_select}
@@ -514,8 +521,8 @@ def _open_rest_family_rows_for_refresh(
         ).fetchall()
     except Exception:  # noqa: BLE001
         return []
-    out: list[tuple[str, str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    out: list[tuple[tuple[str, str, str], str]] = []
+    seen: set[tuple[tuple[str, str, str], str]] = set()
     open_states = {"LIVE", "RESTING", "PARTIALLY_MATCHED"}
     for row in commands:
         venue_order_id = str(row[2] or "")
@@ -549,10 +556,15 @@ def _open_rest_family_rows_for_refresh(
         position_id = str(row[1] or "")
         if not position_id:
             continue
+        snapshot_condition_id = _open_rest_condition_id_from_snapshot(
+            trade_conn,
+            token_id=str(row[4] or ""),
+            snapshot_id=str(row[5] or ""),
+        )
         try:
             pos = trade_conn.execute(
-                """
-                SELECT city, target_date, temperature_metric
+                f"""
+                SELECT city, target_date, temperature_metric, {position_condition_select}
                   FROM position_current
                  WHERE position_id = ?
                    AND phase IN ('pending_entry', 'active', 'day0_window')
@@ -565,30 +577,72 @@ def _open_rest_family_rows_for_refresh(
         if pos is None:
             if forecasts_conn is None:
                 continue
-            condition_id = _open_rest_condition_id_from_snapshot(
-                trade_conn,
-                token_id=str(row[4] or ""),
-                snapshot_id=str(row[5] or ""),
-            )
             resolved = _condition_priority_families_for_refresh(
                 forecasts_conn,
-                [condition_id] if condition_id else [],
+                [snapshot_condition_id] if snapshot_condition_id else [],
             )
             family = resolved[0] if resolved else ("", "", "")
+            condition_id = snapshot_condition_id or ""
         else:
             family = (
                 str(pos[0] or "").strip(),
                 str(pos[1] or "").strip(),
                 str(pos[2] or "").strip(),
             )
-        if all(family) and family not in seen:
+            condition_id = str(pos[3] or "").strip() or (snapshot_condition_id or "")
+        key = (family, condition_id)
+        if all(family) and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _open_rest_family_rows_for_refresh(
+    trade_conn,
+    *,
+    forecasts_conn=None,
+) -> list[tuple[str, str, str]]:
+    """Families with live unfilled entry rests that need fresh executable books."""
+
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for family, _condition_id in _open_rest_scope_rows_for_refresh(
+        trade_conn,
+        forecasts_conn=forecasts_conn,
+    ):
+        if family not in seen:
             seen.add(family)
             out.append(family)
     return out
 
 
-def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
-    """Current held-position families for warmer priority.
+def _open_rest_condition_ids_for_refresh(
+    trade_conn,
+    *,
+    forecasts_conn=None,
+) -> list[str]:
+    """Exact condition ids for live unfilled entry rests.
+
+    An unfilled venue order needs price redecision for the specific book it is
+    resting on.  Expanding it to every sibling bin in the weather family makes
+    stale unrelated bins consume the live freshness window.
+    """
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for _family, condition_id in _open_rest_scope_rows_for_refresh(
+        trade_conn,
+        forecasts_conn=forecasts_conn,
+    ):
+        condition_id = str(condition_id or "").strip()
+        if condition_id and condition_id not in seen:
+            seen.add(condition_id)
+            out.append(condition_id)
+    return out
+
+
+def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str], str]]:
+    """Current on-chain held positions as (family, condition_id) refresh scope.
 
     Fail-soft: a producer read failure must not crash the substrate daemon.
     """
@@ -598,11 +652,35 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     try:
         conn = get_trade_connection_read_only()
         try:
+            cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+            }
+            required = {"city", "target_date", "temperature_metric", "phase", "condition_id"}
+            if not required.issubset(cols):
+                return []
+            if "chain_shares" in cols and "shares" in cols:
+                share_expr = "COALESCE(chain_shares, shares, 0)"
+            elif "chain_shares" in cols:
+                share_expr = "COALESCE(chain_shares, 0)"
+            elif "shares" in cols:
+                share_expr = "COALESCE(shares, 0)"
+            else:
+                return []
+            chain_state_filter = (
+                "AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')"
+                if "chain_state" in cols
+                else ""
+            )
             rows = conn.execute(
-                """
-                SELECT DISTINCT city, target_date, temperature_metric
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric, condition_id
                   FROM position_current
-                 WHERE phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                   AND condition_id IS NOT NULL
+                   AND TRIM(condition_id) != ''
+                   AND {share_expr} > 0.000001
+                   {chain_state_filter}
                 """
             ).fetchall()
         finally:
@@ -612,16 +690,39 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
             "substrate_observer: held-position family read failed; held families not prioritized this tick: %r",
             exc,
         )
-        return set()
-    out: set[tuple[str, str, str]] = set()
+        return []
+    out: list[tuple[tuple[str, str, str], str]] = []
+    seen: set[tuple[tuple[str, str, str], str]] = set()
     for row in rows:
         family = (
             str(row[0] or "").strip(),
             str(row[1] or "").strip(),
             str(row[2] or "").strip(),
         )
-        if all(family):
-            out.add(family)
+        condition_id = str(row[3] or "").strip()
+        key = (family, condition_id)
+        if all(family) and condition_id and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
+    """Current held-position families for warmer priority."""
+
+    return {family for family, _condition_id in _edli_current_held_position_scope_rows()}
+
+
+def _edli_current_held_position_condition_ids() -> list[str]:
+    """Exact condition ids for current held positions."""
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for _family, condition_id in _edli_current_held_position_scope_rows():
+        condition_id = str(condition_id or "").strip()
+        if condition_id and condition_id not in seen:
+            seen.add(condition_id)
+            out.append(condition_id)
     return out
 
 
@@ -647,12 +748,19 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
     for market in markets:
+        market_condition_ids = {
+            str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            for outcome in market.get("outcomes", []) or []
+            if isinstance(outcome, dict)
+            and str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+        }
+        restrict_this_market = bool(scoped_conditions and market_condition_ids & scoped_conditions)
         stale_outcomes: list[dict] = []
         for outcome in market.get("outcomes", []) or []:
             if not isinstance(outcome, dict):
                 continue
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
-            if scoped_conditions and cid not in scoped_conditions:
+            if restrict_this_market and cid not in scoped_conditions:
                 continue
             if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
                 fresh_conditions_skipped += 1
@@ -2115,7 +2223,12 @@ def _edli_market_substrate_warm_cycle() -> None:
         _substrate_priority_receipt(request=priority_marker_request, summary=summary)
         logger.info("EDLI market-substrate warm skipped: %s", summary["scheduler_failure_reason"])
         return summary
-    from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
+    from src.state.db import (
+        ZEUS_FORECASTS_DB_PATH,
+        get_forecasts_connection_read_only,
+        get_trade_connection_read_only,
+        get_world_connection,
+    )
 
     conn = get_world_connection()
     # K1: the snapshot refresh reads market topology off the forecasts DB (market_events).
@@ -2188,9 +2301,36 @@ def _edli_market_substrate_warm_cycle() -> None:
             deadline_monotonic=claim_deadline,
         )
         try:
+            open_rest_priority_condition_ids: list[str] = []
+            held_position_priority_condition_ids: list[str] = []
+            if not priority_marker_active:
+                trade_ro = None
+                try:
+                    trade_ro = get_trade_connection_read_only()
+                    open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh(
+                        trade_ro,
+                        forecasts_conn=forecasts_conn,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "EDLI market-substrate warm: open-rest condition priority read failed "
+                        "(non-fatal): %s",
+                        exc,
+                    )
+                finally:
+                    if trade_ro is not None:
+                        try:
+                            trade_ro.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
+            exact_priority_condition_ids = list(priority_marker_condition_ids)
+            if not priority_marker_active:
+                exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
+                exact_priority_condition_ids.extend(held_position_priority_condition_ids)
             condition_priority_families = _condition_priority_families_for_refresh(
                 forecasts_conn,
-                priority_marker_condition_ids,
+                exact_priority_condition_ids,
             )
             claim_priority_read_failed = False
             if priority_marker_active:
@@ -2218,7 +2358,7 @@ def _edli_market_substrate_warm_cycle() -> None:
         )
         hot_scope_only = bool(
             priority_marker_families
-            or priority_marker_condition_ids
+            or exact_priority_condition_ids
             or condition_priority_families
             or claim_priority_families
             or claim_priority_read_failed
@@ -2228,13 +2368,15 @@ def _edli_market_substrate_warm_cycle() -> None:
             forecasts_conn,
             extra_priority_families=priority_families,
             include_pending_families=not hot_scope_only,
-            priority_condition_ids=priority_marker_condition_ids,
+            priority_condition_ids=exact_priority_condition_ids,
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
         )
         summary = {
             **dict(summary or {}),
             "condition_priority_families": len(condition_priority_families),
+            "open_rest_priority_condition_ids": len(open_rest_priority_condition_ids),
+            "held_position_priority_condition_ids": len(held_position_priority_condition_ids),
             "claim_order_priority_families": len(claim_priority_families),
             "claim_order_priority_read_failed": bool(claim_priority_read_failed),
         }

@@ -665,8 +665,13 @@ def test_substrate_open_rest_scope_resolves_before_position_projection():
         trade_conn,
         forecasts_conn=forecasts_conn,
     )
+    condition_ids = substrate_observer._open_rest_condition_ids_for_refresh(
+        trade_conn,
+        forecasts_conn=forecasts_conn,
+    )
 
     assert families == [("Shanghai", "2026-06-29", "high")]
+    assert condition_ids == ["cond-shanghai-31"]
 
 
 def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(monkeypatch):
@@ -1239,6 +1244,63 @@ def test_market_substrate_warm_cycle_claim_read_failure_does_not_sweep_backlog(
     assert result["claim_order_priority_read_failed"] is True
 
 
+def test_market_substrate_warm_cycle_exact_conditions_do_not_displace_claim_family(
+    monkeypatch,
+):
+    """Held/resting books are exact-condition hot scope; entries still get family discovery."""
+
+    calls: list[dict] = []
+    claim_families = [("Tokyo", "2026-06-30", "low")]
+    condition_families = [("Paris", "2026-06-30", "high")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_open_rest_condition_ids_for_refresh",
+        lambda *a, **k: ["cond-rest"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_edli_current_held_position_condition_ids",
+        lambda: ["cond-held"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_priority_families_for_refresh",
+        lambda _conn, _condition_ids: condition_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        state_db, "get_trade_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls
+    assert calls[0]["priority_condition_ids"] == ["cond-rest", "cond-held"]
+    assert calls[0]["extra_priority_families"] == condition_families + claim_families
+    assert calls[0]["include_pending_families"] is False
+
+
 def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     """The warm job owns an independent cadence; reactor-active must not starve price refresh."""
     calls: list[int] = []
@@ -1597,6 +1659,44 @@ def test_priority_condition_scope_does_not_expand_to_family_siblings(monkeypatch
     assert captured_kwargs[0]["priority_condition_ids"] == {"cond-31"}
     assert [out["condition_id"] for out in captured_markets[0][0]["outcomes"]] == ["cond-31"]
     assert captured_markets[0][0]["condition_ids"] == ["cond-31"]
+
+
+def test_scoped_priority_condition_prune_preserves_unscoped_claim_family(monkeypatch):
+    """Exact monitor/rest scope must not erase unrelated full-family entry discovery."""
+
+    monkeypatch.setattr(substrate_observer, "_condition_buy_sides_fresh", lambda *a, **k: False)
+    markets = [
+        {
+            "slug": "highest-temperature-in-shanghai-on-june-29-2026",
+            "condition_ids": ["cond-30", "cond-31"],
+            "outcomes": [
+                {"condition_id": "cond-30", "token_id": "yes-30"},
+                {"condition_id": "cond-31", "token_id": "yes-31"},
+            ],
+        },
+        {
+            "slug": "lowest-temperature-in-tokyo-on-june-30-2026",
+            "condition_ids": ["cond-21", "cond-22"],
+            "outcomes": [
+                {"condition_id": "cond-21", "token_id": "yes-21"},
+                {"condition_id": "cond-22", "token_id": "yes-22"},
+            ],
+        },
+    ]
+
+    pruned, fresh_skipped, stale_submitted = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            _FakeConn(),
+            markets,
+            fresh_at_iso="2026-06-29T00:00:00+00:00",
+            restrict_to_condition_ids={"cond-31"},
+        )
+    )
+
+    assert fresh_skipped == 0
+    assert stale_submitted == 3
+    assert [out["condition_id"] for out in pruned[0]["outcomes"]] == ["cond-31"]
+    assert [out["condition_id"] for out in pruned[1]["outcomes"]] == ["cond-21", "cond-22"]
 
 
 def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):
