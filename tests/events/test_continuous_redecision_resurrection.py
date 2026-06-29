@@ -621,8 +621,8 @@ def test_rest_pull_does_not_cancel_by_order_age_alone():
     assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
 
 
-def test_rest_pull_cancels_when_family_best_candidate_moves_to_another_bin():
-    """A live rest must not block the family mutex after current edge moves elsewhere."""
+def test_rest_pull_does_not_use_entry_screen_candidate_as_cancel_authority():
+    """A cheap-screen candidate is not enough evidence to cancel a live rest."""
 
     world = _mem_world()
     trade = _mem_trade()
@@ -645,38 +645,9 @@ def test_rest_pull_cancels_when_family_best_candidate_moves_to_another_bin():
         trade,
         open_rests=[rest],
         decision_time="2026-06-12T00:45:00+00:00",
-        candidate_redecisions=[
-            cr.EnqueuedRedecision(
-                family_id=family_id,
-                bin_label="26C",
-                direction="buy_no",
-                edge=0.0358,
-            )
-        ],
     )
 
-    assert len(pulls) == 1
-    pulled_rest, decision = pulls[0]
-    assert pulled_rest.command_id == "cmd-rest"
-    assert decision.action == "CANCEL_REPLACE"
-    assert decision.reason == "FAMILY_BEST_CANDIDATE_CHANGED"
-    assert decision.detail == pytest.approx(0.0358)
-
-    same_rest_candidate = cr.screen_resting_orders(
-        world,
-        trade,
-        open_rests=[rest],
-        decision_time="2026-06-12T00:45:00+00:00",
-        candidate_redecisions=[
-            cr.EnqueuedRedecision(
-                family_id=family_id,
-                bin_label="27C",
-                direction="buy_no",
-                edge=0.04,
-            )
-        ],
-    )
-    assert same_rest_candidate == []
+    assert pulls == []
 
 
 def test_duplicate_suppressed_receipt_pulls_rest_when_full_reactor_best_moved():

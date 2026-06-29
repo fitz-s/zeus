@@ -2309,59 +2309,26 @@ def screen_resting_orders(
     *,
     open_rests: list[OpenRest],
     decision_time: str | None = None,
-    candidate_redecisions: list[EnqueuedRedecision] | None = None,
     value_refresh_min_age_seconds: float = REST_VALUE_REFRESH_MIN_AGE_SECONDS,
 ) -> list[tuple[OpenRest, RepriceDecision]]:
     """§4.5 resting-order management: for each OPEN maker rest, fire a PULL (cancel+re-decide) only
     when its belief decayed past BELIEF_REPRICE_DELTA on NEW evidence (screen_reprice), or the live
     book has walked away from our limit by at least REST_BOOK_DRIFT_TICKS. Order age alone is not
     trading value and not dead-book proof for an already-resting GTC order; the maker-rest deadline
-    owner remains src.execution.maker_rest_escalation. If the current entry screen proves a better
-    same-family candidate on a different bin/side, the rest is also pulled so the duplicate-order
-    mutex does not strand capital on the old family choice. Pure read; returns decisions only — the
-    scheduler job enqueues the redecision and performs cancellation through the existing cancel path."""
+    owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the scheduler
+    job enqueues the redecision and performs cancellation through the existing cancel path.
+
+    The entry cheap-screen is intentionally not cancellation authority. It can
+    select families for a full reactor pass, but a live rest may only be pulled
+    by order-management evidence or by a completed reactor receipt such as
+    ``EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED``.
+    """
     screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
     condition_ids = {r.condition_id for r in open_rests if r.condition_id}
     bid_by_cid = read_freshest_resting_best_bids(trade_conn, condition_ids=condition_ids)
     ask_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=condition_ids)
-    best_candidate_by_family: dict[str, EnqueuedRedecision] = {}
-    for candidate in candidate_redecisions or ():
-        family_id = str(candidate.family_id or "").strip()
-        if not family_id:
-            continue
-        try:
-            candidate_edge = float(candidate.edge)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(candidate_edge):
-            continue
-        prior = best_candidate_by_family.get(family_id)
-        if prior is None or candidate_edge > float(prior.edge):
-            best_candidate_by_family[family_id] = candidate
     out: list[tuple[OpenRest, RepriceDecision]] = []
     for rest in open_rests:
-        best_candidate = best_candidate_by_family.get(rest.family_id)
-        if (
-            best_candidate is not None
-            and (
-                str(best_candidate.bin_label or "") != str(rest.bin_label or "")
-                or str(best_candidate.direction or "") != str(rest.side or "")
-            )
-        ):
-            out.append(
-                (
-                    rest,
-                    RepriceDecision(
-                        family_id=rest.family_id,
-                        bin_label=rest.bin_label,
-                        side=rest.side,
-                        action="CANCEL_REPLACE",
-                        reason="FAMILY_BEST_CANDIDATE_CHANGED",
-                        detail=float(best_candidate.edge),
-                    ),
-                )
-            )
-            continue
         # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
         decision = screen_reprice(
             world_conn,

@@ -5636,7 +5636,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 trade_ro,
                 open_rests=open_rests,
                 decision_time=received_at,
-                candidate_redecisions=entry_redecisions,
             )
             rest_pulls = _edli_merge_rest_pulls(
                 rest_pulls,
@@ -5832,7 +5831,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     trade_ro,
                     open_rests=open_rests,
                     decision_time=received_at,
-                    candidate_redecisions=entry_redecisions,
                 )
                 rest_pulls = _edli_merge_rest_pulls(
                     rest_pulls,
