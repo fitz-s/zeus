@@ -3158,6 +3158,168 @@ def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypa
     assert current["order_status"] == "sell_placed"
 
 
+def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_lifecycle import execute_exit
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    pos = Position(
+        trade_id="pos-venue-open-exit",
+        market_id="mkt-1",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="29C",
+        direction="buy_yes",
+        size_usd=1.0,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        entry_price=0.015,
+        p_posterior=0.1,
+        state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        order_id="ord-entry-old",
+        order_status="partial",
+    )
+
+    class FakeClob:
+        def get_open_orders(self):
+            return [
+                {
+                    "id": "ord-venue-open-exit",
+                    "asset_id": YES_TOKEN,
+                    "side": "SELL",
+                    "status": "LIVE",
+                    "price": "0.023",
+                    "original_size": "9.7",
+                    "size_matched": "0",
+                }
+            ]
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("matching venue open sell must be adopted, not duplicated")
+        ),
+    )
+
+    result = execute_exit(
+        PortfolioState(positions=[pos]),
+        pos,
+        ExitContext(
+            exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+            current_market_price=0.02,
+            current_market_price_is_fresh=True,
+            best_bid=0.019,
+            position_state="active",
+        ),
+        clob=FakeClob(),
+        conn=conn,
+    )
+
+    assert result.startswith("sell_pending: active_prior_exit_sell")
+    assert pos.last_exit_order_id == "ord-venue-open-exit"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+    current = conn.execute(
+        "SELECT phase, order_id, order_status FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_id"] == "ord-venue-open-exit"
+    assert current["order_status"] == "sell_placed"
+
+
+def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_lifecycle import execute_exit
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    pos = Position(
+        trade_id="pos-adopted-cancel",
+        market_id="mkt-1",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="29C",
+        direction="buy_yes",
+        size_usd=1.0,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        entry_price=0.015,
+        p_posterior=0.1,
+        state="pending_exit",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        last_exit_order_id="ord-venue-open-exit",
+        exit_retry_count=1,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+    )
+
+    class FakeClob:
+        def cancel_order(self, order_id):
+            assert order_id == "ord-venue-open-exit"
+            return {"canceled": [order_id]}
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: {
+            "executable_snapshot_id": "snap-adopted-cancel",
+            "executable_snapshot_min_order_size": "5",
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *args, **kwargs: (True, "ok"),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: {"component": "collateral_snapshot_refresh", "allowed": True},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cancel-for-reprice returns to retry before a replacement submit")
+        ),
+    )
+
+    result = execute_exit(
+        PortfolioState(positions=[pos]),
+        pos,
+        ExitContext(
+            exit_reason="SELL_REPRICE_BID_MOVED_AWAY",
+            current_market_price=0.02,
+            current_market_price_is_fresh=True,
+            best_bid=0.01,
+            position_state="pending_exit",
+        ),
+        clob=FakeClob(),
+        conn=conn,
+    )
+
+    assert result == "exit_retry: adopted_order_cancelled"
+    assert pos.last_exit_order_id == ""
+    assert pos.exit_state == "retry_pending"
+    assert pos.next_exit_retry_at is not None
+
+
 def test_exit_active_order_lock_retry_does_not_consume_backoff_budget(conn):
     from src.execution.exit_lifecycle import _mark_exit_retry
     from src.state.portfolio import Position

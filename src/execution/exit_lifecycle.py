@@ -173,6 +173,19 @@ _ACTIVE_EXIT_SELL_STATES = frozenset(
         "REVIEW_REQUIRED",
     }
 )
+_VENUE_OPEN_ORDER_TERMINAL_STATUSES = frozenset(
+    {
+        "CANCELED",
+        "CANCELLED",
+        "CANCEL_CONFIRMED",
+        "EXPIRED",
+        "FILLED",
+        "MATCHED",
+        "MINED",
+        "NOT_FOUND",
+        "REJECTED",
+    }
+)
 
 
 def _is_channel_not_ready_error(error: str) -> bool:
@@ -233,6 +246,96 @@ def _row_value(row: object, key: str, index: int) -> object:
             return None
 
 
+def _payload_first(payload: Mapping[str, object], *keys: str) -> object:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _venue_open_order_remaining_size(payload: Mapping[str, object]) -> Decimal | None:
+    payload_dict = dict(payload)
+    remaining = _payload_decimal(
+        payload_dict,
+        "remaining_size",
+        "remainingSize",
+        "remaining",
+        "open_size",
+        "openSize",
+    )
+    if remaining is not None:
+        return remaining
+    original = _payload_decimal(payload_dict, "original_size", "originalSize", "size")
+    if original is None:
+        return None
+    matched = _payload_decimal(
+        payload_dict,
+        "size_matched",
+        "sizeMatched",
+        "matched_size",
+        "matchedSize",
+        "filled_size",
+        "filledSize",
+    ) or Decimal("0")
+    return original - matched
+
+
+def _venue_open_exit_sell_order(
+    clob,
+    *,
+    token_id: str,
+    expected_shares: float,
+) -> dict[str, object] | None:
+    if clob is None or not token_id:
+        return None
+    get_open_orders = getattr(clob, "get_open_orders", None)
+    if not callable(get_open_orders):
+        return None
+    try:
+        orders = get_open_orders()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "active exit open-order scan failed for token=%s: %s",
+            token_id,
+            exc,
+        )
+        return None
+    expected = Decimal(str(max(0.0, float(expected_shares or 0.0))))
+    if expected <= 0:
+        return None
+    tolerance = max(Decimal("0.000001"), expected * Decimal("0.02"))
+    for order in orders or []:
+        payload = _venue_order_payload(order)
+        if not payload:
+            continue
+        order_id = str(
+            _payload_first(payload, "orderID", "orderId", "order_id", "id") or ""
+        ).strip()
+        asset_id = str(
+            _payload_first(payload, "asset_id", "assetId", "token_id", "tokenId") or ""
+        ).strip()
+        side = str(_payload_first(payload, "side", "order_side") or "").strip().upper()
+        status = str(_payload_first(payload, "status", "state") or "LIVE").strip().upper()
+        if not order_id or asset_id != token_id or side != "SELL":
+            continue
+        if status in _VENUE_OPEN_ORDER_TERMINAL_STATUSES:
+            continue
+        remaining = _venue_open_order_remaining_size(payload)
+        if remaining is None or remaining <= 0 or remaining > expected + tolerance:
+            continue
+        return {
+            "command_id": "venue_open_order",
+            "state": status or "LIVE",
+            "venue_order_id": order_id,
+            "updated_at": _payload_first(payload, "updated_at", "updatedAt") or "",
+            "created_at": _payload_first(payload, "created_at", "createdAt") or "",
+            "price": _payload_first(payload, "price", "limit_price") or "",
+            "size": str(remaining),
+        }
+    return None
+
+
 def _active_exit_sell_command(
     conn: sqlite3.Connection | None,
     *,
@@ -260,6 +363,28 @@ def _active_exit_sell_command(
         ).fetchone()
     except sqlite3.Error:
         return None
+
+
+def _active_exit_sell_for_lock(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    token_id: str,
+    clob,
+) -> object | None:
+    active_exit = _active_exit_sell_command(
+        conn,
+        position_id=str(getattr(position, "trade_id", "") or ""),
+        token_id=token_id,
+    )
+    if active_exit is not None:
+        return active_exit
+    _commit_before_exit_venue_io(conn, stage="active_exit_open_order_scan")
+    return _venue_open_exit_sell_order(
+        clob,
+        token_id=token_id,
+        expected_shares=float(getattr(position, "effective_shares", 0.0) or 0.0),
+    )
 
 
 def _active_exit_already_projected(
@@ -1984,11 +2109,12 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
         return "exit_blocked: no_token_id"
 
-    if conn is not None and not str(getattr(position, "last_exit_order_id", "") or ""):
-        active_exit = _active_exit_sell_command(
+    if not str(getattr(position, "last_exit_order_id", "") or ""):
+        active_exit = _active_exit_sell_for_lock(
             conn,
-            position_id=str(getattr(position, "trade_id", "") or ""),
+            position,
             token_id=token_id,
+            clob=clob,
         )
         if active_exit is not None:
             return _adopt_active_exit_sell(
@@ -2059,10 +2185,11 @@ def _execute_live_exit(
         except CollateralInsufficient as exc:
             collateral_reason = str(exc)
             if _is_exit_transient_lock_error(collateral_reason):
-                active_exit = _active_exit_sell_command(
+                active_exit = _active_exit_sell_for_lock(
                     conn,
-                    position_id=str(getattr(position, "trade_id", "") or ""),
+                    position,
                     token_id=token_id,
+                    clob=clob,
                 )
                 if active_exit is not None:
                     return _adopt_active_exit_sell(
@@ -2100,10 +2227,11 @@ def _execute_live_exit(
     )
     if not can_sell:
         if _is_exit_transient_lock_error(collateral_reason or ""):
-            active_exit = _active_exit_sell_command(
+            active_exit = _active_exit_sell_for_lock(
                 conn,
-                position_id=str(getattr(position, "trade_id", "") or ""),
+                position,
                 token_id=token_id,
+                clob=clob,
             )
             if active_exit is not None:
                 return _adopt_active_exit_sell(
@@ -2169,17 +2297,67 @@ def _execute_live_exit(
                 (position.last_exit_order_id, position.trade_id, exit_intent.token_id),
             ).fetchone()
             if row is None:
-                retry_reason = f"{exit_context.exit_reason} [CANCEL_UNKNOWN: no_command_row]"
-                _mark_exit_retry(position, reason=retry_reason, error="cancel_command_row_missing", conn=conn)
+                from src.execution.exit_safety import parse_cancel_response
+
+                try:
+                    outcome = parse_cancel_response(cancel_fn(position.last_exit_order_id))
+                except Exception as exc:  # noqa: BLE001
+                    retry_reason = f"{exit_context.exit_reason} [CANCEL_UNKNOWN: no_command_row]"
+                    _mark_exit_retry(
+                        position,
+                        reason=retry_reason,
+                        error=str(exc)[:500],
+                        conn=conn,
+                    )
+                    log_pending_exit_recovery_event(
+                        conn,
+                        position,
+                        event_type="EXIT_ORDER_REJECTED",
+                        reason=retry_reason,
+                        error=str(exc)[:500],
+                    )
+                    log_exit_retry_event(conn, position, reason=retry_reason, error=str(exc)[:500])
+                    return "exit_blocked: cancel_unknown"
+                if outcome.status != "CANCELED":
+                    retry_reason = f"{exit_context.exit_reason} [CANCEL_{outcome.status}: no_command_row]"
+                    _mark_exit_retry(
+                        position,
+                        reason=retry_reason,
+                        error=outcome.reason or outcome.status,
+                        conn=conn,
+                    )
+                    log_pending_exit_recovery_event(
+                        conn,
+                        position,
+                        event_type="EXIT_ORDER_REJECTED",
+                        reason=retry_reason,
+                        error=outcome.reason or outcome.status,
+                    )
+                    log_exit_retry_event(conn, position, reason=retry_reason, error=outcome.reason or outcome.status)
+                    return f"exit_blocked: cancel_{outcome.status.lower()}"
+                position.last_exit_order_id = ""
+                retry_reason = f"{exit_context.exit_reason} [CANCEL_ADOPTED_ORDER]"
+                _mark_exit_retry(
+                    position,
+                    reason=retry_reason,
+                    error="adopted_exit_order_cancelled",
+                    cooldown_seconds=0,
+                    conn=conn,
+                )
                 log_pending_exit_recovery_event(
                     conn,
                     position,
                     event_type="EXIT_ORDER_REJECTED",
                     reason=retry_reason,
-                    error="cancel_command_row_missing",
+                    error="adopted_exit_order_cancelled",
                 )
-                log_exit_retry_event(conn, position, reason=retry_reason, error="cancel_command_row_missing")
-                return "exit_blocked: cancel_unknown"
+                log_exit_retry_event(
+                    conn,
+                    position,
+                    reason=retry_reason,
+                    error="adopted_exit_order_cancelled",
+                )
+                return "exit_retry: adopted_order_cancelled"
             outcome = request_cancel_for_command(
                 conn,
                 str(row["command_id"]),
@@ -2237,10 +2415,11 @@ def _execute_live_exit(
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
             if _is_exit_transient_lock_error(sell_error):
-                active_exit = _active_exit_sell_command(
+                active_exit = _active_exit_sell_for_lock(
                     conn,
-                    position_id=str(getattr(position, "trade_id", "") or ""),
+                    position,
                     token_id=token_id,
+                    clob=clob,
                 )
                 if active_exit is not None:
                     return _adopt_active_exit_sell(
