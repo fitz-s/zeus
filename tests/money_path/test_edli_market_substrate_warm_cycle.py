@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-06-29
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -361,6 +361,21 @@ def test_priority_direct_clob_uses_selected_priority_subset():
     assert "priority_direct_clob_service_conditions = set(" in src
     assert "ordered_selected_priority_conditions[:priority_direct_clob_condition_limit]" in src
     assert "len(priority_conditions) <= priority_direct_clob_condition_limit" not in src
+
+
+def test_active_risk_conditions_are_hot_even_with_priority_marker():
+    """A marker request must not exclude live open-rest or held-position exact conditions."""
+
+    src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
+    open_read = src.index("open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh")
+    held_read = src.index("held_position_priority_condition_ids = _edli_current_held_position_condition_ids()")
+    extend_marker = src.index("exact_priority_condition_ids = list(priority_marker_condition_ids)")
+    extend_open = src.index("exact_priority_condition_ids.extend(open_rest_priority_condition_ids)")
+    extend_held = src.index("exact_priority_condition_ids.extend(held_position_priority_condition_ids)")
+
+    assert open_read < extend_marker < extend_open < extend_held
+    assert held_read < extend_open
+    assert "if not priority_marker_active:\n                exact_priority_condition_ids.extend" not in src
 
 
 def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-29
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.1 (Executable-Substrate Observer), §6 (P2 row), §7 I1 (no-back-coupling),
 #   §8 Step 1 (lift + DELETE outer pending gates), §9 (regression-unconstructable proof).
@@ -2310,31 +2310,29 @@ def _edli_market_substrate_warm_cycle() -> None:
         try:
             open_rest_priority_condition_ids: list[str] = []
             held_position_priority_condition_ids: list[str] = []
-            if not priority_marker_active:
-                trade_ro = None
-                try:
-                    trade_ro = get_trade_connection_read_only()
-                    open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh(
-                        trade_ro,
-                        forecasts_conn=forecasts_conn,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "EDLI market-substrate warm: open-rest condition priority read failed "
-                        "(non-fatal): %s",
-                        exc,
-                    )
-                finally:
-                    if trade_ro is not None:
-                        try:
-                            trade_ro.close()
-                        except Exception:  # noqa: BLE001
-                            pass
-                held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
+            trade_ro = None
+            try:
+                trade_ro = get_trade_connection_read_only()
+                open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh(
+                    trade_ro,
+                    forecasts_conn=forecasts_conn,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "EDLI market-substrate warm: open-rest condition priority read failed "
+                    "(non-fatal): %s",
+                    exc,
+                )
+            finally:
+                if trade_ro is not None:
+                    try:
+                        trade_ro.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
             exact_priority_condition_ids = list(priority_marker_condition_ids)
-            if not priority_marker_active:
-                exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
-                exact_priority_condition_ids.extend(held_position_priority_condition_ids)
+            exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
+            exact_priority_condition_ids.extend(held_position_priority_condition_ids)
             condition_priority_families = _condition_priority_families_for_refresh(
                 forecasts_conn,
                 exact_priority_condition_ids,
