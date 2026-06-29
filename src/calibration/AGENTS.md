@@ -3,7 +3,7 @@
 Module book: `docs/reference/modules/calibration.md`
 Machine registry: `architecture/module_manifest.yaml`
 
-## Strategy of record (2026-06-09) — Extended Platt is now the BASELINE calibration
+## Strategy of record — Extended Platt is the diagnostic BASELINE, not the live path
 
 Live q-construction is the **replacement chain** (`docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block): per-model walk-forward de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`, λ=n/(n+8)) → T2 Bayesian precision fusion, Ledoit-Wolf Σ (`fuse_bayes_precision_posterior`) → settlement-preimage bin integration (**`src/calibration/emos.py` `bin_probability_settlement`** — this zone owns the live integrator). Extended Platt below (`platt.py`) is diagnostic/comparison baseline calibration, NOT the primary path. `emos.py` (not Platt) builds the live q; Platt must not cap, floor, or veto it without new authority.
 

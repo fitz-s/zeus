@@ -36,8 +36,8 @@ If you break the statistical pipeline, Zeus either overtrades (false edges) or u
 
 ## Live selection rules (post-Phase 1)
 
-- **Full tested hypothesis family is the FDR budget basis.** `attempted` = COUNT of ALL hypotheses tested in the active candidate/market/snapshot family, not just those with positive CI. Legacy prefiltered-edge paths under-count the family, creating false statistical significance. Zeus does not currently claim whole-cycle BH across all candidate markets.
-- Per-trade Kelly hard caps were **REMOVED 2026-05-04** along with fixed config bankroll and smoke-test cap authority. Per-cycle exposure discipline now lives in posture / RiskGuard / max-exposure gates only. See `config/settings.json::_bankroll_doctrine_2026_05_04`.
+- **Full tested hypothesis family is the FDR budget basis.** `attempted` = COUNT of ALL hypotheses tested in the active candidate/market/snapshot family, not just those with positive CI. Prefiltered-edge paths under-count the family and create false statistical significance. The FDR budget is scoped to the tested family, not whole-cycle BH across all candidate markets.
+- **No per-trade Kelly hard caps and no fixed config bankroll.** Exposure discipline lives only in posture / RiskGuard / max-exposure gates — never an artificial per-trade notional cap. (Historical note: caps and the fixed bankroll were removed 2026-05-04; see `config/settings.json::_bankroll_doctrine_2026_05_04` for the rationale.)
 - Strategy gates carry `GateDecision` provenance with `ReasonCode` enum — no bare bool gates
 - `reason_refuted()` returns False for all codes in Phase 1 (conservative); auto-un-gate recommendations require explicit refutation logic
 

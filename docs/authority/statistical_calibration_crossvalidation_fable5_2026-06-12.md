@@ -1,5 +1,7 @@
 # Independent cross-validation: Fable 5, same clean-room prompt (REQ-20260612-174119)
 
+Status: ARCHIVED_REFERENCE — cross-validation evidence behind the calibration authority; not standalone live law.
+
 Operator ran the identical zero-context prompt through Fable 5 independently.
 RECONCILIATION VERDICT (2026-06-12): every load-bearing theorem CONVERGES with the
 GPT answer — bias-absorption formula k²=k_true²+(δ/σ)² (identical KL derivation,
