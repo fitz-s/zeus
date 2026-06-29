@@ -22,7 +22,7 @@ index, or archive catalog.
 
 | File | Purpose |
 |------|---------|
-| `known_gaps.md` | Compatibility pointer; active known gaps now live at `docs/to-do-list/known_gaps.md` |
+| `known_gaps.md` | Canonical home for active known gaps (per-task open work also under `current/`) |
 | `current_data_state.md` | Active current-fact surface for audited data posture |
 | `current_source_validity.md` | Active current-fact surface for audited source-validity posture |
 | `packet_scope_protocol.md` | Protocol reference for the Packet Runtime (`zpkt`) and `scope.yaml` sidecar contract |
@@ -58,7 +58,7 @@ Discrete `task_*` packet folders are agent-closeable by default once their
 work log, report, or committed code proves the task is complete or superseded.
 The closing agent must move the packet body to `docs/archive/<YYYY>-Q<N>/`,
 record the move in `docs/archive_registry.md`, remove active pointers,
-and promote any residual OPEN work into `docs/to-do-list/known_gaps.md` or a
+and promote any residual OPEN work into `docs/operations/known_gaps.md` or a
 new admitted packet. Do NOT leave a stub file in `docs/operations/`.
 Operator-only closeout is required only when the packet
 itself says `awaiting operator`, `operator-deferred`, `STAGED, NOT COMMITTED`,

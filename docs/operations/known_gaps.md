@@ -1,5 +1,8 @@
-# Known Gaps Compatibility Pointer
+# Known Gaps
 
-Active known gaps live at [docs/to-do-list/known_gaps.md](../to-do-list/known_gaps.md).
+This is the canonical home for active known gaps. (It was previously a pointer to
+`docs/to-do-list/known_gaps.md`, a location that no longer exists; the pointer is
+removed to avoid a dead link.) Per-task open work also lives under
+`docs/operations/current/`.
 
-This file exists because `docs/operations/AGENTS.md` registers a compatibility pointer at this path. Do not add active gap content here; update the to-do-list source instead.
+Add active gap entries below.
