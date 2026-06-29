@@ -3975,6 +3975,12 @@ def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
     """)
 
 
+def ensure_forecast_runtime_indexes(conn: sqlite3.Connection) -> None:
+    """Idempotently converge hot forecast-class indexes needed by live readers."""
+
+    _ensure_forecast_indexes(conn)
+
+
 def _create_day0_horizon_platt_fits(conn: sqlite3.Connection) -> None:
     """Create day0_horizon_platt_fits table. Idempotent. K1 forecast-class.
 

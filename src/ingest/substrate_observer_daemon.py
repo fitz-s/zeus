@@ -201,10 +201,18 @@ def main() -> None:
     # A misconfigured producer = no coverage, so fail LOUD at boot rather than silently.
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
+        ensure_forecast_runtime_indexes,
+        get_forecasts_connection,
         get_trade_connection,
         get_world_connection,
     )
 
+    _forecast_conn = get_forecasts_connection(write_class="live")
+    try:
+        ensure_forecast_runtime_indexes(_forecast_conn)
+        _forecast_conn.commit()
+    finally:
+        _forecast_conn.close()
     _trade_conn = get_trade_connection(write_class="live")
     try:
         _trade_conn.execute(

@@ -161,6 +161,15 @@ def test_substrate_observer_money_path_priority_has_dedicated_executor():
     assert "next_run_time=datetime.now(timezone.utc)" in src
 
 
+def test_substrate_observer_preflight_converges_forecast_runtime_indexes():
+    """Existing live forecasts DBs must receive hot indexes without manual SQL."""
+    src = _OBSERVER_DAEMON.read_text(encoding="utf-8")
+    assert "ensure_forecast_runtime_indexes" in src
+    assert 'get_forecasts_connection(write_class="live")' in src
+    assert "ensure_forecast_runtime_indexes(_forecast_conn)" in src
+    assert "_forecast_conn.commit()" in src
+
+
 def test_no_regression_reactor_reader_in_order_runtime_is_untouched():
     """P1's reactor MUST keep its SELECT-side snapshot reader (the consumer side of I1)."""
     reader_path = _REPO_ROOT / "src" / "engine" / "event_reactor_adapter.py"
