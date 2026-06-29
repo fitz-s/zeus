@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 from src.execution.maker_rest_escalation import (
+    DEADLINE_CANCEL_ACTION,
+    DEADLINE_CANCEL_REASON,
     find_expired_resting_entries,
     run_cancels_for_expired_rests,
     run_maker_rest_escalation_cycle,
@@ -149,6 +151,20 @@ class TestScopeGuards:
         stats = run_maker_rest_escalation_cycle(conn, clob, now=NOW)
         assert clob.cancelled == ["o1"]
         assert stats == {"scanned": 1, "cancelled": 1, "cancel_failed": 0}
+
+    def test_expired_rest_snapshot_carries_deadline_cancel_metadata(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+
+        expired = find_expired_resting_entries(conn, now=NOW)
+
+        assert len(expired) == 1
+        entry = expired[0]
+        assert entry["cancel_reason"] == DEADLINE_CANCEL_REASON
+        assert entry["cancel_action"] == DEADLINE_CANCEL_ACTION
+        assert entry["cancel_detail"]["trigger"] == "maker_rest_deadline"
+        assert entry["cancel_detail"]["deadline_minutes"] > 0.0
+        assert entry["cancel_detail"]["rest_age_seconds"] > 0.0
 
     def test_young_rest_is_untouched(self):
         conn = _db()
@@ -435,6 +451,23 @@ class TestPersistedRestCancel:
             ).fetchall()
         ]
         assert events[-2:] == ["CANCEL_REQUESTED", "CANCEL_ACKED"]
+        payloads = [
+            json.loads(row[0] or "{}")
+            for row in conn.execute(
+                "SELECT payload_json FROM venue_command_events "
+                "WHERE command_id = 'c1' AND event_type IN ('CANCEL_REQUESTED', 'CANCEL_ACKED') "
+                "ORDER BY sequence_no"
+            ).fetchall()
+        ]
+        assert [payload["cancel_reason"] for payload in payloads] == [
+            DEADLINE_CANCEL_REASON,
+            DEADLINE_CANCEL_REASON,
+        ]
+        assert [payload["cancel_action"] for payload in payloads] == [
+            DEADLINE_CANCEL_ACTION,
+            DEADLINE_CANCEL_ACTION,
+        ]
+        assert all(payload["cancel_detail"]["trigger"] == "maker_rest_deadline" for payload in payloads)
 
     def test_pre_cancel_journal_lock_retry_is_idempotent_after_request_committed(self, monkeypatch):
         conn = _db()

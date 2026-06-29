@@ -11,11 +11,10 @@ Pins the two seams the policy crosses:
 1. _family_rest_state: the venue-truth derivation of the antibody input
    (unexpired rest blocks ANY new order) and the escalation license
    (cancelled-unfilled >= deadline -> TAKER_ESCALATED_AFTER_REST lawful).
-2. _select_edli_order_mode leg 3: the fresh-mode witness is SUBORDINATED to the
-   proof's policy — a REST proof rests regardless of any fresh-book EV
-   preference for crossing; only TAKER_* policies witness TAKER. A legacy proof
-   (no policy field) witnesses MAKER (fail-closed migration: in-flight legacy
-   TAKER proofs abort MODE_FLIPPED once and re-rank under the policy).
+2. _select_edli_order_mode leg 3: the legacy helper witnesses the proof's
+   policy mode. The current final-submit path validates through
+   _fresh_rest_then_cross_mode and aborts for a full re-rank instead of
+   inline-flipping a proven command when fresh policy math changes.
 """
 
 import sqlite3

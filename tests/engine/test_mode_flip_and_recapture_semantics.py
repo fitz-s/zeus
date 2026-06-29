@@ -378,12 +378,31 @@ class TestPayloadInferencePathDead:
 
 class TestSingleModeAuthorityFreshSide:
     """Twin-authority #9 antibody (2026-06-11 live): the validator's fresh mode
-    comes from the SAME K4.0 rest-then-cross policy as the proof — after the
-    fleeting-edge narrowing, the legacy governor+EV-override re-derivation said
-    TAKER while every proof said REST_DEFAULT/MAKER: a 100% MODE_FLIPPED rate
-    that silently requeued the whole day-ahead lane to the retry cap."""
+    comes from the SAME K4.0 rest-then-cross policy as the proof. The policy is
+    now mode-consistent: rest when the fresh taker does not materially beat the
+    maker leg, cross when it does and the conservative q/q_exec cap clears."""
 
-    def test_far_horizon_two_sided_book_fresh_mode_is_maker(self):
+    def test_far_horizon_two_sided_book_without_material_taker_advantage_is_maker(self):
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
+
+        mode = _fresh_rest_then_cross_mode(
+            actionable_payload={"q_lcb_5pct": 0.68, "c_fee_adjusted": 0.70},
+            executable_snapshot=SimpleNamespace(
+                payload={"market_end_at": "2026-06-12T12:00:00+00:00"}
+            ),
+            fresh_best_bid=0.58,
+            fresh_best_ask=0.665,
+            tick_size=0.01,
+            decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
+        )
+        assert mode == "MAKER", (
+            "26h out on a two-sided book the shared policy rests when taker "
+            "does not materially beat maker"
+        )
+
+    def test_far_horizon_two_sided_book_material_taker_advantage_is_taker(self):
         from types import SimpleNamespace
         from datetime import datetime, timezone
         from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
@@ -398,9 +417,9 @@ class TestSingleModeAuthorityFreshSide:
             tick_size=0.01,
             decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
         )
-        assert mode == "MAKER", (
-            "26h out on a two-sided book the shared policy rests — the proof said "
-            "the same, so the validator must AGREE, not flip"
+        assert mode == "TAKER", (
+            "far-horizon does not force maker when fresh taker clears the "
+            "conservative bound and materially beats maker"
         )
 
     def test_near_end_huge_edge_fresh_mode_is_taker(self):

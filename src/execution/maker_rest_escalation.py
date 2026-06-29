@@ -56,6 +56,8 @@ OPEN_REST_FACT_STATES = ("LIVE", "RESTING", "PARTIALLY_MATCHED")
 TERMINAL_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
 )
+DEADLINE_CANCEL_REASON = "MAKER_REST_DEADLINE_EXPIRED"
+DEADLINE_CANCEL_ACTION = "CANCEL_REPLACE"
 
 
 class _TerminalCommandNoop(RuntimeError):
@@ -74,6 +76,54 @@ def _deadline_minutes() -> float:
     )
 
     return float(MAKER_REST_ESCALATION_DEADLINE_MINUTES)
+
+
+def _parse_utc(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _deadline_cancel_detail(
+    entry: dict[str, Any],
+    *,
+    now: datetime,
+    deadline_minutes: float,
+) -> dict[str, Any]:
+    created_at = _parse_utc(entry.get("created_at"))
+    now_utc = now.astimezone(UTC)
+    rest_age_seconds = (
+        max(0.0, (now_utc - created_at).total_seconds())
+        if created_at is not None
+        else None
+    )
+    return {
+        "trigger": "maker_rest_deadline",
+        "deadline_minutes": float(deadline_minutes),
+        "rest_age_seconds": rest_age_seconds,
+        "fact_state": str(entry.get("fact_state") or ""),
+        "matched_size": entry.get("matched_size"),
+    }
+
+
+def _with_default_deadline_cancel_metadata(
+    entry: dict[str, Any],
+    *,
+    now: datetime,
+    deadline_minutes: float,
+) -> dict[str, Any]:
+    enriched = dict(entry)
+    enriched.setdefault("cancel_reason", DEADLINE_CANCEL_REASON)
+    enriched.setdefault("cancel_action", DEADLINE_CANCEL_ACTION)
+    enriched.setdefault(
+        "cancel_detail",
+        _deadline_cancel_detail(enriched, now=now, deadline_minutes=deadline_minutes),
+    )
+    return enriched
 
 
 def find_expired_resting_entries(
@@ -112,18 +162,28 @@ def find_expired_resting_entries(
     out: list[dict[str, Any]] = []
     for row in rows:
         if isinstance(row, sqlite3.Row):
-            out.append(dict(row))
+            out.append(
+                _with_default_deadline_cancel_metadata(
+                    dict(row),
+                    now=now,
+                    deadline_minutes=deadline,
+                )
+            )
         else:
             out.append(
-                {
-                    "command_id": row[0],
-                    "venue_order_id": row[1],
-                    "token_id": row[2],
-                    "market_id": row[3],
-                    "created_at": row[4],
-                    "fact_state": row[5],
-                    "matched_size": row[6],
-                }
+                _with_default_deadline_cancel_metadata(
+                    {
+                        "command_id": row[0],
+                        "venue_order_id": row[1],
+                        "token_id": row[2],
+                        "market_id": row[3],
+                        "created_at": row[4],
+                        "fact_state": row[5],
+                        "matched_size": row[6],
+                    },
+                    now=now,
+                    deadline_minutes=deadline,
+                )
             )
     return out
 
@@ -354,6 +414,9 @@ def run_persisted_cancels_for_expired_rests(
     for entry in expired:
         command_id = str(entry.get("command_id") or "")
         order_id = str(entry.get("venue_order_id") or "")
+        cancel_reason = str(entry.get("cancel_reason") or "").strip()
+        cancel_action = str(entry.get("cancel_action") or "").strip()
+        cancel_detail = entry.get("cancel_detail")
         now = datetime.now(UTC).isoformat()
         try:
             _append_cancel_journal_event(
@@ -364,9 +427,9 @@ def run_persisted_cancels_for_expired_rests(
                 payload={
                     "venue_order_id": order_id,
                     "source": "maker_rest_escalation",
-                    "cancel_reason": str(entry.get("cancel_reason") or ""),
-                    "cancel_action": str(entry.get("cancel_action") or ""),
-                    "cancel_detail": entry.get("cancel_detail"),
+                    "cancel_reason": cancel_reason,
+                    "cancel_action": cancel_action,
+                    "cancel_detail": cancel_detail,
                 },
                 close_connections=close_connections,
             )
@@ -398,7 +461,14 @@ def run_persisted_cancels_for_expired_rests(
 
         if outcome is not None and outcome.status == "CANCELED":
             event_type = "CANCEL_ACKED"
-            payload = {"venue_order_id": order_id, "cancel_outcome": outcome.raw_response}
+            payload = {
+                "venue_order_id": order_id,
+                "cancel_outcome": outcome.raw_response,
+                "source": "maker_rest_escalation",
+                "cancel_reason": cancel_reason,
+                "cancel_action": cancel_action,
+                "cancel_detail": cancel_detail,
+            }
         elif outcome is not None and outcome.status == "NOT_CANCELED":
             event_type = "CANCEL_REPLACE_BLOCKED"
             payload = {
@@ -407,6 +477,10 @@ def run_persisted_cancels_for_expired_rests(
                 "requires_m5_reconcile": True,
                 "semantic_cancel_status": "CANCEL_UNKNOWN",
                 "cancel_outcome": outcome.raw_response,
+                "source": "maker_rest_escalation",
+                "cancel_reason": cancel_reason,
+                "cancel_action": cancel_action,
+                "cancel_detail": cancel_detail,
             }
         else:
             event_type = "CANCEL_REPLACE_BLOCKED"
@@ -416,6 +490,10 @@ def run_persisted_cancels_for_expired_rests(
                 "requires_m5_reconcile": True,
                 "semantic_cancel_status": "CANCEL_UNKNOWN",
                 "cancel_outcome": raw,
+                "source": "maker_rest_escalation",
+                "cancel_reason": cancel_reason,
+                "cancel_action": cancel_action,
+                "cancel_detail": cancel_detail,
             }
 
         try:
@@ -462,7 +540,6 @@ def run_persisted_cancels_for_expired_rests(
         else:
             stats["cancel_failed"] += 1
 
-        cancel_reason = str(entry.get("cancel_reason") or "").strip()
         if event_type == "CANCEL_ACKED" and cancel_reason:
             logger.info(
                 "maker_rest_escalation: cancelled screened rest command=%s order=%s "

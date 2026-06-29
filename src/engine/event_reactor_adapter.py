@@ -5193,9 +5193,9 @@ def _build_event_bound_no_submit_receipt_core(
             ),
             "maker_limit_price": proof.maker_limit_price,
             # K4.0 REST-THEN-CROSS: the policy verdict that produced the mode and
-            # the escalation deadline. The final command builder's fresh-mode
-            # witness subordinates its EV-override leg to this policy (a fresh
-            # EV preference for crossing is NOT a license to cross a REST proof).
+            # the escalation deadline. The final command builder validates this
+            # proof mode against the fresh book; it may abort for a re-rank, but it
+            # must not inline-flip a proven maker intent into a taker submit.
             "rest_then_cross_policy": proof.rest_then_cross_policy,
             "rest_escalation_deadline_minutes": proof.rest_escalation_deadline_minutes,
         }
@@ -6415,7 +6415,7 @@ def _build_live_execution_command_certificates(
         # The proof's execution_mode_intent was computed at candidate-generation on the
         # snapshot book AND proven through submit recapture under that mode's economics
         # (zero taker fee + skipped PRICE_MOVED ceiling for MAKER; full fee + ceiling for
-        # TAKER). If the fresh book / governor / EV boundary would change the
+        # TAKER). If the fresh book / mode-consistent EV boundary would change the
         # mode — in EITHER direction (MAKER->TAKER and TAKER->MAKER) — those proven
         # economics are stale: abort SUBMIT_ABORTED_MODE_FLIPPED so the next cycle does a
         # FULL re-rank rather than submitting under an unproven mode. NO inline flip.
@@ -6426,14 +6426,11 @@ def _build_live_execution_command_certificates(
         # mode comes from the K4.0 rest-then-cross policy; the validator's fresh
         # mode MUST come from the SAME policy evaluated on the FRESH book —
         # otherwise the two doctrines disagree systematically and every plan
-        # aborts MODE_FLIPPED. Live incident: after the fleeting-edge narrowing
-        # (operator directive, Denver \$0.43 spread cross) the proof said
-        # REST_DEFAULT/MAKER for the whole licensed class while the legacy
-        # governor+EV-override re-derivation here still said TAKER — a 100%
-        # flip rate that silently requeued the entire day-ahead lane to the
-        # retry cap. Wave-1 2026-06-12: the legacy force-taker bypass is DELETED —
-        # the fresh mode comes UNCONDITIONALLY from the same rest-then-cross policy
-        # as the proof, so the two doctrines can never disagree by construction.
+        # aborts MODE_FLIPPED. The old bug was two independent doctrines: proof
+        # mode from rest-then-cross, then a separate late EV override. The repair is
+        # one doctrine, not forced maker: both proof and fresh validation use the
+        # same conservative q/q_exec bound, spread/fee law, maker haircut, and
+        # mode-consistent EV margin.
         _fresh_mode = _fresh_rest_then_cross_mode(
             actionable_payload=actionable.payload,
             executable_snapshot=executable_snapshot,
@@ -6752,8 +6749,9 @@ def _build_live_execution_command_certificates(
         # The flip is REMOVED. The mode is now decided ONCE — by
         # _validate_final_order_mode_or_abort against the proven proof mode. If the fresh book
         # makes crossing newly attractive for a proven-MAKER candidate, that is a mode flip:
-        # _select_edli_order_mode would have returned TAKER (its EV-override leg) and the
-        # validator would already have aborted SUBMIT_ABORTED_MODE_FLIPPED for a full re-rank.
+        # _fresh_rest_then_cross_mode would have returned TAKER under the same
+        # policy math and the validator would already have aborted
+        # SUBMIT_ABORTED_MODE_FLIPPED for a full re-rank.
         # We therefore FAIL CLOSED here: a proven-MAKER post_only intent that the fresh-book EV
         # boundary now wants to cross is an abort, never an inline re-build to taker.
         from src.strategy.live_inference.mode_consistent_ev import (
@@ -6761,10 +6759,10 @@ def _build_live_execution_command_certificates(
         )
 
         # K4.0: this tripwire applies ONLY to LEGACY proofs (no rest_then_cross
-        # policy on the payload). Under REST-THEN-CROSS, a REST proof rests
-        # lawfully regardless of any fresh-book EV preference for crossing — the
-        # escalation lane owns any later cross, never an inline one, so the EV
-        # boundary firing on a policy REST proof is NOT a mode divergence.
+        # policy on the payload). Under REST-THEN-CROSS, a policy proof is already
+        # the selected mode for THIS submit attempt. If the fresh book now prefers a
+        # different mode, the validator aborts for a full re-rank; this block must
+        # not perform a second inline maker->taker rebuild.
         _rtc_policy_present = bool(
             str(actionable.payload.get("rest_then_cross_policy") or "").strip()
         )
@@ -7091,7 +7089,7 @@ def _actionable_payload_from_receipt(
     if receipt.maker_limit_price is not None:
         proof_mode_fields["proof_maker_limit_price"] = receipt.maker_limit_price
     # K4.0: the rest-then-cross policy verdict travels to the final command builder
-    # so the fresh-mode witness subordinates its EV-override leg to the policy.
+    # so submit-time validation can compare the proven mode with fresh policy math.
     if getattr(receipt, "rest_then_cross_policy", None) is not None:
         proof_mode_fields["rest_then_cross_policy"] = str(receipt.rest_then_cross_policy)
     qkernel_execution_economics = None
@@ -8437,11 +8435,10 @@ def _select_edli_order_mode(
     #   The old §2 boundary must NOT gate a policy cross — its formula disagrees
     #   with the policy's lanes near the margin and would abort-loop every
     #   FLEETING_EDGE/ESCALATED cross (the 93%-churn category, reborn).
-    # * REST/HOLD policy (or a LEGACY proof with no policy field) -> fresh witness
-    #   MAKER: resting is lawful regardless of any fresh EV preference for
-    #   crossing; the escalation lane owns any later cross, never an inline one.
-    #   (A legacy TAKER proof in flight across the deploy aborts MODE_FLIPPED
-    #   once and re-ranks under the policy — fail-closed migration.)
+    # * REST/HOLD policy (or a LEGACY proof with no policy field) -> this legacy
+    #   helper witnesses MAKER. The current final-submit path validates through
+    #   _fresh_rest_then_cross_mode; if fresh policy math wants a different mode,
+    #   it aborts for a full re-rank instead of inline-flipping the command.
     _proof_policy = str(actionable_payload.get("rest_then_cross_policy") or "")
     if _proof_policy.startswith("TAKER_"):
         return "TAKER"
