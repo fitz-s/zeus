@@ -182,8 +182,7 @@ class LiveExecutor(ABC):
 
         Delegates to gate_runtime.check("live_venue_submit") which evaluates
         kill_switch_active + risk_level_halt conditions from capabilities.yaml
-        blocked_when list (Gate 5 Phase 4.D). Inline env-var check retained as
-        dead fallback for callers that bypass gate_runtime.check() directly.
+        blocked_when list (Gate 5 Phase 4.D).
         """
         _gate_runtime.check("live_venue_submit")  # Gate 5 delegation — emits ritual_signal
 

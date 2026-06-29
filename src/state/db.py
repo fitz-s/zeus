@@ -2479,10 +2479,12 @@ def init_schema(
             )),
             source_contract_reason TEXT,
             authority_status TEXT NOT NULL CHECK (authority_status IN (
-                'VERIFIED','STALE','EMPTY_FALLBACK','UNKNOWN'
+                'VERIFIED','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','UNKNOWN'
             )),
             status TEXT NOT NULL CHECK (status IN (
-                'CURRENT','STALE','EMPTY_FALLBACK','MISMATCH','UNKNOWN'
+                'CURRENT','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','MISMATCH','UNKNOWN'
             )),
             expires_at TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
@@ -2498,7 +2500,8 @@ def init_schema(
             audit_id TEXT PRIMARY KEY,
             checked_at_utc TEXT NOT NULL,
             scan_authority TEXT NOT NULL CHECK (scan_authority IN (
-                'VERIFIED','FIXTURE','STALE_CACHE','EMPTY_FALLBACK','NEVER_FETCHED'
+                'VERIFIED','FIXTURE','STALE_CACHE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','NEVER_FETCHED'
             )),
             report_status TEXT CHECK (report_status IS NULL OR report_status IN (
                 'OK','WARN','ALERT','DATA_UNAVAILABLE'
@@ -3286,6 +3289,7 @@ def init_schema(
     # cannot upgrade stale CHECKs.
     _migrate_decision_events_schema(conn)
     _migrate_world_strategy_key_checks(conn)
+    _migrate_market_scan_authority_checks(conn)
 
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
@@ -4158,6 +4162,231 @@ def _migrate_world_strategy_key_checks(conn: sqlite3.Connection) -> None:
             _set_legacy_alter_table(conn, _legacy_alter_was_enabled)
         for (idx_sql,) in indexes:
             conn.execute(idx_sql)
+
+
+def _migrate_market_scan_authority_checks(conn: sqlite3.Connection) -> None:
+    """Replace ambiguous EMPTY_FALLBACK scan-authority CHECK values.
+
+    EMPTY_FALLBACK conflated two different runtime facts: network fetch failed
+    without cache, and keyword-discovery recovery with weaker provenance. The
+    new CHECK admits precise facts only. Existing rows with the old value are
+    intentionally not auto-mapped because their original cause is unrecoverable.
+    """
+
+    _migrate_market_topology_state_authority_checks(conn)
+    _migrate_source_contract_audit_authority_checks(conn)
+
+
+def _table_create_sql(conn: sqlite3.Connection, table_name: str) -> str | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row[0] or "")
+
+
+def _assert_no_ambiguous_empty_fallback_rows(
+    conn: sqlite3.Connection,
+    table_name: str,
+    columns: tuple[str, ...],
+) -> None:
+    predicates = " OR ".join(f"{column} = 'EMPTY_FALLBACK'" for column in columns)
+    count = conn.execute(f"SELECT COUNT(*) FROM {table_name} WHERE {predicates}").fetchone()[0]
+    if int(count or 0) > 0:
+        raise RuntimeError(
+            f"{table_name} contains {count} ambiguous EMPTY_FALLBACK row(s); "
+            "operator migration must classify them before schema upgrade"
+        )
+
+
+def _migrate_market_topology_state_authority_checks(conn: sqlite3.Connection) -> None:
+    sql = _table_create_sql(conn, "market_topology_state")
+    if not sql or "EMPTY_FALLBACK" not in sql:
+        return
+    _assert_no_ambiguous_empty_fallback_rows(
+        conn,
+        "market_topology_state",
+        ("authority_status", "status"),
+    )
+    before = conn.execute("SELECT COUNT(*) FROM market_topology_state").fetchone()[0]
+    conn.execute("DROP TABLE IF EXISTS market_topology_state_authority_migrated")
+    conn.execute(
+        """
+        CREATE TABLE market_topology_state_authority_migrated (
+            topology_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            market_family TEXT NOT NULL,
+            event_id TEXT,
+            condition_id TEXT NOT NULL,
+            question_id TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            bin_topology_hash TEXT,
+            gamma_captured_at TEXT,
+            gamma_updated_at TEXT,
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISMATCH','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            authority_status TEXT NOT NULL CHECK (authority_status IN (
+                'VERIFIED','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','UNKNOWN'
+            )),
+            status TEXT NOT NULL CHECK (status IN (
+                'CURRENT','STALE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','MISMATCH','UNKNOWN'
+            )),
+            expires_at TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+            UNIQUE(market_family, condition_id, city_id, target_local_date, temperature_metric, data_version)
+        )
+        """
+    )
+    columns = (
+        "topology_id, scope_key, market_family, event_id, condition_id, question_id, "
+        "city_id, city_timezone, target_local_date, temperature_metric, physical_quantity, "
+        "observation_field, data_version, token_ids_json, bin_topology_hash, gamma_captured_at, "
+        "gamma_updated_at, source_contract_status, source_contract_reason, authority_status, "
+        "status, expires_at, provenance_json, recorded_at"
+    )
+    conn.execute(
+        f"INSERT INTO market_topology_state_authority_migrated ({columns}) "
+        f"SELECT {columns} FROM market_topology_state"
+    )
+    after = conn.execute("SELECT COUNT(*) FROM market_topology_state_authority_migrated").fetchone()[0]
+    if int(before or 0) != int(after or 0):
+        raise RuntimeError(
+            "market_topology_state scan-authority migration row-count mismatch: "
+            f"before={before} after={after}"
+        )
+    conn.execute("DROP TABLE market_topology_state")
+    conn.execute(
+        "ALTER TABLE market_topology_state_authority_migrated RENAME TO market_topology_state"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_topology_scope
+            ON market_topology_state(city_id, city_timezone, target_local_date, temperature_metric, market_family, condition_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_topology_status_expiry
+            ON market_topology_state(status, expires_at)
+        """
+    )
+
+
+def _migrate_source_contract_audit_authority_checks(conn: sqlite3.Connection) -> None:
+    sql = _table_create_sql(conn, "source_contract_audit_events")
+    if not sql or "EMPTY_FALLBACK" not in sql:
+        return
+    _assert_no_ambiguous_empty_fallback_rows(
+        conn,
+        "source_contract_audit_events",
+        ("scan_authority",),
+    )
+    before = conn.execute("SELECT COUNT(*) FROM source_contract_audit_events").fetchone()[0]
+    conn.execute("DROP TRIGGER IF EXISTS source_contract_audit_events_no_update")
+    conn.execute("DROP TRIGGER IF EXISTS source_contract_audit_events_no_delete")
+    conn.execute("DROP TABLE IF EXISTS source_contract_audit_events_authority_migrated")
+    conn.execute(
+        """
+        CREATE TABLE source_contract_audit_events_authority_migrated (
+            audit_id TEXT PRIMARY KEY,
+            checked_at_utc TEXT NOT NULL,
+            scan_authority TEXT NOT NULL CHECK (scan_authority IN (
+                'VERIFIED','FIXTURE','STALE_CACHE','FETCH_FAILED_NO_CACHE',
+                'KEYWORD_DISCOVERY_UNVERIFIED','NEVER_FETCHED'
+            )),
+            report_status TEXT CHECK (report_status IS NULL OR report_status IN (
+                'OK','WARN','ALERT','DATA_UNAVAILABLE'
+            )),
+            severity TEXT NOT NULL CHECK (severity IN ('OK','WARN','ALERT','DATA_UNAVAILABLE')),
+            event_id TEXT,
+            slug TEXT,
+            title TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            source_contract_status TEXT NOT NULL CHECK (source_contract_status IN (
+                'MATCH','MISSING','AMBIGUOUS','MISMATCH','UNSUPPORTED','UNKNOWN','QUARANTINED'
+            )),
+            source_contract_reason TEXT,
+            configured_source_family TEXT,
+            configured_station_id TEXT,
+            observed_source_family TEXT,
+            observed_station_id TEXT,
+            resolution_sources_json TEXT NOT NULL DEFAULT '[]',
+            source_contract_json TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
+        )
+        """
+    )
+    columns = (
+        "audit_id, checked_at_utc, scan_authority, report_status, severity, event_id, "
+        "slug, title, city, target_date, temperature_metric, source_contract_status, "
+        "source_contract_reason, configured_source_family, configured_station_id, "
+        "observed_source_family, observed_station_id, resolution_sources_json, "
+        "source_contract_json, payload_hash, created_at"
+    )
+    conn.execute(
+        f"INSERT INTO source_contract_audit_events_authority_migrated ({columns}) "
+        f"SELECT {columns} FROM source_contract_audit_events"
+    )
+    after = conn.execute(
+        "SELECT COUNT(*) FROM source_contract_audit_events_authority_migrated"
+    ).fetchone()[0]
+    if int(before or 0) != int(after or 0):
+        raise RuntimeError(
+            "source_contract_audit_events scan-authority migration row-count mismatch: "
+            f"before={before} after={after}"
+        )
+    conn.execute("DROP TABLE source_contract_audit_events")
+    conn.execute(
+        "ALTER TABLE source_contract_audit_events_authority_migrated "
+        "RENAME TO source_contract_audit_events"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_city_date
+            ON source_contract_audit_events(city, target_date, temperature_metric, checked_at_utc)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_contract_audit_status
+            ON source_contract_audit_events(source_contract_status, severity, checked_at_utc)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_update
+        BEFORE UPDATE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS source_contract_audit_events_no_delete
+        BEFORE DELETE ON source_contract_audit_events
+        BEGIN
+          SELECT RAISE(ABORT, 'source_contract_audit_events is append-only');
+        END
+        """
+    )
 
 
 def _migrate_trade_strategy_key_checks(conn: sqlite3.Connection) -> None:
@@ -5762,7 +5991,8 @@ _SOURCE_CONTRACT_AUDIT_AUTHORITIES = frozenset({
     "VERIFIED",
     "FIXTURE",
     "STALE_CACHE",
-    "EMPTY_FALLBACK",
+    "FETCH_FAILED_NO_CACHE",
+    "KEYWORD_DISCOVERY_UNVERIFIED",
     "NEVER_FETCHED",
 })
 _SOURCE_CONTRACT_AUDIT_SEVERITIES = frozenset({

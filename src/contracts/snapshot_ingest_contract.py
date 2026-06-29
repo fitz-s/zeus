@@ -6,7 +6,7 @@
 Phase 5B (B078 / SD-1): enforces the dual-track ingest boundary laws:
   Law 1 (low only): boundary_ambiguous=True → training_allowed=False
   Law 2 (low only): causality=N/A_CAUSAL_DAY_ALREADY_STARTED → training_allowed=False
-  Law 3 (all): issue_time_utc absent/None → training_allowed=False, causality=RUNTIME_ONLY_FALLBACK
+  Law 3 (all): issue_time_utc absent/None → training_allowed=False, causality=ISSUE_TIME_MISSING
   Law 4 (all): members_unit absent → rejected (Kelvin silent-default is a Forbidden Move)
   Law 5 (all): absent causality field → rejected (causality is first-class, never defaulted)
 """
@@ -173,11 +173,11 @@ def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
 
     training_allowed = True
 
-    # Law 3: runtime-only fallback rows — missing issue_time_utc blocks training.
+    # Law 3: missing issue_time_utc blocks training.
     if issue_time in (None, ""):
         training_allowed = False
         if causality_status == "OK":
-            causality_status = "RUNTIME_ONLY_FALLBACK"
+            causality_status = "ISSUE_TIME_MISSING"
 
     # Law 1 (low only): boundary-ambiguous snapshots must not enter calibration training.
     # 2026-05-19: boundary_ambiguous now reflects majority threshold (≥26/51) not any-member.

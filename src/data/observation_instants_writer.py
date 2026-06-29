@@ -52,7 +52,7 @@ from datetime import datetime
 from typing import Any, Iterable, Optional
 
 from src.data.tier_resolver import (
-    SOURCE_ROLE_FALLBACK_EVIDENCE,
+    SOURCE_ROLE_COVERAGE_FILL_EVIDENCE,
     SOURCE_ROLE_HISTORICAL_HOURLY,
     SOURCE_ROLE_RUNTIME_MONITORING,
     Tier,
@@ -98,7 +98,6 @@ _PHYSICAL_TEMP_BOUNDS_C: tuple[float, float] = (-90.0, 60.0)
 _PHYSICAL_TEMP_BOUNDS_F: tuple[float, float] = (-130.0, 140.0)
 
 _CAUSALITY_OK = "OK"
-_CAUSALITY_RUNTIME_ONLY_FALLBACK = "RUNTIME_ONLY_FALLBACK"
 _PROVENANCE_SOURCE_KEYS: frozenset[str] = frozenset({"source_url", "source_file"})
 _PROVENANCE_STATION_KEYS: frozenset[str] = frozenset(
     {"station_id", "station_registry_version", "station_registry_hash"}
@@ -449,7 +448,7 @@ def _derive_insert_source_fields(row: ObsV2Row) -> tuple[int, str, str]:
 
     ``ObsV2Row`` construction has already enforced non-empty provenance and
     the A2 per-city source allowlist. This function binds the accepted row to
-    the frozen P1.1 registry so SQLite defaults cannot promote fallback rows.
+    the frozen P1.1 registry so SQLite defaults cannot promote coverage-fill rows.
     """
     assessment = source_role_assessment_for_city_source(
         row.city,
@@ -465,8 +464,8 @@ def _derive_insert_source_fields(row: ObsV2Row) -> tuple[int, str, str]:
             )
         return 1, _CAUSALITY_OK, assessment.source_role
 
-    if assessment.source_role == SOURCE_ROLE_FALLBACK_EVIDENCE:
-        return 0, _CAUSALITY_RUNTIME_ONLY_FALLBACK, assessment.source_role
+    if assessment.source_role == SOURCE_ROLE_COVERAGE_FILL_EVIDENCE:
+        return 0, _CAUSALITY_OK, assessment.source_role
 
     if assessment.source_role == SOURCE_ROLE_RUNTIME_MONITORING:
         return 0, _CAUSALITY_OK, assessment.source_role

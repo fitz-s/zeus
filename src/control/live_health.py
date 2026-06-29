@@ -231,8 +231,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         _mapping_has_positive_counter(no_trade_reasons)
         or _has_text_value(cycle, "top_no_trade_reason", "dominant_no_trade_reason")
     )
-    entry_blocked_reason = _entry_blocked_reason(status_summary, cycle)
-    entry_blocked_proof = bool(entry_blocked_reason)
+    entry_unavailable_reason = _entry_unavailable_reason(status_summary, cycle)
+    entry_unavailable_proof = bool(entry_unavailable_reason)
     deterministic_rejection_observed = _mapping_has_positive_counter(deterministic_rejections)
     command_recovery = cycle.get("command_recovery")
     chain_sync = cycle.get("chain_sync")
@@ -249,8 +249,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
         "venue_ack_observed": venue_acks > 0,
         "no_trades": no_trades,
         "no_trade_reason_proof": no_trade_reason_proof,
-        "entry_blocked_proof": entry_blocked_proof,
-        "entry_blocked_reason": entry_blocked_reason,
+        "entry_unavailable_proof": entry_unavailable_proof,
+        "entry_unavailable_reason": entry_unavailable_reason,
         "zero_candidate_has_proof": zero_candidate_has_proof,
         "deterministic_rejection_observed": deterministic_rejection_observed,
         "reconcile_progress_observed": (
@@ -264,7 +264,7 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
             "issue": "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF",
             "progress": progress,
         }
-    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof and not entry_blocked_proof:
+    if candidates > 0 and final_intents <= 0 and not no_trade_reason_proof and not entry_unavailable_proof:
         return {
             "ok": False,
             "issue": "CANDIDATES_WITHOUT_FINAL_INTENTS_OR_NO_TRADE_REASONS",
@@ -285,8 +285,8 @@ def _business_plane_surface(status_summary: Optional[dict]) -> dict:
     return {"ok": True, "issue": None, "progress": progress}
 
 
-def _entry_blocked_reason(status_summary: dict, cycle: dict) -> str | None:
-    """Return explicit entry-block proof from status/control/cycle read models."""
+def _entry_unavailable_reason(status_summary: dict, cycle: dict) -> str | None:
+    """Return explicit entry-unavailable proof from status/control/cycle read models."""
 
     control = status_summary.get("control")
     if isinstance(control, dict) and control.get("entries_paused") is True:
@@ -302,20 +302,20 @@ def _entry_blocked_reason(status_summary: dict, cycle: dict) -> str | None:
                     if not isinstance(component, dict) or component.get("allowed") is not False:
                         continue
                     component_name = str(component.get("component") or "entry_component")
-                    reason = str(component.get("reason") or "blocked")
+                    reason = str(component.get("reason") or "unavailable")
                     reasons.append(f"{component_name}:{reason}")
                 if reasons:
                     return ";".join(reasons)
-                blocked_components = entry.get("blocked_components")
-                if isinstance(blocked_components, list) and blocked_components:
-                    return "entry_blocked:" + ",".join(str(c) for c in blocked_components)
+                unavailable_components = entry.get("unavailable_components")
+                if isinstance(unavailable_components, list) and unavailable_components:
+                    return "entry_unavailable:" + ",".join(str(c) for c in unavailable_components)
                 return "entry_global_allow_submit_false"
 
     allocator = cycle.get("held_monitor_allocator_refresh")
     if isinstance(allocator, dict):
         entry = allocator.get("entry")
         if isinstance(entry, dict) and entry.get("allow_submit") is False:
-            return str(entry.get("reason") or "held_monitor_allocator_entry_blocked")
+            return str(entry.get("reason") or "held_monitor_allocator_entry_unavailable")
     blocked_reason = cycle.get("entries_blocked_reason")
     if isinstance(blocked_reason, str) and blocked_reason.strip():
         return blocked_reason.strip()
@@ -344,23 +344,23 @@ def _execution_capability_surface(status_summary: Optional[dict]) -> dict:
             actions[action_name] = {
                 "status": "missing",
                 "global_allow_submit": None,
-                "blocked_components": [f"{action_name}_capability_missing"],
-                "blocked_reasons": [],
+                "unavailable_components": [f"{action_name}_capability_missing"],
+                "unavailable_reasons": [],
             }
             blocked.append(f"{action_name}:missing")
             continue
 
         status = str(action.get("status") or "unknown")
         allow_submit = action.get("global_allow_submit")
-        blocked_components = action.get("blocked_components")
-        if not isinstance(blocked_components, list):
-            blocked_components = []
-        blocked_reasons = []
+        unavailable_components = action.get("unavailable_components")
+        if not isinstance(unavailable_components, list):
+            unavailable_components = []
+        unavailable_reasons = []
         for component in action.get("components") or []:
             if not isinstance(component, dict):
                 continue
             if component.get("allowed") is False:
-                blocked_reasons.append(
+                unavailable_reasons.append(
                     {
                         "component": component.get("component"),
                         "reason": component.get("reason"),
@@ -368,25 +368,25 @@ def _execution_capability_surface(status_summary: Optional[dict]) -> dict:
                 )
 
         action_blocked = (
-            status.lower() in {"blocked", "failed", "error"}
+            status.lower() in {"unavailable", "failed", "error"}
             or allow_submit is False
-            or bool(blocked_components)
-            or bool(blocked_reasons)
+            or bool(unavailable_components)
+            or bool(unavailable_reasons)
         )
         actions[action_name] = {
             "status": status,
             "global_allow_submit": allow_submit,
-            "blocked_components": blocked_components,
-            "blocked_reasons": blocked_reasons,
+            "unavailable_components": unavailable_components,
+            "unavailable_reasons": unavailable_reasons,
         }
         if action_blocked:
-            component_label = ",".join(str(c) for c in blocked_components) or status
+            component_label = ",".join(str(c) for c in unavailable_components) or status
             blocked.append(f"{action_name}:{component_label}")
 
     if blocked:
         return {
             "ok": False,
-            "issue": "LIVE_EXECUTION_CAPABILITY_BLOCKED: " + "; ".join(blocked),
+            "issue": "LIVE_EXECUTION_CAPABILITY_UNAVAILABLE: " + "; ".join(blocked),
             "actions": actions,
         }
     return {"ok": True, "issue": None, "actions": actions}

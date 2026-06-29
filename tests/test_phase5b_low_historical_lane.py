@@ -53,7 +53,7 @@ class TestIngestContractLowGating:
 
     Law 1: boundary_ambiguous=True → training_allowed=False, causality='REJECTED_BOUNDARY_AMBIGUOUS'
     Law 2: causality='N/A_CAUSAL_DAY_ALREADY_STARTED' → training_allowed=False
-    Law 3: issue_time_utc absent/None → training_allowed=False, causality='RUNTIME_ONLY_FALLBACK'
+    Law 3: issue_time_utc absent/None → training_allowed=False, causality='ISSUE_TIME_MISSING'
 
     Import target: src.contracts.snapshot_ingest_contract (does not exist yet — ImportError = RED)
     """
@@ -119,15 +119,15 @@ class TestIngestContractLowGating:
         assert decision.accepted is True
         assert decision.training_allowed is False
 
-    def test_missing_issue_time_sets_runtime_only_fallback(self):
-        """R-AF (rejection): absent issue_time_utc must produce RUNTIME_ONLY_FALLBACK causality."""
+    def test_missing_issue_time_sets_issue_time_missing(self):
+        """R-AF (rejection): absent issue_time_utc must produce ISSUE_TIME_MISSING causality."""
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = self._good_low_payload(issue_time_utc=None)
         decision = validate_snapshot_contract(payload)
         assert decision.accepted is True
         assert decision.training_allowed is False
-        assert decision.causality_status == "RUNTIME_ONLY_FALLBACK"
+        assert decision.causality_status == "ISSUE_TIME_MISSING"
 
     def test_clean_low_payload_is_accepted_with_training_allowed(self):
         """R-AF (acceptance): a fully compliant low payload is accepted with training_allowed=True."""

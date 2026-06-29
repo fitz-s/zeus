@@ -1537,9 +1537,9 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
                 "cycle": {"mode": "opening_hunt", "candidates": 0},
                 "execution_capability": {
                     "entry": {
-                        "status": "blocked",
+                        "status": "unavailable",
                         "global_allow_submit": False,
-                        "blocked_components": ["stale_ws_gap_guard"],
+                        "unavailable_components": ["stale_ws_gap_guard"],
                     }
                 },
             }
@@ -1555,7 +1555,7 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
             "entry": {
                 "status": "requires_intent",
                 "global_allow_submit": True,
-                "blocked_components": [],
+                "unavailable_components": [],
             },
         },
     )
@@ -1581,7 +1581,7 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     assert refreshed["portfolio"]["total_exposure_usd"] == 0.0
     assert refreshed["cycle"] == {"mode": "opening_hunt", "candidates": 3}
     assert refreshed["execution_capability"]["entry"]["global_allow_submit"] is True
-    assert refreshed["execution_capability"]["entry"]["blocked_components"] == []
+    assert refreshed["execution_capability"]["entry"]["unavailable_components"] == []
     assert refreshed["execution"]["current_open_entry_orders"]["status"] == "ok"
     assert refreshed["execution"]["current_open_entry_orders"]["count"] == 0
     assert refreshed["truth"]["authority"] == "VERIFIED"

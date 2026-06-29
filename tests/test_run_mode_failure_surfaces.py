@@ -63,7 +63,7 @@ def _healthy_execution_capability() -> dict:
                 {"component": "heartbeat_supervisor", "allowed": True, "reason": "allowed"},
                 {"component": "risk_allocator_global", "allowed": True, "reason": "ok"},
             ],
-            "blocked_components": [],
+            "unavailable_components": [],
         },
         "exit": {
             "status": "allowed",
@@ -72,7 +72,7 @@ def _healthy_execution_capability() -> dict:
                 {"component": "heartbeat_supervisor", "allowed": True, "reason": "allowed"},
                 {"component": "risk_allocator_global", "allowed": True, "reason": "ok"},
             ],
-            "blocked_components": [],
+            "unavailable_components": [],
         },
     }
 
@@ -475,7 +475,7 @@ def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp
     _setup_healthy_state(sd)
     capability = _healthy_execution_capability()
     capability["entry"] = {
-        "status": "blocked",
+        "status": "unavailable",
         "global_allow_submit": False,
         "components": [
             {
@@ -484,7 +484,7 @@ def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp
                 "reason": "reduce_only_mode_active",
             }
         ],
-        "blocked_components": ["risk_allocator_global"],
+        "unavailable_components": ["risk_allocator_global"],
     }
     _write(
         sd / "status_summary.json",
@@ -510,8 +510,8 @@ def test_business_plane_candidates_blocked_by_entry_gate_have_explicit_proof(tmp
 
     business = result["surfaces"]["business_plane"]
     assert business["ok"] is True
-    assert business["progress"]["entry_blocked_proof"] is True
-    assert business["progress"]["entry_blocked_reason"] == (
+    assert business["progress"]["entry_unavailable_proof"] is True
+    assert business["progress"]["entry_unavailable_reason"] == (
         "operator_pause_live_bad_entry_tokyo_005_yes_until_root_fix"
     )
     assert result["surfaces"]["execution_capability"]["ok"] is False
@@ -659,7 +659,7 @@ def test_business_plane_does_not_infer_venue_ack_from_submit_count(tmp_path: Pat
     assert progress["venue_ack_observed"] is False
 
 
-def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
+def test_execution_capability_unavailable_yields_degraded(tmp_path: Path) -> None:
     """Fresh daemon/cycle signals cannot override the live order gate."""
     sd = tmp_path / "state"
     sd.mkdir()
@@ -667,7 +667,7 @@ def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
     cycle_time = _now_iso(-30)
     capability = _healthy_execution_capability()
     capability["entry"] = {
-        "status": "blocked",
+        "status": "unavailable",
         "global_allow_submit": False,
         "components": [
             {
@@ -681,7 +681,7 @@ def test_execution_capability_blocked_yields_degraded(tmp_path: Path) -> None:
                 "reason": "heartbeat_lost",
             },
         ],
-        "blocked_components": ["heartbeat_supervisor", "risk_allocator_global"],
+        "unavailable_components": ["heartbeat_supervisor", "risk_allocator_global"],
     }
     _write(
         sd / "status_summary.json",

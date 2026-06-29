@@ -1018,10 +1018,10 @@ class TestB017MarketSnapshotProvenance:
         )
         assert get_last_scan_authority() == "STALE"
 
-    def test_b017_network_failure_without_cache_returns_empty_fallback(
+    def test_b017_network_failure_without_cache_returns_fetch_failed_no_cache(
         self, monkeypatch
     ):
-        """No cache + fetch failure => authority=EMPTY_FALLBACK and
+        """No cache + fetch failure => authority=FETCH_FAILED_NO_CACHE and
         empty events, NOT VERIFIED."""
         def _raise(*_a, **_kw):
             raise httpx.ConnectError("simulated network failure")
@@ -1029,10 +1029,10 @@ class TestB017MarketSnapshotProvenance:
         monkeypatch.setattr(ms, "_fetch_events_by_tags", _raise)
 
         snap = _get_active_events_snapshot()
-        assert snap.authority == "EMPTY_FALLBACK"
+        assert snap.authority == "FETCH_FAILED_NO_CACHE"
         assert snap.events == []
         assert snap.stale_age_seconds is None
-        assert get_last_scan_authority() == "EMPTY_FALLBACK"
+        assert get_last_scan_authority() == "FETCH_FAILED_NO_CACHE"
 
     def test_b017_legacy_api_still_returns_list_for_backwards_compat(
         self, monkeypatch
@@ -3065,6 +3065,41 @@ class TestSourceContractAuditPersistence:
             None, report=invalid_report_status, db_path=audit_db
         )["status"] == "refused_invalid_report_status"
 
+    @pytest.mark.parametrize(
+        "scan_authority",
+        ["FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "NEVER_FETCHED"],
+    )
+    def test_source_contract_audit_accepts_precise_unverified_scan_authority(
+        self, tmp_path, scan_authority
+    ):
+        from scripts.watch_source_contract import analyze_events
+
+        event = _gamma_temperature_event(
+            title="Highest temperature in Paris on May 1?",
+            slug="highest-temperature-in-paris-on-may-1-2026",
+            question="Will the high temperature in Paris be 20°C or higher?",
+            resolution_source="https://www.wunderground.com/history/daily/fr/paris/LFPG",
+        )
+        report = analyze_events(
+            [event],
+            checked_at_utc=datetime(2026, 5, 1, 16, 0, tzinfo=timezone.utc),
+            authority=scan_authority,
+        )
+        audit_db = tmp_path / f"audit-{scan_authority}.db"
+
+        result = append_source_contract_audit_events(None, report=report, db_path=audit_db)
+
+        assert result["status"] in {"written", "unchanged"}
+        verify_conn = sqlite3.connect(str(audit_db))
+        verify_conn.row_factory = sqlite3.Row
+        try:
+            row = verify_conn.execute(
+                "SELECT scan_authority FROM source_contract_audit_events"
+            ).fetchone()
+        finally:
+            verify_conn.close()
+        assert row["scan_authority"] == scan_authority
+
     def test_watch_source_contract_persists_audit_only_with_explicit_db_path(
         self, tmp_path, capsys
     ):
@@ -4329,7 +4364,10 @@ class TestForwardMarketSubstrateProducer:
         assert provenance["source_contract"]["station_id"] is None
         assert "weather.gov.hk" in provenance["resolution_sources"][0]
 
-    @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
+    @pytest.mark.parametrize(
+        "authority",
+        ["STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "", None],
+    )
     def test_market_source_contract_refuses_degraded_scan_authority(self, authority):
         parsed = _parse_event(
             _gamma_temperature_event(),
@@ -4641,7 +4679,10 @@ class TestForwardMarketSubstrateProducer:
         finally:
             check_conn.close()
 
-    @pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "", None])
+    @pytest.mark.parametrize(
+        "authority",
+        ["STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "", None],
+    )
     def test_forward_substrate_refuses_degraded_scan_authority(self, authority, tmp_path, request):
         """Only a fresh VERIFIED scan can create forward market substrate."""
         db_path, conn = _make_forward_substrate_db(tmp_path, request)

@@ -2919,7 +2919,7 @@ def test_discovery_phase_blocks_stale_market_scan_before_evaluator(monkeypatch, 
     assert row["failure_type"] == "data_stale"
 
 
-def test_discovery_phase_blocks_empty_fallback_market_scan_before_evaluator(monkeypatch, tmp_path):
+def test_discovery_phase_blocks_keyword_unverified_market_scan_before_evaluator(monkeypatch, tmp_path):
     monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     _db_path = tmp_path / "scan-empty-fallback.db"
     conn = get_connection(_db_path)
@@ -2932,8 +2932,8 @@ def test_discovery_phase_blocks_empty_fallback_market_scan_before_evaluator(monk
         "target_date": "2026-04-01",
         "hours_since_open": 12.0,
         "hours_to_resolution": 24.0,
-        "event_id": "evt-empty-fallback",
-        "slug": "slug-empty-fallback",
+        "event_id": "evt-keyword-unverified",
+        "slug": "slug-keyword-unverified",
         "temperature_metric": "high",
         "outcomes": [
             {"title": "39-40°F", "range_low": 39, "range_high": 40},
@@ -2942,12 +2942,12 @@ def test_discovery_phase_blocks_empty_fallback_market_scan_before_evaluator(monk
     deps = types.SimpleNamespace(
         MODE_PARAMS={DiscoveryMode.OPENING_HUNT: {}},
         find_weather_markets=lambda **kwargs: [market],
-        get_last_scan_authority=lambda: "EMPTY_FALLBACK",
+        get_last_scan_authority=lambda: "KEYWORD_DISCOVERY_UNVERIFIED",
         DiscoveryMode=DiscoveryMode,
         logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None),
         NoTradeCase=NoTradeCase,
         evaluate_candidate=lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("keyword fallback authority must block before evaluator")
+            AssertionError("keyword discovery authority must block before evaluator")
         ),
     )
 
@@ -2977,13 +2977,15 @@ def test_discovery_phase_blocks_empty_fallback_market_scan_before_evaluator(monk
     ).fetchone()
     conn.close()
 
-    assert summary["market_scan_authority"] == "EMPTY_FALLBACK"
+    assert summary["market_scan_authority"] == "KEYWORD_DISCOVERY_UNVERIFIED"
     assert summary["forward_market_substrate_status"] == "refused_degraded_authority"
     assert summary["candidates"] == 0
     assert summary["no_trades"] == 1
     assert artifact.no_trade_cases[0].rejection_stage == "MARKET_FILTER"
     assert artifact.no_trade_cases[0].availability_status == "DATA_UNAVAILABLE"
-    assert artifact.no_trade_cases[0].rejection_reasons == ["market_scan_authority=EMPTY_FALLBACK"]
+    assert artifact.no_trade_cases[0].rejection_reasons == [
+        "market_scan_authority=KEYWORD_DISCOVERY_UNVERIFIED"
+    ]
     assert row["scope_type"] == "city_target"
     assert row["scope_key"] == "NYC:2026-04-01"
     assert row["failure_type"] == "data_unavailable"

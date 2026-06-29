@@ -52,7 +52,7 @@ def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
         elif source.startswith("wu") or source.startswith("ogimet_metar_"):
             normalized_rows.append((*row, 1, "historical_hourly"))
         else:
-            normalized_rows.append((*row, 0, "fallback_evidence"))
+            normalized_rows.append((*row, 0, "coverage_fill_evidence"))
     conn.executemany(
         f"INSERT INTO observation_instants ({','.join(_COLS)}) VALUES ({','.join('?' * len(_COLS))})",
         normalized_rows,
@@ -140,7 +140,7 @@ def test_canonical_reader_rejects_hko_reaudit_rows():
     conn = _obs_conn([
         ("Hong Kong", "2026-06-26", "2026-06-26T07:00:00+08:00", "2026-06-25T23:00Z",
          27.0, 27.0, "ICAO_STATION_NATIVE", "REQUIRES_SOURCE_REAUDIT",
-         "hko_hourly_accumulator", "low", 0, "fallback_evidence"),
+         "hko_hourly_accumulator", "low", 0, "coverage_fill_evidence"),
     ])
 
     out = monitor_refresh._day0_observed_extreme_from_canonical_surface(

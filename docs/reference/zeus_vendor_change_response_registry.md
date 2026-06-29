@@ -120,7 +120,7 @@ canary-style probing.
 | `src/data/tier_resolver.py:155-170` `TIER_ALLOWED_SOURCES` | Per-tier whitelist |
 | `src/data/tier_resolver.py:182` `_build_expected_sources()` | Per-city primary source string |
 | `src/data/tier_resolver.py:216` `_build_allowed_sources_by_city()` | Per-city primary + fallback set |
-| `src/data/tier_resolver.py:88` `SOURCE_ROLE_FALLBACK_EVIDENCE` | Tags fallback sources as not-training-allowed by default |
+| `src/data/tier_resolver.py:88` `SOURCE_ROLE_COVERAGE_FILL_EVIDENCE` | Tags fallback sources as not-training-allowed by default |
 
 **Critical**: tier 4 Ogimet (added 2026-04-15 per docstring line 42) is "deliberately limited" — no automatic Lagos-class onboarding without explicit code change.
 
@@ -524,7 +524,7 @@ operator input:
    lat-band, so the latter is the safer default — but this should be
    explicit operator policy.
 
-3. **Promotion criterion for `fallback_evidence` → primary**: when does a
+3. **Promotion criterion for `coverage_fill_evidence` → primary**: when does a
    long-running fallback (e.g., we end up reading Ogimet for 6 months
    because WU never recovers) get promoted to primary in `tier_resolver`?
    No code-side threshold exists; currently operator manual override only.

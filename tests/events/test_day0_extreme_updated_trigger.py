@@ -1013,7 +1013,7 @@ def test_day0_write_suppresses_recent_same_payload_no_value_refutation():
     assert result is None
 
 
-def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
+def test_scan_observation_instants_rows_skips_coverage_fill_evidence_rows():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     conn.execute(
@@ -1051,7 +1051,7 @@ def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
             '{"source_url":"redacted","station_id":"HKO"}',
             0,
             "REQUIRES_SOURCE_REAUDIT",
-            "fallback_evidence",
+            "coverage_fill_evidence",
         ),
     )
 

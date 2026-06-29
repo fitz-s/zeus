@@ -1979,10 +1979,10 @@ class TestPhase2DExecutionCapabilityStatus:
             ("exit", "global_allow_submit"),
             ("redeem", "global_allow_redeem"),
         ):
-            assert matrix[action]["status"] == "blocked"
+            assert matrix[action]["status"] == "unavailable"
             assert matrix[action][allow_key] is False
             assert matrix[action]["live_action_authorized"] is False
-            assert "cutover_guard" in matrix[action]["blocked_components"]
+            assert "cutover_guard" in matrix[action]["unavailable_components"]
         assert matrix["cancel"]["status"] == "requires_intent"
         assert matrix["cancel"]["global_allow_cancel"] is True
         assert matrix["cancel"]["live_action_authorized"] is False

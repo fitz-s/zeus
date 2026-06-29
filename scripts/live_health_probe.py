@@ -446,8 +446,8 @@ def _classify_alerts(report, ss_age):
     if report.get("cycle", {}).get("risk_level") not in ("GREEN", None):
         alerts.append(f"risk={report['cycle']['risk_level']}")
     entry_status = report.get("entry_capable", {}).get("status")
-    if entry_status == "blocked" or report.get("blocking_gates"):
-        alerts.append("entry_blocked")
+    if entry_status == "unavailable" or report.get("blocking_gates"):
+        alerts.append("entry_unavailable")
     return alerts
 
 def main():

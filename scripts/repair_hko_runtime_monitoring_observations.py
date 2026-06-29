@@ -3,7 +3,7 @@
 
 HKO observations are live monitor/settlement evidence for Hong Kong, but are
 not calibration-training rows.  Older writer semantics persisted them as
-fallback_evidence / REQUIRES_SOURCE_REAUDIT, which makes Day0 and monitor
+coverage_fill_evidence / REQUIRES_SOURCE_REAUDIT, which makes Day0 and monitor
 readers ignore the canonical HK source.
 """
 

@@ -760,7 +760,7 @@ def test_legacy_ingest_without_opendata_ownership_is_observed_not_actionable(
     assert "legacy_ingest_opendata_owner_present" not in out
 
 
-def test_entry_blocked_is_actionable_even_when_daemons_are_alive(tmp_path, monkeypatch, capsys):
+def test_entry_unavailable_is_actionable_even_when_daemons_are_alive(tmp_path, monkeypatch, capsys):
     module = _load_module()
     root = tmp_path / "zeus"
     _healthy_state(root)
@@ -791,7 +791,7 @@ def test_entry_blocked_is_actionable_even_when_daemons_are_alive(tmp_path, monke
     assert out.startswith("ALERT")
     assert "entry=blocked" in out
     assert "blocking_gates=1" in out
-    assert "entry_blocked" in out
+    assert "entry_unavailable" in out
 
 
 def test_process_loaded_code_stale_is_actionable(tmp_path, monkeypatch, capsys):

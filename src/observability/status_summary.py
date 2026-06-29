@@ -179,7 +179,7 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
             "live_action_authorized": False,
             "entry": {
                 "action": "entry",
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
                 "live_action_authorized": False,
                 "authority": "derived_operator_visibility",
@@ -192,7 +192,7 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
                     )
                 ],
                 "required_intent_components": [],
-                "blocked_components": ["execution_capability_pulse"],
+                "unavailable_components": ["execution_capability_pulse"],
             },
         }
     _refresh_current_open_entry_orders_for_status(status)
@@ -1199,17 +1199,17 @@ def _action_capability(
     required_intent_components: list[dict] | None = None,
 ) -> dict:
     unresolved = list(required_intent_components or [])
-    blocked = [c for c in components if c.get("allowed") is False]
-    status = "blocked" if blocked else ("requires_intent" if unresolved else "ready")
+    unavailable = [c for c in components if c.get("allowed") is False]
+    status = "unavailable" if unavailable else ("requires_intent" if unresolved else "ready")
     return {
         "action": action,
         "status": status,
-        gate_key: not blocked,
+        gate_key: not unavailable,
         "live_action_authorized": False,
         "authority": "derived_operator_visibility",
         "components": components,
         "required_intent_components": unresolved,
-        "blocked_components": [str(c.get("component")) for c in blocked],
+        "unavailable_components": [str(c.get("component")) for c in unavailable],
     }
 
 

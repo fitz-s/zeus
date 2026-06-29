@@ -706,7 +706,7 @@ sources:
         markets regardless of date. [VERIFIED settlement_dual_source_truth_2026_05_07.yaml.
         Operator-confirmed 2026-05-07 (commit 1e5615b9).
       failure_modes:
-        - "Stale authority: market_scanner returns STALE or EMPTY_FALLBACK on network failure"
+        - "Stale authority: market_scanner returns STALE or FETCH_FAILED_NO_CACHE on network failure"
         - "Missing LOW markets: first closed LOW event 2026-04-15 (no earlier LOW data)"
 
     related_authority_docs:

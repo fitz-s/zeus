@@ -39,10 +39,10 @@ def test_repair_hko_runtime_monitoring_observations_updates_only_hko_native_rows
         ) VALUES
             ('Hong Kong', '2026-06-26', 'hko_hourly_accumulator',
              '2026-06-25T23:00Z', 'ICAO_STATION_NATIVE',
-             'fallback_evidence', 0, 'REQUIRES_SOURCE_REAUDIT'),
+             'coverage_fill_evidence', 0, 'REQUIRES_SOURCE_REAUDIT'),
             ('Hong Kong', '2026-06-26', 'openmeteo_archive_hourly',
              '2026-06-25T23:00Z', 'UNVERIFIED',
-             'fallback_evidence', 0, 'OK')
+             'coverage_fill_evidence', 0, 'OK')
         """
     )
 
@@ -67,4 +67,4 @@ def test_repair_hko_runtime_monitoring_observations_updates_only_hko_native_rows
         """
     ).fetchone()
     assert hk == ("runtime_monitoring", 0, "OK")
-    assert other == ("fallback_evidence", 0, "OK")
+    assert other == ("coverage_fill_evidence", 0, "OK")

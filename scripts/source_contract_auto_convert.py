@@ -2476,7 +2476,11 @@ def main(argv: list[str] | None = None) -> int:
             lock_state = dict(active_lock)
             try:
                 events, authority = _load_events(args)
-                if authority in {"EMPTY_FALLBACK", "NEVER_FETCHED"}:
+                if authority in {
+                    "FETCH_FAILED_NO_CACHE",
+                    "KEYWORD_DISCOVERY_UNVERIFIED",
+                    "NEVER_FETCHED",
+                }:
                     report = _data_unavailable_report(authority, city=args.city)
                     receipt = build_failure_receipt(
                         run_id=args.run_id,

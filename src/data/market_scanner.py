@@ -327,7 +327,13 @@ def _is_sqlite_locked_error(exc: BaseException) -> bool:
 # B017: data-provenance types. See also src/data/__init__.py note.
 # Authority literal follows the house pattern established in
 # src/contracts/observation_atom.py::ObservationAtom.authority.
-ScanAuthority = Literal["VERIFIED", "STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"]
+ScanAuthority = Literal[
+    "VERIFIED",
+    "STALE",
+    "FETCH_FAILED_NO_CACHE",
+    "KEYWORD_DISCOVERY_UNVERIFIED",
+    "NEVER_FETCHED",
+]
 SourceContractStatus = Literal[
     "MATCH",
     "MISSING",
@@ -346,9 +352,11 @@ class MarketSnapshot:
       - ``STALE``          : network fetch failed, cached data returned
                              (``stale_age_seconds`` > 0, originally fetched
                              at ``fetched_at_utc``)
-      - ``EMPTY_FALLBACK`` : network fetch failed AND no cache was
-                             available (events == [])
-      - ``NEVER_FETCHED``  : initial state before any fetch attempted
+      - ``FETCH_FAILED_NO_CACHE`` : network fetch failed AND no cache was
+                                    available (events == [])
+      - ``KEYWORD_DISCOVERY_UNVERIFIED`` : keyword recovery path returned
+                                           non-authoritative discovery evidence
+      - ``NEVER_FETCHED``        : initial state before any fetch attempted
 
     Callers MAY treat the events as a plain ``list[dict]`` for backwards
     compatibility, but live-trading call paths SHOULD branch on
@@ -1144,7 +1152,7 @@ def find_weather_markets(
     """
     events = _get_active_events(include_slug_pattern=include_slug_pattern)
     if not events:
-        _mark_keyword_fallback_authority()
+        _mark_keyword_unverified_authority()
         events = _fetch_events_by_keyword("temperature")
 
     return _parse_and_persist_weather_events(
@@ -1264,7 +1272,7 @@ def get_current_yes_price(market_id: str) -> Optional[float]:
     """
     events = _get_active_events()
     if not events:
-        _mark_keyword_fallback_authority()
+        _mark_keyword_unverified_authority()
         events = _fetch_events_by_keyword("temperature")
 
     for event in events:
@@ -1295,7 +1303,7 @@ def get_sibling_outcomes(market_id: str) -> list[dict]:
 
     events = _get_active_events()
     if not events:
-        _mark_keyword_fallback_authority()
+        _mark_keyword_unverified_authority()
         events = _fetch_events_by_keyword("temperature")
 
     for event in events:
@@ -1487,7 +1495,7 @@ def _get_active_events_snapshot(*, include_slug_pattern: bool = True) -> MarketS
     On successful fetch: authority="VERIFIED", stale_age_seconds=0.0.
     On network failure with cache: authority="STALE", stale_age_seconds
         = seconds since last successful fetch.
-    On network failure without cache: authority="EMPTY_FALLBACK",
+    On network failure without cache: authority="FETCH_FAILED_NO_CACHE",
         events=[].
     """
     global _ACTIVE_EVENTS_CACHE, _ACTIVE_EVENTS_CACHE_AT
@@ -1531,10 +1539,10 @@ def _get_active_events_snapshot(*, include_slug_pattern: bool = True) -> MarketS
             logger.error(
                 "Active events fetch failed and no cache available: %s", e
             )
-            _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
+            _ACTIVE_EVENTS_LAST_STATUS = "FETCH_FAILED_NO_CACHE"
             return MarketSnapshot(
                 events=[],
-                authority="EMPTY_FALLBACK",
+                authority="FETCH_FAILED_NO_CACHE",
                 fetched_at_utc=None,
                 stale_age_seconds=None,
             )
@@ -1561,16 +1569,16 @@ def get_last_scan_authority() -> ScanAuthority:
     return _ACTIVE_EVENTS_LAST_STATUS
 
 
-def _mark_keyword_fallback_authority() -> None:
-    """Mark keyword-search Gamma results as degraded provenance.
+def _mark_keyword_unverified_authority() -> None:
+    """Mark keyword-search Gamma results as unverified provenance.
 
     The tag path is the authoritative discovery surface. Keyword search is a
-    recovery fallback with weaker provenance, so live entry must not turn it
+    recovery path with weaker provenance, so live entry must not turn it
     into executable candidates without an explicit fail-closed gate.
     """
 
     global _ACTIVE_EVENTS_LAST_STATUS
-    _ACTIVE_EVENTS_LAST_STATUS = "EMPTY_FALLBACK"
+    _ACTIVE_EVENTS_LAST_STATUS = "KEYWORD_DISCOVERY_UNVERIFIED"
 
 
 def _clear_active_events_cache() -> None:

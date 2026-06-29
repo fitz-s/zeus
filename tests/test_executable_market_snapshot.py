@@ -1140,7 +1140,10 @@ def test_capture_executable_snapshot_uses_market_fact_methods_only(conn):
     assert clob.calls == ["get_clob_market_info", "get_orderbook_snapshot", "get_fee_rate"]
 
 
-@pytest.mark.parametrize("authority", ["STALE", "EMPTY_FALLBACK", "NEVER_FETCHED"])
+@pytest.mark.parametrize(
+    "authority",
+    ["STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED", "NEVER_FETCHED"],
+)
 def test_capture_executable_snapshot_requires_verified_gamma_authority(conn, authority):
     with pytest.raises(ExecutableSnapshotCaptureError, match="VERIFIED Gamma authority"):
         capture_executable_market_snapshot(

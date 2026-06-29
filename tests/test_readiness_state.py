@@ -141,8 +141,8 @@ def test_backfill_origin_blocks_without_causal_proof() -> None:
     assert "BACKFILL_ONLY" in decision.reason_codes
 
 
-def test_market_topology_stale_or_empty_fallback_blocks_entry_scope() -> None:
-    for topology_status in ("STALE", "EMPTY_FALLBACK"):
+def test_market_topology_unverified_status_blocks_entry_scope() -> None:
+    for topology_status in ("STALE", "FETCH_FAILED_NO_CACHE", "KEYWORD_DISCOVERY_UNVERIFIED"):
         decision = _evaluate_reference_readiness(
             replace(DependencyFacts(), market_topology_status=topology_status),
         )

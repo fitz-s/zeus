@@ -249,7 +249,8 @@ runtime truth file fail closed with `RuntimeStateMismatchError`.
 `MarketSnapshot` carries explicit provenance:
 - `VERIFIED` — fresh network fetch succeeded
 - `STALE` — network failed, cached data returned (with `stale_age_seconds`)
-- `EMPTY_FALLBACK` — network failed and no cache available
+- `FETCH_FAILED_NO_CACHE` — network failed and no cache available
+- `KEYWORD_DISCOVERY_UNVERIFIED` — keyword-discovery recovery produced non-authoritative evidence
 - `NEVER_FETCHED` — initial state
 
 ---

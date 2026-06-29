@@ -31,6 +31,53 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     }
 
 
+def _migrate_observation_source_role_names(conn: sqlite3.Connection) -> None:
+    """Normalize old coverage-fill observation labels.
+
+    The retired names used fallback terminology for two different facts:
+    source role and temporal causality. Coverage-fill rows are not a second
+    live source of truth; they are same-station evidence that is not eligible
+    for calibration training. Temporal causality remains OK for those rows.
+    """
+    columns = _table_columns(conn, "observation_instants")
+    required = {"source_role", "training_allowed", "causality_status"}
+    if not required.issubset(columns):
+        return
+
+    conn.execute(
+        """
+        UPDATE observation_instants
+           SET source_role = 'coverage_fill_evidence'
+         WHERE source_role = 'fallback_evidence'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE observation_instants
+           SET causality_status = 'OK'
+         WHERE causality_status = 'RUNTIME_ONLY_FALLBACK'
+           AND COALESCE(source_role, '') = 'coverage_fill_evidence'
+           AND COALESCE(training_allowed, 1) = 0
+        """
+    )
+    remaining = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM observation_instants
+             WHERE causality_status = 'RUNTIME_ONLY_FALLBACK'
+            """
+        ).fetchone()[0]
+        or 0
+    )
+    if remaining:
+        raise RuntimeError(
+            "observation_instants contains RUNTIME_ONLY_FALLBACK rows outside "
+            "the retired coverage-fill encoding; repair causality_status before "
+            "schema admission"
+        )
+
+
 def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
 
@@ -202,7 +249,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
                     'N/A_CAUSAL_DAY_ALREADY_STARTED',
                     'N/A_REQUIRED_STEP_BEYOND_DOWNLOADED_HORIZON',
                     'REJECTED_BOUNDARY_AMBIGUOUS',
-                    'RUNTIME_ONLY_FALLBACK',
+                    'ISSUE_TIME_MISSING',
                     'UNKNOWN'
                 )),
             boundary_ambiguous INTEGER NOT NULL DEFAULT 0
@@ -1337,6 +1384,8 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+
+        _migrate_observation_source_role_names(conn)
 
         # ----------------------------------------------------------------
         # zeus_meta — runtime-switch registry for atomic data-version cutover

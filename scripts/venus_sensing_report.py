@@ -282,7 +282,11 @@ def _collect_source_contract_watch() -> dict:
         from scripts import watch_source_contract
 
         events, authority = watch_source_contract.fetch_active_events()
-        if authority in {"EMPTY_FALLBACK", "NEVER_FETCHED"}:
+        if authority in {
+            "FETCH_FAILED_NO_CACHE",
+            "KEYWORD_DISCOVERY_UNVERIFIED",
+            "NEVER_FETCHED",
+        }:
             return _source_watch_unavailable(authority, city=city)
 
         report = watch_source_contract.analyze_events(

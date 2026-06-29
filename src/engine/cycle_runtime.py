@@ -4908,11 +4908,10 @@ def _normalize_observation_coverage_status(raw: str) -> str:
 
     Settlement-bound observation paths emit OK / LOW_COVERAGE /
     WINDOW_INCOMPLETE. Explicitly requested non-settlement observation paths emit
-    NON_SETTLEMENT_SOURCE. Old DIAGNOSTIC_FALLBACK rows are accepted here only as
-    durable pre-cutover aliases and are never emitted by new observation code.
-    Failure paths emit DATA_UNAVAILABLE / DATA_STALE / RATE_LIMITED /
-    CHAIN_UNAVAILABLE (_availability_status_for_exception). The raw value is
-    preserved in payload_json; this is only the canonical column value.
+    NON_SETTLEMENT_SOURCE. Failure paths emit DATA_UNAVAILABLE / DATA_STALE /
+    RATE_LIMITED / CHAIN_UNAVAILABLE (_availability_status_for_exception). The
+    raw value is preserved in payload_json; this is only the canonical column
+    value.
     """
     value = str(raw or "").strip().upper()
     if value in {"OK"}:
@@ -4920,8 +4919,6 @@ def _normalize_observation_coverage_status(raw: str) -> str:
     if value in {"DATA_STALE", "STALE", "RATE_LIMITED"}:
         return "STALE"
     if value in {"NON_SETTLEMENT_SOURCE"}:
-        return "NON_SETTLEMENT_SOURCE"
-    if value in {"DIAGNOSTIC_FALLBACK"}:
         return "NON_SETTLEMENT_SOURCE"
     if value in {"LOW", "LOW_COVERAGE", "WINDOW_INCOMPLETE"}:
         return "LOW"
@@ -5427,12 +5424,16 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
             return str(getter() or "NEVER_FETCHED").strip().upper()
         except Exception as exc:
             deps.logger.warning("Market scan authority read failed: %s", exc)
-            return "EMPTY_FALLBACK"
+            return "SCAN_AUTHORITY_READ_FAILED"
 
     def _market_scan_availability_status(authority: str) -> str:
         if authority == "STALE":
             return "DATA_STALE"
-        if authority == "EMPTY_FALLBACK":
+        if authority in {
+            "FETCH_FAILED_NO_CACHE",
+            "KEYWORD_DISCOVERY_UNVERIFIED",
+            "SCAN_AUTHORITY_READ_FAILED",
+        }:
             return "DATA_UNAVAILABLE"
         if authority == "NEVER_FETCHED":
             return "DATA_UNAVAILABLE"

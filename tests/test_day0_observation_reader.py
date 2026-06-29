@@ -148,7 +148,7 @@ def test_reader_rejects_hko_reaudit_rows_until_runtime_monitoring_role():
         authority="ICAO_STATION_NATIVE",
         training_allowed=0,
         causality_status="REQUIRES_SOURCE_REAUDIT",
-        source_role="fallback_evidence",
+        source_role="coverage_fill_evidence",
         station_id="HKO",
     )
 

@@ -26,8 +26,8 @@ Public API
 - ``TIER_ALLOWED_SOURCES`` — per-tier whitelist of acceptable ``source``
   column values (antibody A2 whitelist for the v2 writer).
 - ``source_role_assessment_for_city_source`` — P1.1 training-eligibility
-  registry helper that distinguishes primary sources from documented fallback
-  evidence without changing writer allowlists.
+  registry helper that distinguishes primary sources from documented
+  coverage-fill evidence without changing writer allowlists.
 
 Invariants (checked by ``tests/test_tier_resolver.py``, antibody A3)
 -------------------------------------------------------------------
@@ -85,7 +85,7 @@ class UnsupportedTierError(Exception):
 
 SOURCE_ROLE_HISTORICAL_HOURLY = "historical_hourly"
 SOURCE_ROLE_SETTLEMENT_TRUTH = "settlement_truth"
-SOURCE_ROLE_FALLBACK_EVIDENCE = "fallback_evidence"
+SOURCE_ROLE_COVERAGE_FILL_EVIDENCE = "coverage_fill_evidence"
 SOURCE_ROLE_RUNTIME_MONITORING = "runtime_monitoring"
 SOURCE_ROLE_MODEL_ONLY = "model_only"
 SOURCE_ROLE_UNKNOWN = "unknown"
@@ -218,10 +218,10 @@ def _build_allowed_sources_by_city() -> dict[str, frozenset[str]]:
 
     Tier 1 (WU_ICAO):
       - primary: ``wu_icao_history``
-      - Ogimet fallback: ``ogimet_metar_<icao>`` — fills WU DST-day upstream
+      - Ogimet coverage fill: ``ogimet_metar_<icao>`` — fills WU DST-day upstream
         gaps (verified 2026-04-22: KORD 2024-03-10 returned 2 observations
         instead of 23). Ogimet mirrors NOAA METAR for the same station.
-      - Meteostat bulk fallback: ``meteostat_bulk_<icao>`` — fills sparse
+      - Meteostat bulk coverage fill: ``meteostat_bulk_<icao>`` — fills sparse
         stations where WU + Ogimet are both slow/scarce (verified 2026-04-22
         for ZGSZ/DNMM/WIHH/VILK/MPMG; subagent research). Free static CDN
         CSV; parallel-safe; no rate limit; lags real-time by weeks-months.
@@ -231,8 +231,8 @@ def _build_allowed_sources_by_city() -> dict[str, frozenset[str]]:
     service METAR/SYNOP feeds; they differ in mirror latency and coverage).
 
     Tier 2 (OGIMET_METAR) and Tier 3 (HKO_NATIVE) have single-source sets
-    (no documented fallback path exists for HKO; Ogimet cities ARE the
-    fallback for Tier 2).
+    (no documented coverage-fill path exists for HKO; Ogimet cities ARE the
+    primary evidence source for Tier 2).
     """
     from src.config import cities_by_name as _cbn
     allowed: dict[str, frozenset[str]] = {}
@@ -277,7 +277,7 @@ def expected_source_for_city(city_name: str) -> str:
 def allowed_sources_for_city(city_name: str) -> frozenset[str]:
     """Return every source tag the writer accepts for *city_name* (A2 set).
 
-    Includes the primary source plus any documented fallback. A row whose
+    Includes the primary source plus any documented coverage-fill source. A row whose
     ``source`` is in this set passes A2 regardless of whether it was
     written by the main-path driver or a gap-fill script.
     """
@@ -306,8 +306,8 @@ def source_role_assessment_for_city_source(
 
     This is intentionally stricter than writer allowlists:
     - WU primary source tags may be training-eligible with provenance.
-    - WU documented fallback source tags remain writer-allowed but classify as
-      ``fallback_evidence`` and are not training-eligible in P1.1.
+    - WU documented coverage-fill source tags remain writer-allowed but classify
+      as ``coverage_fill_evidence`` and are not training-eligible in P1.1.
     - Tier 2 primary Ogimet tags may be training-eligible with provenance.
     - HKO is runtime monitoring and settlement evidence only: it may support
       live Day0 monitoring, but it is not eligible for calibration training.
@@ -354,9 +354,9 @@ def source_role_assessment_for_city_source(
 
     if normalized_source != primary_source:
         return SourceRoleAssessment(
-            source_role=SOURCE_ROLE_FALLBACK_EVIDENCE,
+            source_role=SOURCE_ROLE_COVERAGE_FILL_EVIDENCE,
             training_allowed=False,
-            reason="allowed_fallback_source_tag",
+            reason="allowed_coverage_fill_source_tag",
         )
 
     if not has_provenance:

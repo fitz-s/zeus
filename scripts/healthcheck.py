@@ -1336,34 +1336,34 @@ def _composite_current_fact_contradictions(payload: dict) -> list[dict]:
         status = None
     execution_capability = status.get("execution_capability") if isinstance(status, dict) else None
     if isinstance(execution_capability, dict):
-        blocked_actions: list[dict] = []
+        unavailable_actions: list[dict] = []
         for action_name in ("entry", "exit"):
             action = execution_capability.get(action_name)
             if not isinstance(action, dict):
                 continue
             status_value = str(action.get("status") or "").lower()
-            blocked_components = action.get("blocked_components")
-            if not isinstance(blocked_components, list):
-                blocked_components = []
+            unavailable_components = action.get("unavailable_components")
+            if not isinstance(unavailable_components, list):
+                unavailable_components = []
             global_allow_submit = action.get("global_allow_submit")
             if (
-                status_value in {"blocked", "failed", "error"}
+                status_value in {"unavailable", "failed", "error"}
                 or global_allow_submit is False
-                or bool(blocked_components)
+                or bool(unavailable_components)
             ):
-                blocked_actions.append(
+                unavailable_actions.append(
                     {
                         "action": action_name,
                         "status": action.get("status"),
                         "global_allow_submit": global_allow_submit,
-                        "blocked_components": blocked_components,
+                        "unavailable_components": unavailable_components,
                     }
                 )
-        if blocked_actions:
+        if unavailable_actions:
             contradictions.append(
                 {
                     "surface": "execution_capability",
-                    "blocked_actions": blocked_actions,
+                    "unavailable_actions": unavailable_actions,
                     "status_timestamp": status.get("timestamp") if isinstance(status, dict) else None,
                 }
             )
@@ -1673,12 +1673,12 @@ def check() -> dict:
                     entry_status = entry_capability.get("status")
                     result["entry_execution_capability_status"] = entry_status
                     result["entry_execution_capability_ok"] = entry_status not in {
-                        "blocked",
-                        "UNKNOWN_BLOCKED",
-                        "unknown_blocked",
+                        "unavailable",
+                        "UNKNOWN_UNAVAILABLE",
+                        "unknown_unavailable",
                     }
                     if not result["entry_execution_capability_ok"]:
-                        result["entry_execution_capability_issue"] = "LIVE_ENTRY_EXECUTION_BLOCKED"
+                        result["entry_execution_capability_issue"] = "LIVE_ENTRY_EXECUTION_UNAVAILABLE"
             strategy = status.get("strategy", {}) or {}
             if isinstance(strategy, dict):
                 result["strategy_summary"] = strategy

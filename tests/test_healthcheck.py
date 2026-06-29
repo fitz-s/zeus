@@ -1485,7 +1485,7 @@ def test_healthcheck_is_not_healthy_when_live_health_composite_is_degraded(monke
     assert healthcheck.exit_code_for(result) == 1
 
 
-def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_blocked(
+def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_unavailable(
     monkeypatch,
     tmp_path,
 ):
@@ -1498,14 +1498,14 @@ def test_healthcheck_rejects_composite_healthy_when_execution_capability_is_bloc
     status_path.write_text(json.dumps(_status_payload(
         execution_capability={
             "entry": {
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
-                "blocked_components": ["heartbeat_supervisor", "risk_allocator_global"],
+                "unavailable_components": ["heartbeat_supervisor", "risk_allocator_global"],
             },
             "exit": {
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
-                "blocked_components": ["heartbeat_supervisor"],
+                "unavailable_components": ["heartbeat_supervisor"],
             },
         }
     )))
@@ -1877,14 +1877,14 @@ def test_healthcheck_is_not_healthy_when_source_health_is_stale(monkeypatch, tmp
     assert healthcheck.exit_code_for(result) == 1
 
 
-def test_healthcheck_is_not_healthy_when_entry_execution_capability_is_blocked(monkeypatch, tmp_path):
+def test_healthcheck_is_not_healthy_when_entry_execution_capability_is_unavailable(monkeypatch, tmp_path):
     status_path = tmp_path / "status_summary.json"
     risk_path = tmp_path / "risk_state.db"
     zeus_db_path = tmp_path / "zeus.db"
     status_path.write_text(json.dumps(_status_payload(
         execution_capability={
             "entry": {
-                "status": "blocked",
+                "status": "unavailable",
                 "global_allow_submit": False,
                 "live_action_authorized": False,
                 "components": [
@@ -1910,7 +1910,7 @@ def test_healthcheck_is_not_healthy_when_entry_execution_capability_is_blocked(m
     result = healthcheck.check()
 
     assert result["entry_execution_capability_ok"] is False
-    assert result["entry_execution_capability_issue"] == "LIVE_ENTRY_EXECUTION_BLOCKED"
+    assert result["entry_execution_capability_issue"] == "LIVE_ENTRY_EXECUTION_UNAVAILABLE"
     assert result["healthy"] is False
     assert healthcheck.exit_code_for(result) == 1
 

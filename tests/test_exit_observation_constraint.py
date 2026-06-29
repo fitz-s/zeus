@@ -206,7 +206,6 @@ class TestAuthorityGating:
             ({"local_date_matches_target": 0}, "local_date_mismatch"),
             ({"local_date_matches_target": None}, "local_date_mismatch"),
             ({"coverage_status": "NON_SETTLEMENT_SOURCE"}, "coverage_not_ok"),
-            ({"coverage_status": "DIAGNOSTIC_FALLBACK"}, "coverage_not_ok"),
             ({"coverage_status": "LOW"}, "coverage_not_ok"),
             ({"coverage_status": None}, "coverage_not_ok"),
             ({"freshness_status": "DEGRADED"}, "freshness_not_fresh"),
