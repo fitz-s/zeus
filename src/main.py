@@ -5588,7 +5588,8 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         confirmed_entry_scope = set(family_keys) | entry_refresh_families
         confirmed_rest_scope = set(rest_pull_families)
         confirmed_held_scope = set(held_reemit_families)
-        confirm_families = set(all_families) | set(held_families) | entry_refresh_families
+        held_refresh_families = set(held_condition_scope)
+        confirm_families = set(all_families) | held_refresh_families | entry_refresh_families
         priority_condition_ids = {
             condition_id
             for scope in (
@@ -5652,7 +5653,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 "rest_conditions=%d held_conditions=%d summary=%r",
                 scoped_filter_reason,
                 len(fresh_confirmed_families),
-                len(set(all_families) | set(held_families) | entry_refresh_families),
+                len(set(all_families) | held_refresh_families | entry_refresh_families),
                 len(confirmed_entry_scope),
                 len(confirmed_rest_scope),
                 len(confirmed_held_scope),
@@ -5685,7 +5686,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     "edli_redecision_screen: confirmation refresh produced no fresh "
                     "screened money-path substrate; skipping emit this tick rather "
                     "than queueing stale redecision families=%d expired_unadmitted=%d",
-                    len(set(all_families) | set(held_families)),
+                    len(set(all_families) | held_refresh_families),
                     expired_unadmitted,
                 )
                 return
@@ -6408,6 +6409,63 @@ def _edli_family_key_from_rest(rest: Any) -> tuple[str, str, str] | None:
     return None
 
 
+def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) -> bool:
+    """Return False only when the latest known substrate says this condition cannot trade."""
+
+    clean_condition_id = str(condition_id or "").strip()
+    if not clean_condition_id:
+        return False
+    try:
+        cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()
+        }
+    except sqlite3.Error:
+        return True
+    required = {"condition_id", "captured_at", "snapshot_id"}
+    if not required.issubset(cols):
+        return True
+    selected_cols = [
+        "active" if "active" in cols else "1 AS active",
+        "closed" if "closed" in cols else "0 AS closed",
+        "enable_orderbook" if "enable_orderbook" in cols else "1 AS enable_orderbook",
+        "accepting_orders" if "accepting_orders" in cols else "1 AS accepting_orders",
+    ]
+    try:
+        row = trade_conn.execute(
+            f"""
+            SELECT {", ".join(selected_cols)}
+              FROM executable_market_snapshots
+             WHERE condition_id = ?
+             ORDER BY captured_at DESC, snapshot_id DESC
+             LIMIT 1
+            """,
+            (clean_condition_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return True
+    if row is None:
+        return True
+
+    def _truthy(value: object, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes"}:
+            return True
+        if text in {"0", "false", "no"}:
+            return False
+        return default
+
+    active = _truthy(row[0], True)
+    closed = _truthy(row[1], False)
+    enable_orderbook = _truthy(row[2], True)
+    accepting_orders = _truthy(row[3], True)
+    return bool(active and not closed and enable_orderbook and accepting_orders)
+
+
 def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], set[str]]:
     """Current held-position condition_ids for scoped redecision freshness admission."""
 
@@ -6454,6 +6512,8 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
             )
             condition_id = str(row[3] or "").strip()
             if all(family_key) and family_key[2] in {"high", "low"} and condition_id:
+                if not _edli_condition_latest_snapshot_executable(trade_ro, condition_id):
+                    continue
                 out.setdefault(family_key, set()).add(condition_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning(

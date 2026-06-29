@@ -1791,6 +1791,55 @@ def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
     }
 
 
+def test_held_condition_scope_excludes_latest_non_executable_snapshot(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            phase TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            active INTEGER,
+            closed INTEGER,
+            enable_orderbook INTEGER,
+            accepting_orders INTEGER,
+            captured_at TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("Lucknow", "2026-06-28", "high", "closed-cond", "synced", 20.0, "active"),
+            ("Manila", "2026-06-29", "high", "open-cond", "synced", 5.0, "day0_window"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("snap-closed", "closed-cond", 0, 1, 0, 0, "2026-06-29T05:00:00+00:00"),
+            ("snap-open", "open-cond", 1, 0, 1, 1, "2026-06-29T05:00:00+00:00"),
+        ],
+    )
+    monkeypatch.setattr("src.state.db.get_trade_connection_read_only", lambda: conn)
+
+    assert main._edli_current_held_position_condition_scope() == {
+        ("Manila", "2026-06-29", "high"): {"open-cond"},
+    }
+
+
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
     """The reactor cycle must prune the working set before taking the redecision skip snapshot."""
 
