@@ -3437,10 +3437,22 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
 
     assert result.startswith("sell_pending: active_prior_exit_sell")
     assert pos.last_exit_order_id == "ord-venue-open-exit"
-    assert conn.execute(
-        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+    command = conn.execute(
+        """
+        SELECT command_id, state, venue_order_id, price, size, review_required_reason
+          FROM venue_commands
+         WHERE position_id = ?
+           AND intent_kind = 'EXIT'
+        """,
         (pos.trade_id,),
-    ).fetchone()[0] == 0
+    ).fetchone()
+    assert command is not None
+    assert command["command_id"].startswith("adopted_exit_")
+    assert command["state"] == "ACKED"
+    assert command["venue_order_id"] == "ord-venue-open-exit"
+    assert command["price"] == 0.023
+    assert command["size"] == 9.7
+    assert command["review_required_reason"] == "adopted_from_clob_open_orders;venue_state=LIVE"
     current = conn.execute(
         "SELECT phase, order_id, order_status FROM position_current WHERE position_id = ?",
         (pos.trade_id,),

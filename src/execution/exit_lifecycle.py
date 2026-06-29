@@ -414,6 +414,95 @@ def _active_exit_already_projected(
     return order_id == venue_order_id and order_status.startswith("sell_")
 
 
+def _venue_command_columns(conn: sqlite3.Connection) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _local_state_for_adopted_exit_sell(venue_state: str) -> str:
+    normalized = venue_state.strip().upper()
+    if normalized in {"LIVE", "OPEN", "RESTING"}:
+        return "ACKED"
+    return normalized or "ACKED"
+
+
+def _ensure_adopted_exit_command(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    row: object,
+    *,
+    token_id: str,
+) -> str:
+    if conn is None:
+        return str(_row_value(row, "command_id", 0) or "")
+    venue_order_id = str(_row_value(row, "venue_order_id", 2) or "")
+    position_id = str(getattr(position, "trade_id", "") or "")
+    if not venue_order_id or not position_id:
+        return str(_row_value(row, "command_id", 0) or "")
+    try:
+        existing = conn.execute(
+            """
+            SELECT command_id
+              FROM venue_commands
+             WHERE position_id = ?
+               AND intent_kind = 'EXIT'
+               AND venue_order_id = ?
+             ORDER BY updated_at DESC, created_at DESC, command_id DESC
+             LIMIT 1
+            """,
+            (position_id, venue_order_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return str(_row_value(row, "command_id", 0) or "")
+    if existing is not None:
+        return str(_row_value(existing, "command_id", 0) or "")
+
+    columns = _venue_command_columns(conn)
+    if not columns:
+        return str(_row_value(row, "command_id", 0) or "")
+    digest = hashlib.sha256(f"{position_id}:{venue_order_id}".encode()).hexdigest()[:16]
+    command_id = f"adopted_exit_{digest}"
+    now = _utcnow().isoformat()
+    venue_state = str(_row_value(row, "state", 1) or "")
+    values: dict[str, object] = {
+        "command_id": command_id,
+        "snapshot_id": f"adopted_exit:{venue_order_id}",
+        "envelope_id": f"adopted_exit:{venue_order_id}",
+        "position_id": position_id,
+        "decision_id": f"adopted_exit:{position_id}:{venue_order_id}",
+        "idempotency_key": f"adopted_exit:{position_id}:{venue_order_id}",
+        "intent_kind": "EXIT",
+        "market_id": str(getattr(position, "market_id", "") or ""),
+        "token_id": token_id,
+        "side": "SELL",
+        "size": float(_row_value(row, "size", 6) or getattr(position, "effective_shares", 0.0) or 0.0),
+        "price": float(_row_value(row, "price", 5) or 0.0),
+        "venue_order_id": venue_order_id,
+        "state": _local_state_for_adopted_exit_sell(venue_state),
+        "last_event_id": None,
+        "created_at": str(_row_value(row, "created_at", 8) or now),
+        "updated_at": str(_row_value(row, "updated_at", 7) or now),
+        "review_required_reason": f"adopted_from_clob_open_orders;venue_state={venue_state or 'UNKNOWN'}",
+    }
+    insert_columns = [column for column in values if column in columns]
+    if "command_id" not in insert_columns:
+        return str(_row_value(row, "command_id", 0) or "")
+    placeholders = ", ".join("?" for _ in insert_columns)
+    try:
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO venue_commands ({", ".join(insert_columns)})
+            VALUES ({placeholders})
+            """,
+            tuple(values[column] for column in insert_columns),
+        )
+    except sqlite3.Error:
+        return str(_row_value(row, "command_id", 0) or "")
+    return command_id
+
+
 def _adopt_active_exit_sell(
     position: Position,
     row: object,
@@ -421,7 +510,8 @@ def _adopt_active_exit_sell(
     conn: sqlite3.Connection | None,
     reason: str,
 ) -> str:
-    command_id = str(_row_value(row, "command_id", 0) or "")
+    token_id = _asset_id_for_position(position)
+    command_id = _ensure_adopted_exit_command(conn, position, row, token_id=token_id)
     command_state = str(_row_value(row, "state", 1) or "")
     venue_order_id = str(_row_value(row, "venue_order_id", 2) or "")
     _mark_pending_exit(position)
