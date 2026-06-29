@@ -1614,6 +1614,97 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         )
 
 
+def test_pending_family_refresh_filters_city_local_past_frontier_band_dates():
+    """Frontier-band rows need city-local expiry, not a raw UTC/global date cut."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT NOT NULL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            priority INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+
+    def insert_event(event_id: str, city: str, target_date: str) -> None:
+        available_at = "2026-06-29T06:00:00+00:00"
+        payload = {"city": city, "target_date": target_date, "metric": "high"}
+        conn.execute(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source, observed_at, available_at,
+                received_at, payload_hash, idempotency_key, priority, payload_json,
+                schema_version, created_at
+            ) VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
+            """,
+            (
+                event_id,
+                event_id,
+                available_at,
+                available_at,
+                available_at,
+                event_id,
+                event_id,
+                json.dumps(payload),
+                available_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, updated_at
+            ) VALUES ('edli_reactor_v1', ?, 'pending', ?)
+            """,
+            (event_id, available_at),
+        )
+
+    insert_event("tokyo-past-frontier-band", "Tokyo", "2026-06-28")
+    insert_event("la-still-local-day", "Los Angeles", "2026-06-28")
+    insert_event("tokyo-current", "Tokyo", "2026-06-29")
+
+    # At 2026-06-29 06:30Z, Tokyo's 2026-06-28 local day is over. Los Angeles is
+    # still 2026-06-28 23:30 PDT, so that row must stay refreshable.
+    decision_time = datetime(2026, 6, 29, 6, 30, 0, tzinfo=timezone.utc)
+    for module in (main_module, substrate_observer):
+        rows = module._pending_family_rows_for_refresh(
+            conn,
+            consumer_name="edli_reactor_v1",
+            now_utc=decision_time,
+        )
+
+        assert {(row[0], row[1], row[2]) for row in rows} == {
+            ("Los Angeles", "2026-06-28", "high"),
+            ("Tokyo", "2026-06-29", "high"),
+        }
+
+
 def test_open_rest_priority_requires_live_command_and_remaining_rest():
     """Cancelled partial fills are historical fills, not live rests to reprice."""
 

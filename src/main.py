@@ -2464,14 +2464,14 @@ def _pending_family_rows_for_refresh(
     event_window_limit: int | None = None,
     now_utc: datetime | None = None,
 ):
-    from src.events.event_store import _oceania_frontier_target_floor
+    from src.events.event_store import EventStore, _oceania_frontier_target_floor
 
     if event_window_limit is None:
         event_window_limit = _pending_family_refresh_event_window_limit()
     event_window_limit = max(100, min(10000, int(event_window_limit)))
     decision_utc = now_utc if now_utc is not None else datetime.now(timezone.utc)
     stale_target_floor = _oceania_frontier_target_floor(decision_utc)
-    return world_conn.execute(
+    rows = world_conn.execute(
         """
         WITH pending AS (
             SELECT p.event_id
@@ -2523,6 +2523,15 @@ def _pending_family_rows_for_refresh(
         """,
         (consumer_name, decision_utc.isoformat(), stale_target_floor, event_window_limit),
     ).fetchall()
+    return [
+        row
+        for row in rows
+        if not EventStore._strictly_past_in_tz(
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            decision_utc,
+        )
+    ]
 
 
 def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
