@@ -93,6 +93,12 @@ def _family_portfolio_max_loss_usd() -> float | None:
     return cap if cap > 0.0 else None
 
 from src.contracts.no_trade_reason import NoTradeReason
+from src.contracts.canonical_lifecycle import (
+    PositionPhase,
+    VenueOrderStatus,
+    VenueTradeStatus,
+)
+from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
 from src.config import get_mode, settings
 
 # Audit reason string for dropped bins.
@@ -381,6 +387,9 @@ def _weather_family_exposures_from_portfolio_impl(portfolio: Any) -> list[Weathe
     return exposures
 
 
+# venue_commands.state legacy-display union (mixes command truth + persisted order
+# outcomes). Not cleanly enum-mappable yet — left raw until the A1 command-truth /
+# legacy-display split; the canonical members here are ACKED + REVIEW_REQUIRED.
 _TRADE_COMMAND_BLOCKING_STATES = frozenset(
     {
         "ACKED",
@@ -395,21 +404,59 @@ _TRADE_COMMAND_BLOCKING_STATES = frozenset(
         "SUBMITTED",
     }
 )
+# Order-fact states that block re-entry. Open-order core is sourced from the
+# canonical OPEN_ORDER_FACT_STATES; terminal MATCHED from VenueOrderStatus blocks
+# via standing exposure. ACKED/UNKNOWN/REVIEW_REQUIRED are legacy order-fact echoes
+# retained until order-fact ingress is normalized. Byte-identical to the prior set.
 _TRADE_ORDER_BLOCKING_STATES = frozenset(
-    {
-        "LIVE",
-        "RESTING",
-        "PARTIALLY_MATCHED",
-        "MATCHED",
+    set(OPEN_ORDER_FACT_STATES)
+    | {
+        VenueOrderStatus.MATCHED.value,
         "ACKED",
         "UNKNOWN",
         "REVIEW_REQUIRED",
     }
 )
-_TRADE_FACT_BLOCKING_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED", "PARTIAL"})
-_TRADE_POSITION_BLOCKING_PHASES = frozenset(
-    {"pending_entry", "active", "day0_window", "pending_exit", "quarantined"}
+# Trade-chain fact states that block re-entry (a fill is in progress / done).
+# MATCHED/MINED/CONFIRMED sourced from VenueTradeStatus; "PARTIAL" is a legacy raw
+# trade-fact synonym retained until trade-fact ingress is normalized.
+_TRADE_FACT_BLOCKING_STATES = frozenset(
+    {
+        VenueTradeStatus.MATCHED.value,
+        VenueTradeStatus.MINED.value,
+        VenueTradeStatus.CONFIRMED.value,
+        "PARTIAL",
+    }
 )
+# Position phases that block re-entry, sourced from the canonical PositionPhase enum
+# (the pre-terminal "family is live" phases). Byte-identical to the prior literals.
+_TRADE_POSITION_BLOCKING_PHASES = frozenset(
+    {
+        PositionPhase.PENDING_ENTRY.value,
+        PositionPhase.ACTIVE.value,
+        PositionPhase.DAY0_WINDOW.value,
+        PositionPhase.PENDING_EXIT.value,
+        PositionPhase.QUARANTINED.value,
+    }
+)
+
+
+def _state_text_blocks_reentry(state_text: str) -> bool:
+    """True iff a persisted phase / venue-order / trade / command state text means a
+    same-family entry is already live and a same-family re-entry must block.
+
+    The legacy lowercase exposure-phase superset and the uppercase command/order/
+    trade sets are OR-ed exactly as the inline dedup gate did; the three cleanly-
+    mappable sets are now sourced from the canonical lifecycle enums, so the block
+    decision tracks the typed vocabulary instead of independently re-encoded raw
+    strings (INV-CL-1) while staying byte-identical to the prior literal sets.
+    """
+    return (
+        state_text.lower() in _BLOCKING_EXPOSURE_PHASES
+        or state_text.upper() in _TRADE_COMMAND_BLOCKING_STATES
+        or state_text.upper() in _TRADE_ORDER_BLOCKING_STATES
+        or state_text.upper() in _TRADE_FACT_BLOCKING_STATES
+    )
 
 
 def _table_exists(conn: Any, table_name: str, *, schema: str = "main") -> bool:
@@ -542,13 +589,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
         if not (city and target_date and metric):
             return
         phase_text = str(phase or "pending_entry")
-        phase_blocks = (
-            phase_text.lower() in _BLOCKING_EXPOSURE_PHASES
-            or phase_text.upper() in _TRADE_COMMAND_BLOCKING_STATES
-            or phase_text.upper() in _TRADE_ORDER_BLOCKING_STATES
-            or phase_text.upper() in _TRADE_FACT_BLOCKING_STATES
-        )
-        if not phase_blocks:
+        if not _state_text_blocks_reentry(phase_text):
             return
         exposure = WeatherFamilyExposure(
             key=WeatherFamilyKey(
