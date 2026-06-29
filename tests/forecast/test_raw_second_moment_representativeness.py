@@ -23,8 +23,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.forecast.bayes_precision_fusion import KAPPA, LOWN_INFLATE, MIN_TRAIN, SIGMA_FLOOR
-from src.forecast.center import raw_precision_center, raw_second_moment_weights
+from src.forecast.bayes_precision_fusion import KAPPA, LOWN_INFLATE, SIGMA_FLOOR
+from src.forecast.center import MIN_SETTLED_N, raw_precision_center, raw_second_moment_weights
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ def _ref_weights(
                 base = equal_m2  # cold-start: equal prior + repr below
         else:
             have_signal = True
-            if n_train < MIN_TRAIN:
+            if n_train < MIN_SETTLED_N:
                 lam = n_train / (n_train + KAPPA)
                 base = lam * raw_m2_f + (1.0 - lam) * equal_m2
             else:
@@ -218,7 +218,7 @@ class TestColdStart:
 class TestLowN:
     def test_repr_added_after_eb_shrink(self):
         """A thin-history member's repr must still bite (Form A: floor first, then +repr)."""
-        n_thin = max(1, MIN_TRAIN - 1)
+        n_thin = max(1, MIN_SETTLED_N - 1)
         d = {"thin_far": (0.2, n_thin), "deep_near": (0.2, 40)}
         z = {"thin_far": 28.0, "deep_near": 31.0}
         repr_by = {"thin_far": 5.0, "deep_near": 0.0}

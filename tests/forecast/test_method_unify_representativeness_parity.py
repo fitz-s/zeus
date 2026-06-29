@@ -24,11 +24,11 @@ from types import SimpleNamespace
 import numpy as np
 
 from src.forecast.center import (
+    MIN_SETTLED_N,
     raw_precision_center,
     raw_second_moment_weights,
     walk_forward_model_weights,
 )
-from src.forecast.bayes_precision_fusion import MIN_TRAIN
 from src.forecast.types import RawModelMember
 
 
@@ -97,7 +97,7 @@ class TestEntryExitWeightParity:
 
     def test_thin_n_with_repr_parity(self):
         """Low-n EB shrink + repr: ENTRY == EXIT (repr added AFTER shrink at both)."""
-        n_thin = max(1, MIN_TRAIN - 1)
+        n_thin = max(1, MIN_SETTLED_N - 1)
         raw_m2s = [0.3, 2.0]
         ns = [n_thin, 40]
         zs = [28.0, 31.0]

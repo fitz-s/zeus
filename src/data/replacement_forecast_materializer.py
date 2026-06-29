@@ -1103,10 +1103,10 @@ class _BayesPrecisionFusionFusionOverride:
     # when the grid table is absent ⇒ precision_center_basis is the same as before Option C.
     precision_center_basis: Mapping[str, Mapping[str, float]] | None = None
     precision_basis_hash: str | None = None
-    # Cold-start guard (2026-06-22, Finding 1): models excluded from the center because
-    # their walk-forward VERIFIED settled obs count was below MIN_SETTLED_N.  Empty when
-    # all models are mature (byte-identical to pre-guard in that case).
-    cold_start_excluded_models: tuple[str, ...] = ()
+    # Low-n prior weighting (2026-06-28): models whose walk-forward VERIFIED settled
+    # obs count was below MIN_SETTLED_N. These models are not excluded; their raw_m2
+    # is EB-shrunk toward the equal-precision prior before center weighting.
+    low_n_prior_weighted_models: tuple[str, ...] = ()
     # Source-clock vNext fixed city basket (2026-06-25): present when the per-city one-scheme
     # artifact supplied the served center. This is the live replacement upgrade surface.
     source_clock_one_scheme: Mapping[str, object] | None = None
@@ -1164,7 +1164,7 @@ def _anchor_only_current_override(
                 }
             }
         ),
-        cold_start_excluded_models=(),
+        low_n_prior_weighted_models=(),
     )
 
 
@@ -1541,16 +1541,14 @@ def _replacement_bayes_precision_fusion_override(
             }
         )
 
-        # Cold-start guard provenance (Finding 1, 2026-06-22): models that were
-        # excluded from the center because n < MIN_SETTLED_N.  Derived from the
-        # precision_center_basis: any model with weight=0.0 AND n < MIN_SETTLED_N
-        # was excluded by the guard (not merely absent from the DB).
+        # Low-n prior weighting provenance: models that entered the center through
+        # EB shrink-to-equal because n < MIN_SETTLED_N. They are not excluded.
         from src.forecast.center import MIN_SETTLED_N as _MIN_SETTLED_N  # noqa: PLC0415
-        _cold_start_excluded: tuple[str, ...] = tuple(
+        _low_n_prior_weighted: tuple[str, ...] = tuple(
             sorted(
                 str(_m)
                 for _m, _v in _precision_center_basis.items()
-                if int(_v["n"]) < _MIN_SETTLED_N and _v["weight"] == 0.0
+                if int(_v["n"]) < _MIN_SETTLED_N
             )
         )
 
@@ -1912,7 +1910,7 @@ def _replacement_bayes_precision_fusion_override(
             current_value_serving=_current_value_serving,
             precision_center_basis=_precision_center_basis or None,
             precision_basis_hash=_precision_basis_hash,
-            cold_start_excluded_models=_cold_start_excluded,
+            low_n_prior_weighted_models=_low_n_prior_weighted,
             source_clock_one_scheme=_source_clock_payload,
         )
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
@@ -3051,10 +3049,9 @@ def _compute_posterior_payload(
                 if bayes_precision_fusion_override.source_clock_one_scheme
                 else None
             ),
-            # Cold-start guard provenance (Finding 1, 2026-06-22): models excluded from the
-            # center because n_train < MIN_SETTLED_N.  Empty list when all models are mature
-            # (byte-identical provenance to pre-guard in that case).
-            "cold_start_excluded_models": list(bayes_precision_fusion_override.cold_start_excluded_models),
+            # Low-n prior weighting provenance: these models still entered the center,
+            # but their raw second moment was shrunk toward the equal-precision prior.
+            "low_n_prior_weighted_models": list(bayes_precision_fusion_override.low_n_prior_weighted_models),
             "runtime_layer": runtime_layer,
         }
     return _PosteriorComputeResult(

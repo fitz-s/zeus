@@ -20,8 +20,8 @@ import pytest
 # ── shared helper under test ───────────────────────────────────────────────────
 from types import SimpleNamespace
 
-from src.forecast.center import raw_second_moment_weights, walk_forward_model_weights
-from src.forecast.bayes_precision_fusion import SIGMA_FLOOR, LOWN_INFLATE, MIN_TRAIN, KAPPA
+from src.forecast.center import MIN_SETTLED_N, raw_second_moment_weights, walk_forward_model_weights
+from src.forecast.bayes_precision_fusion import SIGMA_FLOOR, LOWN_INFLATE, KAPPA
 from src.forecast.types import RawModelMember
 
 
@@ -72,9 +72,9 @@ class TestRawSecondMomentWeightsMatchesSpine:
             )
 
     def test_thin_n_shrink_match(self):
-        """Low-n EB shrink: shared helper == spine for n < MIN_TRAIN."""
+        """Low-n EB shrink: shared helper == spine for n < MIN_SETTLED_N."""
         raw_m2 = 0.3
-        n = max(1, MIN_TRAIN - 1)
+        n = max(1, MIN_SETTLED_N - 1)
         members = [_member(raw_m2, n), _member(2.0, 40)]
         case = _case("C")
 
@@ -99,7 +99,7 @@ class TestRawSecondMomentWeightsMatchesSpine:
     def test_f_city_unit_scaling_match(self):
         """F-city: both helpers apply the (9/5)^2 floor/shrink scaling."""
         raw_m2 = 0.3
-        n = max(1, MIN_TRAIN - 1)
+        n = max(1, MIN_SETTLED_N - 1)
         members = [_member(raw_m2, n), _member(1.5, 40)]
         case_f = _case("F")
         case_c = _case("C")
@@ -121,7 +121,7 @@ class TestRawSecondMomentWeightsMatchesSpine:
         cases = [
             {"a": (0.5, 30), "b": (1.5, 25)},
             {"a": (None, 0), "b": (None, 0)},
-            {"a": (0.1, MIN_TRAIN - 1)},
+            {"a": (0.1, MIN_SETTLED_N - 1)},
         ]
         for c in cases:
             w = raw_second_moment_weights(c, unit="C")
