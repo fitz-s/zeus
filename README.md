@@ -7,13 +7,13 @@ through to settlement, and feeds graded outcomes back into calibration.
 
 ## Operation
 
-The engine runs a repeating cycle, not a one-shot pass. Each cycle it reconciles its positions
-against the chain, refreshes forecasts, observations, and prices, re-evaluates every held
-position and resting order against the new data, and scans for new entries. Orders are not
-fire-and-forget: a resting order whose edge has faded or whose limit the market has moved away
-from is pulled and decided again, and a fresh forecast cycle on a market already held is itself
-new information. Held positions are monitored each cycle and exited when their edge reverses, a
-profit is takeable, or settlement is near. The sections below describe one pass of that loop.
+The engine runs a repeating cycle. Each cycle it reconciles its positions against the chain,
+refreshes forecasts, observations, and prices, re-evaluates every held position and resting
+order against the new data, and scans for new entries. A resting order whose edge has faded or
+whose limit the market has moved away from is pulled and decided again; a fresh forecast cycle
+on a market already held is itself new information. Held positions are re-evaluated each cycle
+and exited when their edge reverses, a profit is takeable, or settlement is near. The sections
+below detail one pass of that cycle.
 
 ## Markets
 
@@ -28,9 +28,11 @@ low markets are separate objects with separate calibration.
 
 ## Data
 
-Forecasts come from about 25 sources: global ensemble models (ECMWF, GFS, ICON, GEM, JMA) and,
-for cities that settle on a known station, that nation's official station forecast (Hong Kong
-Observatory, Taiwan CWA). Models refresh two to four times a day on their issue cycles.
+Forecasts come from ECMWF's global ensemble (the anchor) plus decorrelated regional model
+families — ICON (DWD), NOAA, UKMO, and GEM (CMC) — each used where it covers a city, sourced
+through ECMWF OpenData and Open-Meteo. For cities that settle on a known station, that nation's
+official station forecast is ingested as well (Hong Kong Observatory, Taiwan CWA). Models
+refresh two to four times a day on their issue cycles.
 Observations come from Weather Underground (daily settlement values), METAR (15-minute), and
 the HKO and CWA feeds. Market data — market topology, the order book, and the engine's own
 fills — streams from Polymarket over WebSocket. Every record is stamped with when the source
