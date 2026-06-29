@@ -4063,12 +4063,6 @@ def execute_exit_order(
         order_type = _exit_order_type(selected_order_type)
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
-        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(
-            conn,
-            token_id=intent.token_id,
-            shares=shares,
-        )
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -4189,6 +4183,13 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+
+        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
+        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(
+            conn,
+            token_id=intent.token_id,
+            shares=shares,
+        )
 
         try:
             pre_submit_envelope = _build_pre_submit_envelope(

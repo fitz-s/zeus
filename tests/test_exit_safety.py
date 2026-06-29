@@ -1709,8 +1709,9 @@ def test_execute_exit_order_rejects_idempotency_race_with_old_exit_snapshot_iden
         )
 
         assert second.status == "rejected"
-        assert second.reason == "exit_snapshot_identity:existing_command_snapshot_id_mismatch"
-        assert find_calls["n"] == 2
+        assert second.reason is not None
+        assert second.reason.startswith("active_prior_exit_sell:")
+        assert find_calls["n"] == 1
         assert len(calls) == 1
     finally:
         _clear_exit_submit_prereqs()
@@ -2285,7 +2286,14 @@ def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch)
         best_bid=0.49,
     )
 
-    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: {
+            "executable_snapshot_id": "snap-exit-collateral",
+            "executable_snapshot_min_order_size": "5",
+        },
+    )
 
     def fake_refresh(active_conn, **kwargs):
         assert active_conn is conn
@@ -2350,7 +2358,14 @@ def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, mon
         best_bid=0.49,
     )
 
-    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: {
+            "executable_snapshot_id": "snap-exit-collateral-refresh-failed",
+            "executable_snapshot_min_order_size": "5",
+        },
+    )
     monkeypatch.setattr(
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",
@@ -2375,6 +2390,87 @@ def test_live_exit_collateral_refresh_failure_retries_before_preflight(conn, mon
     assert outcome == "collateral_blocked: collateral_refresh_failed: network"
     assert position.exit_state == "retry_pending"
     assert position.last_exit_error == "collateral_refresh_failed: network"
+
+
+def test_live_exit_missing_executable_snapshot_retries_before_executor(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-missing-exit-snapshot",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="holding",
+        strategy_key="opening_inertia",
+    )
+    portfolio = PortfolioState(positions=[position])
+    exit_context = ExitContext(
+        exit_reason="EDGE_REVERSAL",
+        current_market_price=0.50,
+        current_market_price_is_fresh=True,
+        best_bid=0.49,
+    )
+
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_exit_collateral_snapshot_for_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot gate must preempt collateral refresh")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot gate must preempt collateral check")
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot gate must preempt executor")
+        ),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        exit_context,
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: executable_snapshot_unavailable"
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error == "exit_executable_snapshot_unavailable"
+    event = conn.execute(
+        """
+        SELECT event_type, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event["event_type"] == "EXIT_ORDER_REJECTED"
+    assert event["phase_after"] == "pending_exit"
+    assert event["venue_status"] == "retry_pending"
+    assert json.loads(event["payload_json"])["error"] == "exit_executable_snapshot_unavailable"
 
 
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
@@ -2413,15 +2509,14 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
     monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
-    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *args, **kwargs: {"executable_snapshot_min_order_size": "5"},
+    )
 
     def fake_execute_exit_order(intent, decision_id=""):
-        return exit_lifecycle.OrderResult(
-            trade_id=intent.trade_id,
-            status="rejected",
-            reason=error,
-            order_role="exit",
-        )
+        raise AssertionError("dust hold must not call executor")
 
     monkeypatch.setattr(exit_lifecycle, "execute_exit_order", fake_execute_exit_order)
 

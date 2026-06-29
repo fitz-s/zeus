@@ -1869,6 +1869,31 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=dust_reason, error=dust_error)
         return f"sell_blocked_dust: {dust_error}"
 
+    if conn is not None and not str(snapshot_context.get("executable_snapshot_id") or "").strip():
+        snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_UNAVAILABLE]"
+        snapshot_error = "exit_executable_snapshot_unavailable"
+        _mark_exit_retry(
+            position,
+            reason=snapshot_reason,
+            error=snapshot_error,
+            conn=conn,
+        )
+        if conn is not None:
+            log_pending_exit_recovery_event(
+                conn,
+                position,
+                event_type="EXIT_ORDER_REJECTED",
+                reason=snapshot_reason,
+                error=snapshot_error,
+            )
+            log_exit_retry_event(
+                conn,
+                position,
+                reason=snapshot_reason,
+                error=snapshot_error,
+            )
+        return "exit_blocked: executable_snapshot_unavailable"
+
     if conn is not None:
         try:
             _refresh_exit_collateral_snapshot_for_submit(
