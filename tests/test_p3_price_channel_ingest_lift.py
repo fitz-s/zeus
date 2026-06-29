@@ -1314,6 +1314,8 @@ def test_launchd_plist_artifact_exists_and_targets_the_new_daemon():
         parsed = plistlib.load(fh)
     assert parsed.get("Label") == "com.zeus.price-channel-ingest"
     assert "src.ingest.price_channel_daemon" in parsed.get("ProgramArguments", [])
+    env = parsed.get("EnvironmentVariables") or {}
+    assert env.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE") == "2"
 
 
 # ===========================================================================
