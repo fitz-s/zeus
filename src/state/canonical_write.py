@@ -211,30 +211,46 @@ def transition_phase(
             return False
         projection["updated_at"] = occurred_at
         exit_state = str(getattr(position, "exit_state", "") or "").strip()
+        last_exit_order_id = getattr(position, "last_exit_order_id", "") or ""
+        last_exit_command_id = getattr(position, "last_exit_command_id", "") or ""
+        if last_exit_order_id and not last_exit_command_id:
+            try:
+                command_row = conn.execute(
+                    """
+                    SELECT command_id
+                      FROM venue_commands
+                     WHERE position_id = ?
+                       AND intent_kind = 'EXIT'
+                       AND venue_order_id = ?
+                     ORDER BY updated_at DESC, created_at DESC, command_id DESC
+                     LIMIT 1
+                    """,
+                    (trade_id, last_exit_order_id),
+                ).fetchone()
+                if command_row is not None:
+                    last_exit_command_id = str(command_row[0] or "")
+            except Exception:
+                last_exit_command_id = ""
         if event_type == "EXIT_INTENT":
             projection["order_status"] = "exit_intent"
             projection["order_id"] = None
         elif event_type == "EXIT_ORDER_POSTED":
             projection["order_status"] = "sell_placed"
-            projection["order_id"] = (
-                getattr(position, "last_exit_order_id", "") or None
-            )
+            projection["order_id"] = last_exit_order_id or None
         elif event_type == "EXIT_ORDER_REJECTED" and exit_state in {
             "retry_pending",
             "backoff_exhausted",
         }:
             projection["order_status"] = exit_state
-            projection["order_id"] = (
-                getattr(position, "last_exit_order_id", "") or None
-            )
+            projection["order_id"] = last_exit_order_id or None
         payload = {
             "status": exit_state,
             "exit_reason": getattr(position, "exit_reason", "") or reason,
             "error": error or getattr(position, "last_exit_error", ""),
             "retry_count": getattr(position, "exit_retry_count", 0),
             "next_retry_at": getattr(position, "next_exit_retry_at", ""),
-            "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
-            "last_exit_command_id": getattr(position, "last_exit_command_id", ""),
+            "last_exit_order_id": last_exit_order_id,
+            "last_exit_command_id": last_exit_command_id,
         }
         env = str(getattr(position, "env", "") or "live")
         if env not in {"live", "test", "replay", "backtest"}:
@@ -253,8 +269,8 @@ def transition_phase(
             ),
             "decision_id": None,
             "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
-            "order_id": getattr(position, "last_exit_order_id", "") or None,
-            "command_id": getattr(position, "last_exit_command_id", "") or None,
+            "order_id": last_exit_order_id or None,
+            "command_id": last_exit_command_id or None,
             "caused_by": "transition_phase",
             "idempotency_key": f"{trade_id}:phase_transition:{sequence_no}",
             "venue_status": str(getattr(position, "exit_state", "") or "rejected"),

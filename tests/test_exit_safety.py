@@ -3474,6 +3474,69 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
     assert event["command_id"] == command["command_id"]
 
 
+def test_transition_phase_links_exit_order_to_existing_command(conn):
+    from src.state.db import transition_phase
+    from src.state.portfolio import Position
+
+    trade_id = "pos-direct-exit-command-link"
+    _insert_exit_command(
+        conn,
+        command_id="cmd-direct-exit-link",
+        position_id=trade_id,
+        venue_order_id="ord-direct-exit-link",
+        size=9.7,
+        price=0.05,
+    )
+    _ack_exit(conn, command_id="cmd-direct-exit-link", venue_order_id="ord-direct-exit-link")
+    position = Position(
+        trade_id=trade_id,
+        market_id="mkt-1",
+        city="Miami",
+        cluster="US",
+        target_date="2026-06-30",
+        bin_label="96-97F",
+        direction="buy_yes",
+        size_usd=4.34,
+        shares=85.17,
+        cost_basis_usd=4.34,
+        entry_price=0.051,
+        p_posterior=0.34,
+        state="pending_exit",
+        pre_exit_state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="F",
+        env="live",
+        strategy_key="center_buy",
+        order_status="sell_placed",
+        exit_state="sell_placed",
+        last_exit_order_id="ord-direct-exit-link",
+        exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+    )
+
+    assert transition_phase(
+        conn,
+        position,
+        event_type="EXIT_ORDER_POSTED",
+        reason=position.exit_reason,
+        error="",
+    )
+    event = conn.execute(
+        """
+        SELECT command_id, order_id
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_POSTED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (trade_id,),
+    ).fetchone()
+    assert event["order_id"] == "ord-direct-exit-link"
+    assert event["command_id"] == "cmd-direct-exit-link"
+
+
 def test_check_pending_exits_recovers_adopted_open_sell_from_canonical_event(
     conn,
     monkeypatch,
