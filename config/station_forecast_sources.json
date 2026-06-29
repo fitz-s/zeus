@@ -1,9 +1,9 @@
 {
-  "_doc": "Station-calibrated official-forecast sources retained as research inputs only. Registry entries are experimental disabled, and live production does not ingest this file. Promote a source only after durable evidence plus registry role promotion.",
+  "_doc": "Station-calibrated official-forecast sources. ENABLED sources are ingested live by the forecast-download lane (replacement_forecast_production._ingest_station_forecasts_live -> station_forecast_adapter.ingest_enabled_station_sources_live), routed by adapter_kind, on the same ~2x/day cadence as the gridded raw inputs. Each source reaches its city's served center ONLY via the per-city source-clock scheme weight (DATA PRECISION, never a de-bias). Set enabled=false to drop a source from live ingest.",
   "sources": {
     "cwa_township": {
-      "enabled": false,
-      "status": "research_disabled",
+      "enabled": true,
+      "status": "live",
       "model_id": "cwa_township",
       "provider": "cwa_taiwan",
       "provider_family": "cwa",
@@ -22,8 +22,8 @@
       "_grading_note": "CWA-vs-gridded-vs-settlement forward grading: scripts/grade_cwa_township_forward.py"
     },
     "hko_fnd": {
-      "enabled": false,
-      "status": "research_disabled",
+      "enabled": true,
+      "status": "live",
       "model_id": "hko_fnd",
       "provider": "hong_kong_observatory",
       "provider_family": "hko",

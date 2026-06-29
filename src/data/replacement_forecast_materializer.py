@@ -1367,6 +1367,11 @@ def _replacement_bayes_precision_fusion_override(
             served_current = read_current_instrument_values(
                 conn, city=request.city, metric=metric, target_date=target_date,
                 source_cycle_time_iso=source_cycle_iso,
+                # ADD-DATA (operator "加数据"): include station-calibrated sources (cwa_*/hko_*) at
+                # their OWN provider cycle so they enter persisted_current -> the precision fusion
+                # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
+                # skip (_station_live_omitted below) serves that live fusion center.
+                include_station_sources=True,
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()

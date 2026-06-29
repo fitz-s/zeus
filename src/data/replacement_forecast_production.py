@@ -1167,6 +1167,39 @@ def _replacement_cycle_availability_poll() -> None:
         logger.info("cycle availability poll report: %s", report)
 
 
+def _ingest_station_forecasts_live(cfg: dict[str, object]) -> dict[str, int] | None:
+    """Config-driven station-forecast (CWA/HKO) live ingest into raw_model_forecasts.
+
+    Runs on the download lane (publish-time cron + boot catch-up), so station data refreshes at
+    the same ~2x/day cadence as the gridded raw inputs the lane already fetches. Uses an AUTOCOMMIT
+    connection: each tiny per-row write self-commits, so no write lock is held across a provider
+    network fetch (avoids the forecast-DB "database is locked" contention the heavy capture guards
+    against with BEGIN IMMEDIATE). Fail-soft end to end: returns None on any setup error, and the
+    dispatcher swallows per-source provider errors, so station ingest can never kill the cycle.
+    Returns ``{source_id: rows_written}`` or None.
+    """
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
+    try:
+        from src.data.station_forecast_adapter import (  # noqa: PLC0415
+            ingest_enabled_station_sources_live,
+        )
+        from src.state.db import _connect  # noqa: PLC0415
+
+        conn = _connect(Path(str(forecast_db)), write_class="live")
+        # Autocommit: tiny per-row INSERT self-commits; the network fetch inside each ingest
+        # function holds no write transaction. _persist_rows is autocommit-safe by contract.
+        conn.isolation_level = None
+        try:
+            return ingest_enabled_station_sources_live(conn)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - station ingest must never break the download cycle
+        logger.warning("station-forecast live ingest skipped (fail-soft): %s", exc)
+        return None
+
+
 @_scheduler_job("replacement_forecast_download")
 def _replacement_forecast_download_cycle() -> None:
     """Proactive raw-input PRE-FETCH for the BAYES_PRECISION_FUSION/replacement soft-anchor forecast.
@@ -1230,6 +1263,16 @@ def _replacement_forecast_download_cycle() -> None:
     # actual fusion-capture state.
     if bayes_precision_fusion_capture_report is not None:
         _record_bayes_precision_fusion_capture_health(cfg, bayes_precision_fusion_capture_report)
+    # STATION-CALIBRATED forecast ingest (operator "加数据"): the national met agency's OWN
+    # published daily-max forecast for the settlement district — CWA township (Taipei/RCSS),
+    # HKO nine-day (Hong Kong) — lands in raw_model_forecasts here on the SAME download lane as
+    # the gridded raw inputs (publish-time cron + boot catch-up). It is DATA PRECISION, not a
+    # de-bias: each source contributes to its city's served center ONLY via the per-city
+    # source-clock scheme weight downstream. Config-driven + fail-soft; a provider outage never
+    # touches the gridded capture above.
+    station_report = _ingest_station_forecasts_live(cfg)
+    if station_report:
+        logger.info("station-forecast live ingest wrote rows: %s", station_report)
 
 
 @_scheduler_job("replacement_forecast_live_materialize")

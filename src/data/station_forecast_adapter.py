@@ -394,7 +394,11 @@ def resolve_cwa_api_key(
             data = json.load(fh)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-    secret = str((data or {}).get("cwa_api_key", "") or "").strip()
+    # Accept either casing in the file: the documented contract is lowercase ``cwa_api_key``,
+    # but the env-var name ``CWA_API_KEY`` is an easy-to-mistype alternative that once caused a
+    # silent 0-row no-op. Tolerate both so a mis-cased key never silently disables CWA again.
+    blob = data or {}
+    secret = str(blob.get("cwa_api_key") or blob.get(_CWA_API_KEY_ENV) or "").strip()
     return secret or None
 
 
@@ -600,3 +604,87 @@ def ingest_cwa_township_live(
         latitude=latitude,
         longitude=longitude,
     )
+
+
+# ---------------------------------------------------------------------------
+# Config-driven live ingest dispatcher — the seam the forecast-download lane calls
+# ---------------------------------------------------------------------------
+# Turns the static config/station_forecast_sources.json into live raw_model_forecasts rows:
+# for each ENABLED source it routes by ``adapter_kind`` to that provider's live ingest function
+# (fetch → parse → persist, single_runs contract). Per-source FAIL-SOFT: one provider's network
+# or parse error is logged and skipped, never aborting the others or the parent download cycle.
+# This is the ONLY wiring that adds station data live — no hard-coded per-source call list in the
+# daemon, no new fusion path, no hand-set weight. A source contributes to its city's served center
+# solely through the per-city source-clock scheme weight downstream.
+_STATION_ADAPTER_DISPATCH: dict[str, str] = {
+    "cwa_township_json": "ingest_cwa_township_live",
+    "hko_fnd_json": "ingest_hko_fnd_live",
+}
+
+
+def _station_ingest_kwargs(
+    adapter_kind: str,
+    spec: Mapping[str, object],
+    *,
+    environ: Mapping[str, str] | None,
+) -> dict[str, object]:
+    """Build only the kwargs the target ingest function accepts, from the config spec."""
+    kw: dict[str, object] = {}
+    if spec.get("city"):
+        kw["city"] = str(spec["city"])
+    if spec.get("metric"):
+        kw["metric"] = str(spec["metric"])
+    if spec.get("endpoint"):
+        kw["endpoint"] = str(spec["endpoint"])
+    if adapter_kind == "cwa_township_json":
+        if spec.get("location_name"):
+            kw["location_name"] = str(spec["location_name"])
+        if spec.get("element_name"):
+            kw["element_name"] = str(spec["element_name"])
+        if environ is not None:
+            kw["environ"] = environ
+    return kw
+
+
+def ingest_enabled_station_sources_live(
+    conn: sqlite3.Connection,
+    *,
+    root: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, int]:
+    """Ingest every ENABLED station-forecast source from config, routed by ``adapter_kind``.
+
+    Returns ``{source_id: rows_written}`` for each source that dispatched without error. Per-source
+    fail-soft: a source whose ingest raises (or whose ``adapter_kind`` is unknown) is logged and
+    omitted, so one provider outage never starves the cycle. NETWORK happens inside the dispatched
+    ingest functions only.
+    """
+    import logging  # noqa: PLC0415 - keep module import surface lean; called ~2x/cycle
+
+    log = logging.getLogger(__name__)
+    out: dict[str, int] = {}
+    sources = load_station_forecast_config(root=root)
+    for source_id, spec in sources.items():
+        if not isinstance(spec, Mapping) or not spec.get("enabled"):
+            continue
+        adapter_kind = str(spec.get("adapter_kind") or "")
+        fn_name = _STATION_ADAPTER_DISPATCH.get(adapter_kind)
+        if fn_name is None:
+            log.warning(
+                "station ingest: source %s has unknown adapter_kind %r — skipped",
+                source_id,
+                spec.get("adapter_kind"),
+            )
+            continue
+        fn = globals().get(fn_name)
+        if not callable(fn):
+            continue
+        kwargs = _station_ingest_kwargs(adapter_kind, spec, environ=environ)
+        try:
+            out[str(source_id)] = int(fn(conn, **kwargs))
+        except Exception as exc:  # noqa: BLE001 - one source must never abort the cycle
+            log.warning(
+                "station ingest: source %s (%s) failed fail-soft: %s", source_id, fn_name, exc
+            )
+            continue
+    return out
