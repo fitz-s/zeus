@@ -333,12 +333,12 @@ class EventStore:
         # plan under redecision/day0 predicates. Keep SQL to active processing rows
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
-        active_rows: list[tuple[str, int]] = []
+        active_rows: list[tuple[str, int, str]] = []
         active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]))
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""))
             for row in self.conn.execute(
                 """
-                SELECT p.event_id, p.attempt_count
+                SELECT p.event_id, p.attempt_count, p.last_error
                   FROM opportunity_event_processing p
                        INDEXED BY idx_opportunity_event_processing_pending_retry_floor
                  WHERE p.consumer_name = ?
@@ -351,10 +351,10 @@ class EventStore:
             ).fetchall()
         )
         active_rows.extend(
-            (str(row[0] or ""), _safe_int(row[1]))
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""))
             for row in self.conn.execute(
                 """
-                SELECT p.event_id, p.attempt_count
+                SELECT p.event_id, p.attempt_count, p.last_error
                   FROM opportunity_event_processing p
                        INDEXED BY idx_opportunity_event_processing_stale_claim
                  WHERE p.consumer_name = ?
@@ -370,11 +370,13 @@ class EventStore:
         if not active_rows:
             return []
         attempt_by_event: dict[str, int] = {}
+        last_error_by_event: dict[str, str] = {}
         event_ids: list[str] = []
-        for event_id, attempt_count in active_rows:
+        for event_id, attempt_count, last_error in active_rows:
             if not event_id or event_id in attempt_by_event:
                 continue
             attempt_by_event[event_id] = attempt_count
+            last_error_by_event[event_id] = last_error
             event_ids.append(event_id)
 
         rows: list[tuple[object, ...]] = []
@@ -410,6 +412,11 @@ class EventStore:
                 else:
                     event_id = str(row[0] or "")
                     event_tuple = tuple(row[: len(_EVENT_ROW_KEYS)])
+                if _selection_deadline_past(
+                    last_error_by_event.get(event_id, ""),
+                    parsed_decision_time,
+                ):
+                    continue
                 rows.append(event_tuple + (attempt_by_event.get(event_id, 0),))
 
         cooled_families = _recent_recapture_edge_reversed_families(
@@ -451,7 +458,10 @@ class EventStore:
         self, *, decision_time: str, batch_limit: int = 50_000
     ) -> int:
         """Sweep strictly-past-in-tz pending/processing candidates to terminal
-        ``expired`` status so the active scan stops re-reading them.
+        ``expired`` status so the active scan stops re-reading them. A row is
+        also expired when its own event/executable selection deadline is already
+        past; that window is a market-chain fact for this specific pending
+        decision, not a transient infrastructure retry.
 
         OPERATOR DIRECTIVE 2026-06-04 — the working set
         (``opportunity_event_processing``) accumulated ~1.76M ``pending`` rows that
@@ -467,11 +477,12 @@ class EventStore:
         (``fetch_pending``, the two warm-cache family queries, ``_edli_pending_entity_keys``),
         so one sweep removes the row from ALL scan paths without touching provenance.
 
-        EXPIRY is PER-CITY LOCAL TIMEZONE, never raw UTC: a candidate is expired iff
-        its whole target LOCAL day has ENDED in its OWN city tz — exactly the
-        strictly-past boundary ``_is_timely`` rejects (``decision_time >=
-        settlement_day_entry_utc(target_date + 1 day)``). Same predicate, shared with
-        the read floor (``_event_strictly_past_in_tz``) so the two can never diverge.
+        LOCAL-DAY EXPIRY is PER-CITY LOCAL TIMEZONE, never raw UTC: a candidate is
+        expired iff its whole target LOCAL day has ENDED in its OWN city tz —
+        exactly the strictly-past boundary ``_is_timely`` rejects
+        (``decision_time >= settlement_day_entry_utc(target_date + 1 day)``).
+        Same predicate, shared with the read floor (``_event_strictly_past_in_tz``)
+        so the two can never diverge.
 
         Venue closure is deliberately NOT inferred from Gamma ``endDate`` or the
         historical F1 12:00Z anchor. Those timestamps mark resolution timing, not
@@ -506,10 +517,10 @@ class EventStore:
         silently drop a real candidate.
 
         IDEMPOTENT + budget-safe: only ``pending``/``processing`` rows are touched and
-        only those proven strictly-past in their local calendar are expired; a re-run
-        at the same decision time is a no-op.  ``batch_limit`` bounds the rows
-        examined per call so a one-time 1.7M backlog drains across cycles instead of
-        in one giant transaction.
+        only those proven strictly-past in their local calendar, event expiry, or
+        selected execution window are expired; a re-run at the same decision time
+        is a no-op.  ``batch_limit`` bounds the rows examined per call so a one-time
+        backlog drains across cycles instead of in one giant transaction.
 
         Returns the number of processing rows transitioned to ``expired``.
         """
@@ -548,7 +559,9 @@ class EventStore:
             SELECT e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date,
-                   e.event_type
+                   e.event_type,
+                   e.expires_at,
+                   p.last_error
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
               JOIN opportunity_events e
                 ON e.event_id = p.event_id
@@ -559,25 +572,32 @@ class EventStore:
                     'EDLI_REDECISION_PENDING',
                     'DAY0_EXTREME_UPDATED'
                )
-               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
                AND (
                     (
-                        e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
-                        AND (
-                            json_extract(e.payload_json, '$.target_date') <= ?
-                            OR json_extract(e.payload_json, '$.target_date') <= ?
+                        json_extract(e.payload_json, '$.target_date') IS NOT NULL
+                        AND
+                        (
+                            (
+                                e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
+                                AND (
+                                    json_extract(e.payload_json, '$.target_date') <= ?
+                                    OR json_extract(e.payload_json, '$.target_date') <= ?
+                                )
+                            )
+                            OR (
+                                e.event_type = 'DAY0_EXTREME_UPDATED'
+                                AND (
+                                    json_extract(e.payload_json, '$.target_date') < ?
+                                    OR json_extract(e.payload_json, '$.target_date') <= ?
+                                )
+                            )
                         )
                     )
-                    OR (
-                        e.event_type = 'DAY0_EXTREME_UPDATED'
-                        AND (
-                            json_extract(e.payload_json, '$.target_date') < ?
-                            OR json_extract(e.payload_json, '$.target_date') <= ?
-                        )
-                    )
+                    OR e.expires_at IS NOT NULL
+                    OR p.last_error LIKE '%selection_deadline=%'
                )
-             ORDER BY p.updated_at ASC, p.event_id ASC
-             LIMIT ?
+            ORDER BY p.updated_at ASC, p.event_id ASC
+            LIMIT ?
             """,
             (
                 self.consumer_name,
@@ -592,9 +612,19 @@ class EventStore:
         expired_ids: list[str] = []
         for row in candidate_rows:
             event_id = row[0]
-            city = row[1]
-            target_date = row[2]
+            city = str(row[1] or "")
+            target_date = str(row[2] or "")
             event_type = str(row[3] or "")
+            expires_at = row[4]
+            last_error = row[5]
+            if _instant_past(expires_at, decision_time_utc):
+                expired_ids.append(event_id)
+                continue
+            if _selection_deadline_past(last_error, decision_time_utc):
+                expired_ids.append(event_id)
+                continue
+            if not target_date:
+                continue
             if event_type in _FORECAST_DECISION_EVENT_TYPES:
                 if not (target_date <= frontier_floor or target_date <= venue_close_ceiling):
                     continue
@@ -1983,6 +2013,50 @@ def _forecast_family_key_from_payload(payload: dict) -> tuple[str, str, str] | N
     if not (city and target_date and metric):
         return None
     return city, target_date, metric
+
+
+def _parse_optional_utc(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _instant_past(value: object, decision_time_utc: datetime) -> bool:
+    parsed = _parse_optional_utc(value)
+    if parsed is None:
+        return False
+    return parsed <= decision_time_utc.astimezone(timezone.utc)
+
+
+def _deadline_from_reason(reason: object, field_name: str) -> datetime | None:
+    text = str(reason or "")
+    marker = f"{field_name}="
+    start = text.find(marker)
+    if start < 0:
+        return None
+    tail = text[start + len(marker) :]
+    for delimiter in (":decision_time=", " ", ",", ";", "|"):
+        split_at = tail.find(delimiter)
+        if split_at > 0:
+            tail = tail[:split_at]
+            break
+    return _parse_optional_utc(tail)
+
+
+def _selection_deadline_past(reason: object, decision_time_utc: datetime) -> bool:
+    deadline = _deadline_from_reason(reason, "selection_deadline")
+    if deadline is None:
+        return False
+    return deadline <= decision_time_utc.astimezone(timezone.utc)
 
 
 def _recent_recapture_edge_reversed_families(

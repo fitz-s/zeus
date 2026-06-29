@@ -1264,6 +1264,9 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
+          (d) SELECTION_DEADLINE_PAST / EVENT_EXPIRES_AT_PAST — the event's own
+              execution window is past. This burns only the stale selected event;
+              a newer redecision event may still enter with fresh price evidence.
           (b) MARKET_VENUE_CLOSED — only explicit venue evidence says
               ``closed=true`` and ``accepting_orders=false``. Static Gamma endDate
               / F1 timing cannot terminalize a money-path event.
@@ -1282,6 +1285,14 @@ class OpportunityEventReactor:
         # (c) Operator disarm — highest precedence kill-switch.
         if _operator_disarm_active():
             return ("OPERATOR_DISARM", f"{_TRANSIENT_DISARM_ENV} set")
+
+        deadline_horizon = _event_deadline_horizon(
+            event,
+            decision_time=decision_time,
+            transient_reason=self._transient_requeue_reasons.get(event.event_id),
+        )
+        if deadline_horizon is not None:
+            return deadline_horizon
 
         # (b) Venue-close floor. This is evidence-based, not time-derived.
         venue_closed = self._venue_market_closed_horizon(event, decision_time=decision_time)
@@ -2037,7 +2048,15 @@ class OpportunityEventReactor:
             if _is_transient_money_path_reason(receipt.reason):
                 if receipt.reason:
                     self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
-                    if _is_executable_snapshot_refresh_reason(str(receipt.reason)):
+                    if (
+                        _event_deadline_horizon(
+                            event,
+                            decision_time=decision_time,
+                            transient_reason=receipt.reason,
+                        )
+                        is None
+                        and _is_executable_snapshot_refresh_reason(str(receipt.reason))
+                    ):
                         self._record_substrate_block(event, kind="snapshot")
                 return _EXECUTABLE_SNAPSHOT_RETRY
             proof_bundle = receipt.decision_proof_bundle
@@ -2202,7 +2221,15 @@ class OpportunityEventReactor:
         if _is_posterior_staleness_reason(reason):
             self._record_substrate_block(event, kind="posterior")
         if _is_transient_money_path_reason(reason):
-            if _is_executable_snapshot_refresh_reason(reason):
+            if (
+                _event_deadline_horizon(
+                    event,
+                    decision_time=decision_time,
+                    transient_reason=reason,
+                )
+                is None
+                and _is_executable_snapshot_refresh_reason(reason)
+            ):
                 self._record_substrate_block(event, kind="snapshot")
             # Transient: the forecast source was re-ingested after this cycle's
             # decision moment, or the selected executable price expired between
@@ -2572,6 +2599,49 @@ def _parse_utc_instant(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _deadline_from_reason(reason: object, field_name: str) -> datetime | None:
+    text = str(reason or "")
+    marker = f"{field_name}="
+    start = text.find(marker)
+    if start < 0:
+        return None
+    tail = text[start + len(marker) :]
+    for delimiter in (":decision_time=", " ", ",", ";", "|"):
+        split_at = tail.find(delimiter)
+        if split_at > 0:
+            tail = tail[:split_at]
+            break
+    return _parse_utc_instant(tail)
+
+
+def _event_deadline_horizon(
+    event: OpportunityEvent,
+    *,
+    decision_time: datetime,
+    transient_reason: object | None = None,
+) -> tuple[str, str] | None:
+    decision_time_utc = decision_time.astimezone(UTC)
+    expires_at = _parse_utc_instant(getattr(event, "expires_at", None))
+    if expires_at is not None and expires_at <= decision_time_utc:
+        return ("EVENT_EXPIRES_AT_PAST", f"expires_at={expires_at.isoformat()}")
+
+    payload = _payload_dict(event)
+    payload_selection_deadline = _parse_utc_instant(payload.get("selection_deadline"))
+    if payload_selection_deadline is not None and payload_selection_deadline <= decision_time_utc:
+        return (
+            "SELECTION_DEADLINE_PAST",
+            f"selection_deadline={payload_selection_deadline.isoformat()}",
+        )
+
+    reason_selection_deadline = _deadline_from_reason(transient_reason, "selection_deadline")
+    if reason_selection_deadline is not None and reason_selection_deadline <= decision_time_utc:
+        return (
+            "SELECTION_DEADLINE_PAST",
+            f"selection_deadline={reason_selection_deadline.isoformat()}",
+        )
+    return None
 
 
 def _receipt_or_payload(

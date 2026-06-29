@@ -313,10 +313,10 @@ def test_horizon_terminalizes_with_horizon_label():
     assert "attempt" not in regret[0].lower()
 
 
-def test_selection_deadline_past_requeues_stale_snapshot_retry():
-    """A selected executable snapshot's deadline is price-evidence freshness, not
-    an event horizon. Stale price evidence must requeue for fresh substrate until
-    the market/day horizon itself expires."""
+def test_selection_deadline_past_terminalizes_stale_snapshot_retry():
+    """A selected executable snapshot's deadline is the event's own execution
+    horizon. Once that selected window is past, the stale event must not keep
+    refreshing substrate and requeueing ahead of newer entry/redecision work."""
     conn, store = _store()
     event = _day0_event(city="New York", target_date="2026-06-26", suffix="stale-deadline")
     store.insert_or_ignore(event)
@@ -333,23 +333,22 @@ def test_selection_deadline_past_requeues_stale_snapshot_retry():
         result=res,
     )
 
-    assert res.dead_lettered == 0
-    assert res.retried == 1
-    assert _status(conn, event.event_id) == "pending"
+    assert res.dead_lettered == 1
+    assert res.retried == 0
+    assert _status(conn, event.event_id) == "dead_letter"
     row = conn.execute(
-        "SELECT last_error, claimed_at FROM opportunity_event_processing WHERE event_id = ?",
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
         (event.event_id,),
     ).fetchone()
     assert row is not None
-    assert str(row[0]).startswith("EXECUTABLE_SNAPSHOT_STALE:")
-    assert row[1] is not None
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
-            (event.event_id,),
-        ).fetchone()[0]
-        == 0
-    )
+    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
+    assert "SELECTION_DEADLINE_PAST" in (row[1] or "")
+    assert "EXECUTABLE_SNAPSHOT_STALE" in (row[1] or "")
+    regret = conn.execute(
+        "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert regret is not None
+    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:SELECTION_DEADLINE_PAST:")
 
 
 def test_fresh_substrate_sidecar_owns_broad_refresh(monkeypatch, tmp_path):

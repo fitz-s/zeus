@@ -199,6 +199,57 @@ def test_expired_redecision_candidate_archived_and_not_rescanned():
     assert _pending_count(conn) == 0
 
 
+def test_selection_deadline_past_redecision_archived_even_when_local_day_open():
+    """A stale selected executable window is not live work.
+
+    The target local day may still be open, but a requeued event whose own
+    selected snapshot deadline is already past must leave the active scan so
+    newer entry/redecision events can compete on fresh price evidence.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    stale = _redecision_event(
+        "Chicago",
+        "2026-06-07",
+        "snap-stale-selection",
+        available_at="2026-06-05T10:00:00+00:00",
+    )
+    fresh = _redecision_event(
+        "Chicago",
+        "2026-06-07",
+        "snap-fresh-selection",
+        available_at="2026-06-05T10:01:00+00:00",
+    )
+    store.insert_or_ignore(stale)
+    store.insert_or_ignore(fresh)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET last_error = ?
+         WHERE event_id = ?
+        """,
+        (
+            "EXECUTABLE_SNAPSHOT_STALE:"
+            "selection_deadline=2026-06-05T11:00:00+00:00:"
+            "decision_time=2026-06-05T12:00:00+00:00",
+            stale.event_id,
+        ),
+    )
+
+    returned_before_prune = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
+    assert stale.event_id not in [event.event_id for event in returned_before_prune]
+    assert fresh.event_id in [event.event_id for event in returned_before_prune]
+
+    archived = store.archive_expired_candidates(decision_time=_DECISION_TIME)
+
+    assert archived == 1
+    assert _status_of(conn, stale.event_id) == "expired"
+    assert _status_of(conn, fresh.event_id) == "pending"
+    returned_after_prune = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
+    assert stale.event_id not in [event.event_id for event in returned_after_prune]
+    assert fresh.event_id in [event.event_id for event in returned_after_prune]
+
+
 def test_active_oceania_candidate_not_archived_despite_utc_lookback():
     """(b1) An Oceania (UTC+12/13) city whose LOCAL target day is still open is NOT
     archived, even though a naive per-row lookback could mistake it for past. This
