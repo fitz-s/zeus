@@ -27,6 +27,7 @@ from src.config import get_mode, state_path
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
+from src.contracts.position_truth import REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     LifecyclePhase,
@@ -49,12 +50,7 @@ from src.state.portfolio import (
 logger = logging.getLogger(__name__)
 
 SOURCE_WRITER_FRONTIER_STALE_SECONDS = 5 * 60
-_REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
-    {
-        "entry_authority_quarantined",
-        "chain_absent_confirmed_position_unattributed",
-    }
-)
+_REDECISION_QUARANTINE_CHAIN_STATES = REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
 _CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS = 12 * 3600
 
 

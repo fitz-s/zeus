@@ -38,6 +38,17 @@ from enum import Enum
 from typing import Optional
 
 
+# Quarantined is a local lifecycle bucket, not proof that money is no longer at
+# risk. These chain states still carry real positive venue exposure and must stay
+# visible to held-position monitor/redecision lanes.
+REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset(
+    {
+        "entry_authority_quarantined",
+        "chain_absent_confirmed_position_unattributed",
+    }
+)
+
+
 # --------------------------------------------------------------------------- #
 # Authority labels                                                            #
 # --------------------------------------------------------------------------- #

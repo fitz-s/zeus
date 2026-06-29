@@ -1676,6 +1676,8 @@ def test_held_position_family_provider_excludes_closed_phases():
             ("Hong Kong", "2026-06-08", "high", 10.0, 10.0, 8.0, 8.0, 8.0, "synced", "economically_closed"),
             ("Warsaw", "2026-06-08", "high", 15.75, 15.75, 9.0, 9.0, 9.0, "synced", "admin_closed"),
             ("Seoul", "2026-06-08", "high", 7.0, 7.0, 5.0, 5.0, 5.0, "synced", "quarantined"),
+            ("Munich", "2026-06-30", "high", 29.14, 29.14, 21.27, 21.27, 21.27, "chain_absent_confirmed_position_unattributed", "quarantined"),
+            ("Lucknow", "2026-06-28", "high", 19.88, 19.88, 0.12, 0.12, 0.12, "entry_authority_quarantined", "quarantined"),
             ("Busan", "2026-06-20", "high", 22.0, 22.0, 15.0, 15.0, 15.0, "synced", "pending_entry"),
             ("Osaka", "2026-06-21", "high", 12.0, 12.0, 0.0, 0.0, 0.0, "synced", "active"),
             ("Paris", "2026-06-22", "low", 10.0, 0.0, 8.0, 0.0, 8.0, "local_only", "active"),
@@ -1686,6 +1688,8 @@ def test_held_position_family_provider_excludes_closed_phases():
     assert _held_position_families(conn) == {
         ("Tokyo", "2026-06-18", "low"),
         ("Shenzhen", "2026-06-19", "high"),
+        ("Munich", "2026-06-30", "high"),
+        ("Lucknow", "2026-06-28", "high"),
     }
 
 
@@ -1817,6 +1821,25 @@ def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
             ("Hong Kong", "2026-06-09", "high", "ghost-cond", "local_only", 0.0, "active"),
             ("Hong Kong", "2026-06-26", "low", "live-cond", "synced", 5.0, "day0_window"),
             ("Singapore", "2026-06-26", "high", "exit-cond", "exit_pending_missing", 1.0, "pending_exit"),
+            (
+                "Munich",
+                "2026-06-30",
+                "high",
+                "chain-absent-cond",
+                "chain_absent_confirmed_position_unattributed",
+                29.14,
+                "quarantined",
+            ),
+            (
+                "Lucknow",
+                "2026-06-28",
+                "high",
+                "entry-authority-cond",
+                "entry_authority_quarantined",
+                19.88,
+                "quarantined",
+            ),
+            ("Seoul", "2026-06-28", "high", "quarantine-ghost", "synced", 7.0, "quarantined"),
             ("Paris", "2026-06-26", "low", "zero-cond", "synced", 0.0, "active"),
         ],
     )
@@ -1825,6 +1848,8 @@ def test_held_condition_scope_excludes_zero_chain_local_ghosts(monkeypatch):
     assert main._edli_current_held_position_condition_scope() == {
         ("Hong Kong", "2026-06-26", "low"): {"live-cond"},
         ("Singapore", "2026-06-26", "high"): {"exit-cond"},
+        ("Munich", "2026-06-30", "high"): {"chain-absent-cond"},
+        ("Lucknow", "2026-06-28", "high"): {"entry-authority-cond"},
     }
 
 

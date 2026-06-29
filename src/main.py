@@ -55,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
     BlockingScheduler = None
 
 from src.config import cities_by_name, get_mode, settings
+from src.contracts.position_truth import REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
 from src.runtime import bankroll_provider
@@ -6645,16 +6646,33 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
         }
         if not required.issubset(cols):
             return {}
+        redecision_quarantine_states = tuple(
+            sorted(REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES)
+        )
+        redecision_quarantine_placeholders = ",".join(
+            "?" for _ in redecision_quarantine_states
+        )
         rows = trade_ro.execute(
             """
             SELECT city, target_date, temperature_metric, condition_id
               FROM position_current
-             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+             WHERE (
+                    (
+                        phase IN ('active', 'day0_window', 'pending_exit')
+                        AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')
+                    )
+                    OR (
+                        phase = 'quarantined'
+                        AND COALESCE(chain_state, '') IN ({redecision_quarantine_placeholders})
+                    )
+                   )
                AND condition_id IS NOT NULL
                AND TRIM(condition_id) != ''
                AND COALESCE(chain_shares, 0) > 0.000001
-               AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')
-            """
+            """.format(
+                redecision_quarantine_placeholders=redecision_quarantine_placeholders
+            ),
+            redecision_quarantine_states,
         ).fetchall()
         for row in rows:
             family_key = (
