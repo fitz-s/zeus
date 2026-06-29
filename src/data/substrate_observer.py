@@ -153,11 +153,13 @@ def _background_warm_refresh_budget_seconds() -> float:
         5.0,
         float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
     )
-    # Keep the sidecar well under the 20s cadence so money-path targeted refresh
-    # has lock windows between broad background warm ticks.
+    # Keep the sidecar under the 20s cadence while still giving the topology,
+    # CLOB, and trade-write phases enough wall-clock to commit real coverage.
+    # A 6s cap looked conservative but live evidence showed it repeatedly
+    # exhausted topology before any snapshot could be written.
     background_cap = max(
-        6.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "6.0")),
+        10.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS", "14.0")),
     )
     return min(configured, background_cap)
 
@@ -168,8 +170,8 @@ def _background_warm_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
         float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0")),
     )
     background_cap = max(
-        3.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "3.0")),
+        4.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS", "5.0")),
     )
     return min(configured, background_cap, max(0.1, refresh_budget_s - 0.1))
 
@@ -728,6 +730,26 @@ def _substrate_warm_business_summary(
     out = dict(summary or {})
     status = str(out.get("status") or "unknown")
     out["priority_marker_active"] = bool(priority_marker_active)
+    if status in {"error", "budget_exhausted_before_snapshot_capture", "topology_budget_exhausted"}:
+        out["scheduler_failed"] = True
+        out["scheduler_failure_reason"] = str(out.get("reason") or status)
+    attempted = int(out.get("attempted") or 0)
+    inserted = int(out.get("inserted") or 0)
+    failed = int(out.get("failed") or 0)
+    budget_exhausted = bool(out.get("budget_exhausted"))
+    coverage_status = str(out.get("executable_substrate_coverage_status") or "").strip().upper()
+    if attempted > 0 and inserted <= 0 and failed > 0:
+        out["scheduler_failed"] = True
+        out["scheduler_failure_reason"] = "snapshot_write_failed_no_coverage"
+    if status == "refreshed" and attempted > 0 and inserted <= 0 and (
+        budget_exhausted or coverage_status == "NONE"
+    ):
+        out["scheduler_failed"] = True
+        out["scheduler_failure_reason"] = (
+            "snapshot_refresh_exhausted_no_coverage"
+            if budget_exhausted
+            else "snapshot_refresh_no_executable_coverage"
+        )
     if isinstance(priority_request, dict):
         condition_ids = list(priority_request.get("condition_ids") or [])
         families = list(priority_request.get("families") or [])
@@ -741,10 +763,10 @@ def _substrate_warm_business_summary(
                 out["scheduler_failure_reason"] = "priority_conditions_not_serviced"
             elif status in {"error", "budget_exhausted_before_snapshot_capture", "topology_budget_exhausted"}:
                 out["scheduler_failed"] = True
-                out["scheduler_failure_reason"] = status
+                out["scheduler_failure_reason"] = str(out.get("reason") or status)
         elif families and status in {"error", "budget_exhausted_before_snapshot_capture", "topology_budget_exhausted"}:
             out["scheduler_failed"] = True
-            out["scheduler_failure_reason"] = status
+            out["scheduler_failure_reason"] = str(out.get("reason") or status)
     elif status == "error":
         out["scheduler_failed"] = True
         out["scheduler_failure_reason"] = str(out.get("reason") or status)
@@ -1839,12 +1861,6 @@ def _market_discovery_cycle() -> None:
             staleness_window_s,
         )
         return
-    if money_path_substrate_priority_active():
-        _market_discovery_lock.release()
-        logger.info(
-            "market_discovery skipped: live-money targeted substrate refresh has priority"
-        )
-        return
     substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
     if not substrate_acquired:
         _market_discovery_lock.release()
@@ -1859,13 +1875,13 @@ def _market_discovery_cycle() -> None:
             logger.info("market_discovery deferred: cross-process executable substrate refresh already running")
             return
         from src.data.market_scanner import (
-            find_weather_markets,
+            find_weather_markets_or_raise,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
         from src.state.db import get_trade_connection
 
-        events = find_weather_markets(
+        events = find_weather_markets_or_raise(
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
@@ -1883,6 +1899,7 @@ def _market_discovery_cycle() -> None:
                         "substrate_market_discovery_snapshot_refresh"
                     ),
                 )
+                conn.commit()
         finally:
             conn.close()
         if snapshot_summary.get("attempted", 0) > 0 and snapshot_summary.get("inserted", 0) == 0:

@@ -123,7 +123,26 @@ def _scheduler_job(job_name: str):
                 result = fn(*args, **kwargs)
                 try:
                     from src.observability.scheduler_health import _write_scheduler_health
-                    _write_scheduler_health(job_name, failed=False, reason=None)
+                    business_liveness = result if isinstance(result, dict) else None
+                    failed = bool(
+                        isinstance(business_liveness, dict)
+                        and business_liveness.get("scheduler_failed")
+                    )
+                    reason = (
+                        str(
+                            business_liveness.get("scheduler_failure_reason")
+                            or business_liveness.get("status")
+                            or ""
+                        )
+                        if isinstance(business_liveness, dict)
+                        else None
+                    )
+                    _write_scheduler_health(
+                        job_name,
+                        failed=failed,
+                        reason=reason or None,
+                        extra=business_liveness,
+                    )
                 except Exception:  # noqa: BLE001 — health write must never break the job
                     pass
                 return result

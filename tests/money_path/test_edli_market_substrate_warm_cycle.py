@@ -399,11 +399,44 @@ def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     assert "refresh_budget_seconds=background_budget_s" in warm_src
     assert "snapshot_reserve_seconds=background_snapshot_reserve_s" in warm_src
     assert "ZEUS_SUBSTRATE_BACKGROUND_REFRESH_BUDGET_SECONDS" in helper_src
-    assert '"6.0"' in helper_src
+    assert '"14.0"' in helper_src
     assert "ZEUS_SUBSTRATE_BACKGROUND_SNAPSHOT_RESERVE_SECONDS" in reserve_src
-    assert '"3.0"' in reserve_src
+    assert '"5.0"' in reserve_src
     assert "executor.shutdown(wait=False, cancel_futures=True)" in refresh_src
     assert "with ThreadPoolExecutor(" not in refresh_src
+
+
+def test_substrate_warm_topology_exhaustion_is_scheduler_failure():
+    summary = substrate_observer._substrate_warm_business_summary(
+        {
+            "status": "topology_budget_exhausted",
+            "families_checked": 221,
+            "topology_deferred_families": 221,
+        },
+        priority_request=None,
+        priority_marker_active=False,
+    )
+
+    assert summary["scheduler_failed"] is True
+    assert summary["scheduler_failure_reason"] == "topology_budget_exhausted"
+
+
+def test_substrate_warm_refreshed_zero_coverage_exhaustion_is_scheduler_failure():
+    summary = substrate_observer._substrate_warm_business_summary(
+        {
+            "status": "refreshed",
+            "attempted": 8,
+            "inserted": 0,
+            "failed": 0,
+            "budget_exhausted": 1,
+            "executable_substrate_coverage_status": "NONE",
+        },
+        priority_request=None,
+        priority_marker_active=False,
+    )
+
+    assert summary["scheduler_failed"] is True
+    assert summary["scheduler_failure_reason"] == "snapshot_refresh_exhausted_no_coverage"
 
 
 def test_targeted_decision_refresh_has_no_inline_quota_knobs():
@@ -1108,27 +1141,49 @@ def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):
     ]
 
 
-def test_market_discovery_cycle_yields_to_money_path_priority(monkeypatch):
-    """Universe discovery must not hold substrate lock while live money-path recapture waits."""
+def test_market_discovery_cycle_does_not_starve_stale_universe_for_priority_marker(monkeypatch):
+    """A priority marker accelerates targeted refresh; it must not starve stale discovery."""
 
-    calls: list[int] = []
+    calls: list[str] = []
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
     monkeypatch.setattr(
         substrate_observer,
         "_market_discovery_staleness_window_seconds",
         lambda: 0.0,
     )
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     import src.data.market_scanner as market_scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
 
     monkeypatch.setattr(
         market_scanner,
-        "find_weather_markets_or_raise",
-        lambda *a, **k: calls.append(1) or [],
+        "find_weather_markets",
+        lambda **_k: calls.append("find") or [{"condition_id": "cond-1", "outcomes": []}],
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "refresh_executable_market_substrate_snapshots",
+        lambda *_a, **_k: calls.append("refresh") or {"attempted": 1, "inserted": 1},
+    )
+
+    class _FakeDiscoveryConn:
+        def commit(self):
+            calls.append("commit")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: _FakeDiscoveryConn())
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
     )
 
     substrate_observer._market_discovery_cycle()
 
-    assert calls == []
+    assert calls == ["find", "refresh", "commit", "close"]
     assert not substrate_observer._market_discovery_lock.locked()
 
 

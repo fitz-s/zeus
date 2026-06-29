@@ -14,6 +14,7 @@ scheduler health must mark market_discovery FAILED — not healthy.
 RED baseline confirmed on pre-fix code (persistence failure was invisible to
 scheduler health); GREEN after P2-2 fix.
 """
+import contextlib
 import threading
 
 import pytest
@@ -166,6 +167,10 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     # Force STALE substrate so the staleness gate falls through to the capture path.
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 
@@ -181,6 +186,62 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
     ]
     assert failed_entries, (
         "market_discovery scheduler health was not marked FAILED when persistence failed. "
+        f"All health calls: {health_calls}"
+    )
+
+
+def test_market_discovery_persistence_failure_not_hidden_by_empty_priority_marker(monkeypatch):
+    """Priority markers are advisory; they must not mask full-discovery write failure."""
+
+    import src.data.market_scanner as market_scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.ingest.substrate_observer_daemon as observer_daemon
+    import src.observability.scheduler_health as scheduler_health
+    import src.state.db as state_db
+
+    health_calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: health_calls.append((job_name, kwargs)),
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        market_scanner,
+        "find_weather_markets",
+        lambda **_kw: [{"slug": "s1"}, {"slug": "s2"}],
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "get_last_market_events_persistence_result",
+        lambda: _make_fake_persistence_result(
+            status="failed",
+            inserted=0,
+            event_count=2,
+            error="sqlite3.OperationalError: database is locked",
+        ),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
+    monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+
+    observer_daemon._scheduler_job("market_discovery")(
+        substrate_observer._market_discovery_cycle
+    )()
+
+    failed_entries = [
+        (name, kw) for (name, kw) in health_calls
+        if name == "market_discovery" and kw.get("failed") is True
+    ]
+    assert failed_entries, (
+        "empty priority marker hid market_discovery persistence failure. "
         f"All health calls: {health_calls}"
     )
 
@@ -222,6 +283,10 @@ def test_trading_daemon_healthy_when_persistence_ok(monkeypatch):
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
     monkeypatch.setattr(state_db, "get_trade_connection", lambda write_class: FakeConn())
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _fake_refresh)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
     # Force STALE substrate so the staleness gate falls through to the capture path.
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 

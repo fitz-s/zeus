@@ -100,8 +100,9 @@ EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
 }
 
-MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 45.0
-MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 45.0
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
+MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
+MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT = 4
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 
@@ -204,6 +205,30 @@ def _rest_quote_refresh_backpressure_result(
     if extra:
         result.update(extra)
     return result
+
+
+def _price_channel_quote_refresh_failed(
+    result: dict,
+    *,
+    token_key: str,
+    event_key: str,
+) -> tuple[bool, str | None]:
+    """Return business-health failure for quote refresh that made no coverage progress."""
+
+    token_count = int(result.get(token_key) or 0)
+    events = int(result.get(event_key) or 0)
+    if token_count <= 0:
+        return False, None
+    if events > 0:
+        return False, None
+    if result.get("backpressure"):
+        return True, str(result.get("write_backpressure_reason") or result.get("skipped") or "quote_refresh_backpressure")
+    if result.get("budget_exhausted") or int(result.get("budget_skipped_tokens") or 0) > 0:
+        return True, "quote_refresh_budget_exhausted_no_coverage"
+    skipped = str(result.get("skipped") or "")
+    if skipped:
+        return True, skipped
+    return False, None
 
 
 # Required env for the user-channel WS (moved verbatim from src/main.py:1867).
@@ -2259,6 +2284,7 @@ def _edli_refresh_held_position_quote_evidence(
                 ),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
+                chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
@@ -2287,7 +2313,7 @@ def _edli_refresh_held_position_quote_evidence(
 
 def _edli_refresh_candidate_priority_quote_evidence(
     *,
-    limit: int = 128,
+    limit: int = 32,
     budget_seconds: float = MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT,
 ) -> dict:
     """Refresh executable quote evidence for recently selected candidate tokens.
@@ -2409,6 +2435,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 ),
                 commit=_commit_atomic_cross_db,
                 logger=logger,
+                chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
@@ -2457,15 +2484,24 @@ def _edli_held_quote_refresh_cycle() -> dict:
             reason=f"{type(exc).__name__}: {exc}",
         )
         raise
+    failed, reason = _price_channel_quote_refresh_failed(
+        result,
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+    if failed:
+        result["scheduler_failed"] = True
+        result["scheduler_failure_reason"] = reason or "held_quote_refresh_no_coverage"
     _write_scheduler_health(
         "edli_held_quote_refresh",
-        failed=False,
+        failed=failed,
+        reason=reason,
         extra=result,
     )
     return result
 
 
-def _edli_market_channel_ingestor_cycle() -> None:
+def _edli_market_channel_ingestor_cycle() -> dict | None:
     """EDLI market-channel online data-service bootstrap.
 
     This daemon-side job discovers active weather tokens and prepares the public
@@ -2483,7 +2519,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
             limit=_edli_bounded_positive_int(
                 edli_cfg,
                 "market_channel_candidate_priority_max_tokens",
-                default=128,
+                default=32,
                 maximum=1000,
             ),
             budget_seconds=_edli_bounded_positive_float(
@@ -2493,18 +2529,33 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 maximum=120.0,
             ),
         )
+        candidate_failed, candidate_reason = _price_channel_quote_refresh_failed(
+            candidate_refresh,
+            token_key="candidate_token_metadata",
+            event_key="candidate_quote_refresh_events",
+        )
+        if candidate_failed:
+            candidate_refresh["scheduler_failed"] = True
+            candidate_refresh["scheduler_failure_reason"] = (
+                candidate_reason or "candidate_quote_refresh_no_coverage"
+            )
+        health = {
+            "thread": "alive",
+            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "fill_authority": "user_channel_or_reconcile_only",
+            "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
+            "candidate_quote_refresh": candidate_refresh,
+        }
+        if candidate_failed:
+            health["scheduler_failed"] = True
+            health["scheduler_failure_reason"] = candidate_reason or "candidate_quote_refresh_no_coverage"
         _write_scheduler_health(
             "edli_market_channel_ingestor",
-            failed=False,
-            extra={
-                "thread": "alive",
-                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-                "fill_authority": "user_channel_or_reconcile_only",
-                "held_quote_refresh": "delegated_to_edli_held_quote_refresh",
-                "candidate_quote_refresh": candidate_refresh,
-            },
+            failed=candidate_failed,
+            reason=candidate_reason,
+            extra=health,
         )
-        return
+        return health
 
     from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_for_tokens
     from src.state.db import get_trade_connection, get_world_connection
@@ -2519,7 +2570,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
         candidate_priority_limit = _edli_bounded_positive_int(
             edli_cfg,
             "market_channel_candidate_priority_max_tokens",
-            default=128,
+            default=32,
             maximum=1000,
         )
         candidate_priority_token_ids = _edli_candidate_priority_token_ids(
@@ -2553,21 +2604,22 @@ def _edli_market_channel_ingestor_cycle() -> None:
         trade_conn.close()
 
     if not token_ids:
+        health = {
+            "active_weather_token_ids": 0,
+            "priority_token_ids": len(priority_token_ids),
+            "held_priority_token_ids": len(held_priority_token_ids),
+            "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
+            "seed_first_token_ids": len(seed_first_token_ids),
+            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+            "fill_authority": "user_channel_or_reconcile_only",
+            "skipped": "no_priority_token_metadata",
+        }
         _write_scheduler_health(
             "edli_market_channel_ingestor",
             failed=False,
-            extra={
-                "active_weather_token_ids": 0,
-                "priority_token_ids": len(priority_token_ids),
-                "held_priority_token_ids": len(held_priority_token_ids),
-                "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
-                "seed_first_token_ids": len(seed_first_token_ids),
-                "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-                "fill_authority": "user_channel_or_reconcile_only",
-                "skipped": "no_priority_token_metadata",
-            },
+            extra=health,
         )
-        return
+        return health
 
     def _runner() -> None:
         from src.data.polymarket_client import PolymarketClient
@@ -2749,19 +2801,21 @@ def _edli_market_channel_ingestor_cycle() -> None:
         daemon=True,
     )
     _edli_market_channel_thread.start()
+    health = {
+        "active_weather_token_ids": len(token_ids),
+        "priority_token_ids": len(priority_token_ids),
+        "held_priority_token_ids": len(held_priority_token_ids),
+        "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
+        "seed_first_token_ids": len(seed_first_token_ids),
+        "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
+        "fill_authority": "user_channel_or_reconcile_only",
+        "thread": "started",
+        "rest_seed_status": "polymarket_public_orderbook",
+        "websocket_endpoint": "polymarket_public_market_channel",
+    }
     _write_scheduler_health(
         "edli_market_channel_ingestor",
         failed=False,
-        extra={
-            "active_weather_token_ids": len(token_ids),
-            "priority_token_ids": len(priority_token_ids),
-            "held_priority_token_ids": len(held_priority_token_ids),
-            "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
-            "seed_first_token_ids": len(seed_first_token_ids),
-            "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
-            "fill_authority": "user_channel_or_reconcile_only",
-            "thread": "started",
-            "rest_seed_status": "polymarket_public_orderbook",
-            "websocket_endpoint": "polymarket_public_market_channel",
-        },
+        extra=health,
     )
+    return health

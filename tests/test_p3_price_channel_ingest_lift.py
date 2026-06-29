@@ -57,9 +57,58 @@ _LIFTED_PRODUCERS = (
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
     from src.ingest import price_channel_ingest as pci
 
-    assert pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT >= 45.0
+    assert 10.0 <= pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT < 60.0
+    assert pci.MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT <= 4
     assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS >= 15000
     assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
+
+
+def test_quote_refresh_no_coverage_is_business_failure() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    failed, reason = pci._price_channel_quote_refresh_failed(
+        {
+            "candidate_token_metadata": 32,
+            "candidate_quote_refresh_events": 0,
+            "budget_exhausted": True,
+            "budget_skipped_tokens": 32,
+        },
+        token_key="candidate_token_metadata",
+        event_key="candidate_quote_refresh_events",
+    )
+
+    assert failed is True
+    assert reason == "quote_refresh_budget_exhausted_no_coverage"
+
+
+def test_price_channel_daemon_scheduler_health_uses_business_result(monkeypatch) -> None:
+    import src.ingest.price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+
+    wrapped = daemon._scheduler_job("edli_market_channel_ingestor")(
+        lambda: {
+            "scheduler_failed": True,
+            "scheduler_failure_reason": "candidate_quote_refresh_no_coverage",
+        }
+    )
+    result = wrapped()
+
+    assert result["scheduler_failed"] is True
+    assert writes == [
+        {
+            "job_name": "edli_market_channel_ingestor",
+            "failed": True,
+            "reason": "candidate_quote_refresh_no_coverage",
+            "extra": result,
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

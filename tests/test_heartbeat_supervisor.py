@@ -1515,7 +1515,7 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
     refresh_calls = [call for call in calls if call[0] == "refresh"]
     assert len(refresh_calls) == 1
     assert refresh_calls[0][1][2] is True
-    assert ("commit", None) not in calls
+    assert ("commit", None) in calls
     assert ("close", None) in calls
 
 
@@ -1566,6 +1566,10 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
     # P2: force STALE substrate so the staleness gate falls through to capture (the cycle is
     # decoupled from main._cycle_lock — a P1 cycle-lock held must not block this producer).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
 
     assert main._cycle_lock.acquire(blocking=False)
     try:

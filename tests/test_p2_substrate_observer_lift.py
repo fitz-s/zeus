@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 from pathlib import Path
 
@@ -410,7 +411,7 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
         # A non-empty universe — there IS substrate to capture.
         return [{"condition_id": "c1", "outcomes": []}]
 
-    def _fake_refresh(conn, *, markets, clob, captured_at, scan_authority):
+    def _fake_refresh(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
         captured["refresh_called"] = True
         captured["events_seen"] = markets
         return {"attempted": 1, "inserted": 1}
@@ -440,6 +441,10 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
     ms.refresh_executable_market_substrate_snapshots = _fake_refresh
     pc.PolymarketClient = lambda *a, **k: _FakeClob()
     dbmod.get_trade_connection = lambda *a, **k: _FakeConn()
+    import src.data.dual_run_lock as dual_run_lock
+
+    orig_lock = dual_run_lock.acquire_lock
+    dual_run_lock.acquire_lock = lambda _name: contextlib.nullcontext(True)
     # Make the staleness clock report STALE so the producer is due to fire.
     obs._market_discovery_last_completed_monotonic = None
     try:
@@ -451,6 +456,7 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
         ms.refresh_executable_market_substrate_snapshots = orig["refresh"]
         pc.PolymarketClient = orig["client"]
         dbmod.get_trade_connection = orig["trade_conn"]
+        dual_run_lock.acquire_lock = orig_lock
 
     assert captured["refresh_called"], (
         "the substrate producer must reach the snapshot-capture write path on staleness "
