@@ -2587,6 +2587,26 @@ tables:
       this bounded per-condition/token state first and fall back to the append
       table for legacy databases without mirror rows.
 
+  - name: executable_market_snapshot_invalidations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: init_schema_trade_only
+    pk_col: invalidation_id
+    required_columns:
+      - {name: invalidation_id, type: TEXT, nullable: true}
+      - {name: condition_id, type: TEXT, nullable: true}
+      - {name: token_id, type: TEXT, nullable: true}
+      - {name: reason, type: TEXT, nullable: false}
+      - {name: invalidated_at, type: TEXT, nullable: false}
+      - {name: created_at, type: TEXT, nullable: false}
+    notes: >
+      Append-only executable snapshot invalidation facts emitted from public
+      market-channel tick-size/lifecycle changes. The executable_market_snapshots
+      evidence table remains immutable for venue-command auditability; live
+      price readers and submit gates fail closed on rows captured before a
+      matching invalidation until a newer snapshot is captured.
+
   - name: book_hash_transitions
     db: trade
     schema_class: trade_class

@@ -68,6 +68,10 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     "book_hash_transitions",
     "decision_integrity_quarantine",  # PR-E 2026-05-22: trade-class quarantine
     "execution_fact",
+    "execution_feasibility_evidence",
+    "execution_feasibility_latest",
+    "executable_market_snapshot_invalidations",
+    "executable_market_snapshot_latest",
     "executable_market_snapshots",
     "position_current",
     "position_events",

@@ -2076,7 +2076,7 @@ files:
   src/state/snapshot_repo.py:
     zone: K2_runtime
     authority_role: executable_market_snapshot_journal
-    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands. Also maintains executable_market_snapshot_latest as a compact trade-DB read model so hot refresh-priority paths do not scan the high-frequency append log.
+    why: R3 U1 append-only executable market snapshot persistence and lookup surface; snapshots are immutable evidence for venue_commands. Also maintains executable_market_snapshot_latest as a compact trade-DB read model so hot refresh-priority paths do not scan the high-frequency append log. Market-channel tick/lifecycle changes append executable_market_snapshot_invalidations instead of mutating historical snapshot rows; live readers and submit gates reject invalidated rows until newer snapshot evidence exists.
     downstream:
     - src/state/venue_command_repo.py
     - src/execution/executor.py
