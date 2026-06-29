@@ -117,11 +117,51 @@ def test_day0_live_family_admission_uses_market_events_without_coldboot_flood():
         ("Paris", "2026-06-29", "low"),
     )
 
-    admission = main_module._edli_day0_live_family_admission(forecasts_conn, trade_conn)
+    admission = main_module._edli_day0_live_family_admission(
+        forecasts_conn,
+        trade_conn,
+        decision_time=datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc),
+    )
 
     assert admission.expiry_safe is True
     assert admission({"city": "Paris", "target_date": "2026-06-29", "metric": "lowest"})
     assert not admission({"city": "Zhengzhou", "target_date": "2026-06-29", "metric": "high"})
+    assert not admission({"city": "Paris", "target_date": "2026-06-28", "metric": "low"})
+
+
+def test_day0_live_family_admission_uses_city_local_day_not_utc_floor(monkeypatch):
+    forecasts_conn = sqlite3.connect(":memory:")
+    trade_conn = sqlite3.connect(":memory:")
+    _create_minimal_trade_exposure_tables(trade_conn)
+    forecasts_conn.execute(
+        "CREATE TABLE market_events (city TEXT, target_date TEXT, temperature_metric TEXT)"
+    )
+    monkeypatch.setitem(
+        main_module.cities_by_name,
+        "Testville",
+        SimpleNamespace(
+            name="Testville",
+            aliases=(),
+            slug_names=(),
+            timezone="America/Chicago",
+        ),
+    )
+    forecasts_conn.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?)",
+        [
+            ("Testville", "2026-06-28", "high"),
+            ("Testville", "2026-06-29", "high"),
+        ],
+    )
+
+    admission = main_module._edli_day0_live_family_admission(
+        forecasts_conn,
+        trade_conn,
+        decision_time=datetime(2026, 6, 29, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert admission({"city": "Testville", "target_date": "2026-06-28", "metric": "high"})
+    assert not admission({"city": "Testville", "target_date": "2026-06-29", "metric": "high"})
 
 
 def test_day0_live_family_admission_empty_market_events_does_not_admit_unexposed_family():
@@ -132,7 +172,11 @@ def test_day0_live_family_admission_empty_market_events_does_not_admit_unexposed
         "CREATE TABLE market_events (city TEXT, target_date TEXT, temperature_metric TEXT)"
     )
 
-    admission = main_module._edli_day0_live_family_admission(forecasts_conn, trade_conn)
+    admission = main_module._edli_day0_live_family_admission(
+        forecasts_conn,
+        trade_conn,
+        decision_time=datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc),
+    )
 
     assert admission.expiry_safe is True
     assert admission.admitted_families == frozenset()

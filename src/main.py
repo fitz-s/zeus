@@ -178,6 +178,8 @@ class _Day0LiveFamilyAdmission:
 def _edli_day0_live_family_admission(
     forecasts_conn,
     trade_conn,
+    *,
+    decision_time: datetime | None = None,
 ) -> _Day0LiveFamilyAdmission:
     """Build the Day0 execution admission set from live market/exposure truth.
 
@@ -186,6 +188,27 @@ def _edli_day0_live_family_admission(
     substrate budget on families where no order can ever be placed.
     """
 
+    decision_time_utc = (
+        datetime.now(timezone.utc)
+        if decision_time is None
+        else decision_time.astimezone(timezone.utc)
+    )
+
+    def _market_family_is_current_local_day(city: object, target_date: object) -> bool:
+        city_name = _substrate_refresh_canonical_city_name(city)
+        city_cfg = cities_by_name.get(city_name)
+        city_tz = str(getattr(city_cfg, "timezone", "") or "")
+        if not city_tz:
+            return False
+        try:
+            target_local_date = date.fromisoformat(str(target_date or "").strip())
+            decision_local_date = decision_time_utc.astimezone(ZoneInfo(city_tz)).date()
+        except Exception:
+            return False
+        return target_local_date == decision_local_date
+
+    target_floor = (decision_time_utc.date() - timedelta(days=1)).isoformat()
+    target_ceiling = (decision_time_utc.date() + timedelta(days=1)).isoformat()
     market_families: set[tuple[str, str, str]] = set()
     market_surface_read_ok = False
     try:
@@ -200,10 +223,14 @@ def _edli_day0_live_family_admission(
                  WHERE city IS NOT NULL
                    AND target_date IS NOT NULL
                    AND temperature_metric IN ('high', 'low')
-                """
+                   AND target_date BETWEEN ? AND ?
+                """,
+                (target_floor, target_ceiling),
             ).fetchall()
             market_surface_read_ok = True
             for city, target_date, metric in rows:
+                if not _market_family_is_current_local_day(city, target_date):
+                    continue
                 family = _substrate_refresh_family_key(city, target_date, metric)
                 if all(family):
                     market_families.add(family)
@@ -4319,6 +4346,7 @@ def _edli_event_reactor_cycle() -> None:
                     _day0_family_admission = _edli_day0_live_family_admission(
                         forecasts_conn,
                         _day0_admission_trade_conn,
+                        decision_time=now,
                     )
                 finally:
                     _day0_admission_trade_conn.close()
