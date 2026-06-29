@@ -488,6 +488,108 @@ def test_deploy_live_kickstarts_when_service_loaded(monkeypatch):
     assert calls[-1] == ["launchctl", "kickstart", "-k", f"{dl.GUI_DOMAIN}/{label}"]
 
 
+def test_deploy_live_live_restart_stops_before_preflight(monkeypatch, capsys):
+    dl = _load("deploy_live_restart_order_live", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+
+    def _stop(label):
+        calls.append(("stop", label))
+        return True, f"stopped {label}"
+
+    def _preflight(labels):
+        calls.append(("preflight", tuple(labels)))
+        return True, "live restart preflight passed"
+
+    def _launch(label):
+        calls.append(("launch", label))
+        return True, f"bootstrapped {label}"
+
+    monkeypatch.setattr(dl, "_stop_label", _stop)
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
+    monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
+
+    rc = dl.main(["restart", "live-trading"])
+
+    assert rc == 0
+    assert calls == [
+        ("stop", dl.LIVE_TRADING_LABEL),
+        ("preflight", (dl.LIVE_TRADING_LABEL,)),
+        ("launch", dl.LIVE_TRADING_LABEL),
+    ]
+    assert "live restart preflight passed" in capsys.readouterr().out
+
+
+def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
+    dl = _load("deploy_live_restart_order_all", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (calls.append(("stop", label)) or (True, f"stopped {label}")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_run_restart_preflight_if_needed",
+        lambda labels: (calls.append(("preflight", tuple(labels))) or (True, "preflight ok")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, f"bootstrapped {label}")),
+    )
+
+    rc = dl.main(["restart", "all"])
+
+    assert rc == 0
+    assert calls[0] == ("stop", dl.LIVE_TRADING_LABEL)
+    preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
+    live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
+    assert live_launch_index > preflight_index
+    non_live_launches = [
+        call for call in calls[1:preflight_index]
+        if call[0] == "launch"
+    ]
+    assert {label for _, label in non_live_launches} == {
+        label for label in dl.DAEMONS.values() if label != dl.LIVE_TRADING_LABEL
+    }
+
+
+def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
+    dl = _load("deploy_live_restart_preflight_failure", "deploy_live.py")
+    calls = []
+
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty: (True, []))
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (calls.append(("stop", label)) or (True, f"stopped {label}")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_run_restart_preflight_if_needed",
+        lambda labels: (calls.append(("preflight", tuple(labels))) or (False, "not green")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (calls.append(("launch", label)) or (True, f"bootstrapped {label}")),
+    )
+
+    rc = dl.main(["restart", "live-trading"])
+
+    assert rc == 1
+    assert calls == [
+        ("stop", dl.LIVE_TRADING_LABEL),
+        ("preflight", (dl.LIVE_TRADING_LABEL,)),
+    ]
+    err = capsys.readouterr().err
+    assert "live-trading left stopped" in err
+
+
 def test_deploy_live_unknown_daemon_rejected(capsys):
     dl = _load("deploy_live_smoke3", "deploy_live.py")
     rc = dl.main(["restart", "no-such-daemon"])

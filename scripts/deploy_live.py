@@ -110,6 +110,7 @@ DAEMONS = {
     "venue-heartbeat": "com.zeus.venue-heartbeat",
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
+LIVE_TRADING_LABEL = "com.zeus.live-trading"
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
@@ -239,6 +240,22 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
     return False, f"FAILED bootstrap {label}: rc={boot.returncode} {boot.stderr.strip()}"
 
 
+def _stop_label(label: str) -> tuple[bool, str]:
+    """Stop/unload a launchd label so preflight can inspect an absent process."""
+
+    if not _launchctl_service_loaded(label):
+        return True, f"{label} already stopped"
+    stop = subprocess.run(
+        ["launchctl", "bootout", f"{GUI_DOMAIN}/{label}"],
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+    )
+    if stop.returncode == 0:
+        return True, f"stopped {label}"
+    return False, f"FAILED stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     try:
         _require_live_repo()
@@ -296,7 +313,7 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     DB/artifact/sidecar/held-position safety checks.
     """
 
-    if "com.zeus.live-trading" not in labels:
+    if LIVE_TRADING_LABEL not in labels:
         return True, "preflight not required for this daemon"
     live_repo = _require_live_repo()
     py = os.path.join(live_repo, ".venv", "bin", "python")
@@ -345,16 +362,46 @@ def cmd_restart(args: argparse.Namespace) -> int:
             print(f"  {b}")
         print("!" * 64)
 
+    rc_all = 0
+    includes_live_trading = LIVE_TRADING_LABEL in labels
+    live_was_stopped = False
+    if includes_live_trading:
+        ok, detail = _stop_label(LIVE_TRADING_LABEL)
+        if ok:
+            print(detail)
+        else:
+            print(detail, file=sys.stderr)
+        if not ok:
+            return 1
+        live_was_stopped = True
+
+    non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
+    for label in non_live_labels:
+        ok, detail = _launch_or_restart_label(label)
+        if ok:
+            print(detail)
+        else:
+            rc_all = 1
+            print(detail, file=sys.stderr)
+    if rc_all != 0:
+        if live_was_stopped:
+            print(
+                "live-trading left stopped because a prerequisite daemon failed to restart",
+                file=sys.stderr,
+            )
+        return rc_all
+
     preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)
+        if live_was_stopped:
+            print("live-trading left stopped; fix preflight blockers before starting it.", file=sys.stderr)
         return 1
     print(preflight_detail)
 
-    rc_all = 0
-    for label in labels:
-        ok, detail = _launch_or_restart_label(label)
+    if includes_live_trading:
+        ok, detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)
         else:
