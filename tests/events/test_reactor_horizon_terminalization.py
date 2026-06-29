@@ -313,10 +313,13 @@ def test_horizon_terminalizes_with_horizon_label():
     assert "attempt" not in regret[0].lower()
 
 
-def test_selection_deadline_past_terminalizes_stale_snapshot_retry():
-    """A selected executable snapshot's deadline is the event's own execution
-    horizon. Once that selected window is past, the stale event must not keep
-    refreshing substrate and requeueing ahead of newer entry/redecision work."""
+def test_selection_deadline_in_stale_snapshot_reason_does_not_terminalize_retry():
+    """A selected executable snapshot's deadline is stale price evidence, not event life.
+
+    The cure is fresh executable substrate plus redecision. Terminalizing on this reason
+    burns otherwise-refreshable Day0/redecision work before the sidecar or decision-time
+    priority refresh can write a fresh row.
+    """
     conn, store = _store()
     event = _day0_event(city="New York", target_date="2026-06-26", suffix="stale-deadline")
     store.insert_or_ignore(event)
@@ -333,22 +336,14 @@ def test_selection_deadline_past_terminalizes_stale_snapshot_retry():
         result=res,
     )
 
-    assert res.dead_lettered == 1
-    assert res.retried == 0
-    assert _status(conn, event.event_id) == "dead_letter"
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
     row = conn.execute(
         "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
         (event.event_id,),
     ).fetchone()
-    assert row is not None
-    assert row[0] == "MONEY_PATH_HORIZON_EXPIRED"
-    assert "SELECTION_DEADLINE_PAST" in (row[1] or "")
-    assert "EXECUTABLE_SNAPSHOT_STALE" in (row[1] or "")
-    regret = conn.execute(
-        "SELECT rejection_reason FROM no_trade_regret_events ORDER BY rowid DESC LIMIT 1"
-    ).fetchone()
-    assert regret is not None
-    assert regret[0].startswith("MONEY_PATH_HORIZON_EXPIRED:SELECTION_DEADLINE_PAST:")
+    assert row is None
 
 
 def test_fresh_substrate_sidecar_owns_broad_refresh(monkeypatch, tmp_path):

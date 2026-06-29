@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import math
 
-# SINGLE VOCABULARY: live entry requires settled-record evidence.  The K3 module
-# can still mark thin claim history as non-refuting, but live-money admission
-# must not treat absent evidence as an executable license.
+# BUY-NO MATERIAL-BIN VOCABULARY: this is stricter than the replacement certificate
+# coverage predicate. A typed INSUFFICIENT_DATA verdict proves the coverage authority ran
+# and is enough for the certificate bridge to continue into ordinary live gates, but it
+# is not enough to waive the special material-bin buy-NO evidence requirement.
 from src.calibration.settlement_backward_coverage import (
     settlement_coverage_refutes_claim,
 )
@@ -33,14 +34,14 @@ LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
 LIVE_BUY_NO_MATERIAL_YES_POSTERIOR = 0.20
 LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
 
-# SINGLE AUTHORITY: settlement-backward coverage verdict statuses under which the
-# buy-NO material-bin conservative-evidence gate admits a fused-bootstrap q_lcb.
-# Live entry requires actual settled-record support or a refuted-and-shrunk bound:
+# Settlement-backward coverage verdict statuses under which the buy-NO material-bin
+# conservative-evidence gate admits a fused-bootstrap q_lcb. This is intentionally
+# narrower than the certificate bridge's "typed verdict exists" rule:
 #   LICENSED          = realized settled win-rate backs the claimed q_lcb within tolerance.
 #   UNLICENSED        = the record refuted the raw claim and the K3 shrink to realized-1pp
 #                       was the verdict's output — the (shrunk) q_lcb is settled-backed.
 #   INSUFFICIENT_DATA = thin/absent claim history; not overconfidence proof, but
-#                       also not a live-money entry license.
+#                       also not a material-bin buy-NO waiver.
 # None / UNEVALUATED carry no executable verdict and are not admitted by this gate.
 # Category inversion this kills: a record-BACKED bootstrap q_lcb must not be rejected while
 # a record-REFUTED (re-branded) one is accepted. The verdict, not the brand, is the evidence.
@@ -244,9 +245,9 @@ def live_buy_no_conservative_evidence_rejection_reason(
     buy-YES.
 
     ``settlement_coverage_status`` is the family's settlement-backward coverage
-    verdict. When the q_lcb source is not in the allow-list, live entry admits
-    only LICENSED or UNLICENSED-after-shrink semantics. INSUFFICIENT_DATA is not
-    a live-money license because it carries no realized backing.
+    verdict. When the q_lcb source is not in the allow-list, this special buy-NO
+    gate admits only LICENSED or UNLICENSED-after-shrink semantics. INSUFFICIENT_DATA
+    is allowed at the certificate layer but is not a material-bin buy-NO waiver.
     """
 
     if direction != "buy_no":

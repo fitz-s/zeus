@@ -7,9 +7,10 @@
 #   RELATIONSHIP tests (Fitz methodology): they assert the cross-function invariant
 #   credential-state -> certificate-authority -> live-gate-verdict holds across the boundary
 #   between the calibration-authority builder, the live admission gate, and the verifier.
-#   Live entry now requires realized calibration coverage: INSUFFICIENT_DATA is preserved
-#   for provenance but blocked, while UNLICENSED admits ONLY when the shrink was actually
-#   applied to the leg.
+#   Typed coverage verdicts license the certificate bridge so ordinary live gates can run:
+#   INSUFFICIENT_DATA is thin-history, not a structural authority failure. UNLICENSED still
+#   admits ONLY when the shrink was actually applied to the leg; no verdict / unknown
+#   verdict remains blocked.
 """Quadrant relationship matrix for the replacement calibration credential.
 
 The credential bridges three modules whose boundary the bug lived at:
@@ -19,10 +20,10 @@ The credential bridges three modules whose boundary the bug lived at:
   (4) the verifier's APPROVED_CALIBRATION_AUTHORITIES round-trips the admitted authority.
 
 The quadrants:
-  Q1 replacement + bounds + LICENSED / UNLICENSED-shrunk -> admitted,
+  Q1 replacement + bounds + LICENSED / INSUFFICIENT_DATA / UNLICENSED-shrunk -> admitted,
      FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE
   Q2 replacement + NO bounds                   -> IDENTITY_FALLBACK reject (unchanged)
-  Q3 replacement + bounds, INSUFFICIENT_DATA / NO verdict (None) OR UNLICENSED-unshrunk
+  Q3 replacement + bounds, NO verdict (None) / unknown status OR UNLICENSED-unshrunk
      -> UNEVALUATED reject
   Q4 legacy candidate, no Platt bucket         -> IDENTITY_FALLBACK reject (unchanged)
 """
@@ -116,10 +117,10 @@ def _render_payload(credential):
 
 # ---------------------------------------------------------------------------
 # Q1 — replacement + bounds + an ADMITTING coverage verdict -> new authority
-#   LICENSED: admitted unconditionally.
+#   LICENSED / INSUFFICIENT_DATA: admitted unconditionally at the cert layer.
 #   UNLICENSED-shrunk (q_lcb_out<q_lcb_in): admitted (the shrunk q_lcb is honest).
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("status", ["LICENSED", "UNLICENSED"])
+@pytest.mark.parametrize("status", ["LICENSED", "INSUFFICIENT_DATA", "UNLICENSED"])
 def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
@@ -127,12 +128,17 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
         q_mode="FUSED_NORMAL_FULL",
     )
     # UNLICENSED admits ONLY when the shrink was actually applied: a real downward shrink
-    # (q_lcb_out < q_lcb_in) with the coverage gate ON. LICENSED needs no shrink.
-    verdict = (
-        _coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66)
-        if status == "UNLICENSED"
-        else _coverage_verdict("LICENSED")
-    )
+    # (q_lcb_out < q_lcb_in) with the coverage gate ON. LICENSED and INSUFFICIENT_DATA
+    # need no shrink at the certificate layer; downstream quality gates still decide.
+    if status == "UNLICENSED":
+        verdict = _coverage_verdict("UNLICENSED", q_lcb_in=0.80, q_lcb_out=0.66)
+        expected_samples = 60
+    elif status == "INSUFFICIENT_DATA":
+        verdict = _coverage_verdict("INSUFFICIENT_DATA", n=0, ratio=None, realized=None)
+        expected_samples = 0
+    else:
+        verdict = _coverage_verdict("LICENSED")
+        expected_samples = 60
     credential = _build_replacement_calibration_credential(
         replacement_bundle=bundle,
         q_mode="FUSED_NORMAL_FULL",
@@ -149,7 +155,7 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
     assert cal_payload["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert cal_payload["coverage_status"] == status
     assert cal_payload["posterior_id"] == 4242
-    assert cal_payload["n_samples"] == 60
+    assert cal_payload["n_samples"] == expected_samples
     assert cal_payload["season"] is not None
 
     # the live gate ADMITS it (no raise)
@@ -158,29 +164,6 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
 
     # the verifier's approved set round-trips it
     assert FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
-
-
-def test_q3_insufficient_data_is_preserved_but_live_blocked():
-    """Thin-history INSUFFICIENT_DATA has no realized backing and cannot submit live."""
-    bundle = _replacement_bundle(
-        q_lcb={"bin-a": 0.80},
-        q_lcb_basis="fused_center_bootstrap_p05",
-        q_mode="FUSED_NORMAL_FULL",
-    )
-    credential = _build_replacement_calibration_credential(
-        replacement_bundle=bundle,
-        q_mode="FUSED_NORMAL_FULL",
-        coverage_verdict=_coverage_verdict("INSUFFICIENT_DATA", n=0, ratio=None, realized=None),
-        family=_family(),
-    )
-    cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
-    assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"  # preserved for observability
-    assert cal_payload["n_samples"] == 0
-    cert = SimpleNamespace(payload=cal_payload)
-    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
-        _assert_event_bound_calibration_live_admitted(cert)
-
 
 def test_day0_live_observation_hard_fact_calibration_authority_admits():
     """Day0 hard facts do not need a legacy Platt bucket.
@@ -279,9 +262,9 @@ def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, 
 
 
 # ---------------------------------------------------------------------------
-# Q3 — replacement + bounds, no live-licensing coverage -> UNEVALUATED reject (distinct).
-#   INSUFFICIENT_DATA is in this quadrant: the machinery evaluated the scope but found too
-#   little realized backing for live entry.
+# Q3 — replacement + bounds, no typed coverage verdict -> UNEVALUATED reject (distinct).
+#   INSUFFICIENT_DATA is NOT in this quadrant: the machinery evaluated the scope and found
+#   thin history, which is different from no authority verdict at all.
 # ---------------------------------------------------------------------------
 def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked():
     bundle = _replacement_bundle(
@@ -434,7 +417,8 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
     )
     assert verdict is not None
     assert verdict.status == "INSUFFICIENT_DATA"
-    # INSUFFICIENT_DATA is preserved for provenance but does not license live entry.
+    # INSUFFICIENT_DATA is preserved for provenance and licenses only the certificate
+    # bridge as a typed verdict. It is not a material buy-NO waiver.
     credential = _build_replacement_calibration_credential(
         replacement_bundle=_replacement_bundle(
             q_lcb={"bin-a": 0.80},
@@ -446,10 +430,9 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
         family=family,
     )
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
     assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
-    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
-        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
 
 
 def test_family_coverage_verdict_none_when_no_candidate_lcb():

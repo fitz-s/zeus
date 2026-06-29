@@ -2708,7 +2708,7 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert payload["exit_failure"] is False
 
 
-def test_market_closed_hold_preserves_persisted_monitor_values(conn):
+def test_market_closed_hold_clears_stale_monitor_values(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
     from src.state.portfolio import Position
@@ -2785,11 +2785,11 @@ def test_market_closed_hold_preserves_persisted_monitor_values(conn):
         """,
         (persisted.trade_id,),
     ).fetchone()
-    assert current["last_monitor_prob"] == pytest.approx(0.91)
-    assert current["last_monitor_prob_is_fresh"] == 1
-    assert current["last_monitor_edge"] == pytest.approx(0.16)
-    assert current["last_monitor_market_price"] == pytest.approx(0.75)
-    assert current["last_monitor_market_price_is_fresh"] == 1
+    assert current["last_monitor_prob"] is None
+    assert current["last_monitor_prob_is_fresh"] == 0
+    assert current["last_monitor_edge"] is None
+    assert current["last_monitor_market_price"] is None
+    assert current["last_monitor_market_price_is_fresh"] == 0
 
     event = conn.execute(
         """
@@ -2803,10 +2803,11 @@ def test_market_closed_hold_preserves_persisted_monitor_values(conn):
     ).fetchone()
     payload = json.loads(event["payload_json"])
     assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
-    assert payload["last_monitor_prob"] == pytest.approx(0.91)
-    assert payload["last_monitor_market_price"] == pytest.approx(0.75)
-    assert payload["last_monitor_prob_is_fresh"] is True
-    assert payload["last_monitor_market_price_is_fresh"] is True
+    assert payload["last_monitor_prob"] is None
+    assert payload["last_monitor_market_price"] is None
+    assert payload["last_monitor_prob_is_fresh"] is False
+    assert payload["last_monitor_market_price_is_fresh"] is False
+    assert "closed_market_monitor_evidence_unavailable" in payload["applied_validations"]
 
 
 def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):

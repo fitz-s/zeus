@@ -4262,6 +4262,25 @@ def execute_monitoring_phase(
                         boundary="day0_window_entered",
                     )
 
+            # Day0 hard facts are settlement/observation truth, not venue
+            # executability.  Compute them before the closed-market gate so a
+            # CLOB closed/non-accepting state cannot hide an already-dead bin or
+            # a structurally won hold behind a generic awaiting-settlement
+            # receipt.
+            _hard_fact = None
+            if _day0_hard_fact_position_eligible(pos) and city is not None:
+                try:
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    # Pass conn as world_conn so the METAR kill-memo cold-start
+                    # recovery does not open per-city independent world connections
+                    # (connection-burst antibody 2026-06-13).
+                    _hard_fact = evaluate_hard_fact_exit(
+                        position=pos, city=city, now=deps._utcnow(), world_conn=conn
+                    )
+                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
+                    deps.logger.warning(
+                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
+                    )
             closed_market_info = _closed_non_accepting_market_info(
                 clob,
                 pos,
@@ -4287,6 +4306,85 @@ def execute_monitoring_phase(
                     deferred_static_closed_market_info = closed_market_info
                     closed_market_info = None
             if closed_market_info is not None:
+                if _hard_fact is not None and _hard_fact.action in {
+                    "EXIT_DEAD_BIN",
+                    "HOLD_STRUCTURAL_WIN",
+                }:
+                    from src.state.portfolio import ExitDecision as _ExitDecision
+
+                    hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                    pos.state = "day0_window"
+                    pos.pre_exit_state = ""
+                    pos.exit_state = ""
+                    pos.next_exit_retry_at = ""
+                    pos.exit_retry_count = 0
+                    pos.exit_reason = ""
+                    pos.last_exit_error = (
+                        "MARKET_CLOSED_AWAITING_SETTLEMENT:"
+                        f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
+                    )[:500]
+                    pos.last_monitor_prob = 1.0 if hard_fact_win else 0.0
+                    pos.last_monitor_prob_is_fresh = True
+                    pos.last_monitor_edge = None
+                    pos.last_monitor_market_price = None
+                    pos.last_monitor_market_price_is_fresh = False
+                    pos.last_monitor_best_bid = None
+                    pos.last_monitor_best_ask = None
+                    pos.last_monitor_market_vig = None
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                (
+                                    "day0_hard_fact_structural_win_closed_hold"
+                                    if hard_fact_win
+                                    else "day0_hard_fact_bin_dead_closed_market"
+                                ),
+                            ]
+                        )
+                    )
+                    exit_decision = _ExitDecision(
+                        False,
+                        (
+                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED "
+                            if hard_fact_win
+                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED "
+                        )
+                        + f"({_hard_fact.reason}; source={_hard_fact.source})",
+                        urgency="normal",
+                        trigger=(
+                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
+                            if hard_fact_win
+                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+                        ),
+                        selected_method=pos.selected_method or pos.entry_method,
+                        applied_validations=list(pos.applied_validations),
+                    )
+                    _emit_monitor_refreshed_canonical_if_available(
+                        conn,
+                        pos,
+                        deps=deps,
+                        exit_decision=exit_decision,
+                        final_should_exit=False,
+                        final_exit_reason=exit_decision.reason,
+                        final_exit_trigger=exit_decision.trigger,
+                    )
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=pos.last_monitor_prob,
+                            fresh_edge=None,
+                            should_exit=False,
+                            exit_reason=exit_decision.reason,
+                            neg_edge_count=pos.neg_edge_count,
+                        )
+                    )
+                    portfolio_dirty = True
+                    summary["day0_hard_fact_closed_market_monitors"] = (
+                        summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
+                    )
+                    summary["monitors"] += 1
+                    continue
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
                 mark_market_closed_hold_to_settlement(
@@ -4321,25 +4419,9 @@ def execute_monitoring_phase(
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
-            # === DAY0 HARD-FACT verdict — computed before the exit decision.
-            # Settlement-authority hard facts must not depend on estimator
-            # evidence, but the final MONITOR_REFRESHED event is written after
-            # hold/exit evaluation so the canonical row carries the actual
-            # decision for this monitor tick.
-            _hard_fact = None
-            if _day0_hard_fact_position_eligible(pos) and city is not None:
-                try:
-                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
-                    # Pass conn as world_conn so the METAR kill-memo cold-start
-                    # recovery does not open per-city independent world connections
-                    # (connection-burst antibody 2026-06-13).
-                    _hard_fact = evaluate_hard_fact_exit(
-                        position=pos, city=city, now=deps._utcnow(), world_conn=conn
-                    )
-                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
-                    deps.logger.warning(
-                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
-                    )
+            # === DAY0 HARD-FACT verdict — computed before the exit decision and
+            # before closed-market pre-emption above. Settlement-authority hard
+            # facts must not depend on estimator evidence.
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,

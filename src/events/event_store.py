@@ -2053,6 +2053,9 @@ def _deadline_from_reason(reason: object, field_name: str) -> datetime | None:
 
 
 def _selection_deadline_past(reason: object, decision_time_utc: datetime) -> bool:
+    text = str(reason or "")
+    if text.split(":", 1)[0].strip() == "EXECUTABLE_SNAPSHOT_STALE":
+        return False
     deadline = _deadline_from_reason(reason, "selection_deadline")
     if deadline is None:
         return False

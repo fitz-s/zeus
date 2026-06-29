@@ -9,10 +9,10 @@
 """RED-on-revert — representativeness must not widen the served predictive σ / Kelly.
 
 The served center ``_mu_diagonal`` is reweighted by repr (raw_precision_center), but
-the predictive width ``predictive_sigma_c = max(1.0, sqrt(fused.sd² + σ_resid²))`` and
-the center uncertainty ``anchor_sigma_c = fused.sd`` are produced by a DIFFERENT path
-(``fuse_bayes_precision_posterior`` + the common-date residual series) that the center
-repr channel never touches. These tests pin that decoupling.
+the predictive point width ``predictive_sigma_c = served_predictive_sigma_c(σ_resid)``
+and the center uncertainty ``anchor_sigma_c = fused.sd`` are produced by DIFFERENT
+paths. The center repr channel never touches either width path. These tests pin
+that decoupling.
 """
 from __future__ import annotations
 
@@ -50,9 +50,10 @@ class TestReprIsMeanOnly:
 
 # ============================================================================
 # Structural: the predictive_sigma_c formula in the materializer depends ONLY on
-# fused.sd + the residual series — NOT on _sigma_repr_by_model / raw_precision_center.
-# A source-level antibody: if a future edit feeds repr into the width path, the
-# predictive_sigma_c expression would reference the repr symbol and this fails.
+# the realized residual series helper — NOT on _sigma_repr_by_model /
+# raw_precision_center, and NOT on fused.sd. fused.sd is center uncertainty
+# carried as anchor_sigma_c, not point width. A source-level antibody: if a future
+# edit feeds repr or fused.sd into the point-width path, this fails.
 # ============================================================================
 class TestPredictiveSigmaDecoupledFromRepr:
     def test_predictive_sigma_c_does_not_read_repr_symbols(self):
@@ -61,13 +62,13 @@ class TestPredictiveSigmaDecoupledFromRepr:
         src = inspect.getsource(mat._replacement_bayes_precision_fusion_override)
         # Locate the predictive_sigma_c assignment line.
         sigma_lines = [
-            ln for ln in src.splitlines() if "predictive_sigma_c = max" in ln
+            ln for ln in src.splitlines() if "predictive_sigma_c = served_predictive_sigma_c" in ln
         ]
         assert sigma_lines, "predictive_sigma_c assignment not found"
         sigma_line = sigma_lines[0]
-        # It must be built from fused.sd + the residual std, NOT from the repr channel.
-        assert "fused.sd" in sigma_line
-        for forbidden in ("_sigma_repr_by_model", "repr_m2", "representativeness"):
+        # It must be built from the realized residual std helper, NOT from repr or fused.sd.
+        assert "_sigma_resid" in sigma_line
+        for forbidden in ("fused.sd", "_sigma_repr_by_model", "repr_m2", "representativeness"):
             assert forbidden not in sigma_line, (
                 f"predictive_sigma_c must not reference {forbidden} (Kelly double-count)"
             )

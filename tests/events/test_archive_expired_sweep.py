@@ -199,12 +199,12 @@ def test_expired_redecision_candidate_archived_and_not_rescanned():
     assert _pending_count(conn) == 0
 
 
-def test_selection_deadline_past_redecision_archived_even_when_local_day_open():
-    """A stale selected executable window is not live work.
+def test_stale_snapshot_selection_deadline_remains_refreshable_when_local_day_open():
+    """A stale selected executable window is refreshable price evidence, not closure.
 
-    The target local day may still be open, but a requeued event whose own
-    selected snapshot deadline is already past must leave the active scan so
-    newer entry/redecision events can compete on fresh price evidence.
+    The target local day may still be open, so a requeued event whose selected snapshot
+    deadline is already past must remain active. The substrate refresh/redecision loop
+    owns the cure; archive must not make the event disappear.
     """
     conn = _world_conn()
     store = EventStore(conn)
@@ -237,16 +237,16 @@ def test_selection_deadline_past_redecision_archived_even_when_local_day_open():
     )
 
     returned_before_prune = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
-    assert stale.event_id not in [event.event_id for event in returned_before_prune]
+    assert stale.event_id in [event.event_id for event in returned_before_prune]
     assert fresh.event_id in [event.event_id for event in returned_before_prune]
 
     archived = store.archive_expired_candidates(decision_time=_DECISION_TIME)
 
-    assert archived == 1
-    assert _status_of(conn, stale.event_id) == "expired"
+    assert archived == 0
+    assert _status_of(conn, stale.event_id) == "pending"
     assert _status_of(conn, fresh.event_id) == "pending"
     returned_after_prune = store.fetch_pending(decision_time=_DECISION_TIME, limit=100)
-    assert stale.event_id not in [event.event_id for event in returned_after_prune]
+    assert stale.event_id in [event.event_id for event in returned_after_prune]
     assert fresh.event_id in [event.event_id for event in returned_after_prune]
 
 

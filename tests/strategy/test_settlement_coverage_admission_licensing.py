@@ -7,16 +7,19 @@
 #   ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING: yes_posterior=0.205..0.267
 #   max=0.200 source=FORECAST_BOOTSTRAP — while the settlement-backward coverage
 #   verdict for the SAME families said the settled record BACKED the claim.
-#   Live entry now requires realized settlement evidence. INSUFFICIENT_DATA remains a
-#   typed verdict for provenance, but it no longer licenses live-money submission.
+#   The material-bin buy-NO waiver requires realized settlement evidence.
+#   INSUFFICIENT_DATA remains a typed verdict for the certificate bridge, but it does not
+#   waive the special buy-NO native-evidence requirement.
 """Relationship antibodies: settlement-coverage verdict licenses material-YES buy_no.
 
 CROSS-MODULE INVARIANTS pinned here:
-  1. The licensing set has ONE home (live_admission.SETTLEMENT_COVERAGE_LICENSING_
-     STATUSES); the adapter cert credential aliases it (registry entry #11).
+  1. The material buy-NO licensing set has ONE home
+     (live_admission.SETTLEMENT_COVERAGE_LICENSING_STATUSES). The adapter cert credential
+     deliberately uses a separate typed-verdict set because cert authority and buy-NO
+     waiver are different semantics.
   2. LICENSED and UNLICENSED-after-shrink admit a material-YES buy_no whose q_lcb source is
-     FORECAST_BOOTSTRAP. INSUFFICIENT_DATA / None / UNEVALUATED reject with the status in
-     the reason because they lack realized backing.
+     FORECAST_BOOTSTRAP. INSUFFICIENT_DATA / None / UNEVALUATED reject at this buy-NO
+     waiver because they lack realized backing.
   3. CATEGORY-INVERSION KILL: before reconciliation a record-BACKED bootstrap
      q_lcb was rejected while a record-REFUTED one (re-branded SETTLEMENT_ISOTONIC
      by the shrink) was accepted. The verdict, not the brand, is the evidence.
@@ -70,7 +73,7 @@ def test_material_yes_bootstrap_with_unlicensed_verdict_is_admitted() -> None:
     """UNLICENSED = the record refuted the RAW claim and the K3 shrink to
     realized-minus-1pp was the verdict's output — the (shrunk) q_lcb the decision
     actually carries is settled-record-backed. Same statuses the cert credential
-    licenses (_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES); kills the category
+    licenses in the buy-NO material-bin waiver; kills the category
     inversion where only the REFUTED-then-rebranded claim was admitted."""
     reason = live_buy_no_conservative_evidence_rejection_reason(
         **_ATLANTA, settlement_coverage_status="UNLICENSED"
@@ -78,11 +81,11 @@ def test_material_yes_bootstrap_with_unlicensed_verdict_is_admitted() -> None:
     assert reason is None
 
 
-# --- (b) INSUFFICIENT_DATA rejects like no realized backing -----------------
+# --- (b) INSUFFICIENT_DATA rejects for the material buy-NO waiver -----------------
 
 
 def test_material_yes_bootstrap_with_insufficient_data_rejects() -> None:
-    """Thin settlement history is not a live-money evidence license."""
+    """Thin settlement history is not a material-bin buy-NO evidence waiver."""
     reason = live_buy_no_conservative_evidence_rejection_reason(
         **_ATLANTA, settlement_coverage_status="INSUFFICIENT_DATA"
     )

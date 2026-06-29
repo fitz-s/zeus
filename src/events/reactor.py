@@ -1264,9 +1264,10 @@ class OpportunityEventReactor:
         Horizons (in precedence order):
           (c) OPERATOR_DISARM — the operator env kill-switch is set. Checked first
               so a disarm terminalizes everything in-flight immediately.
-          (d) SELECTION_DEADLINE_PAST / EVENT_EXPIRES_AT_PAST — the event's own
-              execution window is past. This burns only the stale selected event;
-              a newer redecision event may still enter with fresh price evidence.
+          (d) EVENT_EXPIRES_AT_PAST or payload-level SELECTION_DEADLINE_PAST — the
+              event's own execution window is past. A selection_deadline embedded in an
+              EXECUTABLE_SNAPSHOT_STALE reason is NOT an event horizon; it is stale price
+              evidence and must refresh/requeue.
           (b) MARKET_VENUE_CLOSED — only explicit venue evidence says
               ``closed=true`` and ``accepting_orders=false``. Static Gamma endDate
               / F1 timing cannot terminalize a money-path event.
@@ -2636,7 +2637,12 @@ def _event_deadline_horizon(
         )
 
     reason_selection_deadline = _deadline_from_reason(transient_reason, "selection_deadline")
-    if reason_selection_deadline is not None and reason_selection_deadline <= decision_time_utc:
+    reason_base = _money_path_reason_base(str(transient_reason or ""))
+    if (
+        reason_base != "EXECUTABLE_SNAPSHOT_STALE"
+        and reason_selection_deadline is not None
+        and reason_selection_deadline <= decision_time_utc
+    ):
         return (
             "SELECTION_DEADLINE_PAST",
             f"selection_deadline={reason_selection_deadline.isoformat()}",

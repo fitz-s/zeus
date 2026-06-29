@@ -8813,13 +8813,14 @@ def _edli_pre_submit_jit_book_quote_provider():
 
 
 def _edli_decision_family_snapshot_refresher(topology_conn):
-    """Build the decision-triggered substrate priority marker.
+    """Build the decision-triggered targeted executable-substrate refresher.
 
-    The live daemon is a decision consumer.  Executable snapshot production is
-    owned by the substrate-observer daemon so decision evaluation cannot race
-    sidecars for the trade DB writer lease.  A stale family is marked for
-    priority sidecar capture and the current decision returns False, preserving
-    the normal stale-snapshot requeue/fail-closed path.
+    The live daemon normally consumes sidecar-produced executable snapshots.  When the
+    selected row is already stale inside the money path, waiting for a later sidecar tick
+    makes the adapter emit ``EXECUTABLE_SNAPSHOT_STALE`` and the reactor can terminalize
+    the event before fresh prices arrive.  For that selected family, run the SAME
+    substrate priority cycle synchronously and return True only when it inserted fresh
+    snapshot rows; lock-busy or failed refresh falls back to the normal fail-closed retry.
     """
 
     def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
@@ -8842,12 +8843,35 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         except Exception as exc:  # noqa: BLE001
             logger.debug("decision family refresh: priority marker write failed: %r", exc)
         logger.info(
-            "decision family refresh delegated to substrate-observer sidecar via priority marker: %s/%s/%s",
+            "decision family refresh marked priority substrate scope: %s/%s/%s",
             family[0],
             family[1],
             family[2],
         )
-        return False
+        try:
+            from src.data import substrate_observer as _substrate_observer
+
+            summary = _substrate_observer._edli_money_path_substrate_priority_cycle()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "decision family refresh synchronous priority cycle failed; "
+                "falling back to stale retry: %r",
+                exc,
+            )
+            return False
+        if not isinstance(summary, dict):
+            return False
+        inserted = int(summary.get("inserted") or 0)
+        status = str(summary.get("status") or "")
+        logger.info(
+            "decision family refresh priority cycle summary status=%s inserted=%s scope=%s/%s/%s",
+            status,
+            inserted,
+            family[0],
+            family[1],
+            family[2],
+        )
+        return status == "refreshed" and inserted > 0
 
     return _refresh
 

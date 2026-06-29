@@ -1112,6 +1112,28 @@ class _BayesPrecisionFusionFusionOverride:
     source_clock_one_scheme: Mapping[str, object] | None = None
 
 
+def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) -> float:
+    """Served POINT predictive width = realized walk-forward fused-center error, floored.
+
+    Authority: frontier consult REQ-20260629-131502 + src/forecast/sigma_authority.py.
+    ``sigma_realized_c`` is the walk-forward fused-center residual std -- the realized total forecast
+    error of the served center -- and IS the point predictive sigma that feeds
+    ``bin_probability_settlement``. The center posterior sd (fused.sd) is NOT added here: adding it
+    double-counts center uncertainty on top of an already-complete realized error (served sigma ~3.0
+    vs realized RMSE ~1.35; PIT mound chi2=218; 50%CI covers 82%). fused.sd is carried separately as
+    ``anchor_sigma_c`` into the q_lcb/q_ucb center-uncertainty bootstrap, where it belongs. A
+    non-finite / non-positive realized width falls back to the floor (defensive;
+    ``bin_probability_settlement`` rejects a non-positive sigma).
+    """
+    try:
+        s = float(sigma_realized_c)
+    except (TypeError, ValueError):
+        return float(floor_c)
+    if not math.isfinite(s) or s <= 0.0:
+        return float(floor_c)
+    return max(float(floor_c), s)
+
+
 def _anchor_only_current_override(
     request: ReplacementForecastMaterializeRequest,
     *,
@@ -1895,10 +1917,10 @@ def _replacement_bayes_precision_fusion_override(
         # spread (the fused-N experiment's tight-sigma caveat). The irreducible part is
         # measured from the walk-forward FUSED-CENTER residual series: per common target_date,
         # the mean of the instruments' de-biased residuals; its std IS the historical error of
-        # an equal-weight fused center at this cell. sigma_pred = sqrt(fused.sd^2 + sigma_resid^2),
-        # floored at 1.0C (conservative: settlement-graded fused-center MAE ran 0.85-1.31C at
-        # real leads; never narrower than the evidence). Thin substrate (<5 common dates) ->
-        # conservative default sigma_resid = 1.5C.
+        # the served fused center at this cell. sigma_pred = max(1.0C, sigma_resid) because the
+        # realized residual already contains total point-forecast error. fused.sd is center
+        # uncertainty and is carried separately as anchor_sigma_c into the q_lcb/q_ucb bootstrap.
+        # Thin substrate (<5 common dates) -> conservative default sigma_resid = 1.5C.
         _date_sets = [set(ins.residuals_by_date) for ins in capture.likelihood if ins.residuals_by_date]
         _sigma_resid = 1.5
         if _date_sets:
@@ -1914,7 +1936,12 @@ def _replacement_bayes_precision_fusion_override(
                     _sigma_resid = float(statistics.stdev(_series))
                 except statistics.StatisticsError:
                     _sigma_resid = 1.5
-        predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
+        # DOUBLE-COUNT FIX (consult REQ-20260629-131502 + sigma_authority.py): the served POINT width
+        # is the realized walk-forward fused-center error ALONE -- NOT sqrt(fused.sd^2 + sigma_resid^2),
+        # which adds the center posterior sd on top of an already-complete realized error (served ~3.0
+        # vs realized ~1.35). fused.sd is carried separately as anchor_sigma_c (below) into the
+        # q_lcb/q_ucb center-uncertainty bootstrap, where center uncertainty belongs.
+        predictive_sigma_c = served_predictive_sigma_c(_sigma_resid, floor_c=1.0)
         if _source_clock_predictive_sigma_c is not None:
             predictive_sigma_c = float(_source_clock_predictive_sigma_c)
 
@@ -1971,14 +1998,14 @@ def _replacement_bayes_precision_fusion_override(
 #
 # Created: 2026-06-09
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1d-§1e (fused-N-direct q,
-#   σ_pred = sqrt(fused.sd² + σ_resid²)); root-cause /tmp/candidate_missing_rootcause.md (the
+#   σ_pred = max(1.0C, σ_resid)); root-cause /tmp/candidate_missing_rootcause.md (the
 #   live LCB falls back to legacy bounds when q_lcb_json is NULL -> under-certifies
 #   below ask → every proof killed). This builds a REAL per-bin q_lcb/q_ucb consistent with the fused
 #   posterior so the bundle q_lcb takes priority over the Wilson fallback (no downstream change).
 #
 # DESIGN (principled, not a fudge):
 #   The fused posterior gives center μ* with posterior sd = fused.sd (anchor_sigma_c — the CENTER
-#   uncertainty) and predictive spread σ_pred (predictive_sigma_c = sqrt(fused.sd² + σ_resid²)). The
+#   uncertainty) and predictive spread σ_pred (predictive_sigma_c = max(1.0C, σ_resid)). The
 #   q POINT vector integrates N(μ*, σ_pred). The q_lcb bound is a PARAMETER-uncertainty bootstrap:
 #   draw μ_i ~ N(μ*, fused.sd) — the center uncertainty ONLY (we do NOT re-add σ_resid here; that
 #   would double-count the residual spread already inside σ_pred). For each draw, integrate the SAME
@@ -2761,7 +2788,7 @@ def _compute_posterior_payload(
     if q_shape not in {"fused_normal_direct", "fused_day0_conditioned_normal"} and bayes_precision_fusion_override is not None:
         try:
             _fc_mu = float(bayes_precision_fusion_override.anchor_value_c)
-            # Spread: ONLY the predictive settlement sigma (sqrt(fused.sd^2 + sigma_resid^2)) is a
+            # Spread: ONLY the predictive settlement sigma (served realized residual width) is a
             # valid dispersion for a settlement bin Normal. We deliberately do NOT substitute
             # anchor_sigma_c (the fused CENTER uncertainty) when predictive_sigma_c is None — that
             # conflates center uncertainty with predictive settlement spread (the q point and q bounds
