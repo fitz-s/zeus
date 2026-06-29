@@ -3929,6 +3929,10 @@ def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
             ON market_events(city, target_date, temperature_metric)
     """)
     conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_condition_id
+            ON market_events(condition_id)
+    """)
+    conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_market_events_open
             ON market_events(city, target_date, temperature_metric)
             WHERE outcome IS NULL

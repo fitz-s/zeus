@@ -402,6 +402,8 @@ def test_priority_direct_clob_uses_selected_priority_subset():
     src = inspect.getsource(market_scanner.refresh_executable_market_substrate_snapshots)
 
     assert "ordered_selected_priority_conditions" in src
+    assert "priority_condition_rank" in src
+    assert "priority_condition_rank.get" in src
     assert "priority_direct_clob_service_conditions = set(" in src
     assert "ordered_selected_priority_conditions[:priority_direct_clob_condition_limit]" in src
     assert "len(priority_conditions) <= priority_direct_clob_condition_limit" not in src
@@ -410,7 +412,7 @@ def test_priority_direct_clob_uses_selected_priority_subset():
 def test_active_risk_conditions_are_hot_even_with_priority_marker():
     """A marker request must not exclude live open-rest or held-position exact conditions."""
 
-    src = inspect.getsource(substrate_observer._edli_market_substrate_warm_cycle)
+    src = inspect.getsource(substrate_observer._edli_money_path_substrate_priority_cycle)
     open_read = src.index("open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh")
     held_read = src.index("held_position_priority_condition_ids = _edli_current_held_position_condition_ids()")
     extend_marker = src.index("exact_priority_condition_ids = list(priority_marker_condition_ids)")
@@ -458,7 +460,7 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "confirmed_entry_scope = set(family_keys)" in screen_src
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
-    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)" in screen_src
+    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)" in screen_src
     assert "open_rest_condition_scope," in screen_src
     assert "ZEUS_REDECISION_CONFIRM_REFRESH_LOCK_TIMEOUT_SECONDS" in confirm_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
@@ -1169,8 +1171,8 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     assert calls == [1], "warm job must invoke the family-snapshot refresh exactly once"
 
 
-def test_market_substrate_warm_cycle_prioritizes_claim_order_families(monkeypatch):
-    """The substrate producer must warm the families the reactor can claim next."""
+def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch):
+    """The priority producer must warm the families the reactor can claim next."""
 
     calls: list[dict] = []
     claim_families = [("Tokyo", "2026-06-28", "high"), ("Shanghai", "2026-06-28", "low")]
@@ -1197,13 +1199,13 @@ def test_market_substrate_warm_cycle_prioritizes_claim_order_families(monkeypatc
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    substrate_observer._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls and calls[0]["extra_priority_families"] == claim_families
     assert calls[0]["include_pending_families"] is False
 
 
-def test_market_substrate_warm_cycle_resolves_condition_marker_without_pending_backlog(
+def test_money_path_priority_cycle_resolves_condition_marker_without_pending_backlog(
     monkeypatch,
 ):
     """Condition-only live markers must not fall back to broad pending backlog.
@@ -1271,7 +1273,7 @@ def test_market_substrate_warm_cycle_resolves_condition_marker_without_pending_b
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    substrate_observer._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
     assert calls[0]["extra_priority_families"] == [("Shanghai", "2026-06-29", "high")]
@@ -1279,7 +1281,7 @@ def test_market_substrate_warm_cycle_resolves_condition_marker_without_pending_b
     assert calls[0]["include_pending_families"] is False
 
 
-def test_market_substrate_warm_cycle_claim_read_failure_does_not_sweep_backlog(
+def test_money_path_priority_cycle_claim_read_failure_does_not_sweep_backlog(
     monkeypatch,
 ):
     """A failed claim-order lookahead must not degrade into broad pending refresh."""
@@ -1308,7 +1310,7 @@ def test_market_substrate_warm_cycle_claim_read_failure_does_not_sweep_backlog(
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    result = substrate_observer._edli_market_substrate_warm_cycle()
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
     assert calls[0]["extra_priority_families"] == []
@@ -1316,7 +1318,7 @@ def test_market_substrate_warm_cycle_claim_read_failure_does_not_sweep_backlog(
     assert result["claim_order_priority_read_failed"] is True
 
 
-def test_market_substrate_warm_cycle_exact_conditions_do_not_displace_claim_family(
+def test_money_path_priority_cycle_exact_conditions_do_not_displace_claim_family(
     monkeypatch,
 ):
     """Held/resting books are exact-condition hot scope; entries still get family discovery."""
@@ -1365,7 +1367,7 @@ def test_market_substrate_warm_cycle_exact_conditions_do_not_displace_claim_fami
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    substrate_observer._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
     assert calls[0]["priority_condition_ids"] == ["cond-rest", "cond-held"]
@@ -1414,7 +1416,11 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
         lambda *a, **k: calls.append(1),
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
-    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: [("Shanghai", "2026-06-28", "high")],
+    )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -1423,7 +1429,86 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
     assert calls == []
 
 
-def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(monkeypatch):
+def test_market_substrate_warm_cycle_ignores_empty_priority_marker(monkeypatch):
+    """An empty marker must not starve background discovery or mark the scheduler failed."""
+
+    calls: list[dict] = []
+    receipts: list[dict] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "no_work", "attempted": 0, "inserted": 0},
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {"request_id": "empty-req", "families": [], "condition_ids": []},
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls
+    assert calls[0]["include_pending_families"] is True
+    assert calls[0]["include_money_risk_families"] is False
+    assert result["scheduler_failed"] is False
+    assert receipts == []
+
+
+def test_money_path_priority_cycle_records_empty_scope_as_noop(monkeypatch):
+    """An empty priority marker is observable, but it is not a scheduler failure."""
+
+    calls: list[int] = []
+    receipts: list[dict] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(1),
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {"request_id": "empty-req", "families": [], "condition_ids": []},
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert calls == []
+    assert result["status"] == "priority_request_empty_scope"
+    assert result["scheduler_failed"] is False
+    assert receipts
+    assert receipts[0]["summary"]["status"] == "priority_request_empty_scope"
+    assert receipts[0]["summary"]["scheduler_failed"] is False
+
+
+def test_money_path_priority_cycle_services_blocked_family_priority_marker(monkeypatch):
     """A reactor-blocked family marker must be serviced before broad pending backlog."""
 
     calls: list[dict] = []
@@ -1478,7 +1563,7 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    substrate_observer._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
     assert calls[0]["extra_priority_families"] == marker_families
@@ -1487,7 +1572,7 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
 
 
-def test_market_substrate_warm_cycle_marker_family_does_not_mix_claim_order(monkeypatch):
+def test_money_path_priority_cycle_marker_family_does_not_mix_claim_order(monkeypatch):
     """A live priority marker owns the current tick even without condition ids."""
 
     calls: list[dict] = []
@@ -1531,7 +1616,7 @@ def test_market_substrate_warm_cycle_marker_family_does_not_mix_claim_order(monk
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    substrate_observer._edli_market_substrate_warm_cycle()
+    substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
     assert calls[0]["extra_priority_families"] == marker_families
@@ -1804,8 +1889,8 @@ def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):
     ]
 
 
-def test_market_discovery_cycle_does_not_starve_stale_universe_for_priority_marker(monkeypatch):
-    """A priority marker accelerates targeted refresh; it must not starve stale discovery."""
+def test_market_discovery_cycle_defers_to_nonempty_priority_marker(monkeypatch):
+    """A nonempty priority marker owns the hot lane; discovery must not take its lock."""
 
     calls: list[str] = []
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
@@ -1846,7 +1931,7 @@ def test_market_discovery_cycle_does_not_starve_stale_universe_for_priority_mark
 
     substrate_observer._market_discovery_cycle()
 
-    assert calls == ["find", "refresh", "commit", "close"]
+    assert calls == []
     assert not substrate_observer._market_discovery_lock.locked()
 
 

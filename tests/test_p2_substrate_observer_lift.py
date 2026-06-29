@@ -151,6 +151,16 @@ def test_substrate_observer_heartbeat_has_dedicated_executor():
     assert "misfire_grace_time=30" in src
 
 
+def test_substrate_observer_money_path_priority_has_dedicated_executor():
+    """Money-path substrate recapture must not wait behind broad warm/discovery jobs."""
+    src = _OBSERVER_DAEMON.read_text(encoding="utf-8")
+    assert '"priority": _APSchedulerThreadPoolExecutor(max_workers=1)' in src
+    assert 'id="money_path_substrate_priority"' in src
+    assert 'executor="priority"' in src
+    assert "_priority_refresh_interval_seconds()" in src
+    assert "next_run_time=datetime.now(timezone.utc)" in src
+
+
 def test_no_regression_reactor_reader_in_order_runtime_is_untouched():
     """P1's reactor MUST keep its SELECT-side snapshot reader (the consumer side of I1)."""
     reader_path = _REPO_ROOT / "src" / "engine" / "event_reactor_adapter.py"
@@ -441,6 +451,12 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
     ms.refresh_executable_market_substrate_snapshots = _fake_refresh
     pc.PolymarketClient = lambda *a, **k: _FakeClob()
     dbmod.get_trade_connection = lambda *a, **k: _FakeConn()
+    monkeypatch_priority_active = getattr(obs, "money_path_substrate_priority_active")
+    monkeypatch_priority_families = getattr(obs, "money_path_substrate_priority_families")
+    monkeypatch_priority_conditions = getattr(obs, "money_path_substrate_priority_condition_ids")
+    obs.money_path_substrate_priority_active = lambda: False
+    obs.money_path_substrate_priority_families = lambda: []
+    obs.money_path_substrate_priority_condition_ids = lambda: []
     import src.data.dual_run_lock as dual_run_lock
 
     orig_lock = dual_run_lock.acquire_lock
@@ -456,6 +472,9 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
         ms.refresh_executable_market_substrate_snapshots = orig["refresh"]
         pc.PolymarketClient = orig["client"]
         dbmod.get_trade_connection = orig["trade_conn"]
+        obs.money_path_substrate_priority_active = monkeypatch_priority_active
+        obs.money_path_substrate_priority_families = monkeypatch_priority_families
+        obs.money_path_substrate_priority_condition_ids = monkeypatch_priority_conditions
         dual_run_lock.acquire_lock = orig_lock
 
     assert captured["refresh_called"], (

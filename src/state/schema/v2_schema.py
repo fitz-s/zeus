@@ -181,6 +181,10 @@ def _create_market_events(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
             ON market_events(city, target_date, temperature_metric)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_market_events_condition_id
+            ON market_events(condition_id)
+    """)
     # Architect refinement: partial index on open markets
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_market_events_open

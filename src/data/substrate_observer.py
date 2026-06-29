@@ -206,6 +206,30 @@ def _background_warm_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
     return min(configured, background_cap, max(0.1, refresh_budget_s - 0.1))
 
 
+def _priority_refresh_interval_seconds() -> float:
+    return max(
+        5.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_REFRESH_INTERVAL_SECONDS", "10.0")),
+    )
+
+
+def _priority_refresh_budget_seconds() -> float:
+    interval_s = _priority_refresh_interval_seconds()
+    configured = max(
+        2.0,
+        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_REFRESH_BUDGET_SECONDS", "8.0")),
+    )
+    return min(configured, max(1.0, interval_s - 0.5))
+
+
+def _priority_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
+    configured = max(
+        0.5,
+        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_SNAPSHOT_RESERVE_SECONDS", "2.0")),
+    )
+    return min(configured, max(0.1, refresh_budget_s - 0.1))
+
+
 def _settings_section(name: str, default=None):
     """Mirror of src.main._settings_section (precedent: replacement_forecast_production)."""
     source = settings._data if hasattr(settings, "_data") else settings
@@ -1025,6 +1049,7 @@ def _substrate_warm_business_summary(
     elif status == "error":
         out["scheduler_failed"] = True
         out["scheduler_failure_reason"] = str(out.get("reason") or status)
+    out.setdefault("scheduler_failed", False)
     return out
 
 
@@ -1039,6 +1064,7 @@ def _refresh_pending_family_snapshots(
     priority_condition_ids: Iterable[str] | None = None,
     refresh_budget_seconds: float | None = None,
     snapshot_reserve_seconds: float | None = None,
+    include_money_risk_families: bool = True,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -1144,21 +1170,25 @@ def _refresh_pending_family_snapshots(
                 pending_families.append(family)
 
     open_rest_priority_families: list[tuple[str, str, str]] = []
-    try:
-        trade_ro = get_trade_connection_read_only()
+    if include_money_risk_families:
         try:
-            open_rest_priority_families = _open_rest_family_rows_for_refresh(
-                trade_ro,
-                forecasts_conn=forecasts_conn,
+            trade_ro = get_trade_connection_read_only()
+            try:
+                open_rest_priority_families = _open_rest_family_rows_for_refresh(
+                    trade_ro,
+                    forecasts_conn=forecasts_conn,
+                )
+            finally:
+                trade_ro.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "refresh_pending_family_snapshots: open-rest priority read failed (non-fatal): %s",
+                exc,
             )
-        finally:
-            trade_ro.close()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "refresh_pending_family_snapshots: open-rest priority read failed (non-fatal): %s",
-            exc,
-        )
-    held_position_priority_families = sorted(_edli_current_held_position_family_keys())
+        held_position_priority_families = sorted(_edli_current_held_position_family_keys())
+    else:
+        open_rest_priority_families = []
+        held_position_priority_families = []
 
     priority_families: list[tuple[str, str, str]] = []
     priority_keys: set[tuple[str, str, str]] = set()
@@ -1185,6 +1215,7 @@ def _refresh_pending_family_snapshots(
             "held_position_priority_families": 0,
             "explicit_priority_families": 0,
             "include_pending_families": bool(include_pending_families),
+            "include_money_risk_families": bool(include_money_risk_families),
         }
 
     global _SUBSTRATE_REFRESH_CURSOR, _SUBSTRATE_PRIORITY_REFRESH_CURSOR, _SUBSTRATE_GAMMA_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
@@ -1381,6 +1412,17 @@ def _refresh_pending_family_snapshots(
                 }
                 for trow in topology_rows
             ]
+            scoped_topology_condition_ids = {
+                str(trow.get("condition_id") or "").strip()
+                for trow in topology_rows
+            } & explicit_priority_conditions
+            if scoped_topology_condition_ids:
+                topology_rows = [
+                    trow
+                    for trow in topology_rows
+                    if str(trow.get("condition_id") or "").strip()
+                    in scoped_topology_condition_ids
+                ]
             family_key = _refresh_family_key(city, target_date, metric)
             if family_key in priority_keys and not explicit_priority_conditions:
                 for trow in topology_rows:
@@ -1483,6 +1525,7 @@ def _refresh_pending_family_snapshots(
                     "families_checked": len(families),
                     "explicit_priority_families": len(explicit_priority_families),
                     "include_pending_families": bool(include_pending_families),
+                    "include_money_risk_families": bool(include_money_risk_families),
                     "open_rest_priority_families": len(open_rest_priority_families),
                     "held_position_priority_families": len(held_position_priority_families),
                     "fresh_skipped": fresh_skipped,
@@ -1518,6 +1561,7 @@ def _refresh_pending_family_snapshots(
                     "families_checked": len(families),
                     "explicit_priority_families": len(explicit_priority_families),
                     "include_pending_families": bool(include_pending_families),
+                    "include_money_risk_families": bool(include_money_risk_families),
                     "open_rest_priority_families": len(open_rest_priority_families),
                     "held_position_priority_families": len(held_position_priority_families),
                     "fresh_skipped": fresh_skipped,
@@ -1538,6 +1582,7 @@ def _refresh_pending_family_snapshots(
                 "families_checked": len(families),
                 "explicit_priority_families": len(explicit_priority_families),
                 "include_pending_families": bool(include_pending_families),
+                "include_money_risk_families": bool(include_money_risk_families),
                 "open_rest_priority_families": len(open_rest_priority_families),
                 "held_position_priority_families": len(held_position_priority_families),
                 "fresh_skipped": fresh_skipped,
@@ -2044,6 +2089,7 @@ def _refresh_pending_family_snapshots(
         "families_checked": len(families),
         "explicit_priority_families": len(explicit_priority_families),
         "include_pending_families": bool(include_pending_families),
+        "include_money_risk_families": bool(include_money_risk_families),
         "open_rest_priority_families": len(open_rest_priority_families),
         "held_position_priority_families": len(held_position_priority_families),
         "priority_family_count": len(priority_families),
@@ -2157,6 +2203,16 @@ def _market_discovery_cycle() -> None:
     """
 
     global _market_discovery_last_completed_monotonic
+
+    if (
+        money_path_substrate_priority_active()
+        and (
+            money_path_substrate_priority_families()
+            or money_path_substrate_priority_condition_ids()
+        )
+    ):
+        logger.info("market_discovery deferred: money-path priority marker active")
+        return
 
     acquired = _market_discovery_lock.acquire(blocking=False)
     if not acquired:
@@ -2286,15 +2342,144 @@ def _edli_market_substrate_warm_cycle() -> None:
     priority_marker_condition_ids = (
         money_path_substrate_priority_condition_ids() if priority_marker_active else []
     )
-    if priority_marker_active and not priority_marker_families and not priority_marker_condition_ids:
+    priority_marker_has_scope = bool(priority_marker_families or priority_marker_condition_ids)
+    if priority_marker_has_scope:
         summary = _substrate_warm_failed_summary(
-            status="priority_request_empty_scope",
-            reason="active priority request has no scoped families or conditions",
+            status="background_deferred_to_priority_lane",
+            reason="money-path priority marker active",
             priority_request=priority_marker_request,
             priority_marker_active=True,
         )
+        summary["scheduler_failed"] = False
+        summary.pop("scheduler_failure_reason", None)
         _substrate_priority_receipt(request=priority_marker_request, summary=summary)
-        logger.info("EDLI market-substrate warm skipped: %s", summary["scheduler_failure_reason"])
+        logger.info("EDLI market-substrate warm skipped: %s", summary["status"])
+        return summary
+    from src.state.db import (
+        ZEUS_FORECASTS_DB_PATH,
+        get_forecasts_connection_read_only,
+        get_world_connection,
+    )
+
+    conn = get_world_connection()
+    try:
+        _attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" not in _attached:
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+    except Exception as _attach_exc:  # noqa: BLE001
+        logger.warning(
+            "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
+        )
+    forecasts_conn = get_forecasts_connection_read_only()
+    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not substrate_acquired:
+        summary = {"status": "skipped_in_process_lock_busy", "priority_marker_active": False}
+        logger.info("EDLI market-substrate warm skipped: %s", summary.get("status"))
+        try:
+            forecasts_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return summary
+    from src.data.dual_run_lock import acquire_lock
+
+    process_lock_ctx = acquire_lock("market_substrate_refresh")
+    try:
+        substrate_process_acquired = process_lock_ctx.__enter__()
+        if not substrate_process_acquired:
+            summary = {"status": "skipped_cross_process_lock_busy", "priority_marker_active": False}
+            logger.info("EDLI market-substrate warm skipped: %s", summary.get("status"))
+            return summary
+        background_budget_s = _background_warm_refresh_budget_seconds()
+        background_snapshot_reserve_s = _background_warm_snapshot_reserve_seconds(background_budget_s)
+        summary = _refresh_pending_family_snapshots(
+            conn,
+            forecasts_conn,
+            extra_priority_families=(),
+            include_pending_families=True,
+            priority_condition_ids=(),
+            refresh_budget_seconds=background_budget_s,
+            snapshot_reserve_seconds=background_snapshot_reserve_s,
+            include_money_risk_families=False,
+        )
+        summary = {
+            **dict(summary or {}),
+            "condition_priority_families": 0,
+            "open_rest_priority_condition_ids": 0,
+            "held_position_priority_condition_ids": 0,
+            "claim_order_priority_families": 0,
+            "claim_order_priority_read_failed": False,
+        }
+        summary = _substrate_warm_business_summary(
+            summary,
+            priority_request=priority_marker_request,
+            priority_marker_active=False,
+        )
+        logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
+        return summary
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        summary = _substrate_warm_failed_summary(
+            status="error",
+            reason=str(exc),
+            priority_request=priority_marker_request,
+            priority_marker_active=False,
+        )
+        logger.error(
+            "EDLI market-substrate warm failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return summary
+    finally:
+        try:
+            forecasts_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            process_lock_ctx.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        _market_substrate_refresh_lock.release()
+
+
+def _edli_money_path_substrate_priority_cycle() -> dict | None:
+    """Refresh only the executable books that can unblock live money-path decisions."""
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return None
+
+    priority_marker_active = money_path_substrate_priority_active()
+    priority_marker_request = (
+        money_path_substrate_priority_request() if priority_marker_active else None
+    )
+    priority_marker_families = (
+        money_path_substrate_priority_families() if priority_marker_active else []
+    )
+    priority_marker_condition_ids = (
+        money_path_substrate_priority_condition_ids() if priority_marker_active else []
+    )
+    if priority_marker_active and not priority_marker_families and not priority_marker_condition_ids:
+        summary = {
+            "status": "priority_request_empty_scope",
+            "priority_marker_active": True,
+            "scheduler_failed": False,
+        }
+        if isinstance(priority_marker_request, dict):
+            summary["priority_request_id"] = str(priority_marker_request.get("request_id") or "")
+            summary["priority_marker_families"] = len(priority_marker_request.get("families") or [])
+            summary["priority_marker_condition_ids"] = len(
+                priority_marker_request.get("condition_ids") or []
+            )
+        _substrate_priority_receipt(request=priority_marker_request, summary=summary)
+        logger.info("EDLI money-path substrate priority skipped: %s", summary["status"])
         return summary
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,
@@ -2315,7 +2500,8 @@ def _edli_market_substrate_warm_cycle() -> None:
             conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
     except Exception as _attach_exc:  # noqa: BLE001 — non-fatal; refresh logs+skips on topology miss
         logger.warning(
-            "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
+            "EDLI money-path substrate priority: ATTACH forecasts failed (non-fatal): %r",
+            _attach_exc,
         )
     forecasts_conn = get_forecasts_connection_read_only()
     substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
@@ -2325,14 +2511,14 @@ def _edli_market_substrate_warm_cycle() -> None:
                 status="priority_unserviced_in_process_lock_busy",
                 reason="executable substrate refresh already running",
                 priority_request=priority_marker_request,
-                priority_marker_active=True,
+                priority_marker_active=priority_marker_active,
             )
             if priority_marker_active
             else {"status": "skipped_in_process_lock_busy", "priority_marker_active": False}
         )
         if priority_marker_active:
             _substrate_priority_receipt(request=priority_marker_request, summary=summary)
-        logger.info("EDLI market-substrate warm skipped: %s", summary.get("status"))
+        logger.info("EDLI money-path substrate priority skipped: %s", summary.get("status"))
         try:
             forecasts_conn.close()
         except Exception:  # noqa: BLE001
@@ -2353,17 +2539,17 @@ def _edli_market_substrate_warm_cycle() -> None:
                     status="priority_unserviced_cross_process_lock_busy",
                     reason="cross-process executable substrate refresh already running",
                     priority_request=priority_marker_request,
-                    priority_marker_active=True,
+                    priority_marker_active=priority_marker_active,
                 )
                 if priority_marker_active
                 else {"status": "skipped_cross_process_lock_busy", "priority_marker_active": False}
             )
             if priority_marker_active:
                 _substrate_priority_receipt(request=priority_marker_request, summary=summary)
-            logger.info("EDLI market-substrate warm skipped: %s", summary.get("status"))
+            logger.info("EDLI money-path substrate priority skipped: %s", summary.get("status"))
             return summary
-        background_budget_s = _background_warm_refresh_budget_seconds()
-        background_snapshot_reserve_s = _background_warm_snapshot_reserve_seconds(background_budget_s)
+        priority_budget_s = _priority_refresh_budget_seconds()
+        priority_snapshot_reserve_s = _priority_snapshot_reserve_seconds(priority_budget_s)
         claim_deadline = time.monotonic() + _claim_order_priority_read_budget_seconds()
         claim_deadline_installed = _install_sqlite_deadline(
             conn,
@@ -2385,7 +2571,7 @@ def _edli_market_substrate_warm_cycle() -> None:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "EDLI market-substrate warm: open-rest condition priority read failed "
+                    "EDLI money-path substrate priority: open-rest condition priority read failed "
                     "(non-fatal): %s",
                     exc,
                 )
@@ -2427,21 +2613,33 @@ def _edli_market_substrate_warm_cycle() -> None:
             + list(condition_priority_families)
             + list(claim_priority_families)
         )
-        hot_scope_only = bool(
-            priority_marker_families
+        if not (
+            priority_families
             or exact_priority_condition_ids
-            or condition_priority_families
-            or claim_priority_families
             or claim_priority_read_failed
-        )
+        ):
+            summary = {
+                "status": "no_money_path_priority_scope",
+                "priority_marker_active": bool(priority_marker_active),
+                "scheduler_failed": False,
+                "condition_priority_families": 0,
+                "open_rest_priority_condition_ids": len(open_rest_priority_condition_ids),
+                "held_position_priority_condition_ids": len(held_position_priority_condition_ids),
+                "claim_order_priority_families": 0,
+                "claim_order_priority_read_failed": False,
+            }
+            _substrate_priority_receipt(request=priority_marker_request, summary=summary)
+            logger.info("EDLI money-path substrate priority: %r", summary)
+            return summary
         summary = _refresh_pending_family_snapshots(
             conn,
             forecasts_conn,
             extra_priority_families=priority_families,
-            include_pending_families=not hot_scope_only,
+            include_pending_families=False,
             priority_condition_ids=exact_priority_condition_ids,
-            refresh_budget_seconds=background_budget_s,
-            snapshot_reserve_seconds=background_snapshot_reserve_s,
+            refresh_budget_seconds=priority_budget_s,
+            snapshot_reserve_seconds=priority_snapshot_reserve_s,
+            include_money_risk_families=True,
         )
         summary = {
             **dict(summary or {}),
@@ -2457,7 +2655,7 @@ def _edli_market_substrate_warm_cycle() -> None:
             priority_marker_active=priority_marker_active,
         )
         _substrate_priority_receipt(request=priority_marker_request, summary=summary)
-        logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
+        logger.info("EDLI money-path substrate priority: refresh summary=%r", summary)
         return summary
     except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
         summary = _substrate_warm_failed_summary(
@@ -2468,7 +2666,7 @@ def _edli_market_substrate_warm_cycle() -> None:
         )
         _substrate_priority_receipt(request=priority_marker_request, summary=summary)
         logger.error(
-            "EDLI market-substrate warm: refresh raised (non-fatal, snapshots did not "
+            "EDLI money-path substrate priority: refresh raised (non-fatal, snapshots did not "
             "advance this tick): %r",
             exc,
         )

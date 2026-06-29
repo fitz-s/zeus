@@ -189,8 +189,10 @@ def main() -> None:
     # The lifted producers from the trading-lane-free module. Importing this module does
     # NOT pull in src.engine / src.main — failure-domain isolation (criterion 3).
     from src.data.substrate_observer import (
+        _edli_money_path_substrate_priority_cycle,
         _edli_market_substrate_warm_cycle,
         _market_discovery_cycle,
+        _priority_refresh_interval_seconds,
     )
 
     # Pre-flight (system_decomposition_plan §8 Step 1 mitigation): assert this process can
@@ -238,6 +240,7 @@ def main() -> None:
             # Snapshot writers stay serialized on the default worker. The heartbeat is
             # file-only liveness evidence and must not be starved by CLOB/Gamma work.
             "default": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "priority": _APSchedulerThreadPoolExecutor(max_workers=1),
             "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
@@ -263,6 +266,16 @@ def main() -> None:
     # The daemon applies its OWN observability wrapper (the lifted functions are not
     # decorated in the trading-lane-free module). Job ids are byte-identical to the order
     # daemon's so dashboards / scheduler_health keying carry over unchanged.
+    _scheduler.add_job(
+        _scheduler_job("money_path_substrate_priority")(_edli_money_path_substrate_priority_cycle),
+        "interval",
+        seconds=_priority_refresh_interval_seconds(),
+        id="money_path_substrate_priority",
+        executor="priority",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
     _scheduler.add_job(
         _scheduler_job("edli_market_substrate_warm")(_edli_market_substrate_warm_cycle),
         "interval",

@@ -171,6 +171,9 @@ def test_trading_daemon_surfaces_persistence_failure(monkeypatch):
         "src.data.dual_run_lock.acquire_lock",
         lambda _name: contextlib.nullcontext(True),
     )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     # Force STALE substrate so the staleness gate falls through to the capture path.
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
 

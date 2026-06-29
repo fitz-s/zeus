@@ -4546,6 +4546,11 @@ def refresh_executable_market_substrate_snapshots(
         for condition_id in (priority_condition_ids or ())
         if str(condition_id or "").strip()
     }
+    priority_condition_rank: dict[str, int] = {}
+    for raw_condition_id in priority_condition_ids or ():
+        condition_id = str(raw_condition_id or "").strip()
+        if condition_id and condition_id not in priority_condition_rank:
+            priority_condition_rank[condition_id] = len(priority_condition_rank)
     attempted = inserted = skipped = failed = 0
     # cap_truncated counts outcomes dropped by per-city cap or budget (true
     # truncation).  skipped counts all filtered-out outcomes (missing cid,
@@ -4664,6 +4669,7 @@ def refresh_executable_market_substrate_snapshots(
             candidate_groups[group_key],
             key=lambda item: (
                 0 if str(item[5] or "").strip() in priority_conditions else 1,
+                priority_condition_rank.get(str(item[5] or "").strip(), len(priority_condition_rank)),
                 item[0],
                 item[1],
                 item[2],
