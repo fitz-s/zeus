@@ -36,7 +36,18 @@ ROOT = str(
 SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
 FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
 FORECAST_LIVE_STALE_SECONDS = 300
-DEFAULT_EXPECTED_REF = "origin/main"
+DEFAULT_EXPECTED_REF = ""
+MATERIAL_CODE_PLANE_DIRTY_PREFIXES = (
+    "architecture/",
+    "config/",
+    "scripts/",
+    "src/",
+)
+MATERIAL_CODE_PLANE_DIRTY_FILES = frozenset({
+    "AGENTS.md",
+    "pyproject.toml",
+    "requirements.txt",
+})
 VOLATILE_CODE_PLANE_DIRTY_PATHS = frozenset({
     "station_migration_alerts.json",
     "state/station_migration_alerts.json",
@@ -354,8 +365,15 @@ def _porcelain_dirty_paths(status_text):
 
 def _code_plane_dirty_state(status_text):
     paths = _porcelain_dirty_paths(status_text)
-    material = [p for p in paths if p not in VOLATILE_CODE_PLANE_DIRTY_PATHS]
-    ignored = [p for p in paths if p in VOLATILE_CODE_PLANE_DIRTY_PATHS]
+    material = [
+        p for p in paths
+        if p not in VOLATILE_CODE_PLANE_DIRTY_PATHS
+        and (
+            p in MATERIAL_CODE_PLANE_DIRTY_FILES
+            or any(p.startswith(prefix) for prefix in MATERIAL_CODE_PLANE_DIRTY_PREFIXES)
+        )
+    ]
+    ignored = [p for p in paths if p not in material]
     return bool(material), material, ignored
 
 def _git_runtime_identity(root=ROOT):
@@ -382,6 +400,9 @@ def _git_runtime_identity(root=ROOT):
     expected_error = None
     if not expected_commit and expected_ref:
         expected_commit, expected_error = _git_text(root, ["rev-parse", expected_ref])
+    elif not expected_commit:
+        expected_ref = "HEAD"
+        expected_commit = head
     return {
         "status": "ok" if expected_commit and dirty is not None else "incomplete",
         "repo": root,

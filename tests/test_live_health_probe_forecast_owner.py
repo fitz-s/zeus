@@ -939,6 +939,38 @@ def test_git_runtime_identity_uses_expected_commit_env(tmp_path, monkeypatch):
     assert ["git", "-C", str(root), "rev-parse", "origin/main"] not in calls
 
 
+def test_git_runtime_identity_defaults_expected_to_current_head(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "hotfix/live\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = ""
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.delenv("ZEUS_LIVE_EXPECTED_COMMIT", raising=False)
+    monkeypatch.delenv("ZEUS_LIVE_EXPECTED_REF", raising=False)
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["status"] == "ok"
+    assert identity["head"] == "abc123"
+    assert identity["expected_ref"] == "HEAD"
+    assert identity["expected_commit"] == "abc123"
+    assert identity["matches_expected"] is True
+    assert ["git", "-C", str(root), "rev-parse", "origin/main"] not in calls
+
+
 def test_git_runtime_identity_ignores_station_migration_timestamp_artifact(tmp_path, monkeypatch):
     module = _load_module()
     root = tmp_path / "zeus"
@@ -989,6 +1021,42 @@ def test_git_runtime_identity_ignores_state_station_migration_timestamp_artifact
     assert identity["dirty"] is False
     assert identity["dirty_paths"] == []
     assert identity["ignored_dirty_paths"] == ["state/station_migration_alerts.json"]
+
+
+def test_git_runtime_identity_ignores_non_runtime_dirty_paths(tmp_path, monkeypatch):
+    module = _load_module()
+    root = tmp_path / "zeus"
+
+    def fake_run(args, **kwargs):
+        git_args = args[3:]
+        if git_args == ["rev-parse", "HEAD"]:
+            stdout = "abc123\n"
+        elif git_args == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            stdout = "main\n"
+        elif git_args == ["status", "--porcelain"]:
+            stdout = (
+                " M .claude/hooks/registry.yaml\n"
+                " M docs/operations/current/plans/live_redecision_repair/PLAN.md\n"
+                "?? .ai-bridge/\n"
+                "?? docs/evidence/settlement_guard/2026-06-29_settlement_guard.md\n"
+            )
+        else:
+            raise AssertionError(f"unexpected git args: {git_args!r}")
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("ZEUS_LIVE_EXPECTED_COMMIT", "abc123")
+
+    identity = module._git_runtime_identity(str(root))
+
+    assert identity["dirty"] is False
+    assert identity["dirty_paths"] == []
+    assert identity["ignored_dirty_paths"] == [
+        ".claude/hooks/registry.yaml",
+        "docs/operations/current/plans/live_redecision_repair/PLAN.md",
+        ".ai-bridge/",
+        "docs/evidence/settlement_guard/2026-06-29_settlement_guard.md",
+    ]
 
 
 def test_git_runtime_identity_still_flags_material_dirty_path(tmp_path, monkeypatch):
