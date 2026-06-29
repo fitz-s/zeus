@@ -4028,6 +4028,17 @@ def _ensure_entry_fill_position_event(
     order_status = "filled" if _entry_fill_covers_command(conn, command, shares_dec) else "partial"
     if command_event == "PARTIAL_FILL_OBSERVED":
         order_status = "partial"
+    chain_state_before = str(current.get("chain_state") or "").strip()
+    order_fact_source_name = str(order_fact_source or "").upper()
+    chain_state_after = current.get("chain_state") or "synced"
+    if chain_state_before in {"", "local_only"} and order_fact_source_name in {
+        "REST",
+        "WS_USER",
+        "WS_MARKET",
+        "DATA_API",
+        "CHAIN",
+    }:
+        chain_state_after = "synced"
     _ensure_entry_fill_order_fact(
         conn,
         command=command,
@@ -4043,7 +4054,7 @@ def _ensure_entry_fill_position_event(
             "trade_id": position_id,
             "state": runtime_state,
             "exit_state": current.get("exit_state") or "",
-            "chain_state": current.get("chain_state") or "synced",
+            "chain_state": chain_state_after,
             "env": current.get("env") or "live",
             "order_id": venue_order_id,
             "entry_order_id": venue_order_id,

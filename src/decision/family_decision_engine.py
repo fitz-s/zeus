@@ -1612,9 +1612,11 @@ class FamilyDecisionEngine:
         raises probability and never moves the forecast center; it only lowers the
         candidate-local ``payoff_q_lcb`` used by edge, robust DeltaU, stake, and ROI.
 
-        Active armed cells that are missing/thin/stale are live-money abstains. Unarmed
-        sides pass through with ``SIDE_NOT_ARMED`` so legacy NO-only artifacts do not
-        pretend to calibrate YES.
+        Active armed cells that are missing/thin/stale are live-money abstains.
+        Unarmed modal sides may pass through because the forecast center is the
+        primary authority there. Unarmed nonmodal/tail sides are live-money
+        abstains: without selected-side evidence, a cheap tail quote is not proof
+        of market alpha.
         """
         lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
 
@@ -1676,15 +1678,23 @@ class FamilyDecisionEngine:
                     bin_class=bin_class,
                     admission_margin=cost,
                 )
+                unarmed_nonmodal = (
+                    str(verdict.basis) == "SIDE_NOT_ARMED"
+                    and bin_class != "modal"
+                )
                 q_safe = float(min(prior_lcb, float(verdict.q_safe)))
+                if unarmed_nonmodal:
+                    q_safe = 0.0
                 guard_fields = {
                     "selection_guard_basis": str(verdict.basis),
-                    "selection_guard_abstained": bool(verdict.abstained or not verdict.trade),
+                    "selection_guard_abstained": bool(
+                        verdict.abstained or not verdict.trade or unarmed_nonmodal
+                    ),
                     "selection_guard_cell_key": str(verdict.cell_key),
                     "selection_guard_n": int(getattr(verdict, "n_g", 0) or 0),
                     "selection_guard_q_safe": float(q_safe),
                 }
-                if not verdict.trade:
+                if not verdict.trade or unarmed_nonmodal:
                     new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
                     out.append(replace(d, economics=new_econ, **guard_fields))
                     continue

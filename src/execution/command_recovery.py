@@ -125,6 +125,15 @@ _ACKED_ORDER_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
 })
+_TERMINAL_POSITIVE_MATCH_COMMAND_STATES = frozenset({
+    CommandState.CANCELLED.value,
+    CommandState.EXPIRED.value,
+})
+_TERMINAL_POSITIVE_MATCH_FACT_STATES = frozenset({
+    "CANCEL_CONFIRMED",
+    "EXPIRED",
+    "VENUE_WIPED",
+})
 _PARTIAL_REMAINDER_STATES = frozenset({
     CommandState.PARTIAL.value,
     CommandState.FILLED.value,
@@ -1637,10 +1646,22 @@ def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
 def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
-    command_states = tuple(_ACKED_ORDER_STATES)
+    command_states = tuple(sorted(_ACKED_ORDER_STATES | _TERMINAL_POSITIVE_MATCH_COMMAND_STATES))
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
-    fact_states = ("LIVE", "RESTING", "MATCHED", "PARTIALLY_MATCHED", "FILLED")
-    sql = "WITH " + _canonical_order_truth_cte() + """
+    fact_states = (
+        "LIVE",
+        "RESTING",
+        "MATCHED",
+        "PARTIALLY_MATCHED",
+        "FILLED",
+        "CANCEL_CONFIRMED",
+        "EXPIRED",
+        "VENUE_WIPED",
+    )
+    command_placeholders = ", ".join("?" for _ in command_states)
+    fact_placeholders = ", ".join("?" for _ in fact_states)
+    source_placeholders = ", ".join("?" for _ in sources)
+    sql = "WITH " + _canonical_order_truth_cte() + f"""
         SELECT
             cmd.*,
             fact.fact_id AS order_fact_id,
@@ -1649,14 +1670,15 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
             fact.venue_order_id AS order_fact_venue_order_id,
             fact.remaining_size AS order_fact_remaining_size,
             fact.matched_size AS order_fact_matched_size,
-            fact.source AS order_fact_source
+            fact.source AS order_fact_source,
+            fact.raw_payload_json AS order_fact_raw_payload_json
           FROM venue_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
          WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
-           AND cmd.state IN (?, ?)
-           AND fact.state IN (?, ?, ?, ?, ?)
-           AND fact.source IN (?, ?, ?, ?, ?)
+           AND cmd.state IN ({command_placeholders})
+           AND fact.state IN ({fact_placeholders})
+           AND fact.source IN ({source_placeholders})
            AND cmd.venue_order_id IS NOT NULL
         """
     rows = conn.execute(
@@ -2001,6 +2023,16 @@ def _venue_status_can_carry_positive_match(venue_status: str) -> bool:
     }
 
 
+def _is_terminal_positive_match_candidate(candidate: Mapping[str, object]) -> bool:
+    command_state = str(candidate.get("state") or "").upper()
+    fact_state = str(candidate.get("order_fact_state") or "").upper()
+    if command_state not in _TERMINAL_POSITIVE_MATCH_COMMAND_STATES:
+        return False
+    if fact_state not in _TERMINAL_POSITIVE_MATCH_FACT_STATES:
+        return False
+    return _positive_decimal_or_none(candidate.get("order_fact_matched_size")) is not None
+
+
 def _matched_remaining_size(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     matched = _decimal_or_none(matched_size)
     if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
@@ -2061,6 +2093,7 @@ def _append_matched_order_fill_projection(
     matched_size: str,
     fill_price: str,
     observed_at: str,
+    order_fact_source: str = "REST",
 ) -> None:
     try:
         from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
@@ -2072,6 +2105,7 @@ def _append_matched_order_fill_projection(
             filled_size=matched_size,
             fill_price=fill_price,
             observed_at=_coerce_iso_datetime(observed_at),
+            order_fact_source=order_fact_source,
         )
     except Exception:
         logger.exception(
@@ -5756,8 +5790,6 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     get_order = getattr(client, "get_order", None)
-    if not callable(get_order):
-        return summary
     trade_payloads_cache: list[dict] | None = None
     for row in _latest_matched_order_fact_candidates(conn):
         summary["scanned"] += 1
@@ -5768,19 +5800,31 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
             if not order_id or not command_order_id or order_id != command_order_id:
                 summary["errors"] += 1
                 continue
-            if _fill_trade_fact_count(conn, command_id) > 0:
+            terminal_positive_fact = _is_terminal_positive_match_candidate(row)
+            existing_fill_trade_fact_count = _fill_trade_fact_count(conn, command_id)
+            if existing_fill_trade_fact_count > 0 and not terminal_positive_fact:
                 summary["stayed"] += 1
                 continue
-            try:
-                point_order = _venue_order_payload(get_order(order_id))
-            except Exception as exc:
-                logger.warning(
-                    "recovery: matched order point lookup failed for command %s order %s: %s",
-                    command_id,
-                    order_id,
-                    exc,
-                )
-                summary["errors"] += 1
+            point_order = _order_fact_point_payload(row) if terminal_positive_fact else None
+            point_order_source = str(row.get("order_fact_source") or "REST")
+            if callable(get_order):
+                try:
+                    live_point_order = _venue_order_payload(get_order(order_id))
+                    if live_point_order is not None:
+                        point_order = live_point_order
+                        point_order_source = "REST"
+                except Exception as exc:
+                    logger.warning(
+                        "recovery: matched order point lookup failed for command %s order %s: %s",
+                        command_id,
+                        order_id,
+                        exc,
+                    )
+                    if not terminal_positive_fact:
+                        summary["errors"] += 1
+                        continue
+            elif not terminal_positive_fact:
+                summary["stayed"] += 1
                 continue
             point_status = str(_first_present(point_order, "status", "state") or "").upper()
             point_matched_size = _point_order_matched_size(
@@ -5803,6 +5847,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 )
                 if trade_point_order is not None:
                     point_order = trade_point_order
+                    point_order_source = "REST"
                 elif point_order is None:
                     summary["stayed"] += 1
                     continue
@@ -5815,14 +5860,20 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 summary["stayed"] += 1
                 continue
             venue_status = str(_first_present(point_order, "status", "state") or "").upper()
-            if not _venue_status_can_carry_positive_match(venue_status):
+            if (
+                not _venue_status_can_carry_positive_match(venue_status)
+                and not terminal_positive_fact
+            ):
                 summary["stayed"] += 1
                 continue
             fill_price = _point_order_fill_price(point_order, fallback=row.get("price"), side=row.get("side"))
             if not _positive_decimal_or_none(fill_price):
                 summary["errors"] += 1
                 continue
-            trade_id = next(iter(_point_order_trade_ids(point_order)), None)
+            trade_ids = _point_order_trade_ids(point_order)
+            trade_id = next(iter(trade_ids), None)
+            if not trade_id and terminal_positive_fact:
+                trade_id = f"order_fact:{row.get('order_fact_id')}:matched"
             if not trade_id:
                 summary["errors"] += 1
                 continue
@@ -5834,9 +5885,19 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 venue_status=venue_status,
                 remaining_size=remaining_size,
             )
-            observed_at = _now_iso()
+            observed_at = (
+                str(row.get("order_fact_observed_at") or "")
+                if terminal_positive_fact
+                else _now_iso()
+            )
+            if not observed_at:
+                observed_at = _now_iso()
             payload = {
-                "reason": "acked_order_point_order_matched",
+                "reason": (
+                    "terminal_order_fact_positive_match"
+                    if terminal_positive_fact
+                    else "acked_order_point_order_matched"
+                ),
                 "proof_class": "point_order_matched_fill",
                 "venue_order_id": order_id,
                 "command_id": command_id,
@@ -5849,46 +5910,51 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 "point_order": point_order,
                 "latest_order_fact_id": row.get("order_fact_id"),
                 "latest_order_fact_state": row.get("order_fact_state"),
+                "latest_order_fact_source": row.get("order_fact_source"),
+                "command_state": row.get("state"),
+                "trade_ids": list(trade_ids),
             }
             safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
             sp_name = f"sp_matched_order_fact_{safe_command_id}"
             conn.execute(f"SAVEPOINT {sp_name}")
             try:
-                append_order_fact(
-                    conn,
-                    venue_order_id=order_id,
-                    command_id=command_id,
-                    state=order_fact_state,
-                    remaining_size=remaining_size,
-                    matched_size=matched_size,
-                    source="REST",
-                    observed_at=observed_at,
-                    venue_timestamp=observed_at,
-                    raw_payload_hash=_payload_hash(payload),
-                    raw_payload_json=payload,
-                )
-                append_trade_fact(
-                    conn,
-                    trade_id=trade_id,
-                    venue_order_id=order_id,
-                    command_id=command_id,
-                    state="MATCHED",
-                    filled_size=matched_size,
-                    fill_price=fill_price,
-                    source="REST",
-                    observed_at=observed_at,
-                    venue_timestamp=observed_at,
-                    tx_hash=tx_hash,
-                    raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
-                    raw_payload_json=payload,
-                )
-                append_event(
-                    conn,
-                    command_id=command_id,
-                    event_type=event_type,
-                    occurred_at=observed_at,
-                    payload=payload,
-                )
+                if existing_fill_trade_fact_count == 0:
+                    append_order_fact(
+                        conn,
+                        venue_order_id=order_id,
+                        command_id=command_id,
+                        state=order_fact_state,
+                        remaining_size=remaining_size,
+                        matched_size=matched_size,
+                        source=point_order_source,
+                        observed_at=observed_at,
+                        venue_timestamp=observed_at,
+                        raw_payload_hash=_payload_hash(payload),
+                        raw_payload_json=payload,
+                    )
+                    append_trade_fact(
+                        conn,
+                        trade_id=trade_id,
+                        venue_order_id=order_id,
+                        command_id=command_id,
+                        state="MATCHED",
+                        filled_size=matched_size,
+                        fill_price=fill_price,
+                        source=point_order_source,
+                        observed_at=observed_at,
+                        venue_timestamp=observed_at,
+                        tx_hash=tx_hash,
+                        raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
+                        raw_payload_json=payload,
+                    )
+                if not terminal_positive_fact:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=event_type,
+                        occurred_at=observed_at,
+                        payload=payload,
+                    )
                 if str(row.get("intent_kind") or "").upper() == "ENTRY":
                     _append_matched_order_fill_projection(
                         conn,
@@ -5897,6 +5963,7 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                         matched_size=matched_size,
                         fill_price=fill_price,
                         observed_at=observed_at,
+                        order_fact_source=point_order_source,
                     )
                 _append_exit_order_fill_projection(
                     conn,

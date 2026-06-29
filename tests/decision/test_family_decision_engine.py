@@ -1968,6 +1968,78 @@ def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
     assert selected is passed_yes
 
 
+def test_selection_calibrator_blocks_unarmed_nonmodal_yes(monkeypatch):
+    """Unarmed selected-side evidence cannot license cheap nonmodal tail YES."""
+
+    case = _case()
+    space = _outcome_space(case)
+    tail_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b24", cost=0.03),
+        edge_lcb=0.07,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.05,
+        optimal_delta_u=0.06,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.08,
+        optimal_stake_usd=Decimal("5"),
+    )
+
+    def _selection_verdict(**kwargs):
+        return SimpleNamespace(
+            q_safe=float(kwargs["raw_side_prob"]),
+            trade=True,
+            abstained=False,
+            cell_key=f"{kwargs['side']}|SIDE_NOT_ARMED",
+            L_g=float("nan"),
+            n_g=0,
+            basis="SIDE_NOT_ARMED",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    pd = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    jq = build_joint_q(pd, space)
+    matrix = _matrix(space)
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(tail_yes, modal_yes),
+        case=case,
+        joint_q=jq,
+        band=build_joint_q_band(pd, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b24", "YES"): _yes_sizing(space, "b24", q_point=0.20, q_lcb=0.10, price="0.03"),
+            ("b25", "YES"): _yes_sizing(space, "b25", q_point=0.50, q_lcb=0.35, price="0.27"),
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    blocked_tail = next(d for d in guarded if d.route.bin_id == "b24")
+    passed_modal = next(d for d in guarded if d.route.bin_id == "b25")
+    assert blocked_tail.selection_guard_basis == "SIDE_NOT_ARMED"
+    assert blocked_tail.selection_guard_abstained is True
+    assert blocked_tail.selection_guard_n == 0
+    assert blocked_tail.selection_guard_q_safe == pytest.approx(0.0)
+    assert blocked_tail.economics.edge_lcb < 0.0
+    assert blocked_tail.economics.optimal_delta_u <= 0.0
+    assert passed_modal.selection_guard_basis == "SIDE_NOT_ARMED"
+    assert passed_modal.selection_guard_abstained is False
+    assert passed_modal.economics.edge_lcb > 0.0
+
+
 def test_selection_calibrator_deflation_recomputes_qkernel_stake(monkeypatch):
     """A licensed selection bound lowers payoff_q_lcb and recomputes ROI inputs."""
 

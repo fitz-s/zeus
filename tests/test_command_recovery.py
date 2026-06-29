@@ -681,9 +681,11 @@ def _append_order_fact(
     matched_size="0",
     remaining_size="0",
     source="REST",
+    raw_payload_json=None,
 ):
     from src.state.venue_command_repo import append_order_fact
 
+    payload = raw_payload_json or {"status": state, "order_id": order_id}
     return append_order_fact(
         conn,
         venue_order_id=order_id,
@@ -695,7 +697,7 @@ def _append_order_fact(
         observed_at="2026-04-26T00:05:00Z",
         venue_timestamp="2026-04-26T00:05:00Z",
         raw_payload_hash="f" * 64,
-        raw_payload_json={"status": state, "order_id": order_id},
+        raw_payload_json=payload,
     )
 
 
@@ -7412,6 +7414,83 @@ class TestRecoveryResolutionTable:
             "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["phase"] == "pending_entry"
+
+    def test_cancelled_terminal_order_fact_with_matched_size_recovers_entry_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0, price=0.50)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+        )
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(
+            conn,
+            state="CANCEL_CONFIRMED",
+            matched_size="1.25",
+            remaining_size="8.75",
+            source="WS_USER",
+            raw_payload_json={
+                "id": "ord-001",
+                "orderID": "ord-001",
+                "status": "CANCELED",
+                "size_matched": "1.25",
+                "price": "0.50",
+                "associate_trades": ["trade-terminal-positive"],
+            },
+        )
+        mock_client.get_order.return_value = None
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        trade = conn.execute(
+            """
+            SELECT trade_id, filled_size, fill_price, source
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade) == {
+            "trade_id": "trade-terminal-positive",
+            "filled_size": "1.25",
+            "fill_price": "0.50",
+            "source": "WS_USER",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_status, chain_state
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("1.25")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0.625")
+        assert Decimal(str(current["entry_price"])) == Decimal("0.5")
+        assert current["order_status"] == "partial"
+        assert current["chain_state"] == "synced"
+        events = [row["event_type"] for row in _get_events(conn, "cmd-001")]
+        assert events[-1] == "CANCEL_ACKED"
+        position_events = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM position_events WHERE position_id = 'pos-001' ORDER BY sequence_no"
+            ).fetchall()
+        ]
+        assert "ENTRY_ORDER_FILLED" in position_events
 
     def test_acked_terminal_order_fact_order_id_mismatch_does_not_void_command_position(
         self,
