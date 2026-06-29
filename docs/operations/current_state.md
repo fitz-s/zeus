@@ -62,6 +62,14 @@ Freeze a new packet through this file before starting any implementation slice.
 Closed or superseded packet bodies are indexed in `docs/archive_registry.md`
 (archive bodies are untracked on disk under `docs/archive/`; not visible in tracked tree).
 
+## Related current-state surfaces
+
+This file is the single entry point for live posture. Satellites cross-link here:
+
+- `docs/operations/current_data_state.md` — data posture detail (stale; verify before use)
+- `docs/operations/current_source_validity.md` — source posture detail (stale; verify before use)
+- `docs/operations/current/` — active packets, plans, and evidence; plan index at `docs/operations/current/plans/INDEX.md`
+
 ## Operations routing
 
 - `docs/operations/AGENTS.md` — packet/package routing and closeout rules

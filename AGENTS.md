@@ -137,7 +137,7 @@ Durable trading rules:
 - Price, probability, sizing, fill, lifecycle, and settlement evidence are separate facts.
 - Current config affects present behavior but does not belong in root AGENTS unless it becomes durable law.
 
-For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route.
+For derivations and worked examples, read `docs/reference/zeus_domain_model.md` and the targeted reference named by the task route. Term definitions live in `docs/reference/glossary.md`; math and physics index in `docs/reference/theory_map.md`.
 
 ## 3. Routing And Gates
 
