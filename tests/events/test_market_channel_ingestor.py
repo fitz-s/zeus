@@ -932,7 +932,7 @@ def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets
     assert _edli_filter_markets_for_condition(markets, "missing-condition") == []
 
 
-def test_tick_size_change_invalidates_bound_executable_snapshot_until_refreshed():
+def test_tick_size_change_records_append_only_snapshot_invalidation_until_refreshed():
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -962,7 +962,19 @@ def test_tick_size_change_invalidates_bound_executable_snapshot_until_refreshed(
     )
 
     assert count == 1
-    assert conn.execute("SELECT freshness_deadline FROM executable_market_snapshots").fetchone()[0] == "2026-05-24T11:59:59+00:00"
+    assert conn.execute("SELECT freshness_deadline FROM executable_market_snapshots").fetchone()[0] == "2026-05-24T12:05:00+00:00"
+    row = conn.execute(
+        """
+        SELECT condition_id, token_id, reason, invalidated_at
+          FROM executable_market_snapshot_invalidations
+        """
+    ).fetchone()
+    assert row == (
+        "condition-1",
+        "yes-1",
+        "tick_size_change",
+        "2026-05-24T12:00:00+00:00",
+    )
 
 
 def test_new_market_message_emits_discovery_event_without_shadow_module():

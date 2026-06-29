@@ -814,46 +814,26 @@ def invalidate_executable_snapshots_for_market_channel_action(
     *,
     invalidated_at: datetime,
 ) -> int:
-    """Force event-bound executable snapshots stale after public venue changes.
+    """Append an invalidation fact after public venue changes.
 
     Public market-channel messages are not fill truth, but tick-size and market
-    lifecycle changes are executable-quote authority changes. Until the REST
-    snapshot refresh succeeds, any previously captured snapshot for the affected
-    condition/token must fail the freshness gate.
+    lifecycle changes are executable-quote authority changes. Snapshot evidence
+    is append-only, so invalidation is a separate fact consumed by live readers,
+    never an UPDATE to historical rows.
     """
 
-    if not action.refresh_snapshot or not _table_exists(conn, "executable_market_snapshots"):
+    if not action.refresh_snapshot:
         return 0
-    columns = _table_columns(conn, "executable_market_snapshots")
-    if "freshness_deadline" not in columns:
-        return 0
-    predicates: list[str] = []
-    params: list[object] = []
-    if action.condition_id and "condition_id" in columns:
-        predicates.append("condition_id = ?")
-        params.append(action.condition_id)
-    if action.token_id:
-        token_predicates = []
-        if "yes_token_id" in columns:
-            token_predicates.append("yes_token_id = ?")
-            params.append(action.token_id)
-        if "no_token_id" in columns:
-            token_predicates.append("no_token_id = ?")
-            params.append(action.token_id)
-        if token_predicates:
-            predicates.append("(" + " OR ".join(token_predicates) + ")")
-    if not predicates:
-        return 0
-    stale_deadline = (invalidated_at.astimezone(UTC) - timedelta(seconds=1)).isoformat()
-    cur = conn.execute(
-        f"""
-        UPDATE executable_market_snapshots
-           SET freshness_deadline = ?
-         WHERE {' OR '.join(predicates)}
-        """,
-        (stale_deadline, *params),
+
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    return record_snapshot_invalidation(
+        conn,
+        condition_id=action.condition_id,
+        token_id=action.token_id,
+        reason=action.reason,
+        invalidated_at=invalidated_at.astimezone(UTC),
     )
-    return int(cur.rowcount or 0)
 
 
 @dataclass

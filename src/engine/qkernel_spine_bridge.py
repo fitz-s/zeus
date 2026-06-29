@@ -141,9 +141,6 @@ NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE = "NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE
 # bucket has its own settlement-EV replay, so live qkernel is restricted to it. A case
 # outside the replayed bucket is a typed no-trade until that bucket is EV-replayed.
 NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED = "QKERNEL_LEAD_BUCKET_NOT_REPLAYED"
-# v1 day0 hard-block (consult_review_pr409_round2.md §3): qkernel reads no day0
-# observation, so a day0 event type is refused BEFORE the spine is driven.
-NO_TRADE_QKERNEL_DAY0_NOT_WIRED = "QKERNEL_DAY0_NOT_WIRED"
 _LEGACY_ROUNDED_MU_DIRECTION_REJECTION_PREFIX = "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
 
 # The route_id prefixes a DIRECT native route carries (negrisk_routes._direct_*_route:

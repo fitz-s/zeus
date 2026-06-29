@@ -478,55 +478,11 @@ def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
-    try:
-        rows = write_conn.execute(
-            """
-            SELECT yes_token_id, no_token_id, selected_outcome_token_id
-            FROM executable_market_snapshot_latest
-            WHERE condition_id = ? AND freshness_deadline >= ?
-            ORDER BY captured_at DESC, snapshot_id DESC
-            """,
-            (condition_id, fresh_at_iso),
-        ).fetchall()
-    except Exception:
-        rows = []
-    if not rows:
-        rows = write_conn.execute(
-            """
-            SELECT yes_token_id, no_token_id, selected_outcome_token_id
-            FROM executable_market_snapshots
-            WHERE condition_id = ? AND freshness_deadline >= ?
-            ORDER BY captured_at DESC, snapshot_id DESC
-            """,
-            (condition_id, fresh_at_iso),
-        ).fetchall()
-    if not rows:
-        return False
+    from src.state.snapshot_repo import condition_buy_sides_fresh
 
-    yes_token_id = ""
-    no_token_id = ""
-    fresh_selected_tokens: set[str] = set()
+    return condition_buy_sides_fresh(write_conn, condition_id, fresh_at_iso)
 
-    def _cell(row, key: str, index: int) -> str:
-        try:
-            value = row[key] if hasattr(row, "keys") else row[index]
-        except (KeyError, IndexError, TypeError):
-            value = None
-        return str(value or "").strip()
 
-    for row in rows:
-        yes = _cell(row, "yes_token_id", 0)
-        no = _cell(row, "no_token_id", 1)
-        selected = _cell(row, "selected_outcome_token_id", 2)
-        if yes and not yes_token_id:
-            yes_token_id = yes
-        if no and not no_token_id:
-            no_token_id = no
-        if selected:
-            fresh_selected_tokens.add(selected)
-    if not yes_token_id or not no_token_id:
-        return False
-    return yes_token_id in fresh_selected_tokens and no_token_id in fresh_selected_tokens
 def _prune_fresh_market_outcomes_for_snapshot_refresh(
     write_conn,
     markets: list[dict],

@@ -2748,55 +2748,9 @@ def _weather_family_from_market_slug(slug: str) -> tuple[str, str, str] | None:
 
 
 def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
-    try:
-        rows = write_conn.execute(
-            """
-            SELECT yes_token_id, no_token_id, selected_outcome_token_id
-            FROM executable_market_snapshot_latest
-            WHERE condition_id = ? AND freshness_deadline >= ?
-            ORDER BY captured_at DESC, snapshot_id DESC
-            """,
-            (condition_id, fresh_at_iso),
-        ).fetchall()
-    except Exception:
-        rows = []
-    if not rows:
-        rows = write_conn.execute(
-            """
-            SELECT yes_token_id, no_token_id, selected_outcome_token_id
-            FROM executable_market_snapshots
-            WHERE condition_id = ? AND freshness_deadline >= ?
-            ORDER BY captured_at DESC, snapshot_id DESC
-            """,
-            (condition_id, fresh_at_iso),
-        ).fetchall()
-    if not rows:
-        return False
+    from src.state.snapshot_repo import condition_buy_sides_fresh
 
-    yes_token_id = ""
-    no_token_id = ""
-    fresh_selected_tokens: set[str] = set()
-
-    def _cell(row, key: str, index: int) -> str:
-        try:
-            value = row[key] if hasattr(row, "keys") else row[index]
-        except (KeyError, IndexError, TypeError):
-            value = None
-        return str(value or "").strip()
-
-    for row in rows:
-        yes = _cell(row, "yes_token_id", 0)
-        no = _cell(row, "no_token_id", 1)
-        selected = _cell(row, "selected_outcome_token_id", 2)
-        if yes and not yes_token_id:
-            yes_token_id = yes
-        if no and not no_token_id:
-            no_token_id = no
-        if selected:
-            fresh_selected_tokens.add(selected)
-    if not yes_token_id or not no_token_id:
-        return False
-    return yes_token_id in fresh_selected_tokens and no_token_id in fresh_selected_tokens
+    return condition_buy_sides_fresh(write_conn, condition_id, fresh_at_iso)
 
 
 def _prune_fresh_market_outcomes_for_snapshot_refresh(
@@ -5591,19 +5545,13 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         confirmed_held_scope = set(held_reemit_families)
         held_refresh_families = set(held_condition_scope)
         confirm_families = set(all_families) | held_refresh_families | entry_refresh_families
-        priority_condition_ids = {
-            condition_id
-            for scope in (
-                entry_condition_scope,
-                entry_refresh_condition_scope,
-                open_rest_condition_scope,
-                rest_condition_scope,
-                held_condition_scope,
-            )
-            for condition_ids in scope.values()
-            for condition_id in condition_ids
-            if str(condition_id or "").strip()
-        }
+        priority_condition_ids = _edli_confirm_priority_condition_ids(
+            rest_condition_scope=rest_condition_scope,
+            held_condition_scope=held_condition_scope,
+            entry_condition_scope=entry_condition_scope,
+            entry_refresh_condition_scope=entry_refresh_condition_scope,
+            open_rest_condition_scope=open_rest_condition_scope,
+        )
         confirm_refresh_summary: dict = {}
         if confirm_families:
             confirm_refresh_summary = _edli_refresh_continuous_money_path_families(
@@ -6427,7 +6375,6 @@ def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) ->
     if not required.issubset(cols):
         return True
     selected_cols = [
-        "active" if "active" in cols else "1 AS active",
         "closed" if "closed" in cols else "0 AS closed",
         "enable_orderbook" if "enable_orderbook" in cols else "1 AS enable_orderbook",
         "accepting_orders" if "accepting_orders" in cols else "1 AS accepting_orders",
@@ -6460,11 +6407,10 @@ def _edli_condition_latest_snapshot_executable(trade_conn, condition_id: str) ->
             return False
         return default
 
-    active = _truthy(row[0], True)
-    closed = _truthy(row[1], False)
-    enable_orderbook = _truthy(row[2], True)
-    accepting_orders = _truthy(row[3], True)
-    return bool(active and not closed and enable_orderbook and accepting_orders)
+    closed = _truthy(row[0], False)
+    enable_orderbook = _truthy(row[1], True)
+    accepting_orders = _truthy(row[2], True)
+    return bool(not closed and enable_orderbook and accepting_orders)
 
 
 def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], set[str]]:
@@ -6653,6 +6599,57 @@ def _edli_refresh_continuous_money_path_families(
             _edli_redecision_confirm_refresh_lock.release()
         except RuntimeError:
             pass
+
+
+def _edli_redecision_priority_condition_limit() -> int:
+    raw = os.environ.get(
+        "ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT",
+        os.environ.get("ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS", "24"),
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 24
+    return max(1, min(500, value))
+
+
+def _edli_confirm_priority_condition_ids(
+    *,
+    rest_condition_scope: dict[tuple[str, str, str], set[str]],
+    held_condition_scope: dict[tuple[str, str, str], set[str]],
+    entry_condition_scope: dict[tuple[str, str, str], set[str]],
+    entry_refresh_condition_scope: dict[tuple[str, str, str], set[str]],
+    open_rest_condition_scope: dict[tuple[str, str, str], set[str]],
+    limit: int | None = None,
+) -> list[str]:
+    """Return a bounded, ordered money-path condition frontier for sidecar capture."""
+
+    condition_limit = _edli_redecision_priority_condition_limit() if limit is None else max(1, int(limit))
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add_scope(scope: dict[tuple[str, str, str], set[str]]) -> None:
+        for family_key in sorted(scope or {}):
+            for condition_id in sorted(scope.get(family_key) or set()):
+                clean = str(condition_id or "").strip()
+                if not clean or clean in seen:
+                    continue
+                seen.add(clean)
+                ordered.append(clean)
+                if len(ordered) >= condition_limit:
+                    return
+
+    for scope in (
+        rest_condition_scope,
+        held_condition_scope,
+        entry_condition_scope,
+        entry_refresh_condition_scope,
+        open_rest_condition_scope,
+    ):
+        if len(ordered) >= condition_limit:
+            break
+        _add_scope(scope)
+    return ordered
 
 
 def _edli_confirmation_refresh_unavailable(summary: dict | None) -> bool:

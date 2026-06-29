@@ -11,6 +11,7 @@ it never edits the evidence a prior venue_command cited.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime
@@ -24,6 +25,7 @@ from src.contracts.executable_market_snapshot import (
 
 SNAPSHOT_TABLE = "executable_market_snapshots"
 SNAPSHOT_LATEST_TABLE = "executable_market_snapshot_latest"
+SNAPSHOT_INVALIDATIONS_TABLE = "executable_market_snapshot_invalidations"
 ABSENT_ORDERBOOK_SIDE = "ABSENT"
 
 
@@ -136,6 +138,7 @@ def init_snapshot_schema(
               ON executable_market_snapshot_latest (no_token_id, captured_at DESC);
             """
         )
+        init_snapshot_invalidation_schema(conn)
     # PR 2: add microstructure transparency columns (idempotent ADD COLUMN).
     # spread_observed_window_ms deferred to follow-up PR (Finding #8 decision-a).
     import logging as _logging
@@ -191,6 +194,263 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
         row,
     )
     _upsert_latest_snapshot(conn, row)
+
+
+def init_snapshot_invalidation_schema(conn: sqlite3.Connection) -> None:
+    """Create append-only market-channel invalidation facts for live snapshot readers."""
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS executable_market_snapshot_invalidations (
+          invalidation_id TEXT PRIMARY KEY,
+          condition_id TEXT,
+          token_id TEXT,
+          reason TEXT NOT NULL,
+          invalidated_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          CHECK (
+            COALESCE(condition_id, '') <> ''
+            OR COALESCE(token_id, '') <> ''
+          )
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshot_invalidations_condition_time
+          ON executable_market_snapshot_invalidations (condition_id, invalidated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_snapshot_invalidations_token_time
+          ON executable_market_snapshot_invalidations (token_id, invalidated_at DESC);
+        """
+    )
+
+
+def record_snapshot_invalidation(
+    conn: sqlite3.Connection,
+    *,
+    condition_id: str | None,
+    token_id: str | None,
+    reason: str,
+    invalidated_at: datetime,
+) -> int:
+    """Append one venue market-action invalidation fact.
+
+    ``executable_market_snapshots`` is immutable evidence. Market-channel
+    lifecycle/tick messages invalidate old rows by appending this fact; readers
+    fail closed until a later snapshot whose ``captured_at`` is after the
+    invalidation exists.
+    """
+
+    clean_condition = str(condition_id or "").strip() or None
+    clean_token = str(token_id or "").strip() or None
+    if clean_condition is None and clean_token is None:
+        return 0
+    clean_reason = str(reason or "").strip() or "market_channel_action"
+    invalidated_at_text = _dt(invalidated_at)
+    invalidation_id = hashlib.sha256(
+        "|".join(
+            (
+                clean_condition or "",
+                clean_token or "",
+                clean_reason,
+                invalidated_at_text,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    init_snapshot_invalidation_schema(conn)
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO executable_market_snapshot_invalidations (
+          invalidation_id, condition_id, token_id, reason, invalidated_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            invalidation_id,
+            clean_condition,
+            clean_token,
+            clean_reason,
+            invalidated_at_text,
+            invalidated_at_text,
+        ),
+    )
+    return int(cur.rowcount or 0)
+
+
+def snapshot_is_invalidated(
+    conn: sqlite3.Connection,
+    snapshot: ExecutableMarketSnapshot,
+    *,
+    checked_at: datetime | None = None,
+) -> bool:
+    """Return whether a later market-channel fact invalidates this snapshot."""
+
+    return _snapshot_identity_invalidated(
+        conn,
+        condition_id=snapshot.condition_id,
+        token_ids=(
+            snapshot.selected_outcome_token_id,
+            snapshot.yes_token_id,
+            snapshot.no_token_id,
+        ),
+        captured_at=snapshot.captured_at,
+        checked_at=checked_at,
+    )
+
+
+def snapshot_row_is_invalidated(
+    conn: sqlite3.Connection,
+    row: Any,
+    *,
+    checked_at: datetime | None = None,
+) -> bool:
+    """Return whether an append-only snapshot row is invalidated by a later fact."""
+
+    captured_at_raw = _row_value(row, "captured_at")
+    if not captured_at_raw:
+        return False
+    try:
+        captured_at = _dt_parse_required(str(captured_at_raw))
+    except (TypeError, ValueError):
+        return False
+    return _snapshot_identity_invalidated(
+        conn,
+        condition_id=str(_row_value(row, "condition_id") or ""),
+        token_ids=(
+            _row_value(row, "selected_outcome_token_id"),
+            _row_value(row, "yes_token_id"),
+            _row_value(row, "no_token_id"),
+        ),
+        captured_at=captured_at,
+        checked_at=checked_at,
+    )
+
+
+def condition_buy_sides_fresh(
+    conn: sqlite3.Connection,
+    condition_id: str,
+    fresh_at_iso: str,
+) -> bool:
+    """Return whether a condition has fresh, non-invalidated YES and NO books."""
+
+    clean_condition_id = str(condition_id or "").strip()
+    if not clean_condition_id:
+        return False
+    rows = _condition_buy_side_rows_from_table(
+        conn,
+        "executable_market_snapshot_latest",
+        condition_id=clean_condition_id,
+        fresh_at_iso=fresh_at_iso,
+    )
+    if not rows:
+        rows = _condition_buy_side_rows_from_table(
+            conn,
+            "executable_market_snapshots",
+            condition_id=clean_condition_id,
+            fresh_at_iso=fresh_at_iso,
+        )
+    if not rows:
+        return False
+
+    yes_token_id = ""
+    no_token_id = ""
+    fresh_selected_tokens: set[str] = set()
+    for row in rows:
+        yes = str(_row_value(row, "yes_token_id") or "").strip()
+        no = str(_row_value(row, "no_token_id") or "").strip()
+        selected = str(_row_value(row, "selected_outcome_token_id") or "").strip()
+        if yes and not yes_token_id:
+            yes_token_id = yes
+        if no and not no_token_id:
+            no_token_id = no
+        if selected:
+            fresh_selected_tokens.add(selected)
+    if not yes_token_id or not no_token_id:
+        return False
+    return yes_token_id in fresh_selected_tokens and no_token_id in fresh_selected_tokens
+
+
+def _condition_buy_side_rows_from_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+    *,
+    condition_id: str,
+    fresh_at_iso: str,
+) -> list[Any]:
+    if not _snapshot_table_exists(conn, table_name):
+        return []
+    invalidation_filter = ""
+    if _snapshot_table_exists(conn, SNAPSHOT_INVALIDATIONS_TABLE):
+        invalidation_filter = f"""
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM {SNAPSHOT_INVALIDATIONS_TABLE} inv
+                 WHERE inv.invalidated_at >= {table_name}.captured_at
+                   AND (
+                        inv.condition_id = {table_name}.condition_id
+                        OR inv.token_id = {table_name}.selected_outcome_token_id
+                        OR inv.token_id = {table_name}.yes_token_id
+                        OR inv.token_id = {table_name}.no_token_id
+                   )
+          )
+        """
+    try:
+        cur = conn.execute(
+            f"""
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id
+              FROM {table_name}
+             WHERE condition_id = ?
+               AND freshness_deadline >= ?
+               {invalidation_filter}
+             ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            (condition_id, fresh_at_iso),
+        )
+        names = [description[0] for description in cur.description]
+        return [
+            {name: row[name] for name in names}
+            if isinstance(row, sqlite3.Row)
+            else dict(zip(names, row))
+            for row in cur.fetchall()
+        ]
+    except Exception:
+        return []
+
+
+def _snapshot_identity_invalidated(
+    conn: sqlite3.Connection,
+    *,
+    condition_id: str | None,
+    token_ids: tuple[Any, ...],
+    captured_at: datetime,
+    checked_at: datetime | None,
+) -> bool:
+    if not _snapshot_table_exists(conn, SNAPSHOT_INVALIDATIONS_TABLE):
+        return False
+    clean_condition = str(condition_id or "").strip()
+    clean_tokens = tuple(
+        dict.fromkeys(str(token_id or "").strip() for token_id in token_ids if str(token_id or "").strip())
+    )
+    predicates: list[str] = []
+    params: list[object] = [_dt(captured_at)]
+    if checked_at is not None:
+        params.append(_dt(checked_at))
+    if clean_condition:
+        predicates.append("condition_id = ?")
+        params.append(clean_condition)
+    for token_id in clean_tokens:
+        predicates.append("token_id = ?")
+        params.append(token_id)
+    if not predicates:
+        return False
+    upper_bound = "AND invalidated_at <= ?" if checked_at is not None else ""
+    row = conn.execute(
+        f"""
+        SELECT 1
+          FROM executable_market_snapshot_invalidations
+         WHERE invalidated_at >= ?
+           {upper_bound}
+           AND ({' OR '.join(predicates)})
+         LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    return row is not None
 
 
 def _upsert_latest_snapshot(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
@@ -287,20 +547,25 @@ def latest_snapshot_for_market(
                 (latest["snapshot_id"],),
             ).fetchone()
             if row is not None:
-                return _snapshot_from_row(row)
-        row = conn.execute(
+                snapshot = _snapshot_from_row(row)
+                if not snapshot_is_invalidated(conn, snapshot, checked_at=fresh_as_of):
+                    return snapshot
+        rows = conn.execute(
             """
             SELECT * FROM executable_market_snapshots
             WHERE condition_id = ?
               AND freshness_deadline >= ?
             ORDER BY captured_at DESC
-            LIMIT 1
             """,
             (condition_id, fresh_as_of_text),
-        ).fetchone()
+        ).fetchall()
     finally:
         conn.row_factory = saved
-    return _snapshot_from_row(row) if row is not None else None
+    for row in rows:
+        snapshot = _snapshot_from_row(row)
+        if not snapshot_is_invalidated(conn, snapshot, checked_at=fresh_as_of):
+            return snapshot
+    return None
 
 
 def executable_snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshot:
@@ -428,6 +693,15 @@ def _bool_or_none(value: Any) -> Optional[bool]:
     if value is None:
         return None
     return bool(value)
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def _decimal_or_absent_text(value: Decimal | None) -> str:

@@ -142,6 +142,7 @@ def _snapshot(
     ask="0.72",
     snapshot_id="s1",
     freshness_deadline="2026-06-12T02:00:00+00:00",
+    captured_at="2026-06-12T00:30:00+00:00",
 ):
     conn.execute(
         "INSERT INTO executable_market_snapshots "
@@ -157,7 +158,7 @@ def _snapshot(
             bid,
             ask,
             freshness_deadline,
-            "2026-06-12T00:30:00+00:00",
+            captured_at,
         ),
     )
     conn.commit()
@@ -468,6 +469,85 @@ def test_price_reader_uses_native_selected_outcome_books():
     assert quotes[("0xc30", "buy_no")].price == pytest.approx(0.70)
     assert bids[("0xc30", "buy_yes")].price == pytest.approx(0.30)
     assert bids[("0xc30", "buy_no")].price == pytest.approx(0.68)
+
+
+def test_price_reader_does_not_treat_gamma_active_label_as_tradeability():
+    trade = _mem_trade()
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN active INTEGER")
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN enable_orderbook INTEGER")
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN closed INTEGER")
+    trade.execute("ALTER TABLE executable_market_snapshots ADD COLUMN accepting_orders INTEGER")
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots
+        (snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id,
+         orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at,
+         active, enable_orderbook, closed, accepting_orders)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "active-routing-label-false",
+            "0xc30",
+            "yes-c30",
+            "no-c30",
+            "yes-c30",
+            "0.30",
+            "0.32",
+            "2026-06-12T02:00:00+00:00",
+            "2026-06-12T00:30:00+00:00",
+            0,
+            1,
+            0,
+            1,
+        ),
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"0xc30"})
+
+    assert quotes[("0xc30", "buy_yes")].price == pytest.approx(0.32)
+
+
+def test_price_reader_skips_market_channel_invalidated_snapshots():
+    trade = _mem_trade()
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.30",
+        ask="0.32",
+        snapshot_id="old",
+        captured_at="2026-06-12T00:30:00+00:00",
+    )
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshot_invalidations (
+          invalidation_id TEXT PRIMARY KEY,
+          condition_id TEXT,
+          token_id TEXT,
+          reason TEXT NOT NULL,
+          invalidated_at TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshot_invalidations
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            "inv-1",
+            "0xc30",
+            None,
+            "tick_size_change",
+            "2026-06-12T00:31:00+00:00",
+            "2026-06-12T00:31:00+00:00",
+        ),
+    )
+
+    quotes = cr.read_freshest_executable_prices(trade, condition_ids={"0xc30"})
+
+    assert ("0xc30", "buy_yes") not in quotes
 
 
 # ───────────────────────────────────────────────────────────────────────────────────────────────

@@ -1596,12 +1596,26 @@ def _freshest_executable_price_rows_by_condition(
         predicates = ["condition_id = ?"]
         if "enable_orderbook" in cols:
             predicates.append("COALESCE(enable_orderbook, 1) = 1")
-        if "active" in cols:
-            predicates.append("COALESCE(active, 1) = 1")
         if "closed" in cols:
             predicates.append("COALESCE(closed, 0) = 0")
         if "accepting_orders" in cols:
             predicates.append("COALESCE(accepting_orders, 1) = 1")
+        if _table_exists(trade_conn, "executable_market_snapshot_invalidations"):
+            predicates.append(
+                """
+                NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations inv
+                     WHERE inv.invalidated_at >= executable_market_snapshots.captured_at
+                       AND (
+                            inv.condition_id = executable_market_snapshots.condition_id
+                            OR inv.token_id = executable_market_snapshots.selected_outcome_token_id
+                            OR inv.token_id = executable_market_snapshots.yes_token_id
+                            OR inv.token_id = executable_market_snapshots.no_token_id
+                       )
+                )
+                """
+            )
         where_clause = " AND ".join(predicates)
         condition_rows = trade_conn.execute(
             """

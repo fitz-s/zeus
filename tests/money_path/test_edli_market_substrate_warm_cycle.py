@@ -540,6 +540,22 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
     ]
 
 
+def test_confirm_priority_condition_ids_are_bounded_money_path_frontier(monkeypatch):
+    monkeypatch.setenv("ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT", "4")
+    family_a = ("Paris", "2026-06-20", "low")
+    family_b = ("Shanghai", "2026-06-20", "high")
+
+    condition_ids = main_module._edli_confirm_priority_condition_ids(
+        rest_condition_scope={family_b: {"rest-2", "rest-1"}},
+        held_condition_scope={family_a: {"held-1"}},
+        entry_condition_scope={family_a: {"entry-1"}},
+        entry_refresh_condition_scope={family_a: {"refresh-1", "refresh-2"}},
+        open_rest_condition_scope={family_a: {"open-rest-1"}},
+    )
+
+    assert condition_ids == ["rest-1", "rest-2", "held-1", "entry-1"]
+
+
 def test_continuous_redecision_confirm_refresh_does_not_wait_on_substrate_process_lock():
     """Sidecar ownership is asynchronous; main only marks priority and filters reads."""
 
@@ -2413,6 +2429,102 @@ def test_condition_buy_sides_fresh_runtime_paths_use_latest_mirror_without_appen
     )
     assert main_tracing.latest_queries == 1
     assert main_tracing.append_queries == 0
+
+
+def test_condition_buy_sides_fresh_excludes_market_channel_invalidated_latest_rows():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_invalidations (
+            invalidation_id TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            reason TEXT,
+            invalidated_at TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    for snapshot_id, selected in (("snap-yes", "yes-1"), ("snap-no", "no-1")):
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshot_latest (
+                snapshot_id, condition_id, yes_token_id, no_token_id,
+                selected_outcome_token_id, captured_at, freshness_deadline
+            ) VALUES (?, 'cond-1', 'yes-1', 'no-1', ?,
+                      '2026-06-06T00:00:00+00:00', '2026-06-06T00:05:00+00:00')
+            """,
+            (snapshot_id, selected),
+        )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_invalidations
+        VALUES ('inv-1', 'cond-1', NULL, 'tick_size_change',
+                '2026-06-06T00:01:00+00:00', '2026-06-06T00:01:00+00:00')
+        """
+    )
+
+    assert not substrate_observer._condition_buy_sides_fresh(
+        conn,
+        "cond-1",
+        "2026-06-06T00:02:00+00:00",
+    )
+    assert not main_module._condition_buy_sides_fresh(
+        conn,
+        "cond-1",
+        "2026-06-06T00:02:00+00:00",
+    )
+
+
+def test_held_condition_scope_does_not_treat_gamma_active_as_tradeability():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            captured_at TEXT,
+            active INTEGER,
+            closed INTEGER,
+            enable_orderbook INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots
+        VALUES ('snap-1', 'cond-1', '2026-06-06T00:00:00+00:00', 0, 0, 1, 1)
+        """
+    )
+
+    assert main_module._edli_condition_latest_snapshot_executable(conn, "cond-1")
 
 
 def test_prune_fresh_market_outcomes_keeps_refresh_moving_past_completed_conditions():

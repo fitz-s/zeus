@@ -10,7 +10,7 @@
 #     2. route identity: PROOF-NATIVE single-leg routing (maker AND taker), edge from
 #        the proof's own execution_price (NOT the negrisk ask ladder); synthetic/arb
 #        disabled; non-direct selection refused.
-#     3. day0 hard-block: QKERNEL_DAY0_NOT_WIRED on _DAY0_LANE_EVENT_TYPES BEFORE the
+#     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES are excluded from the forecast
 #        spine call.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
@@ -680,9 +680,7 @@ def test_non_direct_selection_is_refused_as_typed_no_trade():
 # ===========================================================================
 # BLOCKER 3 — day0 routes to its observation lane, never to the forecast spine.
 # The spine bridge reads no day0 observation (_NoDay0Reader), so a day0 family
-# must NOT be decided by the forecast spine. The earlier hard-block (a typed
-# QKERNEL_DAY0_NOT_WIRED no-trade) killed the day0 lane and churned the
-# money-path requeue every cycle; the replacement is an explicit day0 lane,
+# must NOT be decided by the forecast spine. The replacement is an explicit day0 lane,
 # while forecast flag-off remains QKERNEL_SPINE_REQUIRED no-trade.
 # ===========================================================================
 def test_day0_event_type_is_in_day0_lane_and_excluded_from_forecast_lane():

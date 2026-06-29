@@ -1038,7 +1038,7 @@ def _assert_snapshot_gate(
         StaleMarketSnapshotError,
         assert_snapshot_executable,
     )
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
 
     if not isinstance(snapshot_id, str) or not snapshot_id.strip():
         raise StaleMarketSnapshotError("venue command requires executable market snapshot_id")
@@ -1049,13 +1049,18 @@ def _assert_snapshot_gate(
         raise StaleMarketSnapshotError(
             "executable_market_snapshots table is unavailable; cannot validate venue command"
         ) from exc
+    checked_at = _coerce_snapshot_checked_at(checked_at)
+    if snapshot is not None and snapshot_is_invalidated(conn, snapshot, checked_at=checked_at):
+        raise StaleMarketSnapshotError(
+            f"ExecutableMarketSnapshot {snapshot.snapshot_id} was invalidated before submit"
+        )
     assert_snapshot_executable(
         snapshot,
         token_id=token_id,
         side=side,
         price=price,
         size=size,
-        now=_coerce_snapshot_checked_at(checked_at),
+        now=checked_at,
         expected_min_tick_size=expected_min_tick_size,
         expected_min_order_size=expected_min_order_size,
         expected_neg_risk=expected_neg_risk,

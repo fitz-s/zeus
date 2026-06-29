@@ -212,6 +212,7 @@ from src.state.snapshot_repo import (
     executable_snapshot_from_row,
     get_snapshot,
     insert_snapshot,
+    snapshot_row_is_invalidated,
 )
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -18328,6 +18329,8 @@ def _latest_snapshot_rows_for_event_family(
         selected_token = str(item.get("selected_outcome_token_id") or "")
         side_key = (condition_id, selected_token)
         if not condition_id or side_key in seen_side:
+            continue
+        if snapshot_row_is_invalidated(trade_conn, item, checked_at=fresh_at):
             continue
         seen_side.add(side_key)
         rows.append(item)

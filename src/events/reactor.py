@@ -3006,13 +3006,13 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # NO_EXECUTABLE_ROUTE_CANDIDATE, MARKET_INCOHERENT_BLOCK_LIVE,
     # PREDICTIVE_DISTRIBUTION_NOT_LIVE_ELIGIBLE, NO_DIRECTION_LAW_CANDIDATE,
     # NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE, QKERNEL_LEAD_BUCKET_NOT_REPLAYED,
-    # QKERNEL_DAY0_NOT_WIRED, SPINE_WIRING_FAULT). EVERY such no-trade is TERMINAL
+    # SPINE_WIRING_FAULT). EVERY such no-trade is TERMINAL
     # for THIS event, exactly like the legacy honest-no-edge declines (FDR_REJECTED,
     # TRADE_SCORE_NON_POSITIVE): the spine re-prices the whole family from a FRESH
     # book on the NEXT forecast snapshot, which arrives as a NEW event — so the
     # recovery path is a fresh event, NOT a requeue of this one. Requeueing instead
     # would double-churn the same event every cycle against an unchanged decision
-    # substrate (the live QKERNEL_DAY0_NOT_WIRED requeue storm, monitor b9w56vec6).
+    # substrate (the historic day0 forecast-spine requeue storm, monitor b9w56vec6).
     # Genuine intra-cycle execution races (PRICE_MOVED / MODE_FLIPPED) are classified
     # later at the SUBMIT stage under their own transient bases and are unaffected.
     "QKERNEL_SPINE_NO_TRADE",

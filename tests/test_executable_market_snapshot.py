@@ -49,7 +49,13 @@ from src.engine.evaluator import (
 )
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
 from src.state.db import init_schema, init_schema_trade_only
-from src.state.snapshot_repo import get_snapshot, insert_snapshot, latest_snapshot_for_market
+from src.state.snapshot_repo import (
+    get_snapshot,
+    insert_snapshot,
+    latest_snapshot_for_market,
+    record_snapshot_invalidation,
+    snapshot_is_invalidated,
+)
 from src.state.venue_command_repo import insert_command
 
 
@@ -346,6 +352,58 @@ def test_insert_snapshot_upserts_latest_state_without_mutating_append_log(conn):
     assert latest["snapshot_id"] == "snap-newer"
     assert latest["orderbook_top_bid"] == "0.48"
     assert latest["captured_at"] == (NOW + timedelta(seconds=10)).isoformat()
+
+
+def test_market_channel_invalidation_blocks_old_snapshot_without_mutating_append_log(conn):
+    insert_snapshot(conn, _snapshot(snapshot_id="snap-old", captured_at=NOW))
+
+    inserted = record_snapshot_invalidation(
+        conn,
+        condition_id="condition-1",
+        token_id="yes-token",
+        reason="tick_size_change",
+        invalidated_at=NOW + timedelta(seconds=1),
+    )
+    old_snapshot = get_snapshot(conn, "snap-old")
+
+    assert inserted == 1
+    assert old_snapshot is not None
+    assert old_snapshot.freshness_deadline == NOW + timedelta(seconds=30)
+    assert snapshot_is_invalidated(conn, old_snapshot, checked_at=NOW) is False
+    assert snapshot_is_invalidated(
+        conn,
+        old_snapshot,
+        checked_at=NOW + timedelta(seconds=2),
+    ) is True
+    assert latest_snapshot_for_market(
+        conn,
+        "condition-1",
+        NOW + timedelta(seconds=2),
+    ) is None
+    with pytest.raises(StaleMarketSnapshotError, match="invalidated"):
+        _insert_command(
+            conn,
+            snapshot_id="snap-old",
+            checked_at=NOW + timedelta(seconds=2),
+        )
+
+    insert_snapshot(
+        conn,
+        _snapshot(
+            snapshot_id="snap-new",
+            captured_at=NOW + timedelta(seconds=3),
+            freshness_deadline=NOW + timedelta(seconds=60),
+        ),
+    )
+
+    latest = latest_snapshot_for_market(conn, "condition-1", NOW + timedelta(seconds=4))
+    assert latest is not None
+    assert latest.snapshot_id == "snap-new"
+    _insert_command(
+        conn,
+        snapshot_id="snap-new",
+        checked_at=NOW + timedelta(seconds=4),
+    )
 
 
 def test_snapshot_refresh_state_reads_latest_mirror_without_append_scan(conn):
