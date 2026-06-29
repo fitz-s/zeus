@@ -223,6 +223,89 @@ def _init_entry_command_trade_db(
     conn.close()
 
 
+def _attach_forecast_parent(
+    world_db,
+    *,
+    child_certificate_id: str = "ActionableTradeCertificate:test",
+    parent_hash: str = "forecast-parent-hash",
+    posterior_identity_hash: str = "posterior-hash",
+):
+    conn = sqlite3.connect(world_db)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_certificate_edges (
+            child_certificate_id TEXT NOT NULL,
+            parent_role TEXT NOT NULL,
+            parent_certificate_hash TEXT NOT NULL,
+            parent_certificate_type TEXT NOT NULL,
+            required INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificates (
+            certificate_id, certificate_hash, certificate_type, mode,
+            verifier_status, decision_time, payload_json
+        ) VALUES (?, ?, 'ForecastAuthorityCertificate', 'LIVE', 'VERIFIED', ?, ?)
+        """,
+        (
+            "ForecastAuthorityCertificate:test",
+            parent_hash,
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps({"posterior_identity_hash": posterior_identity_hash}),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO decision_certificate_edges VALUES (
+            ?, 'forecast_authority', ?, 'ForecastAuthorityCertificate', 1, ?
+        )
+        """,
+        (child_certificate_id, parent_hash, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _init_parent_posterior_forecast_db(
+    path,
+    *,
+    posterior_identity_hash: str = "posterior-hash",
+    bin_label: str = "Will the highest temperature in Istanbul be 29°C on June 29?",
+    q_yes: float = 0.3462,
+    q_lcb_yes: float = 0.1124,
+    q_ucb_yes: float = 0.3826,
+):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_identity_hash TEXT PRIMARY KEY,
+            q_json TEXT NOT NULL,
+            q_lcb_json TEXT NOT NULL,
+            q_ucb_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_identity_hash, q_json, q_lcb_json, q_ucb_json
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            posterior_identity_hash,
+            json.dumps({bin_label: q_yes}),
+            json.dumps({bin_label: q_lcb_yes}),
+            json.dumps({bin_label: q_ucb_yes}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _valid_actionable_payload() -> dict:
     return {
         "event_id": "event-1",
@@ -253,6 +336,10 @@ def _valid_actionable_payload() -> dict:
             "optimal_delta_u": 0.01,
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
+            "selection_guard_cell_key": "high|L2_3|YES|nonmodal|pb17",
             "coherence_allows": True,
         },
         "fdr_family_id": "family-1",
@@ -675,6 +762,94 @@ def test_live_actionable_certificate_semantics_accepts_current_qkernel_payload(
     assert result.ok is True
     assert result.evidence["checked_count"] == 1
     assert result.evidence["risky_count"] == 0
+
+
+def test_live_actionable_certificate_semantics_audits_qkernel_above_forecast_parent(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    bin_label = "Will the highest temperature in Istanbul be 29°C on June 29?"
+    payload = {
+        **_valid_actionable_payload(),
+        "city": "Istanbul",
+        "target_date": "2026-06-29",
+        "temperature_metric": "high",
+        "bin_label": bin_label,
+        "direction": "buy_no",
+        "q_live": 0.8768631118304586,
+        "q_lcb_5pct": 0.8198679378026374,
+        "c_fee_adjusted": 0.56,
+        "trade_score": 0.2598679378026374,
+        "action_score": 0.2598679378026374,
+        "qkernel_execution_economics": {
+            **_valid_actionable_payload()["qkernel_execution_economics"],
+            "side": "NO",
+            "payoff_q_point": 0.8768631118304586,
+            "payoff_q_lcb": 0.8198679378026374,
+            "cost": 0.56,
+            "edge_lcb": 0.2598679378026374,
+            "selection_guard_q_safe": 0.8198679378026374,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    _attach_forecast_parent(world_db)
+    _init_parent_posterior_forecast_db(forecast_db, bin_label=bin_label)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["historical_risky_count"] == 1
+    assert "exceeds forecast parent posterior" in result.evidence["historical_risky"][0]["reason"]
+
+
+def test_live_actionable_certificate_semantics_blocks_restart_relevant_qkernel_parent_drift(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    bin_label = "Will the highest temperature in Istanbul be 29°C on June 29?"
+    payload = {
+        **_valid_actionable_payload(),
+        "city": "Istanbul",
+        "target_date": "2026-06-29",
+        "temperature_metric": "high",
+        "bin_label": bin_label,
+        "direction": "buy_no",
+        "token_id": "no-1",
+        "q_live": 0.8768631118304586,
+        "q_lcb_5pct": 0.8198679378026374,
+        "c_fee_adjusted": 0.56,
+        "trade_score": 0.2598679378026374,
+        "action_score": 0.2598679378026374,
+        "qkernel_execution_economics": {
+            **_valid_actionable_payload()["qkernel_execution_economics"],
+            "side": "NO",
+            "payoff_q_point": 0.8768631118304586,
+            "payoff_q_lcb": 0.8198679378026374,
+            "cost": 0.56,
+            "edge_lcb": 0.2598679378026374,
+            "selection_guard_q_safe": 0.8198679378026374,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    _attach_forecast_parent(world_db)
+    _init_parent_posterior_forecast_db(forecast_db, bin_label=bin_label)
+    _init_entry_command_trade_db(trade_db, event_id="event-1", token_id="no-1")
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is False
+    assert result.evidence["risky_count"] == 1
+    assert result.evidence["historical_risky_count"] == 0
+    assert "exceeds forecast parent posterior" in result.evidence["risky"][0]["reason"]
 
 
 def test_live_money_certificate_parent_modes_blocks_no_submit_parent(

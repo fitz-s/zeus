@@ -968,6 +968,7 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         for items in restart_relevant_commands.values()
         for item in items[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
     ][:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
+    forecast_parent_payload_by_child: dict[str, dict[str, Any]] = {}
     try:
         conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
@@ -994,6 +995,32 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             """,
             (since.isoformat(),),
         ).fetchall()
+        if rows and _table_exists(conn, "main", "decision_certificate_edges"):
+            certificate_ids = [str(row["certificate_id"] or "") for row in rows]
+            placeholders = ",".join("?" for _ in certificate_ids)
+            parent_rows = conn.execute(
+                f"""
+                SELECT
+                    edge.child_certificate_id,
+                    parent.payload_json
+                  FROM decision_certificate_edges edge
+                  JOIN decision_certificates parent
+                    ON parent.certificate_hash = edge.parent_certificate_hash
+                 WHERE edge.child_certificate_id IN ({placeholders})
+                   AND edge.parent_role = 'forecast_authority'
+                   AND edge.parent_certificate_type = 'ForecastAuthorityCertificate'
+                """,
+                tuple(certificate_ids),
+            ).fetchall()
+            for parent_row in parent_rows:
+                try:
+                    parent_payload = json.loads(str(parent_row["payload_json"] or "{}"))
+                    if isinstance(parent_payload, dict):
+                        forecast_parent_payload_by_child[
+                            str(parent_row["child_certificate_id"] or "")
+                        ] = parent_payload
+                except json.JSONDecodeError:
+                    continue
     except sqlite3.Error as exc:
         evidence["error"] = str(exc)
         return CheckResult(
@@ -1007,6 +1034,15 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             conn.close()  # type: ignore[name-defined]
         except Exception:
             pass
+
+    forecast_conn: sqlite3.Connection | None = None
+    if FORECAST_DB.exists():
+        try:
+            forecast_conn = sqlite3.connect(f"file:{FORECAST_DB}?mode=ro", uri=True)
+            forecast_conn.row_factory = sqlite3.Row
+        except sqlite3.Error as exc:
+            evidence["forecast_db_error"] = str(exc)
+            forecast_conn = None
 
     risky: list[dict[str, Any]] = []
     historical_risky: list[dict[str, Any]] = []
@@ -1022,6 +1058,15 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             if not isinstance(payload, dict):
                 raise CertificateVerificationError("actionable payload must be object")
             _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+            posterior_reason = _qkernel_parent_posterior_violation_reason(
+                forecast_conn=forecast_conn,
+                payload=payload,
+                forecast_parent_payload=forecast_parent_payload_by_child.get(
+                    str(row["certificate_id"] or "")
+                ),
+            )
+            if posterior_reason is not None:
+                raise CertificateVerificationError(posterior_reason)
         except Exception as exc:  # noqa: BLE001
             cert_hash = str(row["certificate_hash"] or "")
             restart_relevant = _payload_matches_restart_relevant_entry_command(
@@ -1066,6 +1111,11 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                 historical_risky_count += 1
                 if len(historical_risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
                     historical_risky.append(sample)
+    if forecast_conn is not None:
+        try:
+            forecast_conn.close()
+        except Exception:
+            pass
     evidence["checked_count"] = checked
     evidence["risky_count"] = risky_count
     evidence["historical_risky_count"] = historical_risky_count
@@ -1080,6 +1130,106 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         else "restart-relevant actionable certificates fail current qkernel money law",
         evidence,
     )
+
+
+def _qkernel_parent_posterior_violation_reason(
+    *,
+    forecast_conn: sqlite3.Connection | None,
+    payload: dict[str, Any],
+    forecast_parent_payload: dict[str, Any] | None,
+) -> str | None:
+    """Return a reason if a qkernel actionable exceeds its forecast parent.
+
+    The qkernel can rank native route utility, but the executable receipt must not
+    serve a selected-side probability above the ForecastAuthority posterior it cites.
+    For NO, the conservative bound is ``1 - YES_UCB``; never ``1 - YES_LCB``.
+    """
+
+    economics = payload.get("qkernel_execution_economics")
+    if str(payload.get("selection_authority_applied") or "") != "qkernel_spine":
+        return None
+    if not isinstance(economics, dict):
+        return None
+    if forecast_conn is None or forecast_parent_payload is None:
+        return None
+    posterior_hash = str(forecast_parent_payload.get("posterior_identity_hash") or "").strip()
+    if not posterior_hash:
+        return "qkernel forecast_authority posterior_identity_hash missing"
+    try:
+        row = forecast_conn.execute(
+            """
+            SELECT q_json, q_lcb_json, q_ucb_json
+              FROM forecast_posteriors
+             WHERE posterior_identity_hash = ?
+             LIMIT 1
+            """,
+            (posterior_hash,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return f"qkernel forecast parent posterior read failed:{exc}"
+    if row is None:
+        return "qkernel forecast parent posterior row missing"
+    try:
+        q = json.loads(str(row["q_json"] or "{}"))
+        q_lcb = json.loads(str(row["q_lcb_json"] or "{}"))
+        q_ucb = json.loads(str(row["q_ucb_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        return f"qkernel forecast parent posterior json invalid:{exc}"
+    if not isinstance(q, dict) or not isinstance(q_lcb, dict) or not isinstance(q_ucb, dict):
+        return "qkernel forecast parent posterior q/bounds not objects"
+    bin_label = str(payload.get("bin_label") or "").strip()
+    direction = str(payload.get("direction") or "").strip().lower()
+    if not bin_label:
+        return "qkernel actionable bin_label missing"
+    if bin_label not in q:
+        return "qkernel actionable bin_label absent from forecast parent posterior"
+
+    def _prob(value: object) -> float | None:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 <= out <= 1.0):
+            return None
+        return out
+
+    q_yes = _prob(q.get(bin_label))
+    if q_yes is None:
+        return "qkernel forecast parent q invalid"
+    if direction == "buy_yes":
+        q_point_bound = q_yes
+        q_lcb_bound = _prob(q_lcb.get(bin_label))
+        bound_name = "YES:q_lcb"
+    elif direction == "buy_no":
+        q_ucb_yes = _prob(q_ucb.get(bin_label))
+        if q_ucb_yes is None:
+            return "qkernel forecast parent q_ucb missing for NO bound"
+        q_point_bound = 1.0 - q_yes
+        q_lcb_bound = 1.0 - q_ucb_yes
+        bound_name = "NO:1-q_ucb"
+    else:
+        return "qkernel actionable direction invalid for posterior audit"
+    if q_lcb_bound is None:
+        return "qkernel forecast parent q_lcb missing for YES bound"
+    q_lcb_bound = max(0.0, min(float(q_lcb_bound), float(q_point_bound)))
+    observed = {
+        "payload_q_live": payload.get("q_live"),
+        "payload_q_lcb": payload.get("q_lcb_5pct"),
+        "qkernel_q_live": economics.get("payoff_q_point"),
+        "qkernel_q_lcb": economics.get("payoff_q_lcb"),
+    }
+    tolerance = 1e-6
+    for field, raw in observed.items():
+        value = _prob(raw)
+        if value is None:
+            return f"qkernel {field} invalid"
+        bound = q_point_bound if field.endswith("q_live") else q_lcb_bound
+        if value > bound + tolerance:
+            return (
+                "qkernel selected probability exceeds forecast parent posterior:"
+                f"{field}={value:.9f}:bound={bound:.9f}:basis={bound_name}"
+            )
+    return None
 
 
 def _edli_event_id_from_decision_id(decision_id: object) -> str:
