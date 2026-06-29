@@ -5993,6 +5993,78 @@ class TestRecoveryResolutionTable:
         assert row["phase"] == "voided"
         assert row["chain_shares"] == 0.0
 
+    def test_hard_terminal_position_projection_repair_ignores_stale_terminal_event(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares, exit_reason
+            ) VALUES (
+                'pos-stale-terminal', 'pending_exit', 'condition-test', 'Miami', 'US',
+                '2026-06-30', 'Will the highest temperature in Miami be between 96-97F on June 30?',
+                'buy_yes', 'F', 4.34, 85.17, 4.34, 0.051,
+                0.34, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-yes', 'tok-no',
+                'condition-test', 'ord-open-exit', 'sell_placed',
+                '2026-06-29T18:00:50+00:00', 'high', 85.17,
+                'ENTRY_SELECTION_GUARD_INVALID_EXIT'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES
+              ('evt-stale-terminal-void', 'pos-stale-terminal', 7, 'ADMIN_VOIDED',
+               '2026-06-29T13:38:50+00:00', 'active', 'voided',
+               'center_buy', 'dec-1', 'snap-1', 'ord-entry', NULL,
+               'chain_reconciliation', 'idem-stale-terminal-void', 'voided',
+               'src.state.chain_reconciliation',
+               '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-yes","chain_state":"synced"}',
+               'live'),
+              ('evt-stale-terminal-exit-posted', 'pos-stale-terminal', 8, 'EXIT_ORDER_POSTED',
+               '2026-06-29T18:00:45+00:00', 'active', 'pending_exit',
+               'center_buy', 'dec-1', 'snap-1', 'ord-open-exit', NULL,
+               'transition_phase', 'idem-stale-terminal-exit-posted', 'sell_pending',
+               'src.execution.exit_lifecycle',
+               '{"last_exit_order_id":"ord-open-exit","status":"sell_pending"}',
+               'live')
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            """
+            SELECT phase, chain_state, chain_shares, order_status, order_id
+              FROM position_current
+             WHERE position_id = 'pos-stale-terminal'
+            """
+        ).fetchone()
+        assert dict(row) == {
+            "phase": "pending_exit",
+            "chain_state": "synced",
+            "chain_shares": 85.17,
+            "order_status": "sell_placed",
+            "order_id": "ord-open-exit",
+        }
+
     def test_hard_terminal_position_projection_repair_clears_chain_zero_void_fields(
         self,
         conn,

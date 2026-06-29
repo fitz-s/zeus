@@ -4519,6 +4519,7 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
         f"""
         WITH latest_terminal AS (
             SELECT
+                event_id,
                 position_id,
                 event_type,
                 phase_before,
@@ -4532,6 +4533,19 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
                 ) AS rn
               FROM position_events
              WHERE LOWER(COALESCE(phase_after, '')) IN ({terminal_placeholders})
+        ),
+        latest_event AS (
+            SELECT
+                event_id,
+                position_id,
+                sequence_no,
+                occurred_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY position_id
+                    ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                ) AS rn
+              FROM position_events
+             WHERE COALESCE(phase_after, '') <> ''
         )
         SELECT
             pc.position_id,
@@ -4558,6 +4572,10 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
           JOIN latest_terminal lt
             ON lt.position_id = pc.position_id
            AND lt.rn = 1
+          JOIN latest_event le
+            ON le.position_id = pc.position_id
+           AND le.rn = 1
+           AND le.event_id = lt.event_id
          WHERE (
                pc.phase IN ({open_placeholders})
                AND LOWER(COALESCE(lt.phase_after, '')) != LOWER(COALESCE(pc.phase, ''))
