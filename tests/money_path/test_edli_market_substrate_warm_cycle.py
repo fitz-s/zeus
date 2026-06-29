@@ -344,11 +344,11 @@ def test_pending_family_refresh_orders_money_path_urgency_before_target_date():
 def test_full_family_capture_cap_is_decoupled_from_direct_clob_threshold():
     """Candidate selection cap and direct /book prefetch threshold serve different purposes."""
 
-    assert market_scanner._snapshot_capture_max_candidates_per_tick(per_city_limit=0) > (
+    assert market_scanner._snapshot_capture_max_candidates_per_tick(per_city_limit=0) < (
         market_scanner._full_family_direct_clob_prefetch_candidate_threshold()
     )
     src = inspect.getsource(market_scanner.refresh_executable_market_substrate_snapshots)
-    assert "max_candidates = None" in src
+    assert "len(selected_candidates) <= full_family_direct_clob_candidate_threshold" in src
     assert "priority_direct_clob_service_conditions" in src
 
 

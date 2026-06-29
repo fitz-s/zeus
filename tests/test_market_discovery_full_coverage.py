@@ -1283,12 +1283,95 @@ def test_unbounded_family_refresh_batches_complete_groups_per_tick(monkeypatch):
     assert summary["budget_truncated_city_count"] == 2
 
 
+def test_unbounded_family_refresh_cap_keeps_multibin_family_whole(monkeypatch):
+    """A tight full-family cap must not leave several families half-refreshed."""
+
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", "8")
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
+        "16",
+    )
+
+    def _with_outcomes(market: dict, prefix: str) -> dict:
+        outcomes = []
+        for idx in range(3):
+            condition_id = f"cond-{prefix}-{idx}"
+            outcomes.append(
+                {
+                    "condition_id": condition_id,
+                    "token_id": f"yes-{prefix}-{idx}",
+                    "no_token_id": f"no-{prefix}-{idx}",
+                    "executable": True,
+                    "accepting_orders": True,
+                    "closed": False,
+                    "enable_orderbook": True,
+                    "gamma_market_raw": {
+                        "conditionId": condition_id,
+                        "acceptingOrders": True,
+                        "closed": False,
+                        "active": False,
+                        "enableOrderBook": True,
+                    },
+                }
+            )
+        out = dict(market)
+        out["outcomes"] = outcomes
+        out["condition_ids"] = [str(outcome["condition_id"]) for outcome in outcomes]
+        return out
+
+    markets = [
+        _with_outcomes(_make_market("Tokyo", 1, metric="highest"), "tokyo"),
+        _with_outcomes(_make_market("Seoul", 2, metric="highest"), "seoul"),
+    ]
+    captured_conditions: list[str] = []
+    batch_token_counts: list[int] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, token_ids):
+            call = list(token_ids)
+            batch_token_counts.append(len(call))
+            return {
+                token_id: {
+                    "market": token_id,
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.55", "size": "100"}],
+                    "asks": [{"price": "0.60", "size": "100"}],
+                }
+                for token_id in call
+            }
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured_conditions.append(str(decision.tokens.get("market_id") or ""))
+
+    conn = _make_in_memory_trade_db()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=20.0,
+            max_outcomes=0,
+        )
+
+    assert summary["selected_executable_snapshot_count"] == 6
+    assert summary["prefetched_orderbook_count"] == 6
+    assert batch_token_counts == [6]
+    assert len(captured_conditions) == 6
+    captured_prefixes = {condition.split("-")[1] for condition in captured_conditions}
+    assert len(captured_prefixes) == 1
+    assert {condition.rsplit("-", 1)[1] for condition in captured_conditions} == {"0", "1", "2"}
+    assert summary["truncated"] == 1
+    assert summary["budget_truncated_city_count"] == 1
+
+
 def test_unbounded_family_refresh_default_cap_uses_batch_books_envelope(monkeypatch):
-    """Default full-family refresh cap should match the proven one-call /books envelope."""
+    """Default full-family refresh cap must fit the live snapshot-write window."""
 
     monkeypatch.delenv("ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK", raising=False)
 
-    assert ms._snapshot_capture_max_candidates_per_tick(per_city_limit=0) == 500
+    assert ms._snapshot_capture_max_candidates_per_tick(per_city_limit=0) == 32
 
 
 def test_tiny_prefetch_window_still_attempts_one_batch_books(monkeypatch):

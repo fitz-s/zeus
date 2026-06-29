@@ -232,11 +232,11 @@ def _snapshot_capture_max_candidates_per_tick(*, per_city_limit: int | None) -> 
         configured = int(
             os.environ.get(
                 "ZEUS_SNAPSHOT_CAPTURE_MAX_CANDIDATES_PER_TICK",
-                "500",
+                "32",
             )
         )
     except ValueError:
-        configured = 500
+        configured = 32
     if configured <= 0:
         return None
     return configured
@@ -4698,11 +4698,6 @@ def refresh_executable_market_substrate_snapshots(
         max_candidates = _snapshot_capture_max_candidates_per_tick(
             per_city_limit=per_city_limit,
         )
-        if (
-            priority_conditions
-            and len(priority_conditions) <= _priority_direct_clob_prefetch_condition_limit()
-        ):
-            max_candidates = None
         selected_candidate_keys: set[tuple[int, str, str]] = set()
 
         def _candidate_key(item: tuple) -> tuple[int, str, str]:
@@ -4728,36 +4723,22 @@ def refresh_executable_market_substrate_snapshots(
             group for group in per_group_sorted if _snapshot_group_refresh_urgency(group) < 3
         ]
         ordered_groups = urgent_groups + ordinary_groups
-        selection_budget_exhausted = False
-        if max_candidates is not None and len(urgent_groups) > 1:
-            for group_index, group_list in enumerate(urgent_groups):
-                initial_pair = group_list[:2]
-                if not initial_pair:
-                    continue
-                if len(selected_candidates) + len(initial_pair) > max_candidates:
-                    _mark_truncated(urgent_groups[group_index:] + ordinary_groups)
-                    selection_budget_exhausted = True
-                    break
-                for item in initial_pair:
-                    selected_candidates.append(item)
-                    selected_candidate_keys.add(_candidate_key(item))
-        if not selection_budget_exhausted:
-            for group_index, group_list in enumerate(ordered_groups):
-                remaining_group = [
-                    item for item in group_list if _candidate_key(item) not in selected_candidate_keys
-                ]
-                if not remaining_group:
-                    continue
-                if (
-                    max_candidates is not None
-                    and selected_candidates
-                    and len(selected_candidates) + len(remaining_group) > max_candidates
-                ):
-                    _mark_truncated(ordered_groups[group_index:])
-                    break
-                for item in remaining_group:
-                    selected_candidates.append(item)
-                    selected_candidate_keys.add(_candidate_key(item))
+        for group_index, group_list in enumerate(ordered_groups):
+            remaining_group = [
+                item for item in group_list if _candidate_key(item) not in selected_candidate_keys
+            ]
+            if not remaining_group:
+                continue
+            if (
+                max_candidates is not None
+                and selected_candidates
+                and len(selected_candidates) + len(remaining_group) > max_candidates
+            ):
+                _mark_truncated(ordered_groups[group_index:])
+                break
+            for item in remaining_group:
+                selected_candidates.append(item)
+                selected_candidate_keys.add(_candidate_key(item))
     else:
         max_slots = max((len(c) for c in per_group_sorted), default=0)
         for slot in range(0, max_slots, 2):
