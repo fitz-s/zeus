@@ -87,8 +87,11 @@ _NEW_FAMILY_CONDITION_IDS: set[str] = set()
 # lease cannot be shorter than the row-level SQLite busy wait used by
 # market_scanner. Otherwise the coordinator fails first and the substrate lane
 # never reaches the bounded SQLite wait that was added to survive transient
-# zeus_trades.db writer contention.
-SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 5000
+# zeus_trades.db writer contention. Live evidence after the sidecar split
+# showed 5s is still too brittle when executor, exit, and capital writers are
+# active; 8s keeps the wait bounded inside the 20s warm cadence while giving
+# scoped hot refresh a realistic chance to acquire the trade write lane.
+SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 8000
 SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 8000
 
 
@@ -308,7 +311,7 @@ def _claim_order_priority_families_for_refresh(
     consumer_name: str,
     now_utc: datetime,
     limit: int | None = None,
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, str]] | None:
     """Families the reactor is actually eligible to claim next, in claim order.
 
     The broad pending-family query is a backlog surface. It must not decide which
@@ -332,7 +335,7 @@ def _claim_order_priority_families_for_refresh(
             "EDLI market-substrate warm: claim-order priority read failed (non-fatal): %s",
             exc,
         )
-        return []
+        return None
 
     families: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -358,7 +361,129 @@ def _claim_order_priority_families_for_refresh(
     return families
 
 
-def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
+def _condition_priority_families_for_refresh(
+    forecasts_conn,
+    condition_ids: Iterable[str],
+) -> list[tuple[str, str, str]]:
+    """Resolve exact money-path condition ids to refreshable market families.
+
+    Priority markers can carry only concrete condition ids.  The warmer still
+    needs a family to reconstruct cached topology or fetch the exact Gamma slug,
+    but falling back to broad pending rows turns a scoped live request into a
+    backlog sweep.  Use the canonical forecasts.market_events condition map and
+    preserve the request order when possible.
+    """
+
+    ordered_condition_ids: list[str] = []
+    seen_conditions: set[str] = set()
+    for raw in condition_ids:
+        condition_id = str(raw or "").strip()
+        if condition_id and condition_id not in seen_conditions:
+            ordered_condition_ids.append(condition_id)
+            seen_conditions.add(condition_id)
+    if not ordered_condition_ids:
+        return []
+
+    rows_by_condition: dict[str, tuple[str, str, str]] = {}
+    try:
+        for offset in range(0, len(ordered_condition_ids), 500):
+            chunk = ordered_condition_ids[offset: offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = forecasts_conn.execute(
+                f"""
+                SELECT condition_id, city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE condition_id IN ({placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                condition_id = str(row[0] or "").strip()
+                family = (
+                    str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                    str(row[3] or "").strip(),
+                )
+                if condition_id and all(family) and condition_id not in rows_by_condition:
+                    rows_by_condition[condition_id] = family
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EDLI market-substrate warm: condition priority family read failed (non-fatal): %s",
+            exc,
+        )
+        return []
+
+    families: list[tuple[str, str, str]] = []
+    seen_families: set[tuple[str, str, str]] = set()
+    for condition_id in ordered_condition_ids:
+        family = rows_by_condition.get(condition_id)
+        if family and family not in seen_families:
+            families.append(family)
+            seen_families.add(family)
+    return families
+
+
+def _open_rest_condition_id_from_snapshot(
+    trade_conn,
+    *,
+    token_id: str,
+    snapshot_id: str,
+) -> str | None:
+    try:
+        snap_cols = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()
+        }
+    except Exception:  # noqa: BLE001
+        return None
+    if "condition_id" not in snap_cols:
+        return None
+    predicates: list[str] = []
+    params: list[str] = []
+    if snapshot_id and "snapshot_id" in snap_cols:
+        predicates.append("snapshot_id = ?")
+        params.append(snapshot_id)
+    if token_id:
+        for col in ("selected_outcome_token_id", "yes_token_id", "no_token_id"):
+            if col in snap_cols:
+                predicates.append(f"{col} = ?")
+                params.append(token_id)
+    if not predicates:
+        return None
+    order_terms = []
+    query_params = [*params]
+    if snapshot_id and "snapshot_id" in snap_cols:
+        order_terms.append("CASE WHEN snapshot_id = ? THEN 0 ELSE 1 END")
+        query_params.append(snapshot_id)
+    if "captured_at" in snap_cols:
+        order_terms.append("captured_at DESC")
+    if "snapshot_id" in snap_cols:
+        order_terms.append("snapshot_id DESC")
+    order_clause = ", ".join(order_terms) if order_terms else "condition_id DESC"
+    try:
+        row = trade_conn.execute(
+            f"""
+            SELECT condition_id
+              FROM executable_market_snapshots
+             WHERE {" OR ".join(predicates)}
+             ORDER BY {order_clause}
+             LIMIT 1
+            """,
+            tuple(query_params),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    condition_id = str(row[0] or "").strip()
+    return condition_id or None
+
+
+def _open_rest_family_rows_for_refresh(
+    trade_conn,
+    *,
+    forecasts_conn=None,
+) -> list[tuple[str, str, str]]:
     """Families with live unfilled entry rests that need fresh executable books."""
 
     try:
@@ -374,10 +499,12 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         state_filter = (
             "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
         )
+        token_select = "token_id" if "token_id" in command_cols else "'' AS token_id"
+        snapshot_select = "snapshot_id" if "snapshot_id" in command_cols else "'' AS snapshot_id"
         remaining_select = "remaining_size" if "remaining_size" in fact_cols else "NULL AS remaining_size"
         commands = trade_conn.execute(
             f"""
-            SELECT command_id, position_id, venue_order_id, {state_select}
+            SELECT command_id, position_id, venue_order_id, {state_select}, {token_select}, {snapshot_select}
               FROM venue_commands
              WHERE intent_kind = 'ENTRY'
                AND venue_order_id IS NOT NULL
@@ -436,12 +563,24 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
         except Exception:  # noqa: BLE001
             continue
         if pos is None:
-            continue
-        family = (
-            str(pos[0] or "").strip(),
-            str(pos[1] or "").strip(),
-            str(pos[2] or "").strip(),
-        )
+            if forecasts_conn is None:
+                continue
+            condition_id = _open_rest_condition_id_from_snapshot(
+                trade_conn,
+                token_id=str(row[4] or ""),
+                snapshot_id=str(row[5] or ""),
+            )
+            resolved = _condition_priority_families_for_refresh(
+                forecasts_conn,
+                [condition_id] if condition_id else [],
+            )
+            family = resolved[0] if resolved else ("", "", "")
+        else:
+            family = (
+                str(pos[0] or "").strip(),
+                str(pos[1] or "").strip(),
+                str(pos[2] or "").strip(),
+            )
         if all(family) and family not in seen:
             seen.add(family)
             out.append(family)
@@ -884,7 +1023,10 @@ def _refresh_pending_family_snapshots(
     try:
         trade_ro = get_trade_connection_read_only()
         try:
-            open_rest_priority_families = _open_rest_family_rows_for_refresh(trade_ro)
+            open_rest_priority_families = _open_rest_family_rows_for_refresh(
+                trade_ro,
+                forecasts_conn=forecasts_conn,
+            )
         finally:
             trade_ro.close()
     except Exception as exc:  # noqa: BLE001
@@ -1774,11 +1916,14 @@ def _refresh_pending_family_snapshots(
             snapshot_read_conn.close()
 
     result = {
-            "status": "refreshed",
-            "families_checked": len(families),
-            "explicit_priority_families": len(explicit_priority_families),
-            "priority_family_count": len(priority_families),
-            "priority_condition_ids_requested": len(priority_conditions),
+        "status": "refreshed",
+        "families_checked": len(families),
+        "explicit_priority_families": len(explicit_priority_families),
+        "include_pending_families": bool(include_pending_families),
+        "open_rest_priority_families": len(open_rest_priority_families),
+        "held_position_priority_families": len(held_position_priority_families),
+        "priority_family_count": len(priority_families),
+        "priority_condition_ids_requested": len(priority_conditions),
         "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
         "gamma_refresh_families": len(gamma_refresh_families),
         "cached_topology_families": cached_topology_families,
@@ -2043,7 +2188,12 @@ def _edli_market_substrate_warm_cycle() -> None:
             deadline_monotonic=claim_deadline,
         )
         try:
-            if priority_marker_condition_ids:
+            condition_priority_families = _condition_priority_families_for_refresh(
+                forecasts_conn,
+                priority_marker_condition_ids,
+            )
+            claim_priority_read_failed = False
+            if priority_marker_active:
                 claim_priority_families = []
             else:
                 claim_priority_families = _claim_order_priority_families_for_refresh(
@@ -2051,6 +2201,9 @@ def _edli_market_substrate_warm_cycle() -> None:
                     consumer_name="edli_reactor_v1",
                     now_utc=datetime.now(timezone.utc),
                 )
+                if claim_priority_families is None:
+                    claim_priority_read_failed = True
+                    claim_priority_families = []
         finally:
             _cancel_sqlite_deadline_interrupt(claim_deadline_timer)
             if claim_deadline_installed:
@@ -2058,17 +2211,33 @@ def _edli_market_substrate_warm_cycle() -> None:
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
-        priority_families = list(priority_marker_families) + list(claim_priority_families)
-        priority_only = bool(priority_marker_families)
+        priority_families = (
+            list(priority_marker_families)
+            + list(condition_priority_families)
+            + list(claim_priority_families)
+        )
+        hot_scope_only = bool(
+            priority_marker_families
+            or priority_marker_condition_ids
+            or condition_priority_families
+            or claim_priority_families
+            or claim_priority_read_failed
+        )
         summary = _refresh_pending_family_snapshots(
             conn,
             forecasts_conn,
             extra_priority_families=priority_families,
-            include_pending_families=not priority_only,
+            include_pending_families=not hot_scope_only,
             priority_condition_ids=priority_marker_condition_ids,
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
         )
+        summary = {
+            **dict(summary or {}),
+            "condition_priority_families": len(condition_priority_families),
+            "claim_order_priority_families": len(claim_priority_families),
+            "claim_order_priority_read_failed": bool(claim_priority_read_failed),
+        }
         summary = _substrate_warm_business_summary(
             summary,
             priority_request=priority_marker_request,

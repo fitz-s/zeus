@@ -463,7 +463,7 @@ def test_substrate_snapshot_write_lease_covers_sqlite_busy_floor(monkeypatch):
 
     busy_floor = substrate_observer._substrate_snapshot_sqlite_busy_floor_ms()
     assert busy_floor == 4000
-    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 5000
+    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 8000
 
     monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", "1000")
     lease_deadline = substrate_observer._substrate_snapshot_write_lease_ms(
@@ -579,6 +579,94 @@ def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
     assert main_module._edli_open_rest_condition_scope([rest, unrelated], [belief]) == {
         ("Singapore", "2026-06-27", "high"): {"cond-rest"}
     }
+
+
+def test_substrate_open_rest_scope_resolves_before_position_projection():
+    """ACKED rests must be repriced even before position_current catches up."""
+
+    trade_conn = sqlite3.connect(":memory:")
+    forecasts_conn = sqlite3.connect(":memory:")
+    trade_conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            venue_order_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            token_id TEXT,
+            snapshot_id TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            state TEXT,
+            remaining_size REAL,
+            local_sequence INTEGER
+        );
+        CREATE TABLE position_current (
+            position_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            phase TEXT
+        );
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            captured_at TEXT
+        );
+        """
+    )
+    forecasts_conn.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, venue_order_id, intent_kind, state, token_id, snapshot_id
+        ) VALUES ('cmd-1', 'pos-not-projected', 'order-1', 'ENTRY', 'ACKED', 'yes-31', 'snap-1')
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, state, remaining_size, local_sequence
+        ) VALUES ('order-1', 'RESTING', 5.0, 1)
+        """
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, selected_outcome_token_id, yes_token_id, no_token_id,
+            captured_at
+        ) VALUES ('snap-1', 'cond-shanghai-31', 'yes-31', 'yes-31', 'no-31',
+                  '2026-06-29T00:00:00+00:00')
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            condition_id, city, target_date, temperature_metric
+        ) VALUES ('cond-shanghai-31', 'Shanghai', '2026-06-29', 'high')
+        """
+    )
+
+    families = substrate_observer._open_rest_family_rows_for_refresh(
+        trade_conn,
+        forecasts_conn=forecasts_conn,
+    )
+
+    assert families == [("Shanghai", "2026-06-29", "high")]
 
 
 def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(monkeypatch):
@@ -1035,6 +1123,120 @@ def test_market_substrate_warm_cycle_prioritizes_claim_order_families(monkeypatc
     substrate_observer._edli_market_substrate_warm_cycle()
 
     assert calls and calls[0]["extra_priority_families"] == claim_families
+    assert calls[0]["include_pending_families"] is False
+
+
+def test_market_substrate_warm_cycle_resolves_condition_marker_without_pending_backlog(
+    monkeypatch,
+):
+    """Condition-only live markers must not fall back to broad pending backlog.
+
+    The marker condition id is already the money-path scope.  The sidecar may
+    resolve it to its family for topology/Gamma lookup, but ordinary pending
+    families must stay out of the first service window.
+    """
+
+    calls: list[dict] = []
+    marker_condition_ids = ["cond-shanghai-31"]
+
+    class _ForecastsConn(_FakeConn):
+        def execute(self, sql, params=()):
+            if "FROM market_events" in sql and params == tuple(marker_condition_ids):
+                class _Cur:
+                    def fetchall(self_inner):
+                        return [
+                            (
+                                "cond-shanghai-31",
+                                "Shanghai",
+                                "2026-06-29",
+                                "high",
+                            )
+                        ]
+
+                return _Cur()
+            return super().execute(sql, params)
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-condition-only",
+            "families": [],
+            "condition_ids": marker_condition_ids,
+        },
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("claim read should not run")),
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _ForecastsConn(), raising=False
+    )
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls
+    assert calls[0]["extra_priority_families"] == [("Shanghai", "2026-06-29", "high")]
+    assert calls[0]["priority_condition_ids"] == marker_condition_ids
+    assert calls[0]["include_pending_families"] is False
+
+
+def test_market_substrate_warm_cycle_claim_read_failure_does_not_sweep_backlog(
+    monkeypatch,
+):
+    """A failed claim-order lookahead must not degrade into broad pending refresh."""
+
+    calls: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "no_pending_open_rest_or_held_families"},
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls
+    assert calls[0]["extra_priority_families"] == []
+    assert calls[0]["include_pending_families"] is False
+    assert result["claim_order_priority_read_failed"] is True
 
 
 def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
@@ -1149,6 +1351,57 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
+
+
+def test_market_substrate_warm_cycle_marker_family_does_not_mix_claim_order(monkeypatch):
+    """A live priority marker owns the current tick even without condition ids."""
+
+    calls: list[dict] = []
+    marker_families = [("Shanghai", "2026-06-28", "high")]
+    claim_families = [("Tokyo", "2026-06-28", "low")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-family-only",
+            "families": marker_families,
+            "condition_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        "src.data.dual_run_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls
+    assert calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["include_pending_families"] is False
 
 
 def test_priority_family_expands_to_condition_priority_for_captured_books(monkeypatch):
