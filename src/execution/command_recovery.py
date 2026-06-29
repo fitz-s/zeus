@@ -12364,9 +12364,10 @@ def reconcile_unresolved_commands(
     scheduler start, but deliberately skips historical maker-fill economics and
     partial-remainder maintenance so boot cannot be delayed by old filled rows.
     ``scope="restart_preflight"`` is the deploy-time recovery seam: it runs only
-    the venue-backed in-flight command scan plus the no-venue EXIT retry
-    projection needed to clear restart-dangerous pending exits before the
-    read-only restart preflight.  It must stay narrower than ``live_tick``.
+    the venue-backed in-flight command scan, the DB-local ACKED live-entry
+    projection repair, and the no-venue EXIT retry projection needed to clear
+    restart-dangerous pending entries/exits before the read-only restart
+    preflight. It must stay narrower than ``live_tick``.
 
     DB connection: if conn is None, opens get_trade_connection_with_world_required()
     internally (with a try/finally to close). CycleRunner passes the per-cycle
@@ -13299,6 +13300,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
 
     if scope == "restart_preflight":
+        _db_pass(
+            "live_entry_projection_repair",
+            reconcile_live_entry_projection_repairs,
+            "live_entry_projection_repair",
+        )
         _db_pass(
             "restart_no_venue_exit_retry_projection",
             reconcile_restart_no_venue_exit_retry_projections,

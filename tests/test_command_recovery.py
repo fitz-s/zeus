@@ -444,7 +444,13 @@ def test_abandoned_unsubmitted_ghost_recovery_requires_visible_venue_commands(co
         updated_before="2026-04-26T00:10:00Z",
     )
 
-    assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert {k: summary[k] for k in ("scanned", "advanced", "stayed", "errors")} == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["continuations"] == []
     event_types = [
         row["event_type"]
         for row in conn.execute(
@@ -469,7 +475,14 @@ def test_abandoned_unsubmitted_ghost_recovery_terminalizes_only_without_command_
         updated_before="2026-04-26T00:10:00Z",
     )
 
-    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert {k: summary[k] for k in ("scanned", "advanced", "stayed", "errors")} == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert len(summary["continuations"]) == 1
+    assert summary["continuations"][0]["aggregate_id"] == "agg-abandoned-ghost"
     event_types = [
         row["event_type"]
         for row in conn.execute(

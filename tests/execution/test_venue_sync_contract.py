@@ -313,6 +313,90 @@ def test_live_tick_scope_projects_acked_entry_order_before_full_sweep(monkeypatc
         verify.close()
 
 
+def test_restart_preflight_scope_projects_acked_entry_order_before_preflight(monkeypatch, tmp_path):
+    """Restart recovery must clear ACKED/LIVE entry projection gaps before preflight."""
+    import tests.test_command_recovery as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-restart-entry-projection.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    h._insert(
+        seed_conn,
+        command_id="cmd-restart-projection",
+        position_id="pos-restart-projection",
+        decision_id="dec-restart-projection",
+        token_id="tok-yes",
+        no_token_id="tok-no",
+        selected_token_id="tok-no",
+        outcome_label="NO",
+        size=29.14,
+        price=0.73,
+    )
+    h._advance_to_acked(
+        seed_conn,
+        command_id="cmd-restart-projection",
+        venue_order_id="vord-restart-projection",
+    )
+    h._append_order_fact(
+        seed_conn,
+        command_id="cmd-restart-projection",
+        order_id="vord-restart-projection",
+        state="LIVE",
+        matched_size="0",
+        remaining_size="29.14",
+        source="REST",
+    )
+    h._insert_decision_log_trade_case_for_recovery(
+        seed_conn,
+        decision_id="dec-restart-projection",
+        trade_id="pos-restart-projection",
+        token_id="tok-yes",
+        no_token_id="tok-no",
+        direction="buy_no",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(
+        recorder,
+        orders={"vord-restart-projection": {"orderID": "vord-restart-projection", "status": "LIVE"}},
+    )
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="restart_preflight",
+    )
+
+    assert summary["scope"] == "restart_preflight"
+    assert summary["restart_preflight_narrow"] is True
+    assert summary["live_entry_projection_repair"]["advanced"] == 1
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    try:
+        current = verify.execute(
+            """
+            SELECT phase, direction, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-restart-projection'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_entry",
+            "direction": "buy_no",
+            "order_id": "vord-restart-projection",
+            "order_status": "pending",
+        }
+    finally:
+        verify.close()
+
+
 def test_live_tick_releases_post_submit_unknown_no_command_before_broad_snapshot(
     monkeypatch,
     tmp_path,
