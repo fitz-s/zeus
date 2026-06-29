@@ -5,9 +5,6 @@ cities. It ingests weather forecasts, calibrates them into a settlement probabil
 bin of every market, trades the bins it prices differently from the book, manages the orders
 through to settlement, and feeds graded outcomes back into calibration.
 
-Private, single-operator system trading real capital, published for review. Not open source,
-not deployable as-is. See [LICENSE](LICENSE).
-
 ## Markets
 
 A market is a set of yes/no bins over a city's daily high or low (`50–51°F`, `75°F or higher`,
