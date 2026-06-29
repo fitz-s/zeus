@@ -2851,6 +2851,7 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     retry_resumable = _exit_retry_resumable_by_position()
     stranded_intent_recoverable = _stranded_exit_intent_recoverable_by_position()
     phantom_sell_releaseable = _phantom_pending_exit_sell_projection_releaseable_by_position()
+    active_exit_monitorable = _pending_exit_active_command_monitorable_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -2901,6 +2902,14 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
                 "repair_evidence": _phantom_evidence,
             }
             tolerated.append(item)
+        elif str(row["position_id"] or "") in active_exit_monitorable:
+            _active_evidence = active_exit_monitorable[str(row["position_id"] or "")]
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_active_exit_command_monitor",
+                "repair_evidence": _active_evidence,
+            }
+            tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
             tolerated.append(item)
             if order_status != "backoff_exhausted":
@@ -2915,6 +2924,91 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
     )
+
+
+def _pending_exit_active_command_monitorable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "venue_commands")
+        ):
+            return {}
+        position_columns = _table_columns(conn, "main", "position_current")
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        required_command_columns = {
+            "command_id",
+            "position_id",
+            "intent_kind",
+            "side",
+            "state",
+            "venue_order_id",
+            "size",
+            "price",
+            "updated_at",
+        }
+        if not required_command_columns.issubset(command_columns):
+            return {}
+        order_id_select = "pc.order_id" if "order_id" in position_columns else "NULL"
+        created_at_order = "datetime(cmd.created_at) DESC," if "created_at" in command_columns else ""
+        rows = conn.execute(
+            f"""
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, {created_at_order} cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+            )
+            SELECT pc.position_id,
+                   pc.order_status,
+                   {order_id_select} AS projected_order_id,
+                   latest_exit.command_id,
+                   latest_exit.state AS command_state,
+                   latest_exit.venue_order_id,
+                   latest_exit.side,
+                   latest_exit.size,
+                   latest_exit.price,
+                   latest_exit.updated_at
+              FROM position_current pc
+              JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+             WHERE pc.phase = 'pending_exit'
+            """
+        ).fetchall()
+    monitorable: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        state = str(row["command_state"] or "").upper()
+        side = str(row["side"] or "").upper()
+        venue_order_id = str(row["venue_order_id"] or "")
+        projected_order_id = str(row["projected_order_id"] or "")
+        if state in TERMINAL_VENUE_COMMAND_STATES:
+            continue
+        if side != "SELL" or not venue_order_id:
+            continue
+        if projected_order_id and projected_order_id != venue_order_id:
+            continue
+        try:
+            size = float(row["size"] or 0.0)
+            price = float(row["price"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0.0 or price <= 0.0:
+            continue
+        monitorable[str(row["position_id"])] = {
+            "command_id": row["command_id"],
+            "command_state": row["command_state"],
+            "venue_order_id": venue_order_id,
+            "projected_order_id": projected_order_id,
+            "side": side,
+            "size": size,
+            "price": price,
+            "command_updated_at": row["updated_at"],
+            "order_status": row["order_status"],
+        }
+    return monitorable
 
 
 def _phantom_pending_exit_sell_projection_releaseable_by_position() -> dict[str, dict[str, Any]]:

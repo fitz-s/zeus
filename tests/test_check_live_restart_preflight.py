@@ -3111,6 +3111,67 @@ def test_preflight_tolerates_retrying_pending_exit_posted_without_venue_truth(mo
     assert tolerated["repair_evidence"]["exit_retry_count"] == 2
 
 
+def test_preflight_tolerates_pending_exit_with_monitorable_active_exit_command(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute("ALTER TABLE position_current ADD COLUMN order_id TEXT")
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            side TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            price REAL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at, order_id
+        ) VALUES (
+            'active-exit-pos', 'pending_exit', 'Miami', '2026-06-30', 'high',
+            '96-97F', 'buy_yes', 85.17, 85.17, 'sell_placed',
+            'ENTRY_SELECTION_GUARD_INVALID_EXIT', 3, NULL, 0.09, 1, 0.05, 1,
+            '2026-06-29T19:47:04+00:00',
+            '0xactiveexit'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'cmd-active-exit', 'active-exit-pos', 'EXIT', 'SELL', 'ACKED',
+            '0xactiveexit', 85.17, 0.054,
+            '2026-06-29T19:47:04+00:00',
+            '2026-06-29T19:47:04+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_active_exit_command_monitor"
+    assert tolerated["repair_evidence"]["command_id"] == "cmd-active-exit"
+    assert tolerated["repair_evidence"]["venue_order_id"] == "0xactiveexit"
+
+
 def test_preflight_blocks_pending_exit_with_real_exit_command(monkeypatch, tmp_path):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
