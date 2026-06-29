@@ -566,6 +566,19 @@ def test_targeted_decision_refresh_has_no_inline_quota_knobs():
     assert "ZEUS_DECISION_REFRESH_LOCK_TIMEOUT_SECONDS" not in refresh_src
 
 
+def test_claim_order_priority_default_is_live_tick_window(monkeypatch):
+    """Claim-order lookahead is a hot frontier, not a pending-family backlog scan."""
+
+    monkeypatch.delenv("ZEUS_SUBSTRATE_CLAIM_PRIORITY_FAMILY_LIMIT", raising=False)
+    assert substrate_observer._claim_order_priority_family_limit() == 4
+
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CLAIM_PRIORITY_FAMILY_LIMIT", "999")
+    assert substrate_observer._claim_order_priority_family_limit() == 16
+
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CLAIM_PRIORITY_FAMILY_LIMIT", "not-an-int")
+    assert substrate_observer._claim_order_priority_family_limit() == 4
+
+
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
     belief = SimpleNamespace(
         family_id="family-1",

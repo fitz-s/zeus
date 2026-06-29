@@ -296,13 +296,20 @@ def _pending_family_rows_for_refresh(
     ]
 
 
+_CLAIM_ORDER_PRIORITY_DEFAULT_FAMILY_LIMIT = 4
+_CLAIM_ORDER_PRIORITY_MAX_FAMILY_LIMIT = 16
+
+
 def _claim_order_priority_family_limit() -> int:
-    raw = os.environ.get("ZEUS_SUBSTRATE_CLAIM_PRIORITY_FAMILY_LIMIT", "32")
+    raw = os.environ.get(
+        "ZEUS_SUBSTRATE_CLAIM_PRIORITY_FAMILY_LIMIT",
+        str(_CLAIM_ORDER_PRIORITY_DEFAULT_FAMILY_LIMIT),
+    )
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        value = 32
-    return max(1, min(500, value))
+        value = _CLAIM_ORDER_PRIORITY_DEFAULT_FAMILY_LIMIT
+    return max(1, min(_CLAIM_ORDER_PRIORITY_MAX_FAMILY_LIMIT, value))
 
 
 def _claim_order_priority_families_for_refresh(
