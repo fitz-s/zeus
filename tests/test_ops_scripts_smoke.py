@@ -494,6 +494,39 @@ def test_deploy_live_reloads_when_service_loaded(monkeypatch, tmp_path):
     assert calls[-1] == ["launchctl", "bootstrap", dl.GUI_DOMAIN, str(plist)]
 
 
+def test_deploy_live_retries_bootstrap_after_reload_race(monkeypatch, tmp_path):
+    dl = _load("deploy_live_reload_retry", "deploy_live.py")
+    label = "com.zeus.forecast-live"
+    plist = tmp_path / "com.zeus.forecast-live.plist"
+    plist.write_text("plist")
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        calls.append(cmd)
+        if cmd[:2] == ["launchctl", "print"]:
+            return subprocess.CompletedProcess(cmd, 0, "state = running", "")
+        if cmd[:2] == ["launchctl", "bootout"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            bootstrap_count = sum(1 for call in calls if call[:2] == ["launchctl", "bootstrap"])
+            if bootstrap_count == 1:
+                return subprocess.CompletedProcess(cmd, 5, "", "Bootstrap failed: 5")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+    monkeypatch.setattr(dl, "LAUNCHAGENTS_DIR", tmp_path)
+    monkeypatch.setattr(dl.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._launch_or_restart_label(label)
+
+    assert ok is True
+    assert "after 2 attempts" in detail
+    assert sum(1 for call in calls if call[:2] == ["launchctl", "bootstrap"]) == 2
+
+
 def test_deploy_live_live_restart_stops_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []

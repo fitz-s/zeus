@@ -50,6 +50,7 @@ import os
 import plistlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 LIVE_TRADING_PLIST = (
@@ -112,6 +113,8 @@ DAEMONS = {
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
+LAUNCHD_BOOTSTRAP_ATTEMPTS = 3
+LAUNCHD_BOOTSTRAP_RETRY_SECONDS = 1.0
 
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
@@ -231,16 +234,27 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
         if stop.returncode != 0:
             return False, f"FAILED reload stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
 
-    boot = subprocess.run(
-        ["launchctl", "bootstrap", GUI_DOMAIN, str(plist)],
-        capture_output=True,
-        text=True,
-        timeout=20.0,
+    last_boot: subprocess.CompletedProcess | None = None
+    for attempt in range(1, LAUNCHD_BOOTSTRAP_ATTEMPTS + 1):
+        boot = subprocess.run(
+            ["launchctl", "bootstrap", GUI_DOMAIN, str(plist)],
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+        )
+        last_boot = boot
+        if boot.returncode == 0:
+            verb = "reloaded" if was_loaded else "bootstrapped"
+            suffix = "" if attempt == 1 else f" after {attempt} attempts"
+            return True, f"{verb} {label} from {plist}{suffix}"
+        if attempt < LAUNCHD_BOOTSTRAP_ATTEMPTS:
+            time.sleep(LAUNCHD_BOOTSTRAP_RETRY_SECONDS)
+    assert last_boot is not None
+    return (
+        False,
+        f"FAILED bootstrap {label} after {LAUNCHD_BOOTSTRAP_ATTEMPTS} attempts: "
+        f"rc={last_boot.returncode} {last_boot.stderr.strip()}",
     )
-    if boot.returncode == 0:
-        verb = "reloaded" if was_loaded else "bootstrapped"
-        return True, f"{verb} {label} from {plist}"
-    return False, f"FAILED bootstrap {label}: rc={boot.returncode} {boot.stderr.strip()}"
 
 
 def _stop_label(label: str) -> tuple[bool, str]:
