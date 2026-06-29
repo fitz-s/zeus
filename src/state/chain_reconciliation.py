@@ -377,24 +377,59 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ) from exc
         return row is not None
 
-    def _pending_entry_has_linked_fill_fact(position: Position) -> bool:
+    def _position_has_linked_fill_fact(position: Position) -> bool:
         if conn is None:
             return False
-        order_id = str(getattr(position, "entry_order_id", "") or getattr(position, "order_id", "") or "").strip()
-        if not order_id:
+        position_id = str(getattr(position, "trade_id", "") or "").strip()
+        order_ids = {
+            str(value).strip()
+            for value in (
+                getattr(position, "entry_order_id", ""),
+                getattr(position, "order_id", ""),
+            )
+            if str(value or "").strip()
+        }
+        command_ids = {
+            str(value).strip()
+            for value in (
+                getattr(position, "entry_command_id", ""),
+                getattr(position, "command_id", ""),
+            )
+            if str(value or "").strip()
+        }
+        predicates: list[str] = []
+        params: list[str] = []
+        if position_id:
+            predicates.append("vc.position_id = ?")
+            params.append(position_id)
+        if order_ids:
+            placeholders = ", ".join(["?"] * len(order_ids))
+            predicates.append(f"(vtf.venue_order_id IN ({placeholders}) OR vc.venue_order_id IN ({placeholders}))")
+            params.extend(order_ids)
+            params.extend(order_ids)
+        if command_ids:
+            placeholders = ", ".join(["?"] * len(command_ids))
+            predicates.append(f"(vtf.command_id IN ({placeholders}) OR vc.command_id IN ({placeholders}))")
+            params.extend(command_ids)
+            params.extend(command_ids)
+        if not predicates:
             return False
         try:
             rows = conn.execute(
-                """
-                SELECT state, source, filled_size, fill_price
-                  FROM venue_trade_facts
-                 WHERE venue_order_id = ?
-                 ORDER BY observed_at DESC, local_sequence DESC
+                f"""
+                SELECT vtf.state, vtf.source, vtf.filled_size, vtf.fill_price
+                  FROM venue_trade_facts vtf
+                  LEFT JOIN venue_commands vc
+                    ON vc.command_id = vtf.command_id
+                 WHERE {" OR ".join(f"({predicate})" for predicate in predicates)}
+                 ORDER BY vtf.observed_at DESC, vtf.local_sequence DESC
                 """,
-                (order_id,),
+                tuple(params),
             ).fetchall()
-        except Exception:
-            return False
+        except Exception as exc:
+            raise RuntimeError(
+                f"venue fill fact lookup failed for position_id={position_id or 'missing'}"
+            ) from exc
         for row in rows:
             state = str(row["state"] if hasattr(row, "keys") else row[0])
             source = str(row["source"] if hasattr(row, "keys") else row[1])
@@ -408,6 +443,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ):
                 return True
         return False
+
+    def _pending_entry_has_linked_fill_fact(position: Position) -> bool:
+        return _position_has_linked_fill_fact(position)
 
     def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
         if conn is None:
@@ -1033,6 +1071,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             bool(getattr(position, "entry_fill_verified", False))
             or str(getattr(position, "fill_authority", "") or "")
             == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            or _position_has_linked_fill_fact(position)
         )
 
     def _parse_reconcile_dt(value: object) -> datetime | None:
@@ -1073,10 +1112,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         recently observed, venue-confirmed position is gone. Treating that case
         as terminal quarantine removed live exposure from monitor/redecision.
         """
-        if not _positive_decimal(getattr(position, "chain_shares", None)):
-            return (False, "", "")
         runtime_seen_at = getattr(position, "chain_verified_at", "") or ""
-        if runtime_seen_at and _positive_chain_observation_is_recent(runtime_seen_at):
+        if (
+            _positive_decimal(getattr(position, "chain_shares", None))
+            and runtime_seen_at
+            and _positive_chain_observation_is_recent(runtime_seen_at)
+        ):
             return (True, str(runtime_seen_at), "runtime_chain_verified_at")
         if conn is not None:
             position_id = str(getattr(position, "trade_id", "") or "")
@@ -1084,7 +1125,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 try:
                     row = conn.execute(
                         """
-                        SELECT chain_seen_at
+                        SELECT chain_shares, chain_seen_at
                           FROM position_current
                          WHERE position_id = ?
                         """,
@@ -1093,8 +1134,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 except Exception:
                     row = None
                 if row is not None:
-                    chain_seen_at = row["chain_seen_at"] if hasattr(row, "keys") else row[0]
-                    if chain_seen_at and _positive_chain_observation_is_recent(chain_seen_at):
+                    chain_shares = row["chain_shares"] if hasattr(row, "keys") else row[0]
+                    chain_seen_at = row["chain_seen_at"] if hasattr(row, "keys") else row[1]
+                    if (
+                        _positive_decimal(chain_shares)
+                        and chain_seen_at
+                        and _positive_chain_observation_is_recent(chain_seen_at)
+                    ):
                         return (True, str(chain_seen_at), "position_current.chain_seen_at")
                 try:
                     rows = conn.execute(

@@ -371,6 +371,31 @@ def test_strictness_fused_bootstrap_empty_sample_still_blocks():
         _assert_event_bound_calibration_live_admitted(cert)
 
 
+def test_fused_bootstrap_missing_coverage_status_blocks_even_with_samples():
+    cert = SimpleNamespace(
+        payload={
+            "authority": FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+            "n_samples": 60,
+        }
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:missing"):
+        _assert_event_bound_calibration_live_admitted(cert)
+
+
+def test_fused_bootstrap_unknown_coverage_status_blocks_even_with_samples():
+    cert = SimpleNamespace(
+        payload={
+            "authority": FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+            "coverage_status": "UNKNOWN",
+            "n_samples": 60,
+        }
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:UNKNOWN"):
+        _assert_event_bound_calibration_live_admitted(cert)
+
+
 # ---------------------------------------------------------------------------
 # The family coverage-verdict helper: flag-independent verdict read (mission part 1/2c).
 # ---------------------------------------------------------------------------

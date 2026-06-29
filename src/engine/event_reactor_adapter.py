@@ -1826,6 +1826,17 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         return
     if n_samples is not None and n_samples <= 0:
         raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
+    if authority == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY:
+        if n_samples is None:
+            raise ValueError(
+                f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}"
+            )
+        if coverage_status not in SETTLEMENT_COVERAGE_LICENSING_STATUSES:
+            raise ValueError(
+                "EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:"
+                f"{coverage_status or 'missing'}"
+            )
+        return
 
 
 def _assert_event_bound_receipt_live_authority(receipt: EventSubmissionReceipt) -> None:

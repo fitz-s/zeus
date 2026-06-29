@@ -3225,6 +3225,143 @@ def test_chain_absent_confirmed_recent_exposure_reaches_redecision(monkeypatch):
     assert monitor_results[0].exit_reason == "CHAIN_ABSENCE_QUARANTINE_REDECISION_HOLD"
 
 
+def test_chain_absent_confirmed_recent_exposure_exit_signal_reaches_exit_lifecycle(monkeypatch):
+    """A monitor exit signal for real quarantined exposure must reach the exit actuator."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    pos = _make_position(
+        trade_id="chain-absence-quarantine-exit-position",
+        direction="buy_yes",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=12.7,
+        chain_shares=12.7,
+        city="Singapore",
+        target_date="2026-07-01",
+        token_id="yes-singapore",
+        no_token_id="no-singapore",
+        condition_id="condition-singapore",
+        last_chain_absence_observed_at=observed_at,
+        chain_verified_at=observed_at,
+        order_status="partial",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        entry_fill_verified=True,
+    )
+    portfolio = _make_portfolio(pos)
+
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.06, 0.07, 100.0, 100.0
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("fake exit lifecycle does not report a fill")
+
+    def mock_refresh(conn, clob, position):
+        position.last_monitor_prob = 0.02
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_market_price = 0.06
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.06
+        position.last_monitor_best_ask = 0.07
+        position.last_monitor_market_vig = 1.02
+        position.last_monitor_whale_toxicity = False
+        position.last_monitor_at = observed_at
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.06]),
+            p_posterior=0.02,
+            forward_edge=-0.04,
+            alpha=0.0,
+            confidence_band_upper=0.03,
+            confidence_band_lower=0.01,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snap-chain-absence-quarantine-exit",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    def mock_evaluate_exit(self, exit_context):
+        return ExitDecision(
+            True,
+            "QUARANTINED_EXPOSURE_REDECISION_EXIT",
+            trigger="QUARANTINED_EXPOSURE_REDECISION_EXIT",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["chain_absence_quarantine_redecision_exit"],
+        )
+
+    observed_execute = []
+
+    def mock_build_exit_intent(position, exit_context):
+        return SimpleNamespace(token_id=position.token_id, reason=exit_context.exit_reason)
+
+    def mock_execute_exit(*, portfolio, position, exit_context, clob, conn, exit_intent):
+        observed_execute.append(
+            {
+                "position_id": position.trade_id,
+                "state": getattr(position.state, "value", position.state),
+                "chain_state": getattr(position.chain_state, "value", position.chain_state),
+                "exit_reason": exit_context.exit_reason,
+                "token_id": exit_intent.token_id,
+            }
+        )
+        position.state = "pending_exit"
+        return "sell_order_placed:test"
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", mock_evaluate_exit)
+    monkeypatch.setattr("src.execution.exit_lifecycle.build_exit_intent", mock_build_exit_intent)
+    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", mock_execute_exit)
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_chain_absence_quarantine_exit_lifecycle"),
+            "cities_by_name": {"Singapore": type("City", (), {"timezone": "Asia/Singapore"})()},
+            "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["quarantined_exposure_routed_to_redecision"] == 1
+    assert summary["monitors"] == 1
+    assert summary["exits"] == 1
+    assert monitor_results[0].should_exit is True
+    assert monitor_results[0].exit_reason == "QUARANTINED_EXPOSURE_REDECISION_EXIT"
+    assert observed_execute == [
+        {
+            "position_id": "chain-absence-quarantine-exit-position",
+            "state": "quarantined",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "exit_reason": "QUARANTINED_EXPOSURE_REDECISION_EXIT",
+            "token_id": "yes-singapore",
+        }
+    ]
+    assert pos.state == "pending_exit"
+
+
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):
     """Invalid entry-proof review facts must stop automatic monitor/exit churn."""
     from src.engine import cycle_runtime
