@@ -2936,6 +2936,9 @@ def _is_runtime_open_position(pos: Position) -> bool:
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
     chain_shares = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    no_exposure_chain_state = chain_state in NO_EXPOSURE_CHAIN_STATES
+    if state == "pending_exit" and chain_shares > 0.0:
+        no_exposure_chain_state = False
     local_projection_without_chain_exposure = (
         chain_state == VenueVisibilityStatus.LOCAL_ONLY.value
         and chain_shares <= 0.0
@@ -2943,7 +2946,7 @@ def _is_runtime_open_position(pos: Position) -> bool:
     return (
         state not in INACTIVE_RUNTIME_STATES
         and state not in LEGACY_NONVOCABULARY_INACTIVE_STATES
-        and chain_state not in NO_EXPOSURE_CHAIN_STATES
+        and not no_exposure_chain_state
         and not local_projection_without_chain_exposure
     )
 

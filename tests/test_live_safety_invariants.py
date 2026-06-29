@@ -3380,6 +3380,36 @@ def test_chain_absent_confirmed_positive_exposure_redecision_does_not_expire():
     assert cycle_runtime._quarantined_position_can_redecision(pos) is True
 
 
+def test_pending_exit_chain_absent_positive_exposure_stays_open_for_exit_lifecycle():
+    """A pending exit with real chain shares must stay in the open set for exit management."""
+    from src.state.portfolio import get_open_positions
+
+    pos = _make_position(
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=9.7,
+        chain_shares=9.7,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        next_exit_retry_at="2026-06-29T17:17:30+00:00",
+    )
+    portfolio = _make_portfolio(pos)
+
+    assert get_open_positions(portfolio) == [pos]
+
+    zero = _make_position(
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=9.7,
+        chain_shares=0.0,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+    )
+    assert get_open_positions(_make_portfolio(zero)) == []
+
+
 def test_monitor_entry_selection_guard_invalidates_unarmed_qkernel_hold():
     """Monitor must not keep an unarmed qkernel entry as a raw-posterior hold."""
     from src.engine import cycle_runtime
