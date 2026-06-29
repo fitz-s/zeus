@@ -276,11 +276,11 @@ def _full_family_direct_clob_prefetch_candidate_threshold() -> int:
         configured = int(
             os.environ.get(
                 "ZEUS_MARKET_DISCOVERY_FULL_FAMILY_DIRECT_CLOB_PREFETCH_MAX_CANDIDATES",
-                "64",
+                "128",
             )
         )
     except ValueError:
-        configured = 64
+        configured = 128
     return max(0, configured)
 
 
@@ -4872,8 +4872,6 @@ def refresh_executable_market_substrate_snapshots(
         and candidates_needing_network_books
         and full_family_direct_clob_candidate_threshold > 0
         and len(selected_candidates) <= full_family_direct_clob_candidate_threshold
-        and not priority_full_family_direct_clob_prefetch
-        and not priority_conditions
     )
     full_family_direct_clob_prefetch_enabled = bool(
         full_family_direct_clob_prefetch_forced
@@ -4887,7 +4885,11 @@ def refresh_executable_market_substrate_snapshots(
     )
     network_book_candidates = candidates_needing_network_books
     failed_prefetch_tokens: set[str] = set()
-    if priority_full_family_direct_clob_prefetch:
+    if (
+        priority_full_family_direct_clob_prefetch
+        and not full_family_direct_clob_prefetch_forced
+        and not small_full_family_direct_clob_prefetch
+    ):
         network_book_candidates = [
             candidate
             for candidate in candidates_needing_network_books
