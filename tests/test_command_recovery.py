@@ -9363,7 +9363,8 @@ class TestRecoveryResolutionTable:
                 'snap-miami', 'qkernel_spine', 'center_buy',
                 'center_buy', 'opening_hunt', 'synced', 'tok-yes',
                 'tok-no', 'cond-miami', 'ord-entry', 'partial',
-                '2026-06-29T13:38:50+00:00', 'high', 'PHANTOM_NOT_ON_CHAIN',
+                '2026-06-29T13:38:50+00:00', 'high',
+                'ENTRY_SELECTION_GUARD_INVALID_EXIT',
                 'none', 85.17, '2026-06-29T11:16:48+00:00'
             )
             """,

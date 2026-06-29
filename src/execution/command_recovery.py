@@ -7090,12 +7090,12 @@ def _confirmed_phantom_void_candidates(conn: sqlite3.Connection) -> list[dict]:
                      FROM position_events any_event
                     WHERE any_event.position_id = pc.position_id
                ) AS latest_any_sequence_no
-          FROM position_current pc
+         FROM position_current pc
           JOIN latest_void
             ON latest_void.position_id = pc.position_id
          WHERE pc.phase = 'voided'
-           AND COALESCE(pc.exit_reason, '') = 'PHANTOM_NOT_ON_CHAIN'
            AND COALESCE(pc.shares, 0) > 0
+           AND LOWER(COALESCE(pc.chain_state, '')) != 'chain_confirmed_zero'
          ORDER BY pc.updated_at
         """
     ).fetchall()
@@ -7248,7 +7248,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                        updated_at = ?
                  WHERE position_id = ?
                    AND phase = 'voided'
-                   AND COALESCE(exit_reason, '') = 'PHANTOM_NOT_ON_CHAIN'
+                   AND LOWER(COALESCE(chain_state, '')) != 'chain_confirmed_zero'
                 """,
                 (
                     CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
