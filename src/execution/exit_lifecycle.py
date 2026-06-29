@@ -1680,6 +1680,12 @@ def _void_chain_confirmed_zero(
             trade_id,
         )
         return {"action": "skip", "position": None}
+    voided.chain_state = "chain_confirmed_zero"
+    voided.chain_shares = 0.0
+    voided.order_status = "voided"
+    voided.exit_state = ""
+    voided.exit_retry_count = 0
+    voided.next_exit_retry_at = ""
 
     # Emit canonical ADMIN_VOIDED event carrying chain-truth evidence
     if conn is not None:
@@ -1695,6 +1701,10 @@ def _void_chain_confirmed_zero(
             projection = build_position_current_projection(voided)
             projection["updated_at"] = occurred_at
             projection["chain_state"] = "chain_confirmed_zero"
+            projection["chain_shares"] = 0.0
+            projection["order_status"] = "voided"
+            projection["exit_retry_count"] = 0
+            projection["next_exit_retry_at"] = None
 
             env = str(getattr(voided, "env", "") or "live")
             if env not in {"live", "test", "replay", "backtest"}:

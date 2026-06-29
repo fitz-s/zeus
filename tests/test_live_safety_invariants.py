@@ -3438,6 +3438,12 @@ def test_pending_exit_chain_absent_zero_balance_uses_chain_truth_resolution(monk
     assert result["action"] == "closed"
     assert result["position"].state == "voided"
     assert result["position"].exit_reason == "CHAIN_CONFIRMED_ZERO"
+    assert result["position"].chain_state == "chain_confirmed_zero"
+    assert result["position"].chain_shares == 0.0
+    assert result["position"].order_status == "voided"
+    assert result["position"].exit_state == ""
+    assert result["position"].exit_retry_count == 0
+    assert result["position"].next_exit_retry_at == ""
     assert portfolio.positions == []
 
 
