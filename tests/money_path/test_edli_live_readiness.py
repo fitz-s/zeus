@@ -1738,6 +1738,68 @@ def test_actionable_payload_persists_qkernel_execution_economics():
     assert payload["qkernel_execution_economics"] == qkernel_cert
 
 
+def test_day0_actionable_payload_reads_authority_from_event_payload_json():
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.opportunity_event import (
+        Day0ExtremeUpdatedPayload,
+        make_day0_extreme_updated_event,
+    )
+
+    event = make_day0_extreme_updated_event(
+        entity_key="Chicago|2026-05-24|high|day0",
+        source="observation_instants",
+        observed_at="2026-05-24T19:00:00+00:00",
+        received_at="2026-05-24T19:02:00+00:00",
+        payload=Day0ExtremeUpdatedPayload(
+            city="Chicago",
+            target_date="2026-05-24",
+            metric="high",
+            settlement_source="WU",
+            station_id="KMDW",
+            observation_time="2026-05-24T19:00:00+00:00",
+            observation_available_at="2026-05-24T19:01:00+00:00",
+            raw_value=80.4,
+            rounded_value=80,
+            high_so_far=80.4,
+            source_match_status="MATCH",
+            local_date_status="MATCH",
+            station_match_status="MATCH",
+            dst_status="UNAMBIGUOUS",
+            metric_match_status="MATCH",
+            rounding_status="MATCH",
+            source_authorized_status="AUTHORIZED",
+            live_authority_status="live",
+        ),
+    )
+    receipt = replace(
+        _accepted_receipt(event),
+        q_source="day0_observation",
+        selection_authority_applied=None,
+        qkernel_execution_economics=None,
+        opportunity_book={},
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 15.39,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+
+    assert payload["event_type"] == "DAY0_EXTREME_UPDATED"
+    assert payload["source_match_status"] == "MATCH"
+    assert payload["local_date_status"] == "MATCH"
+    assert payload["station_match_status"] == "MATCH"
+    assert payload["dst_status"] == "UNAMBIGUOUS"
+    assert payload["metric_match_status"] == "MATCH"
+    assert payload["rounding_status"] == "MATCH"
+    assert payload["source_authorized_status"] == "AUTHORIZED"
+    assert payload["live_authority_status"] == "live"
+    adapter._assert_live_entry_submit_authority(payload)
+
+
 def test_actionable_payload_drops_nonfinite_qkernel_economics_before_cert_boundary():
     from src.engine import event_reactor_adapter as adapter
 

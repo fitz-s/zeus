@@ -13,6 +13,7 @@ Covers the two helpers added in src/main.py:
 """
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from types import SimpleNamespace
 
@@ -248,6 +249,18 @@ def test_open_rest_screen_keeps_active_local_commands_with_open_venue_fact():
     assert len(rests) == 1
     assert rests[0].command_id == "cmd-rest"
     assert rests[0].side == "buy_no"
+
+
+def test_redecision_screen_manages_open_rests_outside_entry_fair_batch():
+    """Entry fair-batching must not starve already-submitted maker-rest management."""
+
+    import src.main as m
+
+    source = inspect.getsource(m._edli_continuous_redecision_screen_cycle)
+
+    assert source.count("beliefs=all_beliefs") >= 2
+    assert "_edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)" not in source
+    assert "_edli_open_rest_condition_scope(open_rests, all_beliefs)" in source
 
 
 def test_emit_routes_through_standard_live_redecision(monkeypatch):

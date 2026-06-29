@@ -7281,6 +7281,9 @@ def _live_decision_audit_payload(
 def _event_identity_value(event: OpportunityEvent | None, key: str) -> object | None:
     if event is None:
         return None
+    parsed_payload = _payload(event)
+    if key in parsed_payload:
+        return parsed_payload.get(key)
     payload = getattr(event, "payload", None)
     if isinstance(payload, dict):
         return payload.get(key)
@@ -9441,7 +9444,7 @@ def _forecast_authority_payload_and_clock(
     )
     if coverage is None:
         raise ValueError("FORECAST_AUTHORITY_EVIDENCE_MISSING:coverage")
-    if event.event_type == "DAY0_EXTREME_UPDATED":
+    if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         return _day0_forecast_authority_payload_and_clock(
             snapshot=snapshot,
             source_run=source_run,
@@ -9746,7 +9749,7 @@ def _calibration_authority_payload_and_clock(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:city")
-    if event.event_type == "DAY0_EXTREME_UPDATED":
+    if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
         return _day0_calibration_authority_payload_and_clock(
             city=city,
             family=family,

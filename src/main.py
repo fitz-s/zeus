@@ -5650,7 +5650,15 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 )
                 entry_redecisions = []
             raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
-            open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
+            # Open maker rests are already-live order-management obligations.
+            # They must be screened every cycle even when their family is outside
+            # the entry fair-batch cursor; the fair batch limits new entry scans,
+            # not management of submitted GTC rests that hold the submit mutex.
+            open_rests = _edli_open_maker_rests_for_screen(
+                trade_ro,
+                world_ro,
+                beliefs=all_beliefs,
+            )
             entry_refresh_condition_scope = entry_substrate_refresh_scope(
                 trade_ro,
                 beliefs=beliefs,
@@ -5665,7 +5673,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 decision_time=received_at,
             )
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
-            open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)
+            open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)
             rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
         finally:
             try:
@@ -5683,7 +5691,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         rest_pull_families: set = set()
         if rest_pulls:
             by_family = {
-                b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
+                b.family_id: (b.city, b.target_date, b.metric) for b in all_beliefs
             }
             for rest, _decision in rest_pulls:
                 key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
@@ -5844,7 +5852,11 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     )
                     entry_redecisions = []
                 raw_entry_family_keys = screened_family_keys(world_ro, entry_redecisions, beliefs=beliefs)
-                open_rests = _edli_open_maker_rests_for_screen(trade_ro, world_ro, beliefs=beliefs)
+                open_rests = _edli_open_maker_rests_for_screen(
+                    trade_ro,
+                    world_ro,
+                    beliefs=all_beliefs,
+                )
                 rest_pulls = screen_resting_orders(
                     world_ro,
                     trade_ro,
@@ -5866,7 +5878,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
             rest_pull_families = set()
             if rest_pulls:
                 by_family = {
-                    b.family_id: (b.city, b.target_date, b.metric) for b in beliefs
+                    b.family_id: (b.city, b.target_date, b.metric) for b in all_beliefs
                 }
                 for rest, _decision in rest_pulls:
                     key = _edli_family_key_from_rest(rest) or by_family.get(rest.family_id)
