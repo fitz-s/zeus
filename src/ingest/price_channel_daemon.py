@@ -60,7 +60,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,7 @@ _scheduler: Any | None = None
 _PROCESS_START = time.monotonic()
 
 _heartbeat_fails = 0
+MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS = 30
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -279,6 +280,8 @@ def main() -> None:
         id="edli_market_channel_ingestor",
         max_instances=1,
         coalesce=True,
+        next_run_time=datetime.now(timezone.utc)
+        + timedelta(seconds=MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS),
     )
     # PRODUCER 2A: held-position quote witness refresh. This must not share executor
     # capacity with broad user-channel reconcile or market-substrate scans; monitor/

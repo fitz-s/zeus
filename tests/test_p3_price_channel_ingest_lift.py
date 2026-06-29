@@ -1249,6 +1249,20 @@ def test_new_daemon_entry_point_exists_and_starts_ws_and_registers_both_cycles()
         )
 
 
+def test_market_channel_first_fire_is_staggered_from_held_quote_refresh():
+    """Candidate and held quote refresh must not start on the same second.
+
+    Both refresh lanes share the process-local REST seed lock. Starting both
+    interval jobs immediately made the candidate lane lose the lock every
+    minute, leaving executable candidate snapshots stale while held quotes
+    refreshed successfully.
+    """
+    daemon_src = _PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8")
+    assert "MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS = 30" in daemon_src
+    assert "next_run_time=datetime.now(timezone.utc)" in daemon_src
+    assert "timedelta(seconds=MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS)" in daemon_src
+
+
 def test_new_daemon_does_not_import_trading_lane():
     """The new daemon module must NOT import the trading lane (whole-process isolation)."""
     src = _PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8")
