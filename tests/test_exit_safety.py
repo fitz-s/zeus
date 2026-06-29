@@ -3238,6 +3238,107 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
     assert current["order_status"] == "sell_placed"
 
 
+def test_check_pending_exits_recovers_adopted_open_sell_from_canonical_event(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.execution.exit_lifecycle import check_pending_exits
+    from src.state.db import transition_phase
+    from src.state.portfolio import PortfolioState, Position
+
+    trade_id = "pos-adopted-open-sell-scan"
+    posted = Position(
+        trade_id=trade_id,
+        market_id="mkt-1",
+        city="Miami",
+        cluster="US",
+        target_date="2026-06-30",
+        bin_label="96-97F",
+        direction="buy_yes",
+        size_usd=4.34,
+        shares=85.17,
+        cost_basis_usd=4.34,
+        entry_price=0.051,
+        p_posterior=0.34,
+        state="pending_exit",
+        pre_exit_state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="F",
+        env="live",
+        strategy_key="center_buy",
+        order_id="ord-entry-old",
+        order_status="partial",
+        exit_state="sell_placed",
+        last_exit_order_id="ord-adopted-open-sell",
+        exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+    )
+    assert transition_phase(
+        conn,
+        posted,
+        event_type="EXIT_ORDER_POSTED",
+        reason=posted.exit_reason,
+        error="ACTIVE_EXIT_SELL_IN_FLIGHT",
+    )
+
+    stale_runtime = Position(
+        trade_id=trade_id,
+        market_id="mkt-1",
+        city="Miami",
+        cluster="US",
+        target_date="2026-06-30",
+        bin_label="96-97F",
+        direction="buy_yes",
+        size_usd=4.34,
+        shares=85.17,
+        cost_basis_usd=4.34,
+        entry_price=0.051,
+        p_posterior=0.34,
+        state="pending_exit",
+        pre_exit_state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="F",
+        env="live",
+        strategy_key="center_buy",
+        order_id="",
+        order_status="sell_placed",
+        exit_state="sell_pending",
+        last_exit_order_id="",
+        exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-adopted-open-sell"
+            return {"status": "LIVE", "orderID": order_id}
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_cancel_stale_pending_exit_for_reprice",
+        lambda **_kwargs: False,
+    )
+
+    stats = check_pending_exits(PortfolioState(positions=[stale_runtime]), FakeClob(), conn=conn)
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert stale_runtime.last_exit_order_id == "ord-adopted-open-sell"
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_REJECTED'
+           AND payload_json LIKE '%no_order_id%'
+        """,
+        (trade_id,),
+    ).fetchone()[0] == 0
+
+
 def test_execute_exit_cancels_adopted_order_without_command_row_for_reprice(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.execution.exit_lifecycle import execute_exit

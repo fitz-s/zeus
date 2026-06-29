@@ -3301,29 +3301,93 @@ def _last_exit_order_id(
     # missing exit. Only accept the fallback when durable command truth proves it is an
     # EXIT command for this position, or when no DB is available and the runtime status
     # is explicitly sell-scoped.
-    fallback = str(getattr(position, "order_id", "") or "").strip()
-    if not fallback:
-        return ""
     if conn is not None:
         trade_id = str(getattr(position, "trade_id", "") or "").strip()
         if not trade_id:
             return ""
+        fallback = str(getattr(position, "order_id", "") or "").strip()
+        candidates: list[str] = []
+        if fallback:
+            candidates.append(fallback)
         try:
             row = conn.execute(
                 """
-                SELECT 1
+                SELECT order_id
+                  FROM position_current
+                 WHERE position_id = ?
+                   AND COALESCE(order_status, '') LIKE 'sell_%'
+                   AND COALESCE(order_id, '') <> ''
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            current_order_id = str(row[0] if row is not None else "").strip()
+            if current_order_id:
+                candidates.append(current_order_id)
+        except sqlite3.OperationalError:
+            pass
+        try:
+            rows = conn.execute(
+                """
+                SELECT order_id
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_POSTED'
+                   AND phase_after = 'pending_exit'
+                   AND COALESCE(order_id, '') <> ''
+                 ORDER BY sequence_no DESC, occurred_at DESC
+                 LIMIT 3
+                """,
+                (trade_id,),
+            ).fetchall()
+            for row in rows:
+                event_order_id = str(row[0] if row is not None else "").strip()
+                if event_order_id:
+                    candidates.append(event_order_id)
+        except sqlite3.OperationalError:
+            pass
+        seen: set[str] = set()
+        candidates = [candidate for candidate in candidates if not (candidate in seen or seen.add(candidate))]
+        if not candidates:
+            return ""
+        try:
+            placeholders = ", ".join("?" for _ in candidates)
+            rows = conn.execute(
+                f"""
+                SELECT venue_order_id
                   FROM venue_commands
                  WHERE position_id = ?
                    AND intent_kind = 'EXIT'
-                   AND venue_order_id = ?
-                 LIMIT 1
+                   AND venue_order_id IN ({placeholders})
                 """,
-                (trade_id, fallback),
-            ).fetchone()
+                (trade_id, *candidates),
+            ).fetchall()
+            command_order_ids = {str(row[0] if row is not None else "") for row in rows}
         except sqlite3.OperationalError:
-            row = None
-        return fallback if row is not None else ""
+            command_order_ids = set()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT order_id
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_POSTED'
+                   AND phase_after = 'pending_exit'
+                   AND order_id IN ({placeholders})
+                """,
+                (trade_id, *candidates),
+            ).fetchall()
+            event_order_ids = {str(row[0] if row is not None else "") for row in rows}
+        except sqlite3.OperationalError:
+            event_order_ids = set()
+        for candidate in candidates:
+            if candidate in command_order_ids or candidate in event_order_ids:
+                return candidate
+        return ""
 
+    fallback = str(getattr(position, "order_id", "") or "").strip()
+    if not fallback:
+        return ""
     order_status = str(getattr(position, "order_status", "") or "").strip().lower()
     return fallback if order_status.startswith("sell_") else ""
 
@@ -3400,6 +3464,8 @@ def check_pending_exits(
                 log_exit_retry_event(conn, pos, reason="SELL_NO_ORDER_ID", error="no_order_id")
             stats["retried"] += 1
             continue
+        if not str(getattr(pos, "last_exit_order_id", "") or "").strip():
+            pos.last_exit_order_id = exit_order_id
 
         _commit_before_exit_venue_io(conn, stage="pending_exit_status_poll")
         status, status_payload = _check_order_fill(clob, exit_order_id)
