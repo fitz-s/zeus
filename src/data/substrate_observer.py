@@ -573,9 +573,10 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     refresh_budget_s: float,
     snapshot_reserve_s: float,
     cached_topology_count: int,
+    gamma_family_count: int = 0,
 ) -> float:
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
-    if cached_topology_count > 0:
+    if cached_topology_count > 0 and gamma_family_count <= 0:
         cached_gamma_s = max(
             0.1,
             float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "1.0")),
@@ -1326,6 +1327,7 @@ def _refresh_pending_family_snapshots(
             refresh_budget_s=refresh_budget_s,
             snapshot_reserve_s=snapshot_reserve_s,
             cached_topology_count=len(cached_topology_markets),
+            gamma_family_count=len(gamma_refresh_families),
         )
         skipped_not_found = 0
         try:

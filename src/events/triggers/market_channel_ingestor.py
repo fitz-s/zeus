@@ -15,6 +15,7 @@ import json
 import logging
 import sqlite3
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Iterator
@@ -58,6 +59,18 @@ class MarketChannelAction:
     reason: str = ""
     token_id: str | None = None
     condition_id: str | None = None
+
+
+@dataclass(frozen=True)
+class MarketChannelQuoteResult:
+    """Result for quote evidence that intentionally is not a world opportunity row."""
+
+    event_id: str
+    event_type: str
+    inserted: bool
+    duplicate: bool
+    evidence_written: bool
+    opportunity_event_persisted: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,9 @@ class MarketChannelIngestor:
         self._market_event_sink = market_event_sink
         self._deferred_market_event_sink_depth = 0
         self._deferred_market_event_sink_events: list[OpportunityEvent] = []
+        self._seen_quote_event_ids: set[str] = set()
+        self._seen_quote_event_order: deque[str] = deque()
+        self._seen_quote_event_limit = 20_000
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -148,7 +164,12 @@ class MarketChannelIngestor:
         )
         return {token_id for token_id in base if self._token_is_open_at(token_id, now=now)}
 
-    def handle_message(self, message: dict[str, Any], *, received_at: str) -> EventWriteResult | MarketChannelAction | None:
+    def handle_message(
+        self,
+        message: dict[str, Any],
+        *,
+        received_at: str,
+    ) -> EventWriteResult | MarketChannelAction | MarketChannelQuoteResult | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
         if event_type == "tick_size_change":
             return MarketChannelAction(
@@ -173,19 +194,18 @@ class MarketChannelIngestor:
         self._cache_event_payload(event)
         return self._write_market_event(event)
 
-    def flush_coalesced(self, *, market_budget: int | None = None) -> list[EventWriteResult]:
+    def flush_coalesced(
+        self,
+        *,
+        market_budget: int | None = None,
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         if self._coalescer is None:
             return []
         events = self._coalescer.drain(market_budget=market_budget)
         results = []
-        inserted_events: list[OpportunityEvent] = []
         for event in events:
-            result = self._writer.write(event)
-            if result.inserted:
-                self._write_feasibility_evidence(event)
-                inserted_events.append(event)
+            result = self._commit_market_event(event)
             results.append(result)
-        self._notify_market_event_sink(inserted_events)
         return results
 
     def event_from_message(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
@@ -212,7 +232,7 @@ class MarketChannelIngestor:
         received_at: str,
         pre_cached: "dict[str, dict] | None" = None,
         token_ids: Iterable[str] | None = None,
-    ) -> list[EventWriteResult]:
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """REST-seed current books on connect/reconnect before channel deltas.
 
         LOCK DISCIPLINE (2026-06-04): this method MUST NOT be called while the
@@ -235,7 +255,7 @@ class MarketChannelIngestor:
         from src.state.db import assert_no_world_mutex_held_for_io
 
         target_token_ids = self.active_token_ids_open_at(token_ids=token_ids)
-        results: list[EventWriteResult] = []
+        results: list[EventWriteResult | MarketChannelQuoteResult] = []
         for token_id in sorted(target_token_ids):
             try:
                 if pre_cached is not None and token_id in pre_cached:
@@ -262,10 +282,7 @@ class MarketChannelIngestor:
             if event is None:
                 continue
             self._cache_event_payload(event)
-            result = self._writer.write(event)
-            if result.inserted:
-                self._write_feasibility_evidence(event)
-                self._notify_market_event_sink([event])
+            result = self._commit_market_event(event)
             results.append(result)
         return results
 
@@ -449,11 +466,43 @@ class MarketChannelIngestor:
         if self._coalescer is not None:
             self._coalescer.enqueue(event)
             return None
+        return self._commit_market_event(event)
+
+    def _commit_market_event(self, event: OpportunityEvent) -> EventWriteResult | MarketChannelQuoteResult:
+        if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            if self._quote_event_seen(event.event_id):
+                return MarketChannelQuoteResult(
+                    event_id=event.event_id,
+                    event_type=event.event_type,
+                    inserted=False,
+                    duplicate=True,
+                    evidence_written=False,
+                )
+            self._remember_quote_event(event.event_id)
+            self._write_feasibility_evidence(event)
+            self._notify_market_event_sink([event])
+            return MarketChannelQuoteResult(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                inserted=True,
+                duplicate=False,
+                evidence_written=True,
+            )
         result = self._writer.write(event)
         if result.inserted:
             self._write_feasibility_evidence(event)
             self._notify_market_event_sink([event])
         return result
+
+    def _quote_event_seen(self, event_id: str) -> bool:
+        return event_id in self._seen_quote_event_ids
+
+    def _remember_quote_event(self, event_id: str) -> None:
+        self._seen_quote_event_ids.add(event_id)
+        self._seen_quote_event_order.append(event_id)
+        while len(self._seen_quote_event_order) > self._seen_quote_event_limit:
+            expired = self._seen_quote_event_order.popleft()
+            self._seen_quote_event_ids.discard(expired)
 
     def _notify_market_event_sink(self, events: list[OpportunityEvent]) -> None:
         if self._market_event_sink is None or not events:
@@ -834,7 +883,7 @@ class MarketChannelOnlineService:
         *,
         received_at: str,
         pre_captured_books: "dict[str, dict] | None" = None,
-    ) -> list[EventWriteResult]:
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """Seed the book cache on connect.
 
         ``pre_captured_books`` is an optional {token_id: book_dict} map
@@ -1006,7 +1055,7 @@ class MarketChannelOnlineService:
         pre_captured_books: "dict[str, dict] | None" = None,
         token_ids: Iterable[str] | None = None,
         gap_start: str | None = None,
-    ) -> list[EventWriteResult]:
+    ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         """Seed gap-close books on reconnect.
 
         ``pre_captured_books`` is an optional {token_id: book_dict} map
@@ -1052,10 +1101,7 @@ class MarketChannelOnlineService:
                 received_at=received_at,
             )
             if event is not None:
-                result = self.ingestor._writer.write(event)
-                if result.inserted:
-                    self.ingestor._write_feasibility_evidence(event)
-                    self.ingestor._notify_market_event_sink([event])
+                result = self.ingestor._commit_market_event(event)
                 results.append(result)
         self.gap_start = None
         return results

@@ -4557,6 +4557,10 @@ def refresh_executable_market_substrate_snapshots(
     seen_snapshot_sides: set[tuple[str, str]] = set()
     candidate_cities: set[str] = set()
     candidate_count = 0
+    candidate_rejection_counts: dict[str, int] = {}
+
+    def _reject_candidate(reason: str) -> None:
+        candidate_rejection_counts[reason] = candidate_rejection_counts.get(reason, 0) + 1
 
     # Group candidates by city for breadth-first interleaving, except the
     # max_outcomes=0 pending-family path, where the group key is one market
@@ -4586,6 +4590,7 @@ def refresh_executable_market_substrate_snapshots(
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
             if not condition_id:
+                _reject_candidate("missing_condition_id")
                 skipped += 1
                 continue
             # FAMILY-IDENTITY admission (2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root):
@@ -4607,10 +4612,12 @@ def refresh_executable_market_substrate_snapshots(
                 str(outcome.get("token_id") or "").strip()
                 and str(outcome.get("no_token_id") or "").strip()
             ):
+                _reject_candidate("missing_yes_no_token_identity")
                 skipped += 1
                 continue
             end_at = _outcome_market_end_at(market, outcome)
             if end_at is not None and end_at <= captured:
+                _reject_candidate("market_end_at_elapsed")
                 skipped += 1
                 continue
             refresh_key, fresh_selected_tokens = _snapshot_condition_refresh_state(
@@ -4622,13 +4629,16 @@ def refresh_executable_market_substrate_snapshots(
             for direction in ("buy_yes", "buy_no"):
                 snapshot_side = (condition_id, direction)
                 if snapshot_side in seen_snapshot_sides:
+                    _reject_candidate("duplicate_condition_side")
                     skipped += 1
                     continue
                 if direction == "buy_no" and not str(outcome.get("no_token_id") or "").strip():
+                    _reject_candidate("missing_no_token_identity")
                     skipped += 1
                     continue
                 selected_token = _selected_token_for_direction(outcome, direction)
                 if selected_token and selected_token in fresh_selected_tokens:
+                    _reject_candidate("selected_token_already_fresh")
                     skipped += 1
                     continue
                 seen_snapshot_sides.add(snapshot_side)
@@ -5057,6 +5067,7 @@ def refresh_executable_market_substrate_snapshots(
     summary = {
         "discovered_event_count": len(markets or []),
         "executable_snapshot_candidate_count": candidate_count,
+        "executable_snapshot_candidate_rejection_counts": candidate_rejection_counts,
         "selected_executable_snapshot_count": len(selected_candidates),
         "executable_candidate_city_count": len(candidate_cities),
         "selected_executable_city_count": len(selected_cities),

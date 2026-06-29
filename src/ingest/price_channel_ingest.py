@@ -2225,15 +2225,12 @@ def _edli_refresh_held_position_quote_evidence(
             "skipped": "no_held_token_metadata",
         }
 
-    # INV-37 (PR415 B5, 2026-06-20): write the world event (opportunity_events) AND
-    # the trade-owned book witness (execution_feasibility_evidence) through ONE
-    # attached connection with a single commit, never two independent connections
-    # committed separately. world.db is MAIN (so the EventStore's unqualified
-    # opportunity_events + its sqlite_master guard resolve to the real world log)
-    # and zeus_trades.db is ATTACHed as 'trades' (so the schema-qualified feasibility
-    # insert reaches the runtime-read trades table, never the world ghost copy). A single
-    # conn.commit() keeps the pair together in normal successful execution; WAL mode
-    # does not make ATTACHed DB files cross-file host-crash-atomic.
+    # Quote/book refresh writes trade-owned execution_feasibility_evidence and may
+    # synchronously emit derived EDLI_REDECISION_PENDING world events. Raw
+    # BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED cache facts are intentionally not persisted
+    # to opportunity_events; keeping them there was write amplification, not
+    # decision truth. The attached connection still keeps the trade witness and any
+    # derived world event on one commit boundary.
     from src.state.db import get_world_connection_with_trades_required
 
     ordered_metadata_tokens = [
@@ -2251,11 +2248,10 @@ def _edli_refresh_held_position_quote_evidence(
             attempted_tokens=len(ordered_metadata_tokens),
         )
 
-    # The single ATTACHed connection preserves one world-event + trades.feasibility
-    # commit path. Do not use the flocked context here: REST book
-    # fetches happen inside seed_rest_books_in_chunks before each DB chunk write,
-    # and holding cross-process trade/world writer flocks across those network
-    # calls starves live redecision's executable snapshot refresh.
+    # Do not use the flocked context here: REST book fetches happen inside
+    # seed_rest_books_in_chunks before each DB chunk write, and holding
+    # cross-process trade/world writer flocks across those network calls starves
+    # live redecision's executable snapshot refresh.
     conn = None
     try:
         conn = get_world_connection_with_trades_required(write_class="live")
@@ -2390,10 +2386,9 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "skipped": "no_candidate_token_metadata",
         }
 
-    # INV-37 (PR415 B5, 2026-06-20): one attached connection + one commit for the
-    # world-event + trade-feasibility cross-DB pair during normal successful execution
-    # (see the held-priority twin above for the full rationale + the ghost-table hazard
-    # this world-MAIN + ATTACHed 'trades' + schema-qualified-feasibility shape avoids).
+    # Same attached-connection shape as held refresh: quote evidence lands in
+    # trades.execution_feasibility_evidence, while only derived redecision events
+    # touch world.opportunity_events.
     from src.state.db import get_world_connection_with_trades_required
 
     # Same lock discipline as held-position refresh: one world-main connection
@@ -2653,18 +2648,13 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         )
         from src.state.db import get_world_connection_with_trades_required
 
-        # INV-37 (PR415 B5, 2026-06-20): the long-lived market-channel ingestor writes
-        # the world event (opportunity_events) AND the trade-owned feasibility witness
-        # (execution_feasibility_evidence) per unit through ONE attached connection
-        # (world.db MAIN + zeus_trades.db ATTACHed as 'trades'), never two independent
-        # connections committed separately. The NON-flocked helper is used here because
-        # this connection lives for the whole forever-loop — holding cross-DB writer
-        # flocks for that lifetime would starve every other writer; each per-unit
-        # commit stays on one attached connection and is serialized on zeus-world.db by
-        # the world write mutex inside the service loop. WAL mode does not make that
-        # cross-file host-crash-atomic. The
-        # feasibility insert is schema-qualified 'trades' (feasibility_schema below) so
-        # it reaches the runtime-read trades table, never the world ghost copy.
+        # The long-lived market-channel ingestor writes quote evidence to trades and
+        # derived redecision events to world on one attached connection. It does not
+        # persist raw BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED rows to opportunity_events.
+        # The NON-flocked helper is used here because this connection lives for the
+        # whole forever-loop; holding cross-DB writer flocks for that lifetime would
+        # starve every other writer. Feasibility writes are schema-qualified 'trades'
+        # so they reach the runtime-read trades table, never the world ghost copy.
         conn = get_world_connection_with_trades_required(write_class="live")
         world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
         feasibility_conn = conn

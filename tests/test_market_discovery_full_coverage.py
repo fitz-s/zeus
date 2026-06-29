@@ -667,7 +667,7 @@ def test_capture_reuses_clob_market_info_for_adjacent_condition_sides():
 
 
 def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
-    """Warm cycles with cached topology must reserve most time for CLOB prices."""
+    """Cached topology short-cuts Gamma only when no family needs Gamma hydration."""
     import src.main as main_mod
 
     fake_now = 108.0
@@ -679,6 +679,14 @@ def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
         refresh_budget_s=15.0,
         snapshot_reserve_s=6.0,
         cached_topology_count=50,
+        gamma_family_count=0,
+    )
+    deadline_with_cache_and_gamma_work = substrate_observer._gamma_lookup_deadline_for_snapshot_refresh(
+        refresh_deadline=115.0,
+        refresh_budget_s=15.0,
+        snapshot_reserve_s=6.0,
+        cached_topology_count=50,
+        gamma_family_count=20,
     )
     deadline_without_cache = substrate_observer._gamma_lookup_deadline_for_snapshot_refresh(
         refresh_deadline=115.0,
@@ -688,7 +696,31 @@ def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
     )
 
     assert deadline_with_cache == pytest.approx(101.0)
+    assert deadline_with_cache_and_gamma_work == pytest.approx(109.0)
     assert deadline_without_cache == pytest.approx(109.0)
+
+
+def test_snapshot_refresh_reports_candidate_identity_rejection_counts():
+    market = _make_market("Chicago", 1)
+    market["outcomes"][0]["no_token_id"] = ""
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot") as capture:
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_make_clob_mock(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+        )
+
+    capture.assert_not_called()
+    assert summary["executable_substrate_coverage_status"] == "NO_EXECUTABLE_CANDIDATES"
+    assert summary["executable_snapshot_candidate_count"] == 0
+    assert summary["executable_snapshot_candidate_rejection_counts"] == {
+        "missing_yes_no_token_identity": 1
+    }
 
 
 # ---------------------------------------------------------------------------

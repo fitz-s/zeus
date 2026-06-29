@@ -615,6 +615,77 @@ def mark_market_closed_hold_to_settlement(
     )
 
 
+_CLOSED_HOLD_MONITOR_COLUMNS = (
+    "last_monitor_prob",
+    "last_monitor_prob_is_fresh",
+    "last_monitor_edge",
+    "last_monitor_market_price",
+    "last_monitor_market_price_is_fresh",
+    "last_monitor_best_bid",
+    "last_monitor_best_ask",
+    "last_monitor_market_vig",
+)
+
+
+def _position_current_columns(conn: sqlite3.Connection) -> set[str]:
+    try:
+        return {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+    except Exception:
+        return set()
+
+
+def _read_current_monitor_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+) -> dict[str, object] | None:
+    columns = [
+        column
+        for column in _CLOSED_HOLD_MONITOR_COLUMNS
+        if column in _position_current_columns(conn)
+    ]
+    if not columns:
+        return None
+    row = conn.execute(
+        f"SELECT {', '.join(columns)} FROM position_current WHERE position_id = ?",
+        (trade_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {column: row[index] for index, column in enumerate(columns)}
+
+
+def _apply_monitor_snapshot_for_closed_hold(
+    conn: sqlite3.Connection,
+    position: Position,
+    *,
+    trade_id: str,
+) -> None:
+    snapshot = _read_current_monitor_snapshot(conn, trade_id=trade_id)
+    if not snapshot:
+        position.last_monitor_prob = None  # type: ignore[assignment]
+        position.last_monitor_prob_is_fresh = False
+        position.last_monitor_edge = None  # type: ignore[assignment]
+        position.last_monitor_market_price = None
+        position.last_monitor_market_price_is_fresh = False
+        position.last_monitor_best_bid = None
+        position.last_monitor_best_ask = None
+        position.last_monitor_market_vig = None
+        return
+
+    for column, value in snapshot.items():
+        if column in {
+            "last_monitor_prob_is_fresh",
+            "last_monitor_market_price_is_fresh",
+        }:
+            setattr(position, column, bool(value))
+        else:
+            setattr(position, column, value)
+
+
 def _dual_write_market_closed_hold_if_available(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -635,6 +706,7 @@ def _dual_write_market_closed_hold_if_available(
 
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
+        _apply_monitor_snapshot_for_closed_hold(conn, position, trade_id=trade_id)
         position.last_monitor_at = occurred_at
         events, projection = build_monitor_refreshed_canonical_write(
             position,

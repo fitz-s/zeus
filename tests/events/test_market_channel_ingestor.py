@@ -129,22 +129,29 @@ def test_user_channel_is_only_fill_authority():
 def test_reconnect_gap_online_ingestor_no_stale_trade():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
-    event = ingestor.reconnect_gap_snapshot(
-        {
-            "event_type": "book",
-            "asset_id": "token-1",
-            "market": "0xcondition",
-            "bids": [{"price": "0.48", "size": "10"}],
-            "asks": [{"price": "0.52", "size": "10"}],
-            "hash": "hash-after-gap",
-            "timestamp": "1766789469958",
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=lambda _token_id: {})
+    service.connected = False
+    service.gap_start = "2026-05-24T09:59:00+00:00"
+    results = service.on_reconnect(
+        pre_captured_books={
+            "token-1": {
+                "event_type": "book",
+                "asset_id": "token-1",
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "hash-after-gap",
+                "timestamp": "1766789469958",
+            }
         },
+        token_ids={"token-1"},
         gap_start="2026-05-24T09:59:00+00:00",
         received_at="2026-05-24T10:00:00+00:00",
     )
-    assert event is not None
-    writer.write(event)
-    assert conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0] == 1
+    assert len(results) == 1
+    assert results[0].inserted is True
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
 
 
 def test_market_message_ignores_inactive_token():
@@ -288,7 +295,10 @@ def test_quote_cache_seeded_from_rest_on_connect():
 
     assert len(results) == 1
     assert cache.get("token-1") is not None
-    assert conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0] == 1
+    assert results[0].inserted is True
+    assert results[0].opportunity_event_persisted is False
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
 
 
 def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
@@ -535,12 +545,8 @@ def test_rest_seed_deadline_stops_before_fetching_more_tokens():
 
     assert written == 0
     assert fetch_calls == []
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
-        ).fetchone()[0]
-        == 0
-    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
 
 
 def test_rest_seed_preserves_ordered_priority_tokens():
@@ -622,14 +628,15 @@ def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressive
         received_at="2026-05-24T10:00:00+00:00",
         world_mutex=nullcontext(),
         commit=lambda: commit_counts.append(
-            conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
         ),
         chunk_size=2,
     )
 
     assert written == 5
     assert fetch_calls == [f"token-{idx}" for idx in range(5)]
-    assert commit_counts == [2, 4, 5]
+    assert commit_counts == [4, 8, 10]
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert service.connected is True
     assert service.gap_start is None
 
@@ -720,10 +727,8 @@ def test_market_channel_same_top_of_book_bba_does_not_append_ignored_events():
     assert first.inserted is True
     assert same_touch is None
     assert moved.inserted is True
-    assert (
-        conn.execute("SELECT COUNT(*) FROM opportunity_events WHERE event_type='BEST_BID_ASK_CHANGED'").fetchone()[0]
-        == 2
-    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 4
     assert len(seen) == 2
 
 
@@ -754,7 +759,7 @@ def test_market_channel_can_write_feasibility_to_trade_connection():
         received_at="2026-05-24T10:00:00+00:00",
     )
 
-    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert world_conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
     ).fetchone()[0] == 0
@@ -785,8 +790,7 @@ def test_market_channel_no_default_yes_for_no_token():
         received_at="2026-05-24T10:00:00+00:00",
     )
 
-    event_payload = conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0]
-    assert '"outcome_label":"NO"' in event_payload
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     rows = conn.execute(
         "SELECT direction, outcome_label FROM execution_feasibility_evidence ORDER BY direction"
     ).fetchall()
@@ -1500,15 +1504,11 @@ def test_on_connect_with_pre_captured_books_seeds_cache_without_fetch_call():
         pre_captured_books=pre_captured,
     )
 
-    # Seed must still populate the book cache and write the event row
+    # Seed must still populate the book cache and write executable quote evidence.
     assert len(results) == 1
     assert cache.get("token-1") is not None
-    assert (
-        conn.execute(
-            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
-        ).fetchone()[0]
-        == 1
-    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
     # The REST callable must NOT have been invoked — I/O happened before the lock
     assert fetch_calls == [], (
         "fetch_orderbook was called inside on_connect with pre_captured_books — "

@@ -2613,6 +2613,107 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
     assert payload["exit_failure"] is False
 
 
+def test_market_closed_hold_preserves_persisted_monitor_values(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    persisted = Position(
+        trade_id="pos-market-closed-preserve-monitor",
+        market_id="condition-test",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="day0_window",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status="filled",
+        last_monitor_prob=0.91,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_edge=0.16,
+        last_monitor_market_price=0.75,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=0.74,
+        last_monitor_best_ask=0.76,
+        last_monitor_market_vig=0.02,
+    )
+    upsert_position_current(conn, build_position_current_projection(persisted))
+
+    stale_in_memory = Position(
+        trade_id=persisted.trade_id,
+        market_id=persisted.market_id,
+        city=persisted.city,
+        cluster=persisted.cluster,
+        target_date=persisted.target_date,
+        bin_label=persisted.bin_label,
+        direction=persisted.direction,
+        token_id=persisted.token_id,
+        no_token_id=persisted.no_token_id,
+        condition_id=persisted.condition_id,
+        state="day0_window",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status="filled",
+        last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_edge=0.0,
+        last_monitor_market_price=0.0,
+        last_monitor_market_price_is_fresh=True,
+    )
+
+    mark_market_closed_hold_to_settlement(stale_in_memory, conn=conn)
+
+    current = conn.execute(
+        """
+        SELECT last_monitor_prob, last_monitor_prob_is_fresh, last_monitor_edge,
+               last_monitor_market_price, last_monitor_market_price_is_fresh
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (persisted.trade_id,),
+    ).fetchone()
+    assert current["last_monitor_prob"] == pytest.approx(0.91)
+    assert current["last_monitor_prob_is_fresh"] == 1
+    assert current["last_monitor_edge"] == pytest.approx(0.16)
+    assert current["last_monitor_market_price"] == pytest.approx(0.75)
+    assert current["last_monitor_market_price_is_fresh"] == 1
+
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (persisted.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+    assert payload["last_monitor_prob"] == pytest.approx(0.91)
+    assert payload["last_monitor_market_price"] == pytest.approx(0.75)
+    assert payload["last_monitor_prob_is_fresh"] is True
+    assert payload["last_monitor_market_price_is_fresh"] is True
+
+
 def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
     from src.contracts.semantic_types import ExitState
     from src.engine.lifecycle_events import (
