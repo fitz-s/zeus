@@ -49,6 +49,26 @@ def is_open_order_fact(state: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Proof-class coercion — the INV-CL-1 boundary for projection inputs           #
+# --------------------------------------------------------------------------- #
+
+def coerce_order_proof_class(value: OrderProofClass | str | None) -> OrderProofClass | None:
+    """Coerce a proof-class input to the typed enum before projection branching.
+
+    The reducer now emits ``OrderProofClass``, but future wiring may hand a
+    persisted raw proof string. The projections branch with identity (``is``)
+    checks, which are NOT raw-string compatible (StrEnum ``==``/membership works,
+    ``is`` does not). Coercing at projection entry keeps every downstream ``is``
+    check correct. ``None`` passes through; an unmapped string raises (fail loud).
+    """
+    if value is None:
+        return None
+    if isinstance(value, OrderProofClass):
+        return value
+    return OrderProofClass(str(value))
+
+
+# --------------------------------------------------------------------------- #
 # A6 — ExitProgress derived purely from the sell command's order truth         #
 # --------------------------------------------------------------------------- #
 
@@ -56,38 +76,41 @@ def derive_exit_progress(
     *,
     has_exit_command: bool,
     has_venue_fact: bool,
-    order_proof_class: OrderProofClass | None,
+    order_proof_class: OrderProofClass | str | None,
     retry_pending: bool = False,
     backoff_exhausted: bool = False,
 ) -> ExitProgress:
     """Pure projection of the exit/sell progression — never a stored source.
 
+    The sell command's order-truth proof class is AUTHORITATIVE: it already
+    encodes whether a venue fact exists. UNKNOWN_SIDE_EFFECT / REVIEW_REQUIRED
+    mean "submitted, result not cleanly known" — there is deliberately NO clean
+    venue fact, so they must be honored WITHOUT a ``has_venue_fact`` gate (the
+    prior gated form mis-projected them as EXIT_INTENT, the exact condition the
+    review state exists for). ``has_venue_fact`` is retained for call-site
+    ergonomics but is not the classifier.
+
     Precedence: a confirmed sell fill is terminal and wins; otherwise an explicit
-    backoff/retry event; otherwise classify the resting/partial/unknown sell order
-    from its order-truth proof class; otherwise the intent has not reached the venue.
+    backoff/retry event; otherwise classify the unknown/review/partial/resting
+    sell order from its proof class; otherwise the intent has not reached a known
+    venue state.
     """
     if not has_exit_command:
         return ExitProgress.NONE
+    pc = coerce_order_proof_class(order_proof_class)
     # Terminal sell fill wins — the position economics are closed.
-    if has_venue_fact and order_proof_class in (
-        OrderProofClass.TERMINAL_FILLED,
-        OrderProofClass.TERMINAL_PARTIAL,
-    ):
+    if pc in (OrderProofClass.TERMINAL_FILLED, OrderProofClass.TERMINAL_PARTIAL):
         return ExitProgress.SELL_FILLED
     if backoff_exhausted:
         return ExitProgress.BACKOFF_EXHAUSTED
     if retry_pending:
         return ExitProgress.RETRY_PENDING
-    if has_venue_fact:
-        if order_proof_class in (
-            OrderProofClass.UNKNOWN_SIDE_EFFECT,
-            OrderProofClass.REVIEW_REQUIRED,
-        ):
-            return ExitProgress.REVIEW_REQUIRED
-        if order_proof_class is OrderProofClass.PARTIAL_WITH_REMAINDER:
-            return ExitProgress.SELL_PARTIALLY_FILLED
-        if order_proof_class is OrderProofClass.LIVE_RESTING:
-            return ExitProgress.SELL_OPEN
+    if pc in (OrderProofClass.UNKNOWN_SIDE_EFFECT, OrderProofClass.REVIEW_REQUIRED):
+        return ExitProgress.REVIEW_REQUIRED
+    if pc is OrderProofClass.PARTIAL_WITH_REMAINDER:
+        return ExitProgress.SELL_PARTIALLY_FILLED
+    if pc is OrderProofClass.LIVE_RESTING:
+        return ExitProgress.SELL_OPEN
     return ExitProgress.EXIT_INTENT
 
 
@@ -98,25 +121,40 @@ def derive_exit_progress(
 def derive_order_result_status(
     *,
     command_rejected: bool,
-    order_proof_class: OrderProofClass | None,
+    order_proof_class: OrderProofClass | str | None,
     matched_size: Decimal | int = 0,
 ) -> LegacyOrderResultStatus:
     """Coarse executor-return status from command + order truth. Fill size and
-    proof class carry the partial-vs-full detail; 'partial' is NOT a status."""
+    proof class carry the partial-vs-full detail; 'partial' is NOT a status.
+
+    Conflict invariant: a no-side-effect reject (``command_rejected``) cannot
+    coexist with a positive venue fill proof — venue truth would be silently
+    lost. That contradiction is raised loudly (fail loud) so executor wiring
+    surfaces inconsistent historical data instead of mis-reporting REJECTED."""
+    pc = coerce_order_proof_class(order_proof_class)
+    if (
+        command_rejected
+        and pc in (OrderProofClass.TERMINAL_FILLED, OrderProofClass.TERMINAL_PARTIAL)
+        and matched_size > 0
+    ):
+        raise ValueError(
+            "invalid order truth: command_rejected with positive venue fill proof "
+            f"(proof_class={pc}, matched_size={matched_size})"
+        )
     if command_rejected:
         return LegacyOrderResultStatus.REJECTED
-    if order_proof_class is OrderProofClass.TERMINAL_FILLED:
+    if pc is OrderProofClass.TERMINAL_FILLED:
         return LegacyOrderResultStatus.FILLED
-    if order_proof_class is OrderProofClass.TERMINAL_PARTIAL and matched_size > 0:
+    if pc is OrderProofClass.TERMINAL_PARTIAL and matched_size > 0:
         return LegacyOrderResultStatus.FILLED
-    if order_proof_class in (
+    if pc in (
         OrderProofClass.LIVE_RESTING,
         OrderProofClass.PARTIAL_WITH_REMAINDER,
     ):
         return LegacyOrderResultStatus.PENDING
-    if order_proof_class is OrderProofClass.TERMINAL_NO_FILL:
+    if pc is OrderProofClass.TERMINAL_NO_FILL:
         return LegacyOrderResultStatus.REJECTED
-    if order_proof_class in (
+    if pc in (
         OrderProofClass.UNKNOWN_SIDE_EFFECT,
         OrderProofClass.REVIEW_REQUIRED,
     ):

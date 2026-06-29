@@ -161,6 +161,36 @@ def test_unknown_or_review_is_unknown_side_effect(pc) -> None:
     assert derive_order_result_status(command_rejected=False, order_proof_class=pc) is LegacyOrderResultStatus.UNKNOWN_SIDE_EFFECT
 
 
+# --- review hardening (consult 6a42bc3d): coerce raw persisted proof strings -- #
+
+def test_derive_order_result_status_coerces_raw_proof_string() -> None:
+    # Executor-wiring may hand a persisted raw proof string; identity checks must
+    # not silently misclassify it as UNKNOWN_SIDE_EFFECT.
+    assert derive_order_result_status(
+        command_rejected=False, order_proof_class="TERMINAL_FILLED"
+    ) is LegacyOrderResultStatus.FILLED
+
+
+# --- review hardening (consult 6a42bc3d): command_rejected + positive fill is illegal -- #
+
+def test_command_rejected_with_positive_terminal_fill_raises() -> None:
+    # A no-side-effect reject and a positive venue fill cannot coexist; surface the
+    # inconsistency loudly instead of silently returning REJECTED (venue truth lost).
+    with pytest.raises(ValueError):
+        derive_order_result_status(
+            command_rejected=True,
+            order_proof_class=OrderProofClass.TERMINAL_FILLED,
+            matched_size=5,
+        )
+
+
+def test_command_rejected_with_terminal_no_fill_still_rejected() -> None:
+    # The invariant fires ONLY on positive fill proof; a rejected no-fill stays rejected.
+    assert derive_order_result_status(
+        command_rejected=True, order_proof_class=OrderProofClass.TERMINAL_NO_FILL
+    ) is LegacyOrderResultStatus.REJECTED
+
+
 # --------------------------------------------------------------------------- #
 # A6 — ExitProgress derived as a pure view over the sell command's order truth #
 # --------------------------------------------------------------------------- #
@@ -201,6 +231,29 @@ def test_unknown_or_review_sell_is_review_required(pc) -> None:
 def test_retry_and_backoff_take_precedence_over_intent() -> None:
     assert derive_exit_progress(has_exit_command=True, has_venue_fact=False, order_proof_class=None, retry_pending=True) is ExitProgress.RETRY_PENDING
     assert derive_exit_progress(has_exit_command=True, has_venue_fact=False, order_proof_class=None, backoff_exhausted=True) is ExitProgress.BACKOFF_EXHAUSTED
+
+
+# --- review hardening (consult 6a42bc3d): unknown/review needs no venue fact -- #
+
+@pytest.mark.parametrize("pc", [OrderProofClass.UNKNOWN_SIDE_EFFECT, OrderProofClass.REVIEW_REQUIRED])
+def test_unknown_or_review_sell_without_venue_fact_is_review_required(pc) -> None:
+    # A sell whose submit returned ambiguous/unknown has NO clean venue fact yet;
+    # that is exactly the condition REVIEW_REQUIRED exists for, NOT a pre-submit
+    # EXIT_INTENT. The proof class is authoritative; has_venue_fact is not the gate.
+    assert derive_exit_progress(
+        has_exit_command=True, has_venue_fact=False, order_proof_class=pc
+    ) is ExitProgress.REVIEW_REQUIRED
+
+
+def test_derive_exit_progress_coerces_raw_proof_string() -> None:
+    # A6-wiring may hand a persisted raw proof string; identity checks must not
+    # silently fall through to EXIT_INTENT.
+    assert derive_exit_progress(
+        has_exit_command=True, has_venue_fact=True, order_proof_class="LIVE_RESTING"
+    ) is ExitProgress.SELL_OPEN
+    assert derive_exit_progress(
+        has_exit_command=True, has_venue_fact=True, order_proof_class="PARTIAL_WITH_REMAINDER"
+    ) is ExitProgress.SELL_PARTIALLY_FILLED
 
 
 def test_open_order_fact_states_match_legacy_set() -> None:
