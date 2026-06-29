@@ -49,6 +49,13 @@ scripts are registered and safe for their declared class.
 - Repair/ETL writers must declare write targets and dry-run/apply behavior.
 - Diagnostics and reports must not write canonical DB truth.
 - Scripts are not hidden authority centers.
+- Do not copy or back up canonical Zeus DB files (`state/zeus_trades.db`,
+  `state/zeus-world.db`, `state/zeus-forecasts.db`) to `/tmp`,
+  `/private/tmp`, `/private/var/folders`, evidence dirs, or ad hoc backup dirs
+  by default. Dry-runs must use tiny isolated fixtures or read-only SQLite
+  connections. Any full live DB backup requires an explicit operator opt-in
+  gate such as `ZEUS_ALLOW_LIVE_DB_BACKUP=1`, a named destination, and a cleanup
+  plan.
 
 ## Local Registry
 
