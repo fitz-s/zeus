@@ -18,6 +18,7 @@ from src.contracts.canonical_lifecycle import (
     CommandTruthState,
     ExposureState,
     OrderProofClass,
+    PositionPhase,
     VenueOrderStatus,
     VenueStatusIngress,
     VenueTradeStatus,
@@ -41,6 +42,16 @@ def test_venue_trade_status_is_the_five_trade_chain_values() -> None:
     assert {s.value for s in VenueTradeStatus} == {
         "MATCHED", "MINED", "CONFIRMED", "RETRYING", "FAILED",
     }
+
+
+def test_strenum_members_interchangeable_with_raw_strings() -> None:
+    # The byte-identical reducer/fill_tracker cutovers rely on StrEnum members being
+    # equal to + hash-equal to + set-interchangeable with their raw string values.
+    assert VenueOrderStatus.MATCHED == "MATCHED"
+    assert hash(VenueOrderStatus.MATCHED) == hash("MATCHED")
+    assert "MATCHED" in {VenueOrderStatus.MATCHED}
+    assert "CONFIRMED" in {VenueTradeStatus.CONFIRMED}
+    assert "active" in {PositionPhase.ACTIVE}
 
 
 def test_exposure_state_is_only_the_two_live_values() -> None:

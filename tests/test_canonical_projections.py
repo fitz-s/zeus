@@ -141,6 +141,12 @@ def test_terminal_partial_with_fill_is_filled() -> None:
     assert derive_order_result_status(command_rejected=False, order_proof_class=OrderProofClass.TERMINAL_PARTIAL, matched_size=3) is LegacyOrderResultStatus.FILLED
 
 
+def test_order_result_accepts_decimal_matched_size() -> None:
+    # Live execution/reducer sizes are Decimal; the derive must accept them.
+    from decimal import Decimal
+    assert derive_order_result_status(command_rejected=False, order_proof_class=OrderProofClass.TERMINAL_PARTIAL, matched_size=Decimal("0.1")) is LegacyOrderResultStatus.FILLED
+
+
 @pytest.mark.parametrize("pc", [OrderProofClass.LIVE_RESTING, OrderProofClass.PARTIAL_WITH_REMAINDER])
 def test_open_proof_is_pending(pc) -> None:
     assert derive_order_result_status(command_rejected=False, order_proof_class=pc) is LegacyOrderResultStatus.PENDING

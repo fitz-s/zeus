@@ -19,6 +19,8 @@ here ONLY to keep this pilot behavior-identical to governor's current logic.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from src.contracts.canonical_lifecycle import (
     ExitProgress,
     ExposureState,
@@ -97,7 +99,7 @@ def derive_order_result_status(
     *,
     command_rejected: bool,
     order_proof_class: OrderProofClass | None,
-    matched_size: int = 0,
+    matched_size: Decimal | int = 0,
 ) -> LegacyOrderResultStatus:
     """Coarse executor-return status from command + order truth. Fill size and
     proof class carry the partial-vs-full detail; 'partial' is NOT a status."""
@@ -145,8 +147,12 @@ def derive_position_phase(
     zero; chain-only or review-bucket chain visibility; exit terminal fill; any open
     exit order; positive exposure from active lot / chain-observed / entry fill; day0
     window; local entry intent). Precedence is monotonic terminal-first so the phase
-    never regresses. The fact->boolean computation is wired at the call sites
-    (lifecycle_manager / projection) in the A5 cutover; this is the pure decision."""
+    never regresses. `has_admin_close` is an EXPLICIT operator terminal override and
+    intentionally outranks settlement — it is not ordinary post-settlement
+    bookkeeping; if a report consumer needs economic resolution to dominate the
+    operator phase, split that out rather than re-ranking here. The fact->boolean
+    computation is wired at the call sites (lifecycle_manager / projection) in the
+    A5 cutover; this is the pure decision."""
     if has_admin_close:
         return PositionPhase.ADMIN_CLOSED
     if has_settlement:
