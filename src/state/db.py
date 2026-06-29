@@ -4311,7 +4311,17 @@ def _assert_no_ambiguous_empty_fallback_rows(
 
 
 def _migrate_market_topology_state_authority_checks(conn: sqlite3.Connection) -> None:
+    leftover_table = "market_topology_state_authority_migrated"
     sql = _table_create_sql(conn, "market_topology_state")
+    leftover_sql = _table_create_sql(conn, leftover_table)
+    if leftover_sql and (not sql or "EMPTY_FALLBACK" not in sql):
+        leftover_count = conn.execute(f"SELECT COUNT(*) FROM {leftover_table}").fetchone()[0]
+        if int(leftover_count or 0) > 0:
+            raise RuntimeError(
+                f"{leftover_table} contains {leftover_count} row(s); refusing to "
+                "discard interrupted market_topology_state migration residue"
+            )
+        conn.execute(f"DROP TABLE {leftover_table}")
     if not sql or "EMPTY_FALLBACK" not in sql:
         return
     _assert_no_ambiguous_empty_fallback_rows(
