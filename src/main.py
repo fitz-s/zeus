@@ -5553,7 +5553,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
-            active_duplicate_suppressed_rest_pulls,
             entry_substrate_refresh_scope,
             filter_redecisions_with_spine_members,
             screen_entry_redecisions,
@@ -5636,14 +5635,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 trade_ro,
                 open_rests=open_rests,
                 decision_time=received_at,
-            )
-            rest_pulls = _edli_merge_rest_pulls(
-                rest_pulls,
-                active_duplicate_suppressed_rest_pulls(
-                    world_ro,
-                    open_rests=open_rests,
-                    decision_time=received_at,
-                ),
             )
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
             open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)
@@ -5831,14 +5822,6 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     trade_ro,
                     open_rests=open_rests,
                     decision_time=received_at,
-                )
-                rest_pulls = _edli_merge_rest_pulls(
-                    rest_pulls,
-                    active_duplicate_suppressed_rest_pulls(
-                        world_ro,
-                        open_rests=open_rests,
-                        decision_time=received_at,
-                    ),
                 )
                 entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
                 rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)

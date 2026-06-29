@@ -94,12 +94,10 @@ REST_BOOK_DRIFT_TICKS: float = 1.0
 # while allowing the full cert path to re-price before the 20-minute hard
 # rest-then-cross escalation deadline.
 REST_VALUE_REFRESH_MIN_AGE_SECONDS: float = 5.0 * 60.0
-DUPLICATE_SUPPRESSED_REST_PULL_LOOKBACK_SECONDS: float = 30.0 * 60.0
 REDECISION_EVENT_TYPE: str = "EDLI_REDECISION_PENDING"
 _BELIEF_PREFIX: str = "edli_belief:"
 _EPS: float = 1e-9
 _DEFAULT_LATEST_BELIEF_SCAN_LIMIT: int = 5_000
-_ACTIVE_DUPLICATE_SUPPRESSED_MARKER: str = "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
 EntryScreenKey = tuple[str, str, str]
 StableEntryScreenKey = tuple[str, str, str, str, str]
 FamilyRedecisionScreenKey = tuple[str, str, str, str]
@@ -2101,208 +2099,6 @@ class OpenRest:
     metric: str = ""
 
 
-@dataclass(frozen=True)
-class _DuplicateSuppressedCandidate:
-    city: str
-    target_date: str
-    metric: str
-    family_id: str
-    condition_id: str
-    token_id: str
-    direction: str
-    created_at: str
-    detail: float
-
-
-def _active_duplicate_suppressed_fields(reason: str) -> dict[str, str]:
-    """Extract stable fields from the live active-duplicate receipt reason."""
-
-    text = str(reason or "")
-    marker_at = text.find(_ACTIVE_DUPLICATE_SUPPRESSED_MARKER)
-    if marker_at < 0:
-        return {}
-    tail = text[marker_at + len(_ACTIVE_DUPLICATE_SUPPRESSED_MARKER):]
-    wanted = {"condition_id", "token_id", "direction", "family_id", "city", "target_date", "metric"}
-    out: dict[str, str] = {}
-    for part in tail.split(":"):
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        key = key.strip()
-        if key in wanted and key not in out:
-            out[key] = value.strip()
-    return out
-
-
-def _reason_float_field(reason: str, field: str) -> float | None:
-    prefix = f"{field}="
-    for part in str(reason or "").replace(";", " ").split():
-        if not part.startswith(prefix):
-            continue
-        value = part[len(prefix):].strip()
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _latest_duplicate_suppressed_candidates(
-    conn: sqlite3.Connection,
-    *,
-    decision_time: str | None,
-    lookback_seconds: float,
-) -> list[_DuplicateSuppressedCandidate]:
-    if not _table_exists(conn, "no_trade_regret_events"):
-        return []
-    cols = _table_columns(conn, "no_trade_regret_events")
-    if not {"rejection_reason", "created_at"}.issubset(cols):
-        return []
-    selected = {
-        "city": "city" if "city" in cols else "NULL AS city",
-        "target_date": "target_date" if "target_date" in cols else "NULL AS target_date",
-        "metric": "metric" if "metric" in cols else "NULL AS metric",
-        "family_id": "family_id" if "family_id" in cols else "NULL AS family_id",
-        "condition_id": "condition_id" if "condition_id" in cols else "NULL AS condition_id",
-        "token_id": "token_id" if "token_id" in cols else "NULL AS token_id",
-        "direction": "direction" if "direction" in cols else "NULL AS direction",
-        "trade_score": "trade_score" if "trade_score" in cols else "NULL AS trade_score",
-        "q_lcb_5pct": "q_lcb_5pct" if "q_lcb_5pct" in cols else "NULL AS q_lcb_5pct",
-        "c_fee_adjusted": "c_fee_adjusted" if "c_fee_adjusted" in cols else "NULL AS c_fee_adjusted",
-    }
-    try:
-        now = _parse(decision_time) if decision_time is not None else datetime.now(timezone.utc)
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        now = datetime.now(timezone.utc)
-    cutoff = (now.astimezone(timezone.utc) - timedelta(seconds=max(0.0, float(lookback_seconds)))).isoformat()
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT {selected['city']},
-                   {selected['target_date']},
-                   {selected['metric']},
-                   {selected['family_id']},
-                   {selected['condition_id']},
-                   {selected['token_id']},
-                   {selected['direction']},
-                   {selected['trade_score']},
-                   {selected['q_lcb_5pct']},
-                   {selected['c_fee_adjusted']},
-                   created_at,
-                   rejection_reason
-              FROM no_trade_regret_events
-             WHERE rejection_reason LIKE ?
-               AND created_at >= ?
-             ORDER BY created_at DESC
-             LIMIT 100
-            """,
-            (f"%{_ACTIVE_DUPLICATE_SUPPRESSED_MARKER}%", cutoff),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    out: list[_DuplicateSuppressedCandidate] = []
-    for row in rows:
-        reason = str(row[11] or "")
-        fields = _active_duplicate_suppressed_fields(reason)
-        city = str(row[0] or fields.get("city") or "").strip()
-        target_date = str(row[1] or fields.get("target_date") or "").strip()
-        metric = str(row[2] or fields.get("metric") or "").strip()
-        family_id = str(row[3] or fields.get("family_id") or "").strip()
-        condition_id = str(row[4] or fields.get("condition_id") or "").strip()
-        token_id = str(row[5] or fields.get("token_id") or "").strip()
-        direction = str(row[6] or fields.get("direction") or "").strip()
-        if not ((city and target_date and metric) or family_id):
-            continue
-        if not (condition_id and direction):
-            continue
-        detail = _optional_float(row[7])
-        if detail is None:
-            q_lcb = _optional_float(row[8])
-            price = _optional_float(row[9])
-            detail = q_lcb - price if q_lcb is not None and price is not None else None
-        if detail is None:
-            detail = _reason_float_field(reason, "rejected_ev_per_dollar")
-        out.append(
-            _DuplicateSuppressedCandidate(
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                family_id=family_id,
-                condition_id=condition_id,
-                token_id=token_id,
-                direction=direction,
-                created_at=str(row[10] or ""),
-                detail=float(detail) if detail is not None else 0.0,
-            )
-        )
-    return out
-
-
-def active_duplicate_suppressed_rest_pulls(
-    world_conn: sqlite3.Connection,
-    *,
-    open_rests: list[OpenRest],
-    decision_time: str | None = None,
-    lookback_seconds: float = DUPLICATE_SUPPRESSED_REST_PULL_LOOKBACK_SECONDS,
-) -> list[tuple[OpenRest, RepriceDecision]]:
-    """Turn live duplicate-suppressed better-candidate receipts into rest pulls.
-
-    Submit duplicate suppression is the correct mutex, but it is not a terminal
-    order-management answer. If the full reactor proves the best same-family
-    candidate is on a different condition or side than the current open rest,
-    the scheduler must cancel that stale rest through the normal maker-rest
-    cancel lane and re-decide the family after terminal cancel evidence.
-    """
-
-    if not open_rests:
-        return []
-    candidates = _latest_duplicate_suppressed_candidates(
-        world_conn,
-        decision_time=decision_time,
-        lookback_seconds=lookback_seconds,
-    )
-    if not candidates:
-        return []
-    by_family_key: dict[tuple[str, str, str], _DuplicateSuppressedCandidate] = {}
-    by_family_id: dict[str, _DuplicateSuppressedCandidate] = {}
-    for candidate in candidates:
-        if candidate.city and candidate.target_date and candidate.metric:
-            key = (candidate.city, candidate.target_date, candidate.metric)
-            by_family_key.setdefault(key, candidate)
-        if candidate.family_id:
-            by_family_id.setdefault(candidate.family_id, candidate)
-    out: list[tuple[OpenRest, RepriceDecision]] = []
-    for rest in open_rests:
-        candidate: _DuplicateSuppressedCandidate | None = None
-        if rest.city and rest.target_date and rest.metric:
-            candidate = by_family_key.get((rest.city, rest.target_date, rest.metric))
-        if candidate is None and rest.family_id:
-            candidate = by_family_id.get(rest.family_id)
-        if candidate is None:
-            continue
-        if (
-            str(candidate.condition_id or "") == str(rest.condition_id or "")
-            and str(candidate.direction or "") == str(rest.side or "")
-        ):
-            continue
-        out.append(
-            (
-                rest,
-                RepriceDecision(
-                    family_id=rest.family_id,
-                    bin_label=rest.bin_label,
-                    side=rest.side,
-                    action="CANCEL_REPLACE",
-                    reason="ACTIVE_DUPLICATE_SUPPRESSED_BETTER_CANDIDATE",
-                    detail=float(candidate.detail),
-                ),
-            )
-        )
-    return out
-
-
 def screen_resting_orders(
     world_conn: sqlite3.Connection,
     trade_conn: sqlite3.Connection,
@@ -2318,10 +2114,10 @@ def screen_resting_orders(
     owner remains src.execution.maker_rest_escalation. Pure read; returns decisions only — the scheduler
     job enqueues the redecision and performs cancellation through the existing cancel path.
 
-    The entry cheap-screen is intentionally not cancellation authority. It can
-    select families for a full reactor pass, but a live rest may only be pulled
-    by order-management evidence or by a completed reactor receipt such as
-    ``EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED``.
+    Entry cheap-screen and submit-layer duplicate-suppression receipts are not
+    cancellation authority. They can select families for a full reactor pass or
+    prevent duplicate submission, but a live rest may only be pulled by
+    order-management evidence produced for that rest.
     """
     screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
     condition_ids = {r.condition_id for r in open_rests if r.condition_id}

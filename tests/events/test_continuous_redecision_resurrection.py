@@ -650,8 +650,8 @@ def test_rest_pull_does_not_use_entry_screen_candidate_as_cancel_authority():
     assert pulls == []
 
 
-def test_duplicate_suppressed_receipt_pulls_rest_when_full_reactor_best_moved():
-    """Full-reactor duplicate lock is rest-management evidence, not a dead end."""
+def test_duplicate_suppressed_receipt_is_not_rest_cancel_authority():
+    """Submit duplicate suppression is a mutex receipt, not a cancel+replace proof."""
 
     world = _mem_world()
     _regret_table(world)
@@ -696,18 +696,14 @@ def test_duplicate_suppressed_receipt_pulls_rest_when_full_reactor_best_moved():
         ),
     )
 
-    pulls = cr.active_duplicate_suppressed_rest_pulls(
+    pulls = cr.screen_resting_orders(
         world,
+        _mem_trade(),
         open_rests=[rest],
         decision_time="2026-06-29T08:48:00+00:00",
     )
 
-    assert len(pulls) == 1
-    pulled_rest, decision = pulls[0]
-    assert pulled_rest.command_id == "cmd-rest"
-    assert decision.action == "CANCEL_REPLACE"
-    assert decision.reason == "ACTIVE_DUPLICATE_SUPPRESSED_BETTER_CANDIDATE"
-    assert decision.detail == pytest.approx(0.1722)
+    assert pulls == []
 
 
 def test_duplicate_suppressed_receipt_does_not_pull_same_active_rest():
@@ -752,8 +748,9 @@ def test_duplicate_suppressed_receipt_does_not_pull_same_active_rest():
         ),
     )
 
-    pulls = cr.active_duplicate_suppressed_rest_pulls(
+    pulls = cr.screen_resting_orders(
         world,
+        _mem_trade(),
         open_rests=[rest],
         decision_time="2026-06-29T08:48:00+00:00",
     )
