@@ -7078,11 +7078,40 @@ def _confirmed_phantom_void_candidates(conn: sqlite3.Connection) -> list[dict]:
          WHERE pc.phase = 'voided'
            AND COALESCE(pc.exit_reason, '') = 'PHANTOM_NOT_ON_CHAIN'
            AND COALESCE(pc.shares, 0) > 0
-           AND COALESCE(pc.fill_authority, '') <> ''
          ORDER BY pc.updated_at
         """
     ).fetchall()
     return [_dict_row(row) for row in rows]
+
+
+def _positive_trade_fact_proof_for_position(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> dict:
+    if not position_id or not all(
+        _table_exists(conn, table) for table in ("venue_commands", "venue_trade_facts")
+    ):
+        return {"has_positive_trade_fact": False, "trade_fact_count": 0}
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT vtf.trade_id) AS trade_fact_count,
+            MAX(vtf.observed_at) AS latest_observed_at
+          FROM venue_commands vc
+          JOIN venue_trade_facts vtf
+            ON vtf.command_id = vc.command_id
+         WHERE vc.position_id = ?
+           AND UPPER(COALESCE(vtf.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
+        """,
+        (position_id,),
+    ).fetchone()
+    count = int((row[0] if row else 0) or 0)
+    return {
+        "has_positive_trade_fact": count > 0,
+        "trade_fact_count": count,
+        "latest_observed_at": row[1] if row is not None else None,
+    }
 
 
 def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
@@ -7102,7 +7131,10 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
             CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
         )
-        from src.state.portfolio import has_verified_trade_fill
+        from src.state.portfolio import (
+            FILL_AUTHORITY_CANCELLED_REMAINDER,
+            has_verified_trade_fill,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("recovery: confirmed phantom-void repair unavailable: %s", exc)
         summary["errors"] += len(candidates)
@@ -7110,13 +7142,18 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
 
     for row in candidates:
         summary["scanned"] += 1
-        if not has_verified_trade_fill(row):
-            summary["stayed"] += 1
-            continue
         position_id = str(row.get("position_id") or "")
         if not position_id:
             summary["stayed"] += 1
             continue
+        trade_fact_proof = _positive_trade_fact_proof_for_position(conn, position_id)
+        has_projected_verified_fill = has_verified_trade_fill(row)
+        if not has_projected_verified_fill and not trade_fact_proof["has_positive_trade_fact"]:
+            summary["stayed"] += 1
+            continue
+        repaired_fill_authority = str(row.get("fill_authority") or "").strip()
+        if not has_projected_verified_fill:
+            repaired_fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
         direction = str(row.get("direction") or "")
         held_token_id = (
             str(row.get("no_token_id") or "")
@@ -7140,8 +7177,10 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             "token_id": str(row.get("token_id") or ""),
             "no_token_id": str(row.get("no_token_id") or ""),
             "fill_authority": str(row.get("fill_authority") or ""),
+            "repaired_fill_authority": repaired_fill_authority,
             "shares": row.get("shares"),
             "chain_shares": row.get("chain_shares"),
+            "positive_trade_fact_proof": trade_fact_proof,
             "source_proof": {
                 "source_function": "command_recovery.repair_confirmed_phantom_voids",
                 "source_reason": "venue_confirmed_fill_cannot_be_phantom_without_close_attribution",
@@ -7180,6 +7219,10 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                    SET phase = 'quarantined',
                        chain_state = ?,
                        exit_reason = ?,
+                       fill_authority = CASE
+                           WHEN COALESCE(fill_authority, '') IN ('', 'none') THEN ?
+                           ELSE fill_authority
+                       END,
                        chain_absence_at = CASE
                            WHEN COALESCE(chain_absence_at, '') = '' THEN ?
                            ELSE chain_absence_at
@@ -7192,6 +7235,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                 (
                     CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
                     CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                    repaired_fill_authority,
                     now,
                     now,
                     position_id,
@@ -13498,6 +13542,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "hard_terminal_position_projection_repair",
             reconcile_hard_terminal_position_projection_repairs,
             "hard_terminal_position_projection_repair",
+        )
+        _db_pass(
+            "confirmed_phantom_void_repair",
+            repair_confirmed_phantom_voids,
+            "confirmed_phantom_void_repair",
         )
         _db_pass(
             "exit_lifecycle_alignment_repair",

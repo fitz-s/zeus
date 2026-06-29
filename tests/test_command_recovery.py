@@ -9241,6 +9241,105 @@ class TestRecoveryResolutionTable:
         assert payload["held_token_id"] == "tok-no"
         assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
 
+    def test_confirmed_phantom_void_repair_uses_trade_facts_when_fill_authority_missing(
+        self,
+        conn,
+    ):
+        position_id = "pos-confirmed-phantom-fill-authority-none"
+        command_id = _insert(
+            conn,
+            command_id="cmd-phantom-fill-authority-none",
+            position_id=position_id,
+            token_id="tok-yes",
+            selected_token_id="tok-yes",
+            side="BUY",
+            size=135.89,
+            price=0.05,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-positive-1', 'ord-entry', ?, 'CONFIRMED', '85.17',
+                '0.05', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-29T11:16:07.840000+00:00',
+                '2026-06-29T11:16:07.840000+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "a" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_seen_at
+            ) VALUES (
+                ?, 'voided', ?, 'mkt-miami', 'Miami', 'US',
+                '2026-06-30',
+                'Will the highest temperature in Miami be between 96-97°F on June 30?',
+                'buy_yes', 'F', 4.3436, 85.17, 4.3436, 0.05, 0.339,
+                'snap-miami', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'synced', 'tok-yes',
+                'tok-no', 'cond-miami', 'ord-entry', 'partial',
+                '2026-06-29T13:38:50+00:00', 'high', 'PHANTOM_NOT_ON_CHAIN',
+                'none', 85.17, '2026-06-29T11:16:48+00:00'
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'ADMIN_VOIDED', '2026-06-29T13:38:50+00:00',
+                      'active', 'voided', 'center_buy', NULL,
+                      'snap-miami', 'ord-entry', NULL, 'chain_reconciliation',
+                      ?, 'voided', 'src.state.chain_reconciliation',
+                      '{"reason":"PHANTOM_NOT_ON_CHAIN","token_id":"tok-yes","chain_state":"synced"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_void:4",
+                position_id,
+                f"{position_id}:chain_void:4",
+            ),
+        )
+
+        from src.execution.command_recovery import repair_confirmed_phantom_voids
+
+        summary = repair_confirmed_phantom_voids(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, exit_reason, fill_authority, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "exit_reason": "chain_absent_confirmed_position_unattributed",
+            "fill_authority": "cancelled_remainder",
+            "chain_shares": 85.17,
+        }
+
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,
         conn,
