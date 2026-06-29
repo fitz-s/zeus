@@ -202,7 +202,6 @@ from src.engine.event_bound_final_intent import (
     validate_final_intent_cert_for_existing_executor,
 )
 from src.engine.replacement_forecast_reactor_hook import (
-    REPLACEMENT_EXECUTION_EXPERIMENT_STATUS,
     REPLACEMENT_EXECUTION_LIVE_STATUS,
     ReplacementForecastReactorHookResult,
 )
@@ -4196,7 +4195,7 @@ def _build_event_bound_no_submit_receipt_core(
                     q_lcb_5pct=effective_q_lcb,
                     trade_score=effective_trade_score,
                 )
-            elif replacement_hook_result.status != REPLACEMENT_EXECUTION_EXPERIMENT_STATUS:
+            else:
                 return EventSubmissionReceipt(
                     False,
                     event.event_id,

@@ -2436,7 +2436,7 @@ def init_schema(
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'READY','LIVE_ELIGIBLE','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -3290,6 +3290,7 @@ def init_schema(
     _migrate_decision_events_schema(conn)
     _migrate_world_strategy_key_checks(conn)
     _migrate_market_scan_authority_checks(conn)
+    _migrate_readiness_state_status_checks(conn)
 
     # Phase 3 T3 (2026-05-21): shoulder_exposure_ledger table (SCHEMA_VERSION 23).
     from src.state.schema.shoulder_exposure_ledger_schema import ensure_table as _ensure_shoulder_exposure_ledger_table
@@ -3838,7 +3839,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'READY','LIVE_ELIGIBLE','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -4175,6 +4176,114 @@ def _migrate_market_scan_authority_checks(conn: sqlite3.Connection) -> None:
 
     _migrate_market_topology_state_authority_checks(conn)
     _migrate_source_contract_audit_authority_checks(conn)
+
+
+def _migrate_readiness_state_status_checks(conn: sqlite3.Connection) -> None:
+    """Remove log-only readiness from the executable readiness vocabulary.
+
+    ``DEGRADED_LOG_ONLY`` was an observe-only/status-reporting word admitted by
+    the live readiness table. A readiness row either authorizes the live path
+    (``LIVE_ELIGIBLE``) or blocks it with evidence. If old rows still exist, the
+    migration fails instead of silently relabeling them.
+    """
+
+    sql = _table_create_sql(conn, "readiness_state")
+    if not sql or "DEGRADED_LOG_ONLY" not in sql:
+        return
+    stale_rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS n
+          FROM readiness_state
+         WHERE status NOT IN ('READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED')
+         GROUP BY status
+         ORDER BY status
+        """
+    ).fetchall()
+    if stale_rows:
+        details = ", ".join(f"{row[0]}={row[1]}" for row in stale_rows)
+        raise RuntimeError(
+            "readiness_state contains obsolete non-live status row(s); "
+            f"classify them before schema upgrade: {details}"
+        )
+    before = conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0]
+    conn.execute("DROP TABLE IF EXISTS readiness_state_status_migrated")
+    conn.execute(
+        """
+        CREATE TABLE readiness_state_status_migrated (
+            readiness_id TEXT PRIMARY KEY,
+            scope_key TEXT NOT NULL UNIQUE,
+            scope_type TEXT NOT NULL CHECK (scope_type IN (
+                'global','source','city_metric','market','strategy','quote'
+            )),
+            city_id TEXT,
+            city TEXT,
+            city_timezone TEXT,
+            target_local_date TEXT,
+            metric TEXT,
+            temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
+            physical_quantity TEXT,
+            observation_field TEXT,
+            data_version TEXT,
+            source_id TEXT,
+            track TEXT,
+            source_run_id TEXT,
+            market_family TEXT,
+            event_id TEXT,
+            condition_id TEXT,
+            token_ids_json TEXT NOT NULL DEFAULT '[]',
+            strategy_key TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'READY','LIVE_ELIGIBLE','BLOCKED','UNKNOWN_BLOCKED'
+            )),
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            computed_at TEXT NOT NULL,
+            expires_at TEXT,
+            dependency_json TEXT NOT NULL DEFAULT '{}',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+            UNIQUE(
+                scope_type, city_id, city_timezone, target_local_date,
+                temperature_metric, physical_quantity, observation_field,
+                data_version, strategy_key, market_family, source_id, track,
+                condition_id
+            )
+        )
+        """
+    )
+    columns = (
+        "readiness_id, scope_key, scope_type, city_id, city, city_timezone, "
+        "target_local_date, metric, temperature_metric, physical_quantity, "
+        "observation_field, data_version, source_id, track, source_run_id, "
+        "market_family, event_id, condition_id, token_ids_json, strategy_key, "
+        "status, reason_codes_json, computed_at, expires_at, dependency_json, "
+        "provenance_json, recorded_at"
+    )
+    conn.execute(
+        f"INSERT INTO readiness_state_status_migrated ({columns}) "
+        f"SELECT {columns} FROM readiness_state"
+    )
+    after = conn.execute("SELECT COUNT(*) FROM readiness_state_status_migrated").fetchone()[0]
+    if int(before or 0) != int(after or 0):
+        raise RuntimeError(
+            "readiness_state status migration row-count mismatch: "
+            f"before={before} after={after}"
+        )
+    conn.execute("DROP TABLE readiness_state")
+    conn.execute("ALTER TABLE readiness_state_status_migrated RENAME TO readiness_state")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_entry_scope
+            ON readiness_state(city_id, city_timezone, target_local_date,
+                               temperature_metric, strategy_key,
+                               market_family, condition_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_readiness_state_status_expiry
+            ON readiness_state(status, expires_at)
+        """
+    )
 
 
 def _table_create_sql(conn: sqlite3.Connection, table_name: str) -> str | None:
@@ -4644,6 +4753,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _ensure_job_run_release_key_identity(conn)
     _create_source_run_coverage(conn)
     _create_readiness_state(conn)
+    _migrate_readiness_state_status_checks(conn)
 
     # Post-condition equivalence (Option A, 2026-05-14):
     # The ATTACH branch above copies indexes from world_src.sqlite_master; if

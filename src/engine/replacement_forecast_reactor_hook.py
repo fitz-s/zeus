@@ -41,7 +41,6 @@ from src.data.replacement_forecast_switch_decision import (
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 REPLACEMENT_EXECUTION_LIVE_STATUS = "live"
-REPLACEMENT_EXECUTION_EXPERIMENT_STATUS = "experiment"
 
 
 @dataclass(frozen=True)
@@ -293,13 +292,13 @@ def apply_replacement_forecast_reactor_hook(
         raise TypeError("policy must be ReplacementForecastRuntimePolicy")
     candidate_view = candidate if isinstance(candidate, ReplacementForecastCandidateView) else ReplacementForecastCandidateView.from_mapping(candidate)
     if policy.status == SAFE_DEFAULT_STATUS:
-        return _no_change(candidate_view, status=REPLACEMENT_EXECUTION_EXPERIMENT_STATUS, reason_codes=policy.reason_codes)
+        return _no_change(candidate_view, status="BLOCKED", reason_codes=policy.reason_codes)
     if switch_decision is None:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_SWITCH_DECISION_MISSING",))
     if not isinstance(switch_decision, ReplacementForecastSwitchDecision):
         raise TypeError("switch_decision must be ReplacementForecastSwitchDecision")
     if switch_decision.status == SWITCH_DISABLED:
-        return _no_change(candidate_view, status=REPLACEMENT_EXECUTION_EXPERIMENT_STATUS, reason_codes=switch_decision.reason_codes)
+        return _no_change(candidate_view, status="BLOCKED", reason_codes=switch_decision.reason_codes)
     if switch_decision.status == SWITCH_BLOCKED:
         return _no_change(candidate_view, status="BLOCKED", reason_codes=switch_decision.reason_codes)
     if policy.status == BLOCKED_STATUS:

@@ -525,6 +525,7 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
         )
     """)
+    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_target
             ON forecast_posteriors(city, target_date, temperature_metric, product_id, computed_at)
@@ -544,7 +545,6 @@ def _create_replacement_forecast_live_tables(conn: sqlite3.Connection) -> None:
             ON forecast_posteriors(posterior_identity_hash)
             WHERE posterior_identity_hash IS NOT NULL
     """)
-    _ensure_forecast_posteriors_runtime_layer_compatibility(conn)
 
     # ------------------------------------------------------------------------
     # raw_model_forecasts  (BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture)
