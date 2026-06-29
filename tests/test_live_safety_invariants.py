@@ -15,6 +15,7 @@ GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 import logging
 import json
 import math
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -3360,6 +3361,114 @@ def test_chain_absent_confirmed_recent_exposure_exit_signal_reaches_exit_lifecyc
         }
     ]
     assert pos.state == "pending_exit"
+
+
+def test_chain_absent_confirmed_positive_exposure_redecision_does_not_expire():
+    """Positive exposure in a chain-absent quarantine must stay in redecision."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        direction="buy_yes",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=12.7,
+        chain_shares=12.7,
+        last_chain_absence_observed_at="2026-06-20T00:00:00+00:00",
+        chain_verified_at="",
+    )
+
+    assert cycle_runtime._quarantined_position_can_redecision(pos) is True
+
+
+def test_monitor_entry_selection_guard_invalidates_unarmed_qkernel_hold():
+    """Monitor must not keep an unarmed qkernel entry as a raw-posterior hold."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, decision_id, intent_kind, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ENTRY', ?, ?)
+        """,
+        (
+            "cmd-unarmed",
+            "pos-unarmed",
+            "edli_exec_cmd:agg-unarmed:edli_intent:agg-unarmed:tok:tok:buy_yes",
+            "2026-06-29T12:00:00+00:00",
+            "2026-06-29T12:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, occurred_at, payload_json
+        ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            "agg-unarmed",
+            "2026-06-29T12:00:00+00:00",
+            json.dumps(
+                {
+                    "direction": "buy_yes",
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "selection_guard_basis": "SIDE_NOT_ARMED",
+                        "selection_guard_abstained": False,
+                        "selection_guard_q_safe": 0.0,
+                        "selection_guard_cell_key": "YES|tail|nonmodal|pb2",
+                        "payoff_q_lcb": 0.0,
+                        "cost": 0.07,
+                        "edge_lcb": 0.0,
+                    },
+                }
+            ),
+        ),
+    )
+    pos = _make_position(
+        trade_id="pos-unarmed",
+        direction="buy_yes",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=65.0,
+        chain_shares=65.0,
+        entry_method="qkernel_spine",
+        selected_method="qkernel_spine",
+    )
+    summary = {}
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=conn,
+        pos=pos,
+        exit_context=SimpleNamespace(best_bid=0.006),
+        summary=summary,
+    )
+
+    assert decision is not None
+    assert decision.should_exit is True
+    assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_EXIT"
+    assert "selection_guard_side_not_armed" in decision.reason
+    assert summary["entry_selection_guard_invalid_positions"] == 1
 
 
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):

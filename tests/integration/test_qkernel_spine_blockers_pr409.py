@@ -1218,6 +1218,11 @@ def test_qkernel_execution_economics_requires_direction_law_and_coherence():
         "q_lcb_guard_basis": "OOF_WILSON_95",
         "q_lcb_guard_abstained": False,
         "q_lcb_guard_cell_key": "low|L2_3|YES|nonmodal|qb2|coarse_global",
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "YES|L2_3|modal|pb2",
+        "selection_guard_n": 80,
+        "selection_guard_q_safe": 0.137,
         "direction_law_ok": False,
         "coherence_allows": True,
     }

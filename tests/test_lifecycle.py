@@ -1057,6 +1057,116 @@ def test_chain_reconciliation_venue_partial_fill_fact_prevents_phantom_void(tmp_
     assert events[0]["details"]["reason"] == CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON
 
 
+def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure(tmp_path):
+    """A false PHANTOM void with positive exposure must re-enter redecision quarantine."""
+
+    from src.state.chain_reconciliation import (
+        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+        ChainPosition,
+        reconcile,
+    )
+    from src.state.db import query_position_events
+    from src.state.portfolio import FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+
+    conn = get_connection(tmp_path / "false_phantom_void_positive_exposure.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="false-phantom-positive",
+        state="voided",
+        chain_state="synced",
+        direction="buy_yes",
+        token_id="tok-false-phantom-yes",
+        no_token_id="tok-false-phantom-no",
+        shares=85.17,
+        chain_shares=85.17,
+        cost_basis_usd=4.3436,
+        size_usd=4.3436,
+        entry_price=0.051,
+        entered_at="2026-06-29T11:16:00+00:00",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        env="live",
+        unit="F",
+        order_id="0xfalsephantom",
+        order_status="partial",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        entry_fill_verified=True,
+        exit_reason="PHANTOM_NOT_ON_CHAIN",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster,
+            target_date, bin_label, direction, unit, size_usd, shares,
+            cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+            entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id,
+            order_status, updated_at, temperature_metric, fill_authority,
+            chain_shares, chain_seen_at, exit_reason
+        ) VALUES (
+            ?, 'voided', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            pos.trade_id,
+            pos.trade_id,
+            pos.market_id,
+            pos.city,
+            pos.cluster,
+            pos.target_date,
+            pos.bin_label,
+            pos.direction,
+            pos.unit,
+            pos.size_usd,
+            pos.shares,
+            pos.cost_basis_usd,
+            pos.entry_price,
+            pos.p_posterior,
+            "snap-false-phantom",
+            "qkernel_spine",
+            pos.strategy_key,
+            "center_buy",
+            "forecast_redecision",
+            pos.chain_state,
+            pos.token_id,
+            pos.no_token_id,
+            "cond-false-phantom",
+            pos.order_id,
+            pos.order_status,
+            pos.entered_at,
+            "high",
+            pos.fill_authority,
+            pos.chain_shares,
+            pos.entered_at,
+            pos.exit_reason,
+        ),
+    )
+    conn.commit()
+
+    stats = reconcile(
+        PortfolioState(positions=[pos]),
+        [ChainPosition(token_id="tok-other", size=1.0, avg_price=0.5)],
+        conn=conn,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT phase, chain_state, shares, chain_shares FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    events = query_position_events(conn, pos.trade_id)
+    conn.close()
+
+    assert stats["false_phantom_void_positive_exposure_restored"] == 1
+    assert row["phase"] == "quarantined"
+    assert row["chain_state"] == CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["shares"] == pytest.approx(85.17)
+    assert row["chain_shares"] == pytest.approx(85.17)
+    assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
+    assert events[0]["details"]["reason"] == "false_phantom_void_positive_exposure"
+
+
 def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tmp_path):
     """Relationship: legacy runtime states can still be canonically voided."""
 

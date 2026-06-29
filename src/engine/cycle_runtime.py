@@ -2840,6 +2840,177 @@ def _family_direct_sell_advantage_threshold_usd(sell_value: float) -> float:
     )
 
 
+def _entry_qkernel_selection_guard_verdict(conn, pos) -> dict[str, object] | None:
+    """Return the entry-time qkernel selection guard for a live position.
+
+    The position projection does not currently carry the qkernel cert. The
+    durable venue command does carry the EDLI decision id, and the append-only
+    EDLI stream carries the pre-submit qkernel economics. Monitor uses this to
+    avoid treating an entry admitted under an unarmed selection cell as a valid
+    raw-posterior hold.
+    """
+
+    if conn is None:
+        return None
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        return None
+    try:
+        command_row = conn.execute(
+            """
+            SELECT decision_id
+              FROM venue_commands
+             WHERE position_id = ?
+               AND intent_kind = 'ENTRY'
+             ORDER BY created_at DESC, updated_at DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if command_row is None:
+        return None
+    decision_id = str(
+        command_row["decision_id"] if hasattr(command_row, "keys") else command_row[0]
+        or ""
+    ).strip()
+    if not decision_id:
+        return None
+    try:
+        event_row = conn.execute(
+            """
+            SELECT payload_json
+              FROM edli_live_order_events
+             WHERE event_type = 'PreSubmitRevalidated'
+               AND ? LIKE '%' || aggregate_id || '%'
+             ORDER BY occurred_at DESC, event_sequence DESC
+             LIMIT 1
+            """,
+            (decision_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    if event_row is None:
+        return None
+    payload_json = event_row["payload_json"] if hasattr(event_row, "keys") else event_row[0]
+    try:
+        payload = json.loads(payload_json or "{}")
+    except Exception:
+        return None
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        return None
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        return None
+    basis = str(economics.get("selection_guard_basis") or "").strip()
+    raw_abstained = economics.get("selection_guard_abstained")
+    if isinstance(raw_abstained, bool):
+        abstained = raw_abstained
+    else:
+        abstained = str(raw_abstained).strip().lower() in {"1", "true", "yes"}
+    try:
+        q_safe = float(economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        q_safe = float("nan")
+    invalid_reason = ""
+    if not basis:
+        invalid_reason = "selection_guard_missing"
+    elif basis == "SIDE_NOT_ARMED":
+        invalid_reason = "selection_guard_side_not_armed"
+    elif abstained:
+        invalid_reason = "selection_guard_abstained"
+    elif not (math.isfinite(q_safe) and q_safe > 0.0):
+        invalid_reason = "selection_guard_q_safe_non_positive"
+    return {
+        "invalid_reason": invalid_reason,
+        "selection_guard_basis": basis,
+        "selection_guard_abstained": abstained,
+        "selection_guard_q_safe": q_safe if math.isfinite(q_safe) else None,
+        "selection_guard_cell_key": str(economics.get("selection_guard_cell_key") or ""),
+        "payoff_q_lcb": economics.get("payoff_q_lcb"),
+        "cost": economics.get("cost"),
+        "edge_lcb": economics.get("edge_lcb"),
+    }
+
+
+def _entry_selection_guard_exit_decision(
+    *,
+    conn,
+    pos,
+    exit_context,
+    summary: dict,
+) -> object | None:
+    verdict = _entry_qkernel_selection_guard_verdict(conn, pos)
+    if verdict is None:
+        return None
+    if not verdict.get("invalid_reason"):
+        return None
+
+    summary["entry_selection_guard_invalid_positions"] = (
+        summary.get("entry_selection_guard_invalid_positions", 0) + 1
+    )
+    summary.setdefault("entry_selection_guard_invalid_details", []).append(
+        {
+            "position_id": str(getattr(pos, "trade_id", "") or ""),
+            "reason": verdict.get("invalid_reason"),
+            "basis": verdict.get("selection_guard_basis"),
+            "q_safe": verdict.get("selection_guard_q_safe"),
+            "cell_key": verdict.get("selection_guard_cell_key"),
+        }
+    )
+
+    shares = _position_real_exposure_shares(pos)
+    try:
+        best_bid = float(getattr(exit_context, "best_bid", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        best_bid = 0.0
+    sell_value = shares * best_bid if math.isfinite(best_bid) and best_bid > 0.0 else 0.0
+    threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
+
+    from src.state.portfolio import ExitDecision as _ExitDecision
+
+    if shares <= 0.0 or sell_value + 1e-9 < threshold:
+        return _ExitDecision(
+            False,
+            (
+                "ENTRY_SELECTION_GUARD_INVALID_HOLD_NO_EXECUTABLE_BID "
+                f"({verdict.get('invalid_reason')})"
+            ),
+            urgency="normal",
+            trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_NO_EXECUTABLE_BID",
+            selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+            applied_validations=list(
+                dict.fromkeys(
+                    [
+                        *(getattr(pos, "applied_validations", []) or []),
+                        "entry_selection_guard_invalid_no_executable_bid",
+                    ]
+                )
+            ),
+        )
+
+    return _ExitDecision(
+        True,
+        (
+            "ENTRY_SELECTION_GUARD_INVALID_EXIT "
+            f"({verdict.get('invalid_reason')}; sell_value_usd={sell_value:.4f}; "
+            f"q_safe={verdict.get('selection_guard_q_safe')})"
+        ),
+        urgency="normal",
+        trigger="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+        selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
+        applied_validations=list(
+            dict.fromkeys(
+                [
+                    *(getattr(pos, "applied_validations", []) or []),
+                    "entry_selection_guard_invalid_exit",
+                ]
+            )
+        ),
+    )
+
+
 def _family_monitor_key(pos) -> tuple[str, str, str] | None:
     city = str(getattr(pos, "city", "") or "").strip()
     target_date = str(getattr(pos, "target_date", "") or "").strip()
@@ -3237,6 +3408,8 @@ def _quarantined_position_can_redecision(pos) -> bool:
     if getattr(pos, "is_quarantine_placeholder", False):
         return False
     if chain_state == "entry_authority_quarantined":
+        return True
+    if chain_state == "chain_absent_confirmed_position_unattributed":
         return True
     return _chain_absent_quarantine_is_fresh_enough_for_redecision(pos)
 
@@ -4243,6 +4416,20 @@ def execute_monitoring_phase(
                 # structurally-won position would defeat the purpose of holding.
             else:
                 exit_decision = pos.evaluate_exit(exit_context)
+            entry_selection_guard_forced_exit = False
+            if not (
+                _hard_fact is not None
+                and _hard_fact.action in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
+            ):
+                selection_guard_decision = _entry_selection_guard_exit_decision(
+                    conn=conn,
+                    pos=pos,
+                    exit_context=exit_context,
+                    summary=summary,
+                )
+                if selection_guard_decision is not None:
+                    exit_decision = selection_guard_decision
+                    entry_selection_guard_forced_exit = bool(selection_guard_decision.should_exit)
             if _summary_risk_level(summary) == "ORANGE" and not (
                 _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
             ):
@@ -4264,7 +4451,7 @@ def execute_monitoring_phase(
             if not (
                 _hard_fact is not None
                 and _hard_fact.action in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
-            ):
+            ) and not entry_selection_guard_forced_exit:
                 should_exit, exit_reason = _apply_family_monitor_overlay(
                     portfolio=portfolio,
                     pos=pos,

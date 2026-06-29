@@ -1405,6 +1405,43 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         elif state_name not in INACTIVE_RUNTIME_STATES:
             local_tokens.add(tid)
 
+        if (
+            state_name == LifecyclePhase.VOIDED.value
+            and str(getattr(pos, "exit_reason", "") or "") == "PHANTOM_NOT_ON_CHAIN"
+            and (
+                _positive_decimal(getattr(pos, "chain_shares", None))
+                or _positive_decimal(getattr(pos, "shares", None))
+            )
+            and _has_confirmed_entry_authority(pos)
+        ):
+            corrected = replace(pos)
+            corrected.state = LifecycleState.QUARANTINED.value
+            corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+            corrected.last_chain_absence_observed_at = (
+                getattr(corrected, "last_chain_absence_observed_at", "") or now
+            )
+            corrected.quarantined_at = corrected.quarantined_at or now
+            if _append_canonical_review_required(
+                corrected,
+                reason="false_phantom_void_positive_exposure",
+            ):
+                stats["false_phantom_void_positive_exposure_restored"] = (
+                    stats.get("false_phantom_void_positive_exposure_restored", 0) + 1
+                )
+                stats["review_required_persisted"] = (
+                    stats.get("review_required_persisted", 0) + 1
+                )
+            else:
+                stats["false_phantom_void_positive_exposure_runtime_restored"] = (
+                    stats.get("false_phantom_void_positive_exposure_runtime_restored", 0) + 1
+                )
+            pos.state = corrected.state
+            pos.chain_state = corrected.chain_state
+            pos.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
+            pos.quarantined_at = corrected.quarantined_at
+            stats["quarantined"] += 1
+            continue
+
         if pos.state in INACTIVE_RUNTIME_STATES:
             state_name = getattr(pos.state, "value", pos.state)
             key = f"skipped_{state_name}"
