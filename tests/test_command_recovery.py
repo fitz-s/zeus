@@ -54,6 +54,46 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    seed.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+            p_posterior, decision_snapshot_id, entry_method, strategy_key,
+            edge_source, discovery_mode, chain_state, token_id, no_token_id,
+            condition_id, order_id, order_status, updated_at, temperature_metric,
+            chain_shares, exit_retry_count, next_exit_retry_at, exit_reason
+        ) VALUES (
+            'pos-boot-chain-zero-stale', 'voided', 'condition-test', 'Manila', 'Manila',
+            '2026-07-01', 'Will the highest temperature in Manila be 29C on July 1?',
+            'buy_yes', 'C', 0.15, 9.7, 0.15, 0.015,
+            0.13, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+            'center_buy', 'opening_hunt', 'chain_confirmed_zero', 'tok-001', 'tok-001-no',
+            'condition-test', NULL, 'retry_pending',
+            '2026-06-29T17:33:25+00:00', 'high',
+            9.7, 6, '2026-06-29T17:45:00+00:00', 'CHAIN_CONFIRMED_ZERO'
+        )
+        """
+    )
+    seed.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (
+            'evt-boot-chain-zero-stale', 'pos-boot-chain-zero-stale', 11, 'ADMIN_VOIDED',
+            '2026-06-29T17:33:25+00:00', 'pending_exit', 'voided',
+            'center_buy', 'dec-1', 'snap-1', NULL, NULL,
+            'chain_truth_balance_zero', 'idem-boot-chain-zero-stale', 'voided',
+            'src.execution.exit_lifecycle',
+            '{"evidence_source":"CHAIN_BALANCEOF","chain_state":"chain_confirmed_zero","reason":"CHAIN_CONFIRMED_ZERO"}',
+            'live'
+        )
+        """
+    )
+    seed.commit()
     seed.close()
 
     def _conn_factory():
@@ -73,9 +113,25 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     assert summary["scope"] == "boot_fast"
     assert summary["venue_snapshot_deferred"] is True
     assert summary["deferred_full_sweep"] is True
+    assert summary["hard_terminal_position_projection_repair"]["advanced"] == 1
     client.get_order.assert_not_called()
     client.get_open_orders.assert_not_called()
     client.get_trades.assert_not_called()
+    verified = _conn_factory()
+    try:
+        row = verified.execute(
+            """
+            SELECT chain_shares, order_status, exit_retry_count, next_exit_retry_at
+              FROM position_current
+             WHERE position_id = 'pos-boot-chain-zero-stale'
+            """
+        ).fetchone()
+    finally:
+        verified.close()
+    assert row["chain_shares"] == 0.0
+    assert row["order_status"] == "voided"
+    assert row["exit_retry_count"] == 0
+    assert row["next_exit_retry_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -5936,6 +5992,75 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert row["phase"] == "voided"
         assert row["chain_shares"] == 0.0
+
+    def test_hard_terminal_position_projection_repair_clears_chain_zero_void_fields(
+        self,
+        conn,
+    ):
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, market_id, city, cluster, target_date, bin_label,
+                direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+                p_posterior, decision_snapshot_id, entry_method, strategy_key,
+                edge_source, discovery_mode, chain_state, token_id, no_token_id,
+                condition_id, order_id, order_status, updated_at, temperature_metric,
+                chain_shares, exit_retry_count, next_exit_retry_at, exit_reason
+            ) VALUES (
+                'pos-chain-zero-stale', 'voided', 'condition-test', 'Manila', 'Manila',
+                '2026-07-01', 'Will the highest temperature in Manila be 29C on July 1?',
+                'buy_yes', 'C', 0.15, 9.7, 0.15, 0.015,
+                0.13, 'forecast-snap-old', 'qkernel_spine', 'center_buy',
+                'center_buy', 'opening_hunt', 'chain_confirmed_zero', 'tok-001', 'tok-001-no',
+                'condition-test', NULL, 'retry_pending',
+                '2026-06-29T17:33:25+00:00', 'high',
+                9.7, 6, '2026-06-29T17:45:00+00:00', 'CHAIN_CONFIRMED_ZERO'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (
+                'evt-chain-zero-stale', 'pos-chain-zero-stale', 11, 'ADMIN_VOIDED',
+                '2026-06-29T17:33:25+00:00', 'pending_exit', 'voided',
+                'center_buy', 'dec-1', 'snap-1', NULL, NULL,
+                'chain_truth_balance_zero', 'idem-chain-zero-stale', 'voided',
+                'src.execution.exit_lifecycle',
+                '{"evidence_source":"CHAIN_BALANCEOF","chain_state":"chain_confirmed_zero","reason":"CHAIN_CONFIRMED_ZERO"}',
+                'live'
+            )
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_hard_terminal_position_projection_repairs,
+        )
+
+        summary = reconcile_hard_terminal_position_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        row = conn.execute(
+            """
+            SELECT phase, chain_state, chain_shares, order_status, exit_retry_count,
+                   next_exit_retry_at, exit_reason
+              FROM position_current
+             WHERE position_id = 'pos-chain-zero-stale'
+            """
+        ).fetchone()
+        assert dict(row) == {
+            "phase": "voided",
+            "chain_state": "chain_confirmed_zero",
+            "chain_shares": 0.0,
+            "order_status": "voided",
+            "exit_retry_count": 0,
+            "next_exit_retry_at": None,
+            "exit_reason": "CHAIN_CONFIRMED_ZERO",
+        }
 
     def test_live_entry_repair_prefers_forecasts_market_events_over_trade_ghost(
         self,

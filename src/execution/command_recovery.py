@@ -4536,8 +4536,13 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
         SELECT
             pc.position_id,
             pc.phase AS current_phase,
+            pc.chain_state AS current_chain_state,
             pc.chain_shares,
             pc.shares,
+            pc.order_status,
+            pc.exit_retry_count,
+            pc.next_exit_retry_at,
+            pc.exit_reason,
             pc.city,
             pc.target_date,
             pc.temperature_metric,
@@ -4553,13 +4558,71 @@ def _hard_terminal_projection_repair_candidates(conn: sqlite3.Connection) -> lis
           JOIN latest_terminal lt
             ON lt.position_id = pc.position_id
            AND lt.rn = 1
-         WHERE pc.phase IN ({open_placeholders})
-           AND LOWER(COALESCE(lt.phase_after, '')) != LOWER(COALESCE(pc.phase, ''))
+         WHERE (
+               pc.phase IN ({open_placeholders})
+               AND LOWER(COALESCE(lt.phase_after, '')) != LOWER(COALESCE(pc.phase, ''))
+             )
+            OR (
+               LOWER(COALESCE(pc.phase, '')) = 'voided'
+               AND LOWER(COALESCE(lt.phase_after, '')) = 'voided'
+               AND lt.event_type = 'ADMIN_VOIDED'
+               AND (
+                    lt.payload_json LIKE '%CHAIN_CONFIRMED_ZERO%'
+                 OR lt.payload_json LIKE '%chain_confirmed_zero%'
+                 OR lt.payload_json LIKE '%CHAIN_BALANCEOF%'
+               )
+               AND (
+                    LOWER(COALESCE(pc.chain_state, '')) != 'chain_confirmed_zero'
+                 OR ABS(COALESCE(pc.chain_shares, 0.0)) > 0.000001
+                 OR LOWER(COALESCE(pc.order_status, '')) NOT IN ('', 'voided')
+                 OR COALESCE(pc.exit_retry_count, 0) != 0
+                 OR COALESCE(pc.next_exit_retry_at, '') != ''
+                 OR COALESCE(pc.exit_reason, '') != 'CHAIN_CONFIRMED_ZERO'
+               )
+             )
          ORDER BY datetime(lt.occurred_at) DESC, lt.sequence_no DESC
         """,
         tuple(_HARD_TERMINAL_REPAIR_PHASES) + tuple(_RUNTIME_OPEN_REPAIR_PHASES),
     ).fetchall()
     return [_dict_row(row) for row in rows]
+
+
+def _terminal_projection_repair_updates(candidate: dict) -> tuple[list[str], list[object]]:
+    terminal_phase = str(candidate.get("phase_after") or "").strip().lower()
+    updates: list[str] = ["phase = ?", "updated_at = ?"]
+    params: list[object] = [terminal_phase, _now_iso()]
+    payload = _json_dict(candidate.get("payload_json"))
+    chain_zero_admin_void = (
+        terminal_phase == "voided"
+        and str(candidate.get("event_type") or "") == "ADMIN_VOIDED"
+        and (
+            str(payload.get("reason") or "") == "CHAIN_CONFIRMED_ZERO"
+            or str(payload.get("chain_state") or "").lower() == "chain_confirmed_zero"
+            or str(payload.get("evidence_source") or "") == "CHAIN_BALANCEOF"
+        )
+    )
+    if chain_zero_admin_void:
+        updates.extend(
+            [
+                "chain_state = ?",
+                "chain_shares = ?",
+                "order_status = ?",
+                "exit_retry_count = ?",
+                "next_exit_retry_at = ?",
+                "exit_reason = ?",
+            ]
+        )
+        params.extend(
+            [
+                "chain_confirmed_zero",
+                0.0,
+                "voided",
+                0,
+                None,
+                "CHAIN_CONFIRMED_ZERO",
+            ]
+        )
+    return updates, params
 
 
 def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection) -> dict:
@@ -4583,15 +4646,15 @@ def reconcile_hard_terminal_position_projection_repairs(conn: sqlite3.Connection
         )[:80]
         conn.execute("SAVEPOINT " + sp_name)
         try:
+            updates, params = _terminal_projection_repair_updates(candidate)
+            params.append(position_id)
             cursor = conn.execute(
                 f"""
                 UPDATE position_current
-                   SET phase = ?,
-                       updated_at = ?
+                   SET {", ".join(updates)}
                  WHERE position_id = ?
-                   AND phase IN ({", ".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)})
                 """,
-                (terminal_phase, _now_iso(), position_id, *_RUNTIME_OPEN_REPAIR_PHASES),
+                tuple(params),
             )
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             if cursor.rowcount > 0:
@@ -13430,6 +13493,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,
             "live_entry_projection_repair",
+        )
+        _db_pass(
+            "hard_terminal_position_projection_repair",
+            reconcile_hard_terminal_position_projection_repairs,
+            "hard_terminal_position_projection_repair",
         )
         _db_pass(
             "exit_lifecycle_alignment_repair",
