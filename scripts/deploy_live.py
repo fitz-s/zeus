@@ -30,10 +30,11 @@ COMMANDS
         restarts still require scripts/check_live_restart_preflight.py to pass.
 
 SAFETY
-    Read-mostly: the only state-changing action is `launchctl kickstart` for
-    an already-loaded daemon, or `launchctl bootstrap` when the service is not
-    loaded but its active plist exists. Both happen only after the clean-tree
-    gate passes (or --allow-dirty is given) and the live-money restart
+    Read-mostly: the only state-changing action is `launchctl bootout` followed
+    by `launchctl bootstrap` from the active plist. A plain kickstart is not
+    enough for this tool because it can preserve launchd's already-loaded
+    EnvironmentVariables after a plist config fix. Reload happens only after the
+    clean-tree gate passes (or --allow-dirty is given) and the live-money restart
     preflight passes for trading-daemon restarts.
     `status` never changes anything.
 
@@ -215,20 +216,21 @@ def _launchctl_service_loaded(label: str) -> bool:
 
 
 def _launch_or_restart_label(label: str) -> tuple[bool, str]:
-    if _launchctl_service_loaded(label):
-        kick = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"{GUI_DOMAIN}/{label}"],
+    plist = _plist_path_for_label(label)
+    if not plist.exists():
+        return False, f"FAILED bootstrap {label}: active plist missing at {plist}"
+
+    was_loaded = _launchctl_service_loaded(label)
+    if was_loaded:
+        stop = subprocess.run(
+            ["launchctl", "bootout", f"{GUI_DOMAIN}/{label}"],
             capture_output=True,
             text=True,
             timeout=20.0,
         )
-        if kick.returncode == 0:
-            return True, f"kickstarted {label}"
-        return False, f"FAILED kickstart {label}: rc={kick.returncode} {kick.stderr.strip()}"
+        if stop.returncode != 0:
+            return False, f"FAILED reload stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
 
-    plist = _plist_path_for_label(label)
-    if not plist.exists():
-        return False, f"FAILED bootstrap {label}: active plist missing at {plist}"
     boot = subprocess.run(
         ["launchctl", "bootstrap", GUI_DOMAIN, str(plist)],
         capture_output=True,
@@ -236,7 +238,8 @@ def _launch_or_restart_label(label: str) -> tuple[bool, str]:
         timeout=20.0,
     )
     if boot.returncode == 0:
-        return True, f"bootstrapped {label} from {plist}"
+        verb = "reloaded" if was_loaded else "bootstrapped"
+        return True, f"{verb} {label} from {plist}"
     return False, f"FAILED bootstrap {label}: rc={boot.returncode} {boot.stderr.strip()}"
 
 

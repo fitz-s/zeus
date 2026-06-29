@@ -464,9 +464,11 @@ def test_deploy_live_bootstraps_when_service_not_loaded(monkeypatch, tmp_path):
     assert calls[-1] == ["launchctl", "bootstrap", dl.GUI_DOMAIN, str(plist)]
 
 
-def test_deploy_live_kickstarts_when_service_loaded(monkeypatch):
-    dl = _load("deploy_live_kickstart_loaded", "deploy_live.py")
+def test_deploy_live_reloads_when_service_loaded(monkeypatch, tmp_path):
+    dl = _load("deploy_live_reload_loaded", "deploy_live.py")
     label = "com.zeus.live-trading"
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_text("plist")
     calls = []
 
     def _fake_run(cmd, **kwargs):
@@ -475,17 +477,21 @@ def test_deploy_live_kickstarts_when_service_loaded(monkeypatch):
         calls.append(cmd)
         if cmd[:2] == ["launchctl", "print"]:
             return subprocess.CompletedProcess(cmd, 0, "state = running", "")
-        if cmd[:2] == ["launchctl", "kickstart"]:
+        if cmd[:2] == ["launchctl", "bootout"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"unexpected subprocess call: {cmd!r}")
 
+    monkeypatch.setattr(dl, "LIVE_TRADING_PLIST", plist)
     monkeypatch.setattr(dl.subprocess, "run", _fake_run)
 
     ok, detail = dl._launch_or_restart_label(label)
 
     assert ok is True
-    assert "kickstarted" in detail
-    assert calls[-1] == ["launchctl", "kickstart", "-k", f"{dl.GUI_DOMAIN}/{label}"]
+    assert "reloaded" in detail
+    assert calls[-2] == ["launchctl", "bootout", f"{dl.GUI_DOMAIN}/{label}"]
+    assert calls[-1] == ["launchctl", "bootstrap", dl.GUI_DOMAIN, str(plist)]
 
 
 def test_deploy_live_live_restart_stops_before_preflight(monkeypatch, capsys):
