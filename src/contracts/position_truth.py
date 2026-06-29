@@ -188,9 +188,8 @@ class ChainOnlyReviewState(str, Enum):
 
       UNRESOLVED   — chain-only token detected; entry gate fires.
       EXPIRED      — chain-only persisted past the 48h review window;
-                     entry gate continues to fire but the row is flagged
-                     for operator escalation. (Auto-expiry NEVER clears
-                     the fact — only operator action does.)
+                     no longer freezes unrelated new entries, but remains
+                     flagged for operator/reconciliation attention.
       ACKNOWLEDGED — operator has reviewed and chosen to keep the fact
                      active (e.g. waiting for redeem); equivalent to
                      UNRESOLVED for gating purposes but reduces noise in
@@ -252,13 +251,14 @@ class ChainOnlyFact:
     def blocks_entry(self) -> bool:
         """True iff this fact should block new entries this cycle.
 
-        UNRESOLVED + EXPIRED + ACKNOWLEDGED all block. Only RESOLVED clears.
-        Expiry is an escalation marker, NOT auto-resolution — leaving an
-        expired chain-only fact in place is a stronger operator signal,
-        not a weaker one.
+        Only fresh unresolved/operator-acknowledged facts block unrelated new
+        entries. EXPIRED remains visible as review debt, but stale review debt
+        is not current chain truth and must not permanently freeze the live
+        entry engine.
         """
         return (
-            self.review_state != ChainOnlyReviewState.RESOLVED
+            self.review_state
+            in {ChainOnlyReviewState.UNRESOLVED, ChainOnlyReviewState.ACKNOWLEDGED}
             and self.entry_block_scope != "position_only"
         )
 

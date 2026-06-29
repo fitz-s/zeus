@@ -212,6 +212,20 @@ _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
 _ABSORBING_POSITION_PHASES = frozenset(
     set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
 )
+_REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
+    {
+        "entry_authority_quarantined",
+        "chain_absent_confirmed_position_unattributed",
+    }
+)
+_REDECISION_QUARANTINE_EXIT_EVENTS = frozenset(
+    {
+        "EXIT_INTENT",
+        "EXIT_ORDER_REJECTED",
+        "EXIT_ORDER_POSTED",
+        "EXIT_ORDER_FILLED",
+    }
+)
 _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
     {
         "market_id",
@@ -288,6 +302,25 @@ def _has_positive_chain_observation(projection: dict) -> bool:
     return True
 
 
+def _projection_allows_redecision_quarantine_pending_exit(projection: dict) -> bool:
+    if str(projection.get("phase") or "") != "pending_exit":
+        return False
+    if str(projection.get("_canonical_event_type") or "") not in _REDECISION_QUARANTINE_EXIT_EVENTS:
+        return False
+    chain_state = projection.get("chain_state")
+    chain_state_value = str(getattr(chain_state, "value", chain_state) or "")
+    if chain_state_value not in _REDECISION_QUARANTINE_CHAIN_STATES:
+        return False
+    for field in ("chain_shares", "shares"):
+        try:
+            value = float(projection.get(field) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0.01:
+            return True
+    return False
+
+
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     projection = _preserve_existing_monitor_refresh_authority(conn, projection)
@@ -308,7 +341,10 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
             (candidate_position_id,),
         ).fetchone()
         existing_phase = str(existing_phase_row[0] if existing_phase_row else "")
-        if existing_phase in _ABSORBING_POSITION_PHASES:
+        if existing_phase in _ABSORBING_POSITION_PHASES and not (
+            existing_phase == LifecyclePhase.QUARANTINED.value
+            and _projection_allows_redecision_quarantine_pending_exit(projection)
+        ):
             raise ValueError(
                 "position_current absorbing non-open phase cannot be reopened: "
                 f"position_id={candidate_position_id!r} "

@@ -652,6 +652,74 @@ def test_spine_preserves_payload_served_sigma_for_point_bin_integration(monkeypa
     assert result.selected_proof.candidate.bin.label == "20C"
 
 
+def test_unarmed_nonmodal_yes_tail_is_abstained_before_selection(monkeypatch):
+    """Cheap nonmodal YES tails require selected-side evidence before live submit.
+
+    Regression: legacy selection artifacts were NO-only, but returned an identity
+    q_safe for unarmed YES. The qkernel then treated a very cheap tail YES as
+    executable alpha even though no selected-side empirical evidence licensed it.
+    """
+    from src.decision import family_decision_engine as fde
+    from src.decision import qlcb_reliability_guard as guard_mod
+    from src.decision.selection_calibrator import CalibratorVerdict
+
+    reliability_cells = _fully_licensed_reliability_cells(guard_mod)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_CACHE", reliability_cells)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
+    monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
+
+    def _fake_selection_guard(*, raw_side_prob, side, lead_days, bin_class, admission_margin=None):
+        return CalibratorVerdict(
+            q_safe=float(raw_side_prob),
+            trade=True,
+            abstained=False,
+            cell_key=f"fake|{side}|{bin_class}",
+            L_g=float("nan"),
+            n_g=0,
+            basis="SIDE_NOT_ARMED" if str(side).upper() == "YES" else "SELECTION_BETA_95",
+        )
+
+    monkeypatch.setattr(fde, "apply_selection_calibrator", _fake_selection_guard)
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.90, 0.90, 0.01],
+        no_asks=[0.99, 0.99, 0.99, 0.99],
+        q_by_bin=[0.04, 0.42, 0.41, 0.13],
+        q_lcb_by_bin=[0.02, 0.28, 0.27, 0.08],
+        no_execution_prices=[0.99, 0.99, 0.99, 0.99],
+    )
+    tail_proof = next(
+        proof
+        for proof in proofs
+        if proof.direction == "buy_yes" and proof.candidate.bin.label == "22C or above"
+    )
+    tail_bin_id = era._candidate_bin_id(tail_proof)
+
+    result = _drive(
+        family,
+        proofs,
+        _payload(mu=20.5, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 21.2]),
+    )
+
+    assert result.decision is not None
+    tail_decisions = [
+        decision
+        for decision in result.decision.candidate_decisions
+        if decision.route.side == "YES" and decision.route.bin_id == tail_bin_id
+    ]
+    assert tail_decisions
+    tail_decision = tail_decisions[0]
+    assert tail_decision.selection_guard_basis == "SIDE_NOT_ARMED"
+    assert tail_decision.selection_guard_abstained is True
+    assert tail_decision.selection_guard_q_safe == 0.0
+    assert tail_decision.economics.edge_lcb < 0.0
+    assert float(tail_decision.economics.optimal_stake_usd) == 0.0
+    if result.selected_proof is not None:
+        assert result.selected_proof.token_id != tail_proof.token_id
+
+
 def test_non_direct_selection_is_refused_as_typed_no_trade():
     """If the spine ever selects a non-direct (synthetic/arb) route, the bridge refuses it
     as NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE rather than single-leg-mapping it.

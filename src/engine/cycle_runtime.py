@@ -49,6 +49,13 @@ from src.state.portfolio import (
 logger = logging.getLogger(__name__)
 
 SOURCE_WRITER_FRONTIER_STALE_SECONDS = 5 * 60
+_REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
+    {
+        "entry_authority_quarantined",
+        "chain_absent_confirmed_position_unattributed",
+    }
+)
+_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS = 12 * 3600
 
 
 # H2 critic R6 (2026-05-04, rebuild fixes branch): the previously-hardcoded
@@ -3195,14 +3202,47 @@ def _position_real_exposure_shares(pos) -> float:
     return 0.0
 
 
-def _quarantined_position_can_redecision(pos) -> bool:
+def _position_timestamp_recent(value, *, max_age_seconds: int) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return 0.0 <= age_seconds <= max_age_seconds
+
+
+def _chain_absent_quarantine_is_fresh_enough_for_redecision(pos) -> bool:
     return (
-        _position_state_value(pos) == "quarantined"
-        and _position_chain_state_value(pos) == "entry_authority_quarantined"
-        and _position_direction_value(pos) in {"buy_yes", "buy_no"}
-        and _position_real_exposure_shares(pos) > 0.01
-        and not getattr(pos, "is_quarantine_placeholder", False)
+        _position_timestamp_recent(
+            getattr(pos, "chain_verified_at", "") or "",
+            max_age_seconds=_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS,
+        )
+        or _position_timestamp_recent(
+            getattr(pos, "last_chain_absence_observed_at", "") or "",
+            max_age_seconds=_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS,
+        )
     )
+
+
+def _quarantined_position_can_redecision(pos) -> bool:
+    if _position_state_value(pos) != "quarantined":
+        return False
+    chain_state = _position_chain_state_value(pos)
+    if chain_state not in _REDECISION_QUARANTINE_CHAIN_STATES:
+        return False
+    if _position_direction_value(pos) not in {"buy_yes", "buy_no"}:
+        return False
+    if _position_real_exposure_shares(pos) <= 0.01:
+        return False
+    if getattr(pos, "is_quarantine_placeholder", False):
+        return False
+    if chain_state == "entry_authority_quarantined":
+        return True
+    return _chain_absent_quarantine_is_fresh_enough_for_redecision(pos)
 
 
 def _day0_hard_fact_position_eligible(pos) -> bool:

@@ -2633,6 +2633,27 @@ def test_chain_only_fact_position_only_scope_does_not_freeze_new_entries():
     assert position_only_fact.blocks_position_management is True
 
 
+def test_expired_chain_only_fact_does_not_freeze_new_entries():
+    from src.engine.cycle_runner import _has_quarantined_positions
+
+    expired_fact = ChainOnlyFact(
+        token_id="expired-token",
+        condition_id="expired-condition",
+        size=1.0,
+        avg_price=0.5,
+        cost_basis=0.5,
+        first_seen_at="2026-06-01T00:00:00+00:00",
+        last_seen_at="2026-06-03T00:00:00+00:00",
+        review_state=ChainOnlyReviewState.EXPIRED,
+    )
+
+    portfolio = _make_portfolio()
+    portfolio.chain_only_facts.append(expired_fact)
+
+    assert expired_fact.blocks_entry is False
+    assert _has_quarantined_positions(portfolio) is False
+
+
 def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
     from src.state.chain_reconciliation import ChainPosition, reconcile
 
@@ -2781,6 +2802,51 @@ def test_quarantine_expired_blocks_new_entries_until_resolved():
     portfolio = _make_portfolio(pos)
 
     assert _has_quarantined_positions(portfolio) is True
+
+
+def test_recent_chain_absent_quarantine_redecision_exposure_does_not_block_entries():
+    """A monitor-managed real exposure quarantine must not freeze all new entries."""
+    from src.engine.cycle_runner import _has_quarantined_positions
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    pos = _make_position(
+        direction="buy_yes",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=65.0,
+        chain_shares=65.0,
+        last_chain_absence_observed_at=observed_at,
+        chain_verified_at=observed_at,
+    )
+    portfolio = _make_portfolio(pos)
+
+    assert _has_quarantined_positions(portfolio) is False
+
+
+@pytest.mark.parametrize(
+    "chain_state",
+    [
+        "chain_absent_confirmed_position_unattributed",
+        "chain_confirmed_zero",
+        "entry_authority_quarantined",
+    ],
+)
+def test_stale_resolved_quarantine_projection_does_not_block_entries(chain_state):
+    """Old explicit chain-resolution projections must not freeze unrelated entry flow."""
+    from src.engine.cycle_runner import _has_quarantined_positions
+
+    pos = _make_position(
+        direction="buy_no",
+        state="quarantined",
+        chain_state=chain_state,
+        shares=10.0,
+        chain_shares=0.0 if chain_state == "chain_confirmed_zero" else 10.0,
+        last_chain_absence_observed_at="2026-06-20T00:00:00+00:00",
+        chain_verified_at="2026-06-20T00:00:00+00:00",
+    )
+    portfolio = _make_portfolio(pos)
+
+    assert _has_quarantined_positions(portfolio) is False
 
 
 def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
@@ -3031,6 +3097,132 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
     assert monitor_results[0].fresh_edge == 0.22
     assert monitor_results[0].should_exit is False
     assert monitor_results[0].exit_reason == "ENTRY_AUTHORITY_QUARANTINE_REDECISION_HOLD"
+
+
+def test_chain_absent_confirmed_recent_exposure_reaches_redecision(monkeypatch):
+    """Recently mis-attributed chain absence with real exposure must still be monitor-managed."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    pos = _make_position(
+        trade_id="chain-absence-quarantine-position",
+        direction="buy_yes",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=65.0,
+        chain_shares=65.0,
+        city="Chongqing",
+        target_date="2026-07-01",
+        token_id="yes-chongqing",
+        no_token_id="no-chongqing",
+        condition_id="condition-chongqing",
+        last_chain_absence_observed_at=observed_at,
+        chain_verified_at=observed_at,
+        order_status="filled",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        entry_fill_verified=True,
+    )
+    portfolio = _make_portfolio(pos)
+
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.004, 0.006, 100.0, 100.0
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("no exit fill expected")
+
+    observed_refresh = []
+
+    def mock_refresh(conn, clob, position):
+        observed_refresh.append((
+            position.trade_id,
+            getattr(position.state, "value", position.state),
+            getattr(position.chain_state, "value", position.chain_state),
+        ))
+        position.last_monitor_prob = 0.03
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_market_price = 0.004
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.004
+        position.last_monitor_best_ask = 0.006
+        position.last_monitor_market_vig = 1.02
+        position.last_monitor_whale_toxicity = False
+        position.last_monitor_at = observed_at
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.004]),
+            p_posterior=0.03,
+            forward_edge=0.026,
+            alpha=0.0,
+            confidence_band_upper=0.04,
+            confidence_band_lower=0.02,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snap-chain-absence-quarantine",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    observed_exit_contexts = []
+
+    def mock_evaluate_exit(self, exit_context):
+        observed_exit_contexts.append(exit_context)
+        return ExitDecision(
+            False,
+            "CHAIN_ABSENCE_QUARANTINE_REDECISION_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["chain_absence_quarantine_redecision"],
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", mock_evaluate_exit)
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_chain_absence_quarantine_redecision"),
+            "cities_by_name": {"Chongqing": type("City", (), {"timezone": "Asia/Shanghai"})()},
+            "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert observed_refresh == [(
+        "chain-absence-quarantine-position",
+        "quarantined",
+        "chain_absent_confirmed_position_unattributed",
+    )]
+    assert observed_exit_contexts
+    assert observed_exit_contexts[0].position_state == "quarantined"
+    assert summary["quarantined_exposure_routed_to_redecision"] == 1
+    assert summary.get("monitor_skipped_quarantine_resolution", 0) == 0
+    assert summary["monitors"] == 1
+    assert len(monitor_results) == 1
+    assert monitor_results[0].fresh_prob == 0.03
+    assert monitor_results[0].fresh_edge == 0.026
+    assert monitor_results[0].should_exit is False
+    assert monitor_results[0].exit_reason == "CHAIN_ABSENCE_QUARANTINE_REDECISION_HOLD"
 
 
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):

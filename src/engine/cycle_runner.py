@@ -131,17 +131,28 @@ def _has_quarantined_positions(portfolio: PortfolioState) -> bool:
     # for mid-cycle chain-only-quarantine detection. Chain reconcile now
     # emits typed ChainOnlyFact entries instead of synthetic Position rows.
     # PR D1 (Finding D1, Part-2 audit, 2026-05-27): gate fires only on facts
-    # whose review_state still blocks entry (UNRESOLVED / EXPIRED /
-    # ACKNOWLEDGED). RESOLVED facts (operator-cleared or settled) do NOT
-    # block — see ChainOnlyFact.blocks_entry.
+    # whose review_state still blocks entry (fresh UNRESOLVED or operator
+    # ACKNOWLEDGED). EXPIRED/RESOLVED facts are review debt, not current
+    # entry blockers — see ChainOnlyFact.blocks_entry.
     chain_only_facts = getattr(portfolio, "chain_only_facts", None) or []
     if any(getattr(fact, "blocks_entry", True) for fact in chain_only_facts):
         return True
-    return any(
-        _semantic_value(getattr(pos, "state", "")) == "quarantined"
-        or _semantic_value(getattr(pos, "chain_state", "")) in {"quarantined", "quarantine_expired"}
-        for pos in portfolio.positions
-    )
+    for pos in portfolio.positions:
+        chain_state = _semantic_value(getattr(pos, "chain_state", ""))
+        if chain_state in {"quarantined", "quarantine_expired"}:
+            return True
+        if _semantic_value(getattr(pos, "state", "")) != "quarantined":
+            continue
+        if _runtime._quarantined_position_can_redecision(pos):
+            continue
+        if chain_state in {
+            "chain_absent_confirmed_position_unattributed",
+            "chain_confirmed_zero",
+            "entry_authority_quarantined",
+        }:
+            continue
+        return True
+    return False
 
 
 # DT#2 P9B (INV-19): terminal position states are excluded from the RED

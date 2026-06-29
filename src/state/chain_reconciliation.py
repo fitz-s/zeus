@@ -23,6 +23,7 @@ Rules:
 Live mode: MANDATORY every cycle before any trading.
 """
 
+import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -213,6 +214,7 @@ _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
 # persisted timestamp is older than this threshold to keep classify_chain_state()
 # correctly classifying long-lived synced positions on daemon restart.
 _CHAIN_SEEN_AT_MAX_AGE_SECONDS: int = 1800  # 30 minutes
+_CONFIRMED_CHAIN_ABSENCE_RECENT_POSITIVE_SECONDS: int = 6 * 3600
 
 
 def allocate_chain_truth(
@@ -1033,6 +1035,115 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             == FILL_AUTHORITY_VENUE_CONFIRMED_FULL
         )
 
+    def _parse_reconcile_dt(value: object) -> datetime | None:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _positive_chain_observation_is_recent(value: object) -> bool:
+        observed_at = _parse_reconcile_dt(value)
+        now_dt = _parse_reconcile_dt(now)
+        if observed_at is None or now_dt is None:
+            return False
+        age_seconds = (now_dt - observed_at).total_seconds()
+        return 0.0 <= age_seconds <= _CONFIRMED_CHAIN_ABSENCE_RECENT_POSITIVE_SECONDS
+
+    def _payload_has_positive_chain_observation(payload_json: str) -> bool:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except Exception:
+            return False
+        if str(payload.get("chain_state") or "") not in {"", "synced"}:
+            return False
+        for key in ("chain_shares_after", "chain_shares", "shares_after", "shares"):
+            if _positive_decimal(payload.get(key)):
+                return True
+        return False
+
+    def _recent_positive_chain_observation(position: Position) -> tuple[bool, str, str]:
+        """Return whether recent positive chain evidence should veto absence quarantine.
+
+        A non-empty chain snapshot that omits one token is not proof that a
+        recently observed, venue-confirmed position is gone. Treating that case
+        as terminal quarantine removed live exposure from monitor/redecision.
+        """
+        if not _positive_decimal(getattr(position, "chain_shares", None)):
+            return (False, "", "")
+        runtime_seen_at = getattr(position, "chain_verified_at", "") or ""
+        if runtime_seen_at and _positive_chain_observation_is_recent(runtime_seen_at):
+            return (True, str(runtime_seen_at), "runtime_chain_verified_at")
+        if conn is not None:
+            position_id = str(getattr(position, "trade_id", "") or "")
+            if position_id:
+                try:
+                    row = conn.execute(
+                        """
+                        SELECT chain_seen_at
+                          FROM position_current
+                         WHERE position_id = ?
+                        """,
+                        (position_id,),
+                    ).fetchone()
+                except Exception:
+                    row = None
+                if row is not None:
+                    chain_seen_at = row["chain_seen_at"] if hasattr(row, "keys") else row[0]
+                    if chain_seen_at and _positive_chain_observation_is_recent(chain_seen_at):
+                        return (True, str(chain_seen_at), "position_current.chain_seen_at")
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT occurred_at, payload_json
+                          FROM position_events
+                         WHERE position_id = ?
+                           AND event_type IN ('CHAIN_SYNCED', 'CHAIN_SIZE_CORRECTED')
+                         ORDER BY occurred_at DESC, sequence_no DESC
+                         LIMIT 8
+                        """,
+                        (position_id,),
+                    ).fetchall()
+                except Exception:
+                    rows = []
+                for event_row in rows:
+                    occurred_at = event_row["occurred_at"] if hasattr(event_row, "keys") else event_row[0]
+                    payload_json = event_row["payload_json"] if hasattr(event_row, "keys") else event_row[1]
+                    if (
+                        _positive_chain_observation_is_recent(occurred_at)
+                        and _payload_has_positive_chain_observation(str(payload_json or ""))
+                    ):
+                        return (True, str(occurred_at), "position_events.positive_chain_observation")
+        return (False, "", "")
+
+    def _defer_confirmed_chain_absence_when_recently_observed(
+        position: Position,
+        *,
+        token_id: str,
+        source: str,
+    ) -> bool:
+        recent, observed_at, basis = _recent_positive_chain_observation(position)
+        if not recent:
+            return False
+        position.last_chain_absence_observed_at = now
+        stats["confirmed_chain_absence_recent_positive_deferred"] = (
+            stats.get("confirmed_chain_absence_recent_positive_deferred", 0) + 1
+        )
+        logger.warning(
+            "CONFIRMED_POSITION_CHAIN_ABSENCE_DEFERRED: trade_id=%s token=%s "
+            "source=%s basis=%s observed_at=%s; preserving monitorable exposure",
+            getattr(position, "trade_id", "?"),
+            token_id,
+            source,
+            basis,
+            observed_at,
+        )
+        return True
+
     def _quarantine_confirmed_chain_absence(
         position: Position,
         *,
@@ -1067,10 +1178,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             stats.get("confirmed_chain_absence_quarantined", 0) + 1
         )
 
-    def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> None:
+    def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> str:
         if conn is None:
-            return
-        from src.state.db import record_token_suppression
+            return "global"
+        from src.state.db import chain_only_entry_block_scope, record_token_suppression
 
         try:
             result = record_token_suppression(
@@ -1095,6 +1206,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             raise RuntimeError(
                 f"chain-only quarantine fact write failed for {token_id}: {result}"
             )
+        return chain_only_entry_block_scope(
+            conn,
+            condition_id=str(getattr(chain, "condition_id", "") or ""),
+        )
 
     # DT#4 / INV-18: derive three-state from inputs at the TOP of reconcile().
     # reconcile() is only called when the chain API responded (cycle_runtime.py
@@ -1202,6 +1317,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         # Void using the existing PHANTOM_NOT_ON_CHAIN state (no new enum).
         if pos.trade_id in phantom_set:
             if _has_confirmed_entry_authority(pos):
+                if _defer_confirmed_chain_absence_when_recently_observed(
+                    pos,
+                    token_id=tid,
+                    source="aggregate_allocation",
+                ):
+                    continue
                 _quarantine_confirmed_chain_absence(
                     pos,
                     token_id=tid,
@@ -1442,6 +1563,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 stats["skipped_pending_exit"] = stats.get("skipped_pending_exit", 0) + 1
                 continue
             if _has_confirmed_entry_authority(pos):
+                if _defer_confirmed_chain_absence_when_recently_observed(
+                    pos,
+                    token_id=tid,
+                    source="per_position_missing_token",
+                ):
+                    continue
                 _quarantine_confirmed_chain_absence(
                     pos,
                     token_id=tid,
@@ -1618,7 +1745,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # unchanged. portfolio.chain_only_facts carries the in-memory
             # review-queue signal that cycle gates consult alongside
             # portfolio.positions during the migration window.
-            _persist_chain_only_quarantine_fact(tid, chain)
+            entry_block_scope = _persist_chain_only_quarantine_fact(tid, chain)
             portfolio.chain_only_facts.append(
                 ChainOnlyFact(
                     token_id=tid,
@@ -1628,6 +1755,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     cost_basis=float(chain.cost or (chain.size * (chain.avg_price or 0.0))),
                     first_seen_at=now,
                     last_seen_at=now,
+                    entry_block_scope=entry_block_scope,
                 )
             )
             stats["quarantined"] += 1
@@ -1695,27 +1823,28 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     # escalation consumer. Chain-only inventory is NOT a local Position, so the
     # position "exit evaluation" above does not apply — there is nothing to
     # exit. Instead, its review_state escalates UNRESOLVED -> EXPIRED at the 48h
-    # window and is surfaced here for operator attention; `blocks_entry` remains
-    # True until the operator RESOLVES the suppression row. Prior to this, the
-    # 48h ChainOnlyFact lifecycle the README references had no consumer beyond
-    # the entry gate. Read-only escalation (the fact's review_state is derived);
-    # resolution is operator-driven via the suppression row.
+    # window and is surfaced here for operator attention. Expiry is not current
+    # chain truth and must not freeze unrelated entries forever. Prior to this,
+    # the 48h ChainOnlyFact lifecycle the README references had no consumer
+    # beyond the entry gate. Read-only escalation (the fact's review_state is
+    # derived); resolution is operator-driven via the suppression row.
     for fact in getattr(portfolio, "chain_only_facts", None) or []:
-        if not getattr(fact, "blocks_entry", True):
+        review_state = getattr(getattr(fact, "review_state", None), "value", None)
+        if review_state == "resolved":
             continue  # RESOLVED — nothing to escalate
         first_seen = str(getattr(fact, "first_seen_at", "") or "")
         try:
             seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
         except ValueError:
             logger.warning(
-                "CHAIN_ONLY_REVIEW MISSING/BAD TIMESTAMP: token=%s first_seen=%r — operator review required (entry blocked)",
+                "CHAIN_ONLY_REVIEW MISSING/BAD TIMESTAMP: token=%s first_seen=%r — operator review required (fresh entry blocked)",
                 getattr(fact, "token_id", "?"), first_seen,
             )
             continue
         hours_seen = (now - seen_dt).total_seconds() / 3600
         if hours_seen > CHAIN_ONLY_REVIEW_WINDOW_HOURS:
             logger.warning(
-                "CHAIN_ONLY_REVIEW EXPIRED: token=%s held %.0fh review_state=%s — operator review required (entry remains blocked)",
+                "CHAIN_ONLY_REVIEW EXPIRED: token=%s held %.0fh review_state=%s — operator review required (entry no longer globally blocked by this stale fact)",
                 getattr(fact, "token_id", "?"),
                 hours_seen,
                 getattr(getattr(fact, "review_state", None), "value", "?"),

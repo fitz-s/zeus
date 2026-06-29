@@ -10750,13 +10750,101 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
             ORDER BY ts.created_at ASC, ts.token_id ASC
             """
         ).fetchall()
+    chain_non_global: list = []
+    if _table_or_view_exists(conn, "market_topology_state"):
+        chain_rows = conn.execute(
+            """
+            SELECT token_id, condition_id
+            FROM token_suppression
+            WHERE suppression_reason = 'chain_only_quarantined'
+            ORDER BY created_at ASC, token_id ASC
+            """
+        ).fetchall()
+        chain_non_global = [
+            row
+            for row in chain_rows
+            if chain_only_entry_block_scope(
+                conn,
+                condition_id=str(row["condition_id"] or ""),
+            )
+            != "global"
+        ]
     out: list[str] = []
     seen: set[str] = set()
-    for row in list(base) + list(chain_terminal):
+    for row in list(base) + list(chain_terminal) + list(chain_non_global):
         tok = str(row["token_id"] or "")
         if tok and tok not in seen:
             seen.add(tok)
             out.append(tok)
+    return out
+
+
+def chain_only_entry_block_scope(
+    conn: sqlite3.Connection | None,
+    *,
+    condition_id: str | None,
+    decision_time: datetime | None = None,
+) -> str:
+    """Return the entry-block scope for a chain-only suppression fact.
+
+    Chain-only tokens are a real review signal, but they are only a global
+    entry kill-switch when they belong to the current Zeus weather topology.
+    Non-weather inventory, missing topology, stale topology, and old weather
+    dates remain position-level review debt so they cannot freeze all live
+    trading.
+    """
+
+    if conn is None or not condition_id:
+        return "position_only"
+    if not _table_or_view_exists(conn, "market_topology_state"):
+        return "global"
+    try:
+        row = conn.execute(
+            """
+            SELECT market_family, target_local_date, status, authority_status
+            FROM market_topology_state
+            WHERE condition_id = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            """,
+            (str(condition_id),),
+        ).fetchone()
+    except sqlite3.Error:
+        logger.warning(
+            "chain-only scope lookup failed; preserving global entry block",
+            exc_info=True,
+        )
+        return "global"
+    if row is None:
+        return "position_only"
+    if str(row["market_family"] or "") != "weather_temperature":
+        return "position_only"
+    if str(row["status"] or "") != "CURRENT":
+        return "position_only"
+    if str(row["authority_status"] or "") != "VERIFIED":
+        return "position_only"
+    target_date_raw = str(row["target_local_date"] or "")
+    try:
+        target_date = datetime.strptime(target_date_raw, "%Y-%m-%d").date()
+    except ValueError:
+        return "position_only"
+    now_dt = decision_time or datetime.now(timezone.utc)
+    # Allow one UTC-day slack for west-of-UTC local trading days. Older weather
+    # markets are settlement/redeem review debt, not current entry risk.
+    if target_date < (now_dt.date() - timedelta(days=1)):
+        return "position_only"
+    return "global"
+
+
+def _with_chain_only_entry_block_scope(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> dict:
+    out = dict(row)
+    out["entry_block_scope"] = chain_only_entry_block_scope(
+        conn,
+        condition_id=str(out.get("condition_id") or ""),
+    )
     return out
 
 
@@ -10797,7 +10885,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
             ORDER BY created_at ASC, token_id ASC
             """
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [_with_chain_only_entry_block_scope(conn, row) for row in rows]
     rows = conn.execute(
         """
         SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
@@ -10811,7 +10899,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
         ORDER BY ts.created_at ASC, ts.token_id ASC
         """
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [_with_chain_only_entry_block_scope(conn, row) for row in rows]
 
 
 def expire_control_override(

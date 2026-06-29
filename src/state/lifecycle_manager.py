@@ -222,7 +222,11 @@ def enter_pending_exit_runtime_state(
     normalized_chain_state = _normalized_state(chain_state)
     if (
         current_phase == LifecyclePhase.QUARANTINED
-        and normalized_chain_state == "entry_authority_quarantined"
+        and normalized_chain_state
+        in {
+            "entry_authority_quarantined",
+            "chain_absent_confirmed_position_unattributed",
+        }
     ):
         return LifecyclePhase.PENDING_EXIT.value
     # Idempotency: positions that have already advanced past PENDING_EXIT

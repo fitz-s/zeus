@@ -2462,6 +2462,7 @@ def _chain_only_fact_from_row(row: dict) -> ChainOnlyFact:
         first_seen_at=first_seen,
         last_seen_at=last_seen,
         review_state=review_state,
+        entry_block_scope=str(row.get("entry_block_scope") or "global"),
     )
 
 
@@ -2483,8 +2484,9 @@ def _derive_chain_only_review_state(
 
     The 48h review window is a SOFT escalation marker — it does NOT clear
     the fact, it flips UNRESOLVED → EXPIRED so ops dashboards can surface
-    chain-only inventory that has lingered past triage SLA. Only operator
-    action (suppression_reason flip) actually resolves the fact.
+    chain-only inventory that has lingered past triage SLA. Expired review
+    debt does not freeze unrelated new entries; only operator action
+    (suppression_reason flip) actually resolves the fact.
     """
     if suppression_reason in ("operator_quarantine_clear", "settled_position"):
         return ChainOnlyReviewState.RESOLVED

@@ -142,18 +142,42 @@ def transition_phase(
         if not trade_id:
             return False
         current_row = conn.execute(
-            "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+            """
+            SELECT phase, chain_state, shares, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
             (trade_id,),
         ).fetchone()
         current_phase = str(current_row[0] or "").strip().lower() if current_row is not None else ""
         current_chain_state = str(current_row[1] or "").strip().lower() if current_row is not None else ""
-        entry_authority_quarantine_exit = (
+        def _positive_position_exposure() -> bool:
+            for value in (
+                current_row[3] if current_row is not None else None,
+                current_row[2] if current_row is not None else None,
+                getattr(position, "chain_shares", None),
+                getattr(position, "shares", None),
+            ):
+                try:
+                    numeric = float(value or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if numeric > 0.01:
+                    return True
+            return False
+
+        redecision_quarantine_exit = (
             current_phase == "quarantined"
-            and current_chain_state == "entry_authority_quarantined"
+            and current_chain_state
+            in {
+                "entry_authority_quarantined",
+                "chain_absent_confirmed_position_unattributed",
+            }
+            and _positive_position_exposure()
         )
         if (
             current_phase == "economically_closed"
-            or (is_terminal_state(current_phase) and not entry_authority_quarantine_exit)
+            or (is_terminal_state(current_phase) and not redecision_quarantine_exit)
         ):
             return False
         sequence_no_row = conn.execute(
@@ -167,7 +191,7 @@ def transition_phase(
         ).value
         phase_after = (
             "pending_exit"
-            if entry_authority_quarantine_exit and phase_before == "quarantined"
+            if redecision_quarantine_exit and phase_before == "quarantined"
             else fold_lifecycle_phase(phase_before, "pending_exit").value
         )
         projection_position = _copy.copy(position)
