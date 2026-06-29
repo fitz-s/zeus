@@ -679,6 +679,117 @@ def test_rest_pull_cancels_when_family_best_candidate_moves_to_another_bin():
     assert same_rest_candidate == []
 
 
+def test_duplicate_suppressed_receipt_pulls_rest_when_full_reactor_best_moved():
+    """Full-reactor duplicate lock is rest-management evidence, not a dead end."""
+
+    world = _mem_world()
+    _regret_table(world)
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="hyp|live|Singapore|2026-07-01|high|disc",
+        bin_label="30C",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.82,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.06,
+        quote_age_ms=120_000.0,
+        city="Singapore",
+        target_date="2026-07-01",
+        metric="high",
+    )
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            city, target_date, metric, family_id, bin_label, direction, q_lcb_5pct,
+            c_fee_adjusted, trade_score, created_at
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  'Singapore', '2026-07-01', 'high', 'edli_family_dynamic',
+                  '', '', NULL, NULL, NULL, ?)
+        """,
+        (
+            "regret-dup",
+            "event-dup",
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=Will the highest temperature in Singapore be 32°C on July 1? "
+                "buy_no reason_class=other missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+                "condition_id=0xc32:token_id=tok32:direction=buy_no:"
+                "family_id=:city=Singapore:target_date=2026-07-01:metric=high "
+                "q_lcb=0.6447 price=0.5500 rejected_ev_per_dollar=0.1722"
+            ),
+            "2026-06-29T08:47:16+00:00",
+        ),
+    )
+
+    pulls = cr.active_duplicate_suppressed_rest_pulls(
+        world,
+        open_rests=[rest],
+        decision_time="2026-06-29T08:48:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    pulled_rest, decision = pulls[0]
+    assert pulled_rest.command_id == "cmd-rest"
+    assert decision.action == "CANCEL_REPLACE"
+    assert decision.reason == "ACTIVE_DUPLICATE_SUPPRESSED_BETTER_CANDIDATE"
+    assert decision.detail == pytest.approx(0.1722)
+
+
+def test_duplicate_suppressed_receipt_does_not_pull_same_active_rest():
+    world = _mem_world()
+    _regret_table(world)
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="hyp|live|Singapore|2026-07-01|high|disc",
+        bin_label="30C",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.82,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.06,
+        quote_age_ms=120_000.0,
+        city="Singapore",
+        target_date="2026-07-01",
+        metric="high",
+    )
+    world.execute(
+        """
+        INSERT INTO no_trade_regret_events (
+            regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
+            city, target_date, metric, family_id, bin_label, direction, q_lcb_5pct,
+            c_fee_adjusted, trade_score, created_at
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  'Singapore', '2026-07-01', 'high', 'edli_family_dynamic',
+                  '', '', NULL, NULL, NULL, ?)
+        """,
+        (
+            "regret-same",
+            "event-same",
+            (
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=22 other=22; "
+                "best_rejected=30C buy_yes reason_class=other missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:"
+                "condition_id=0xc30:token_id=tok30:direction=buy_yes:"
+                "family_id=:city=Singapore:target_date=2026-07-01:metric=high"
+            ),
+            "2026-06-29T08:47:16+00:00",
+        ),
+    )
+
+    pulls = cr.active_duplicate_suppressed_rest_pulls(
+        world,
+        open_rests=[rest],
+        decision_time="2026-06-29T08:48:00+00:00",
+    )
+
+    assert pulls == []
+
+
 def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
     world = _mem_world()
     trade = _mem_trade()

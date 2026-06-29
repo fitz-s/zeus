@@ -5553,6 +5553,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
         from datetime import datetime, timezone
         from src.events.continuous_redecision import (
             _all_latest_beliefs,
+            active_duplicate_suppressed_rest_pulls,
             entry_substrate_refresh_scope,
             filter_redecisions_with_spine_members,
             screen_entry_redecisions,
@@ -5636,6 +5637,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 open_rests=open_rests,
                 decision_time=received_at,
                 candidate_redecisions=entry_redecisions,
+            )
+            rest_pulls = _edli_merge_rest_pulls(
+                rest_pulls,
+                active_duplicate_suppressed_rest_pulls(
+                    world_ro,
+                    open_rests=open_rests,
+                    decision_time=received_at,
+                ),
             )
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
             open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)
@@ -5824,6 +5833,14 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     open_rests=open_rests,
                     decision_time=received_at,
                     candidate_redecisions=entry_redecisions,
+                )
+                rest_pulls = _edli_merge_rest_pulls(
+                    rest_pulls,
+                    active_duplicate_suppressed_rest_pulls(
+                        world_ro,
+                        open_rests=open_rests,
+                        decision_time=received_at,
+                    ),
                 )
                 entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
                 rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
@@ -6435,6 +6452,25 @@ def _edli_merge_condition_scopes(
             }
             if clean:
                 out.setdefault(family_key, set()).update(clean)
+    return out
+
+
+def _edli_merge_rest_pulls(*pull_groups: Iterable[tuple[Any, Any]]) -> list[tuple[Any, Any]]:
+    """Merge rest-pull sources without emitting duplicate cancels for one order."""
+
+    out: list[tuple[Any, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for pulls in pull_groups:
+        for rest, decision in pulls or ():
+            command_id = str(getattr(rest, "command_id", "") or "").strip()
+            venue_order_id = str(getattr(rest, "venue_order_id", "") or "").strip()
+            key = (command_id, venue_order_id)
+            if key == ("", ""):
+                key = (str(id(rest)), "")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((rest, decision))
     return out
 
 
