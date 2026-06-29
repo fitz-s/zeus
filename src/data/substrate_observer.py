@@ -168,6 +168,15 @@ def _substrate_clob_timeout_seconds() -> float:
     )
 
 
+def _market_unavailable_evidence_ttl_seconds() -> float:
+    """TTL for sidecar-written market-unavailable evidence consumed by reactor."""
+
+    return max(
+        300.0,
+        float(os.environ.get("ZEUS_REACTOR_MARKET_UNAVAILABLE_EVIDENCE_SECONDS", "1800.0")),
+    )
+
+
 def _background_warm_refresh_budget_seconds() -> float:
     """Bound background warm lock occupancy so money-path refresh gets windows."""
     configured = max(
@@ -2064,8 +2073,65 @@ def _refresh_pending_family_snapshots(
         "snapshot_budget_seconds": snapshot_budget_s,
         **summary,
     }
+    unavailable_source = _market_unavailable_source_from_snapshot_summary(summary)
+    if unavailable_source is not None:
+        unavailable_families = sorted(
+            {
+                _refresh_family_key(
+                    market.get("city"),
+                    market.get("target_date"),
+                    market.get("temperature_metric") or market.get("metric"),
+                )
+                for market in markets_for_refresh
+                if isinstance(market, dict)
+            }
+        )
+        unavailable_families = [
+            family for family in unavailable_families if family[0] and family[1] and family[2]
+        ]
+        if unavailable_families:
+            try:
+                from src.data.market_absence_evidence import record_market_unavailable_families
+
+                record_market_unavailable_families(
+                    unavailable_families,
+                    ttl_seconds=_market_unavailable_evidence_ttl_seconds(),
+                    observed_at=now_utc,
+                    source=unavailable_source,
+                )
+                result["market_unavailable_evidence_source"] = unavailable_source
+                result["market_unavailable_families_recorded"] = len(unavailable_families)
+            except Exception:
+                logger.debug(
+                    "refresh_pending_family_snapshots: failed to persist "
+                    "market-unavailable evidence",
+                    exc_info=True,
+                )
     logger.info("refresh_pending_family_snapshots: %s", result)
     return result
+
+
+def _market_unavailable_source_from_snapshot_summary(summary: dict) -> str | None:
+    """Return a terminal market-unavailable source proven by snapshot refresh."""
+
+    if str(summary.get("executable_substrate_coverage_status") or "") != "NO_EXECUTABLE_CANDIDATES":
+        return None
+    try:
+        candidate_count = int(summary.get("executable_snapshot_candidate_count") or 0)
+    except (TypeError, ValueError):
+        candidate_count = 0
+    if candidate_count != 0:
+        return None
+    counts = summary.get("executable_snapshot_candidate_rejection_counts")
+    if not isinstance(counts, dict):
+        return None
+    if set(str(key) for key in counts) != {"market_end_at_elapsed"}:
+        return None
+    try:
+        elapsed = int(counts.get("market_end_at_elapsed") or 0)
+    except (TypeError, ValueError):
+        elapsed = 0
+    return "market_end_at_elapsed" if elapsed > 0 else None
 
 
 def _market_discovery_staleness_window_seconds() -> float:

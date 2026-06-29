@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from src.data.market_absence_evidence import (
     clear_gamma_empty_families,
     has_recent_gamma_empty_evidence,
+    has_recent_market_unavailable_evidence,
+    record_market_unavailable_families,
     record_gamma_empty_families,
 )
 
@@ -66,5 +68,40 @@ def test_gamma_empty_absence_evidence_is_cleared_by_later_listing(tmp_path) -> N
         target_date="2026-06-26",
         metric="low",
         now=datetime(2026, 6, 25, 18, 2, tzinfo=timezone.utc),
+        path=path,
+    )
+
+
+def test_market_end_elapsed_evidence_is_market_unavailable_not_gamma_empty(tmp_path) -> None:
+    path = tmp_path / "market_absence_evidence.json"
+    now = datetime(2026, 6, 25, 18, 0, tzinfo=timezone.utc)
+
+    record_market_unavailable_families(
+        [("Auckland", "2026-06-25", "low")],
+        ttl_seconds=1800,
+        observed_at=now,
+        source="market_end_at_elapsed",
+        path=path,
+    )
+
+    assert has_recent_market_unavailable_evidence(
+        city="auckland",
+        target_date="2026-06-25",
+        metric="lowest temperature",
+        now=datetime(2026, 6, 25, 18, 10, tzinfo=timezone.utc),
+        path=path,
+    )
+    assert not has_recent_gamma_empty_evidence(
+        city="auckland",
+        target_date="2026-06-25",
+        metric="low",
+        now=datetime(2026, 6, 25, 18, 10, tzinfo=timezone.utc),
+        path=path,
+    )
+    assert not has_recent_market_unavailable_evidence(
+        city="auckland",
+        target_date="2026-06-25",
+        metric="low",
+        now=datetime(2026, 6, 25, 18, 31, tzinfo=timezone.utc),
         path=path,
     )

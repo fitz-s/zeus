@@ -1,8 +1,9 @@
-"""Cross-process market-absence evidence for pending weather families.
+"""Cross-process market-unavailable evidence for pending weather families.
 
-The substrate observer owns Gamma/listing probes, while the order daemon owns
-reactor horizon decisions. An in-process backoff map cannot cross that boundary,
-so Gamma-empty evidence is mirrored to a small state file with an explicit expiry.
+The substrate observer owns listing/executable-substrate probes, while the
+order daemon owns reactor horizon decisions. An in-process backoff map cannot
+cross that boundary, so listing or executable-unavailable evidence is mirrored
+to a small state file with an explicit expiry.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from src.config import state_path
 
 
 ABSENCE_EVIDENCE_FILE = "market_absence_evidence.json"
+MARKET_UNAVAILABLE_SOURCES = frozenset({"gamma_empty", "market_end_at_elapsed"})
 
 
 def family_key(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
@@ -30,6 +32,50 @@ def record_gamma_empty_families(
     observed_at: datetime | None = None,
     path: Path | None = None,
 ) -> None:
+    _record_market_unavailable_families(
+        families,
+        ttl_seconds=ttl_seconds,
+        observed_at=observed_at,
+        path=path,
+        source="gamma_empty",
+    )
+
+
+def record_market_unavailable_families(
+    families: Iterable[tuple[object, object, object]],
+    *,
+    ttl_seconds: float,
+    source: str,
+    observed_at: datetime | None = None,
+    path: Path | None = None,
+) -> None:
+    """Persist family-level proof that no executable venue market is available.
+
+    ``source`` must name a concrete probe result, not a generic fallback state.
+    Consumers can then terminalize only from durable evidence written by the
+    substrate sidecar.
+    """
+
+    _record_market_unavailable_families(
+        families,
+        ttl_seconds=ttl_seconds,
+        observed_at=observed_at,
+        path=path,
+        source=source,
+    )
+
+
+def _record_market_unavailable_families(
+    families: Iterable[tuple[object, object, object]],
+    *,
+    ttl_seconds: float,
+    source: str,
+    observed_at: datetime | None,
+    path: Path | None,
+) -> None:
+    source_key = str(source or "").strip()
+    if source_key not in MARKET_UNAVAILABLE_SOURCES:
+        return
     ttl = max(0.0, float(ttl_seconds))
     if ttl <= 0.0:
         return
@@ -49,7 +95,7 @@ def record_gamma_empty_families(
                 "city_key": city_key,
                 "target_date": target_date,
                 "metric": metric_key,
-                "source": "gamma_empty",
+                "source": source_key,
                 "observed_at": now.isoformat(),
                 "expires_at": expires_at.isoformat(),
             }
@@ -102,17 +148,41 @@ def has_recent_gamma_empty_evidence(
     now: datetime | None = None,
     path: Path | None = None,
 ) -> bool:
+    return has_recent_market_unavailable_evidence(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        now=now,
+        path=path,
+        sources={"gamma_empty"},
+    )
+
+
+def has_recent_market_unavailable_evidence(
+    *,
+    city: object,
+    target_date: object,
+    metric: object,
+    now: datetime | None = None,
+    path: Path | None = None,
+    sources: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+) -> bool:
     checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     key = _serialized_key(family_key(city, target_date, metric))
     if not all(key.split("|")):
         return False
+    allowed_sources = (
+        MARKET_UNAVAILABLE_SOURCES
+        if sources is None
+        else frozenset(str(source or "").strip() for source in sources)
+    )
     target = path or state_path(ABSENCE_EVIDENCE_FILE)
     try:
         payload = _read_payload(target, now=checked_at)
         row = (payload.get("families") or {}).get(key)
         if not isinstance(row, dict):
             return False
-        if str(row.get("source") or "") != "gamma_empty":
+        if str(row.get("source") or "") not in allowed_sources:
             return False
         expires_at = _parse_utc(row.get("expires_at"))
         return expires_at is not None and expires_at > checked_at

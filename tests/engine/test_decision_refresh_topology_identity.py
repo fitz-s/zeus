@@ -349,7 +349,7 @@ def test_reactor_refresher_marks_sidecar_priority_family(monkeypatch) -> None:
 
 
 def test_reactor_market_absence_provider_ignores_process_local_gamma_empty_backoff(monkeypatch) -> None:
-    """The reactor terminalizes no-listed-market blocks only from Gamma-empty proof.
+    """The reactor terminalizes no-listed-market blocks only from durable sidecar proof.
 
     Main no longer owns the sidecar's process-local backoff map. It must read only
     durable shared evidence.
@@ -360,7 +360,7 @@ def test_reactor_market_absence_provider_ignores_process_local_gamma_empty_backo
 
     monkeypatch.setattr(
         market_absence_evidence,
-        "has_recent_gamma_empty_evidence",
+        "has_recent_market_unavailable_evidence",
         lambda **_kwargs: False,
     )
 
@@ -371,7 +371,7 @@ def test_reactor_market_absence_provider_ignores_process_local_gamma_empty_backo
 
 
 def test_reactor_market_absence_provider_reads_sidecar_file_evidence(monkeypatch) -> None:
-    """Gamma-empty evidence is produced by the substrate-observer process.
+    """Market-unavailable evidence is produced by the substrate-observer process.
 
     The order daemon's provider must read the shared evidence surface, not only its
     own process-local backoff map.
@@ -380,13 +380,13 @@ def test_reactor_market_absence_provider_reads_sidecar_file_evidence(monkeypatch
     import src.main as main
     from src.data import market_absence_evidence
 
-    def _has_recent_gamma_empty_evidence(*, city, target_date, metric, now=None, path=None):
+    def _has_recent_market_unavailable_evidence(*, city, target_date, metric, now=None, path=None):
         return (city, target_date, metric) == ("Auckland", "2026-06-20", "low")
 
     monkeypatch.setattr(
         market_absence_evidence,
-        "has_recent_gamma_empty_evidence",
-        _has_recent_gamma_empty_evidence,
+        "has_recent_market_unavailable_evidence",
+        _has_recent_market_unavailable_evidence,
     )
 
     provider = main._edli_reactor_family_market_absence_provider()

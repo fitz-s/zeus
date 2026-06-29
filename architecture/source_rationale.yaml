@@ -2581,6 +2581,13 @@ files:
     why: Shared row helpers for market topology consumers after substrate observer decomposition; keeps topology row shape out of the order daemon.
     downstream:
     - src/data/substrate_observer.py
+  src/data/market_absence_evidence.py:
+    zone: K2_runtime
+    authority_role: cross_process_market_unavailable_evidence
+    why: Small expiring state-file contract from substrate observer to reactor; carries concrete market-unavailable evidence such as Gamma-empty or market-end elapsed so stale/blocked events terminalize only from sidecar-produced facts.
+    downstream:
+    - src/data/substrate_observer.py
+    - src/main.py
   src/data/substrate_observer.py:
     zone: K2_runtime
     authority_role: executable_substrate_producer_lane

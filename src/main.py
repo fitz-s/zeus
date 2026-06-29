@@ -8823,17 +8823,17 @@ def _edli_reactor_family_snapshot_refresher():
 def _edli_reactor_family_market_absence_provider():
     """Build the reactor's live venue-listing absence proof provider.
 
-    The only authority this provider exposes is durable Gamma-empty evidence
-    written by the substrate-observer sidecar. Plain missing topology,
+    The only authority this provider exposes is durable market-unavailable
+    evidence written by the substrate-observer sidecar. Plain missing topology,
     lock-busy, time-boxed probes, or network errors do not write that evidence
     and therefore do not terminalize reactor events.
     """
 
     def _is_absent(*, city, target_date, metric, **_ignored):
         try:
-            from src.data.market_absence_evidence import has_recent_gamma_empty_evidence
+            from src.data.market_absence_evidence import has_recent_market_unavailable_evidence
 
-            return has_recent_gamma_empty_evidence(
+            return has_recent_market_unavailable_evidence(
                 city=city,
                 target_date=target_date,
                 metric=metric,

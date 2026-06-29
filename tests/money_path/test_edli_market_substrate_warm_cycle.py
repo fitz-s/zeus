@@ -3683,6 +3683,105 @@ def test_lifted_substrate_warm_lane_backs_off_gamma_empty_family(monkeypatch):
     assert gamma_calls["count"] == 1
 
 
+def test_lifted_substrate_warm_lane_records_market_end_elapsed_evidence(monkeypatch):
+    """When every candidate is rejected because the venue end-at elapsed, the
+    sidecar must emit durable family evidence so the reactor can terminalize
+    stale snapshot events instead of retrying a non-executable family forever."""
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "lowest-temperature-in-hong-kong-on-june-7-2026",
+            "city": "Hong Kong",
+            "target_date": "2026-06-07",
+            "temperature_metric": "low",
+            "condition_id": "cond-1",
+            "token_id": "yes-1",
+            "range_label": "21C",
+        }
+    ]
+    cached_market = {
+        "slug": "lowest-temperature-in-hong-kong-on-june-7-2026",
+        "city": SimpleNamespace(name="Hong Kong"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "low",
+        "outcomes": [
+            {
+                "condition_id": "cond-1",
+                "market_id": "cond-1",
+                "token_id": "yes-1",
+                "no_token_id": "no-1",
+                "question_id": "q-1",
+            }
+        ],
+    }
+
+    import src.data.market_absence_evidence as market_absence_evidence
+    import src.data.market_scanner as scanner
+    import src.data.market_topology_rows as market_topology_rows
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    recorded: list[dict] = []
+
+    monkeypatch.setenv("ZEUS_REACTOR_MARKET_UNAVAILABLE_EVIDENCE_SECONDS", "1800")
+    monkeypatch.setattr(
+        market_topology_rows, "_event_family_market_topology_rows", lambda *a, **k: topology_rows
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(
+        scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: None)
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+    monkeypatch.setattr(
+        market_absence_evidence,
+        "record_market_unavailable_families",
+        lambda *args, **kwargs: recorded.append({"args": args, "kwargs": kwargs}),
+    )
+
+    def _refresh(_conn, *, markets, **_kwargs):
+        assert markets == [cached_market]
+        return {
+            "executable_substrate_coverage_status": "NO_EXECUTABLE_CANDIDATES",
+            "executable_snapshot_candidate_count": 0,
+            "executable_snapshot_candidate_rejection_counts": {
+                "market_end_at_elapsed": 1,
+            },
+            "attempted": 0,
+            "inserted": 0,
+        }
+
+    monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "low")
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 8, 18, 0, tzinfo=timezone.utc),
+        extra_priority_families=[("Hong Kong", "2026-06-07", "low")],
+        include_pending_families=False,
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["market_unavailable_evidence_source"] == "market_end_at_elapsed"
+    assert result["market_unavailable_families_recorded"] == 1
+    assert recorded == [
+        {
+            "args": ([("hong kong", "2026-06-07", "low")],),
+            "kwargs": {
+                "ttl_seconds": 1800.0,
+                "observed_at": datetime(2026, 6, 8, 18, 0, tzinfo=timezone.utc),
+                "source": "market_end_at_elapsed",
+            },
+        }
+    ]
+
+
 def test_warm_lane_venue_close_skip_is_failsoft_on_unresolvable_family(monkeypatch):
     """Fail-SOFT direction of the venue-close warm-skip: an UNRESOLVABLE family
     (city not in the runtime registry) must be KEPT (not skipped) even past the
