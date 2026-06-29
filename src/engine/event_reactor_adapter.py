@@ -10727,6 +10727,11 @@ def _selection_scoped_proofs(
     honor_admission_rejections: bool = True,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    executable = [
+        proof
+        for proof in executable
+        if _live_selection_rejection_reason(proof) is None
+    ]
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
     # admission gate REJECTED (missing_reason set: DIRECTION_LAW / COVERAGE_
     # UNLICENSED_TAIL / capital efficiency / buy_no evidence) must not enter the
@@ -10813,6 +10818,39 @@ def _selection_scoped_proofs(
         elif scoped:
             return ()
     return tuple(scoped)
+
+
+def _live_selection_rejection_reason(proof: _CandidateProof) -> str | None:
+    """Return the live admission reason that prevents a proof from being ranked.
+
+    The ΔU selector is the entry decision surface; proofs that cannot satisfy live
+    selected-side evidence must be removed before ranking, not merely rejected by
+    the final venue submit gate.  This keeps cheap positive-EV lottery legs and
+    qkernel SIDE_NOT_ARMED telemetry from becoming selected live intents.
+    """
+    from src.strategy.live_inference.live_admission import (
+        live_win_rate_floor_rejection_reason,
+    )
+
+    win_rate_reason = live_win_rate_floor_rejection_reason(
+        q_lcb=getattr(proof, "q_lcb_5pct", None)
+    )
+    if win_rate_reason is not None:
+        return win_rate_reason
+
+    cert = getattr(proof, "qkernel_execution_economics", None)
+    if cert is None:
+        return None
+    if not isinstance(cert, Mapping):
+        return "QKERNEL_EXECUTION_ECONOMICS_INVALID"
+    if str(cert.get("source") or "").strip() != "qkernel_spine":
+        return None
+    if _valid_qkernel_execution_economics_payload(
+        cert,
+        direction=str(getattr(proof, "direction", "") or ""),
+    ) is None:
+        return "QKERNEL_EXECUTION_ECONOMICS_INVALID_FOR_SELECTION"
+    return None
 
 
 def _opportunity_book_proofs_with_selection_rejections(

@@ -225,6 +225,7 @@ class CandidateEvaluation:
             and self.passed_prefilter
             and self.missing_reason is None
             and self.quote_fresh
+            and self.live_win_rate_admissible
             and self.live_lcb_consistency_admissible
             and self.live_capital_efficiency_admissible
             and self.live_buy_no_conservative_evidence_admissible

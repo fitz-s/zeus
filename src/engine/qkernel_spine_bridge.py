@@ -1454,6 +1454,12 @@ def _overlay_spine_economics_onto_proof_with_reason(
         return _OverlayResult(None, "SELECTION_MISSING")
     if _proof_direction_law_rejected(proof):
         return _OverlayResult(None, "DIRECTION_LAW_REJECTED_PROOF")
+    missing_reason = str(getattr(proof, "missing_reason", "") or "").strip()
+    if not _qkernel_may_clear_legacy_missing_reason(missing_reason):
+        return _OverlayResult(
+            None,
+            f"PROOF_ADMISSION_REJECTION_NOT_QKERNEL_RECOVERABLE:{missing_reason}",
+        )
     selected_decision = None
     for candidate_decision in getattr(decision, "candidate_decisions", ()) or ():
         try:
@@ -1523,6 +1529,21 @@ def _overlay_spine_economics_onto_proof_with_reason(
         return _OverlayResult(replace(proof, **overlay))
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
         return _OverlayResult(None, "PROOF_REPLACE_FAILED")
+
+
+def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool:
+    """Allow qkernel to rescore only legacy scalar blockers, not live policy gates."""
+
+    text = str(missing_reason or "").strip()
+    if not text:
+        return True
+    return text.startswith(
+        (
+            "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            "ADMISSION_CAPITAL_EFFICIENCY",
+            "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
+        )
+    )
 
 
 def _qkernel_selection_guard_rejection_reason(

@@ -1373,6 +1373,22 @@ def test_overlay_clears_scalar_admission_missing_reason_for_qkernel_selected_can
     assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
+def test_overlay_refuses_to_clear_center_buy_ultra_low_live_blocker():
+    """qkernel may rescore stale scalar vetoes, not live strategy policy blockers."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.015, q_dot_payoff=0.08, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.08,
+        q_lcb_5pct=0.08,
+        economics=economics,
+        direction="buy_yes",
+        missing_reason="CENTER_BUY_ULTRA_LOW_PRICE(0.0150<=0.02)",
+    )
+
+    assert new_proof is None
+
+
 def test_overlay_sets_qkernel_band_false_edge_p_value():
     """FDR consumes the selected qkernel route's empirical false-edge rate.
 

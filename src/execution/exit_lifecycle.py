@@ -3325,7 +3325,13 @@ def _last_exit_order_id(
         except sqlite3.OperationalError:
             event_order_ids = set()
         for candidate in candidates:
-            if candidate in command_order_ids or candidate in event_order_ids:
+            if candidate in command_order_ids:
+                return candidate
+            try:
+                retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
+            except (TypeError, ValueError):
+                retry_count = 0
+            if retry_count <= 0 and candidate in event_order_ids:
                 return candidate
         return ""
 
@@ -3362,7 +3368,12 @@ def check_pending_exits(
         if _runtime_state_value(pos) in _PENDING_EXIT_SCAN_INACTIVE_STATES:
             stats["skipped_inactive"] = stats.get("skipped_inactive", 0) + 1
             continue
-        if pos.exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
+        raw_exit_state = getattr(pos, "exit_state", "")
+        exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
+        if exit_state == "retry_pending":
+            stats["unchanged"] += 1
+            continue
+        if exit_state not in ("sell_placed", "sell_pending", "exit_intent") and str(
             getattr(pos, "order_status", "") or ""
         ) != "sell_pending_confirmation":
             continue
@@ -3396,6 +3407,10 @@ def check_pending_exits(
 
         exit_order_id = _last_exit_order_id(pos, conn=conn)
         if not exit_order_id:
+            if release_pending_exit_without_order_if_retryable(pos, conn=conn):
+                stats["retried"] += 1
+                stats["released_no_order"] = stats.get("released_no_order", 0) + 1
+                continue
             _mark_exit_retry(pos, reason="SELL_NO_ORDER_ID", error="no_order_id", conn=conn)
             if conn is not None:
                 log_pending_exit_recovery_event(
@@ -3607,6 +3622,44 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     if conn is not None:
         from src.state.db import log_exit_retry_released_event
         log_exit_retry_released_event(conn, position)
+    return True
+
+
+def release_pending_exit_without_order_if_retryable(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Release a stranded pending_exit that has no live sell order to monitor."""
+
+    if _runtime_state_value(position) != "pending_exit":
+        return False
+    raw_exit_state = getattr(position, "exit_state", "")
+    exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
+    if exit_state in {"backoff_exhausted", "retry_pending"}:
+        return False
+    if is_exit_cooldown_active(position):
+        return False
+    if _last_exit_order_id(position, conn=conn):
+        return False
+    if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
+        return False
+    position.exit_state = ""
+    position.next_exit_retry_at = ""
+    order_status = str(getattr(position, "order_status", "") or "")
+    if order_status.startswith("sell_") or order_status in {"retry_pending", "exit_intent"}:
+        position.order_status = "filled"
+    _release_pending_exit(position)
+    if conn is not None:
+        from src.state.db import log_pending_exit_recovery_event
+
+        log_pending_exit_recovery_event(
+            conn,
+            position,
+            event_type="EXIT_INTENT_RECOVERED",
+            reason="PENDING_EXIT_NO_ORDER_RELEASED",
+            error="no_exit_order",
+        )
     return True
 
 
@@ -3917,6 +3970,7 @@ def _mark_exit_retry(
         # abandoning a still-sellable reversal exit. (2026-06-23 diagnosis.)
         position.last_exit_error = error[:500]
         position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
         position.next_exit_retry_at = (
             _utcnow() + timedelta(seconds=CHANNEL_NOT_READY_COOLDOWN_SECONDS)
         ).isoformat()
@@ -3936,6 +3990,7 @@ def _mark_exit_retry(
     if _is_exit_transient_lock_error(error):
         position.last_exit_error = error[:500]
         position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
         position.next_exit_retry_at = (
             _utcnow() + timedelta(seconds=EXIT_LOCKED_COOLDOWN_SECONDS)
         ).isoformat()
@@ -3959,6 +4014,7 @@ def _mark_exit_retry(
 
     if position.exit_retry_count >= MAX_EXIT_RETRIES:
         position.exit_state = "backoff_exhausted"
+        position.order_status = "backoff_exhausted"
         _dual_write_canonical_pending_exit_if_available(
             conn,
             position,
@@ -3975,6 +4031,7 @@ def _mark_exit_retry(
     # Exponential cooldown: 5min, 10min, 20min, ... capped at 60min
     actual_cooldown = min(cooldown_seconds * (2 ** (position.exit_retry_count - 1)), 3600)
     position.exit_state = "retry_pending"
+    position.order_status = "retry_pending"
     position.next_exit_retry_at = (
         _utcnow() + timedelta(seconds=actual_cooldown)
     ).isoformat()

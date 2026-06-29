@@ -97,6 +97,9 @@ def _admission_rejection_reason(evaluation: CandidateEvaluation) -> str:
         return "ADMISSION_TRADE_SCORE_NON_POSITIVE"
     if not evaluation.quote_fresh:
         return "ADMISSION_QUOTE_STALE"
+    win_rate_reason = evaluation.live_win_rate_floor_reason
+    if win_rate_reason is not None:
+        return win_rate_reason
     lcb_consistency_reason = evaluation.live_lcb_consistency_reason
     if lcb_consistency_reason is not None:
         return lcb_consistency_reason

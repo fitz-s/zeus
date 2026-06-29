@@ -3992,6 +3992,7 @@ def execute_monitoring_phase(
         execute_exit,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        release_pending_exit_without_order_if_retryable,
         release_market_closed_pending_exit_hold,
     )
     from src.state.chain_reconciliation import quarantine_resolution_reason
@@ -4093,6 +4094,11 @@ def execute_monitoring_phase(
                 continue
             if run_exit_preflight:
                 check_pending_retries(pos, conn=conn)
+            if release_pending_exit_without_order_if_retryable(pos, conn=conn):
+                portfolio_dirty = True
+                summary["monitor_released_pending_exit_without_order"] = (
+                    summary.get("monitor_released_pending_exit_without_order", 0) + 1
+                )
             if pos.state == "pending_exit":
                 pending_exit_monitor_only = True
                 summary["monitor_pending_exit_phase_evaluated"] = (

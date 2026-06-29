@@ -2499,6 +2499,7 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
             "chain_state",
             "p_posterior",
             "cost_basis_usd",
+            "order_id",
         ):
             optional_selects.append(column if column in columns else f"NULL AS {column}")
         chain_filter = "AND COALESCE(chain_shares, shares, 0) > 0" if positive_chain_only else ""
@@ -2579,11 +2580,15 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
                 sequence_select = (
                     "sequence_no" if "sequence_no" in event_columns else "0 AS sequence_no"
                 )
+                event_id_select = (
+                    "event_id" if "event_id" in event_columns else "NULL AS event_id"
+                )
                 placeholders = ",".join("?" for _ in position_ids)
                 event_rows = conn.execute(
                     f"""
                     WITH terminal_events AS (
                         SELECT
+                            {event_id_select},
                             position_id,
                             {event_type_select},
                             {phase_before_select},
@@ -2598,13 +2603,28 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
                           FROM position_events
                          WHERE position_id IN ({placeholders})
                            AND ({" OR ".join(event_conditions)})
+                    ),
+                    latest_any AS (
+                        SELECT
+                            {event_id_select},
+                            position_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY position_id
+                                ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                            ) AS rn
+                          FROM position_events
+                         WHERE position_id IN ({placeholders})
                     )
-                    SELECT position_id, event_type, phase_before, phase_after,
+                    SELECT terminal_events.position_id, event_type, phase_before, phase_after,
                            sequence_no, occurred_at, payload_json
                       FROM terminal_events
-                     WHERE rn = 1
+                      JOIN latest_any
+                        ON latest_any.position_id = terminal_events.position_id
+                       AND latest_any.rn = 1
+                       AND COALESCE(latest_any.event_id, '') = COALESCE(terminal_events.event_id, '')
+                     WHERE terminal_events.rn = 1
                     """,
-                    tuple(position_ids) + tuple(event_params),
+                    tuple(position_ids) + tuple(event_params) + tuple(position_ids),
                 ).fetchall()
             terminal_by_position = {
                 str(row["position_id"]): dict(row)
@@ -2830,6 +2850,7 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     full_fill_repairable = _exit_full_fill_repairable_by_position()
     retry_resumable = _exit_retry_resumable_by_position()
     stranded_intent_recoverable = _stranded_exit_intent_recoverable_by_position()
+    phantom_sell_releaseable = _phantom_pending_exit_sell_projection_releaseable_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -2872,6 +2893,14 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
                 "repair_evidence": _intent_evidence,
             }
             tolerated.append(item)
+        elif str(row["position_id"] or "") in phantom_sell_releaseable:
+            _phantom_evidence = phantom_sell_releaseable[str(row["position_id"] or "")]
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_pending_exit_no_order_release",
+                "repair_evidence": _phantom_evidence,
+            }
+            tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
             tolerated.append(item)
             if order_status != "backoff_exhausted":
@@ -2886,6 +2915,107 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
     )
+
+
+def _phantom_pending_exit_sell_projection_releaseable_by_position() -> dict[str, dict[str, Any]]:
+    """Find pending-exit sell projections that have no durable venue truth behind them."""
+
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return {}
+        position_columns = _table_columns(conn, "main", "position_current")
+        order_id_select = "pc.order_id" if "order_id" in position_columns else "NULL"
+        rows = conn.execute(
+            f"""
+            SELECT pc.position_id,
+                   pc.order_status,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   {order_id_select} AS projected_order_id,
+                   SUM(CASE WHEN UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT' THEN 1 ELSE 0 END)
+                       AS exit_command_count,
+                   SUM(CASE WHEN pe.event_type = 'EXIT_ORDER_POSTED' THEN 1 ELSE 0 END)
+                       AS exit_order_posted_count
+              FROM position_current pc
+              LEFT JOIN venue_commands cmd
+                ON cmd.position_id = pc.position_id
+              LEFT JOIN position_events pe
+                ON pe.position_id = pc.position_id
+             WHERE pc.phase = 'pending_exit'
+             GROUP BY pc.position_id, pc.order_status, pc.exit_retry_count,
+                      pc.next_exit_retry_at, projected_order_id
+            """
+        ).fetchall()
+        releaseable: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            order_status = str(row["order_status"] or "")
+            if not _pending_exit_order_status_looks_like_sell_projection(order_status):
+                continue
+            try:
+                exit_command_count = int(row["exit_command_count"] or 0)
+                posted_count = int(row["exit_order_posted_count"] or 0)
+                retry_count = int(row["exit_retry_count"] or 0)
+            except (TypeError, ValueError):
+                continue
+            projected_order_id = str(row["projected_order_id"] or "")
+            order_fact_count = _venue_fact_count_for_order(
+                conn,
+                table="venue_order_facts",
+                venue_order_id=projected_order_id,
+            )
+            trade_fact_count = _venue_fact_count_for_order(
+                conn,
+                table="venue_trade_facts",
+                venue_order_id=projected_order_id,
+            )
+            if exit_command_count or order_fact_count or trade_fact_count:
+                continue
+            if posted_count and retry_count <= 0:
+                continue
+            releaseable[str(row["position_id"])] = {
+                "order_status": order_status,
+                "projected_order_id": projected_order_id,
+                "exit_command_count": exit_command_count,
+                "exit_order_posted_count": posted_count,
+                "venue_order_fact_count": order_fact_count,
+                "venue_trade_fact_count": trade_fact_count,
+                "exit_retry_count": retry_count,
+                "next_exit_retry_at": row["next_exit_retry_at"],
+            }
+        return releaseable
+
+
+def _pending_exit_order_status_looks_like_sell_projection(order_status: str) -> bool:
+    normalized = order_status.strip().lower()
+    return normalized.startswith("sell_") or normalized in {"selling", "exit_intent"}
+
+
+def _venue_fact_count_for_order(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    venue_order_id: str,
+) -> int:
+    if not venue_order_id or not _table_exists(conn, "main", table):
+        return 0
+    columns = _table_columns(conn, "main", table)
+    if "venue_order_id" not in columns:
+        return 0
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM {table} WHERE venue_order_id = ?",
+            (venue_order_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    try:
+        return int(row["count"] or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _stranded_exit_intent_recoverable_by_position() -> dict[str, dict[str, Any]]:

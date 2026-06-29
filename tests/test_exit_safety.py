@@ -741,6 +741,217 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     assert json.loads(event["payload_json"])["semantic_event"] == "PARTIAL_FILL_OBSERVED"
 
 
+def test_pending_exit_fill_poller_skips_retry_without_order_id(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-retry-no-order",
+        market_id="mkt-retry-no-order",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="29C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=0.15,
+        entry_price=0.015,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="retry_pending",
+        order_status="sell_pending_confirmation",
+        last_exit_order_id="",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-retry-no-order",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"retry_pending without order id must not be polled: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(PortfolioState(positions=[position]), FakeClob(), conn=conn)
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert position.exit_state == "retry_pending"
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_ID_MISSING'
+        """,
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+
+
+def test_pending_exit_without_order_releases_for_redecision(conn):
+    from src.execution.exit_lifecycle import release_pending_exit_without_order_if_retryable
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-pending-no-order-release",
+        market_id="mkt-pending-no-order-release",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="29C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=0.15,
+        entry_price=0.015,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="",
+        order_status="filled",
+        last_exit_order_id="",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-pending-no-order-release",
+    )
+
+    assert release_pending_exit_without_order_if_retryable(position, conn=conn) is True
+    assert position.state == "entered"
+    assert position.pre_exit_state == ""
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+
+
+def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-phantom-sell-projection",
+        market_id="mkt-phantom-sell-projection",
+        city="Miami",
+        cluster="US",
+        target_date="2026-06-30",
+        bin_label="96-97F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=4.34,
+        entry_price=0.051,
+        shares=85.17,
+        cost_basis_usd=4.34,
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="sell_placed",
+        order_status="sell_placed",
+        order_id="0xphantom-exit-order",
+        last_exit_order_id="",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-phantom-sell-projection",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"phantom sell projection must be released, not polled: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(PortfolioState(positions=[position]), FakeClob(), conn=conn)
+
+    assert stats["retried"] == 1
+    assert stats["released_no_order"] == 1
+    assert position.state == "entered"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_ID_MISSING'
+        """,
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+
+
+def test_retrying_pending_exit_posted_without_command_releases_before_poll(conn):
+    from src.execution import exit_lifecycle
+    from src.state.db import transition_phase
+    from src.state.portfolio import PortfolioState, Position
+
+    trade_id = "pos-stale-posted-exit-without-command"
+    posted = Position(
+        trade_id=trade_id,
+        market_id="mkt-stale-posted-exit-without-command",
+        city="Miami",
+        cluster="US",
+        target_date="2026-06-30",
+        bin_label="96-97F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=4.34,
+        entry_price=0.051,
+        shares=85.17,
+        cost_basis_usd=4.34,
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="sell_placed",
+        order_status="sell_placed",
+        order_id="0xstale-posted-exit",
+        last_exit_order_id="0xstale-posted-exit",
+        exit_retry_count=2,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-stale-posted-exit-without-command",
+    )
+    assert transition_phase(
+        conn,
+        posted,
+        event_type="EXIT_ORDER_POSTED",
+        reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+        error="",
+    )
+
+    runtime_position = Position(
+        trade_id=trade_id,
+        market_id="mkt-stale-posted-exit-without-command",
+        city="Miami",
+        cluster="US",
+        target_date="2026-06-30",
+        bin_label="96-97F",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=4.34,
+        entry_price=0.051,
+        shares=85.17,
+        cost_basis_usd=4.34,
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="sell_placed",
+        order_status="sell_placed",
+        order_id="0xstale-posted-exit",
+        last_exit_order_id="",
+        exit_retry_count=2,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-stale-posted-exit-without-command",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"stale posted exit without command must release: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[runtime_position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["retried"] == 1
+    assert stats["released_no_order"] == 1
+    assert runtime_position.state == "entered"
+    assert runtime_position.exit_state == ""
+    assert runtime_position.order_status == "filled"
+
+
 def test_pending_exit_status_poll_releases_db_transaction_before_venue_io(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position

@@ -125,7 +125,7 @@ def test_selector_keeps_large_lcb_kelly_edge_over_tiny_cheap_tail():
     assert result.selected is larger_lcb_edge
 
 
-def test_selector_allows_low_win_rate_positive_ev_when_capital_efficient():
+def test_selector_rejects_low_win_rate_positive_ev_even_when_capital_efficient():
     low_win_rate_lottery = _evaluation(
         candidate_id="cand-low-win-rate",
         condition_id="condition-low-win-rate",
@@ -151,11 +151,11 @@ def test_selector_allows_low_win_rate_positive_ev_when_capital_efficient():
 
     result = select_best_family_candidate((low_win_rate_lottery, stable_win_rate_edge))
 
-    assert result.selected is low_win_rate_lottery or result.selected is stable_win_rate_edge
-    assert not result.loser_reasons.get("cand-low-win-rate", "").startswith("ADMISSION_WIN_RATE_FLOOR:")
+    assert result.selected is stable_win_rate_edge
+    assert result.loser_reasons["cand-low-win-rate"].startswith("ADMISSION_WIN_RATE_FLOOR:")
 
 
-def test_selector_can_choose_buy_yes_below_win_rate_floor_when_objective_best():
+def test_selector_cannot_choose_buy_yes_below_win_rate_floor_when_objective_best():
     cheap_buy_yes = _evaluation(
         candidate_id="cand-cheap-buy-yes",
         condition_id="condition-cheap-buy-yes",
@@ -183,9 +183,9 @@ def test_selector_can_choose_buy_yes_below_win_rate_floor_when_objective_best():
     result = select_best_family_candidate((expensive_buy_no, cheap_buy_yes))
 
     assert cheap_buy_yes.live_win_rate_admissible is False
-    assert cheap_buy_yes.admitted is True
-    assert result.selected is cheap_buy_yes
-    assert result.loser_reasons["cand-expensive-buy-no"].startswith("FAMILY_RANK_LOST:")
+    assert cheap_buy_yes.admitted is False
+    assert result.selected is expensive_buy_no
+    assert result.loser_reasons["cand-cheap-buy-yes"].startswith("ADMISSION_WIN_RATE_FLOOR:")
 
 
 def test_selector_ranks_low_payout_capital_inefficient_candidate_below_better_sibling():
@@ -227,8 +227,8 @@ def test_selector_uses_candidate_kelly_size_for_expected_dollars():
         direction="buy_yes",
         bin_label="tiny",
         execution_price=0.10,
-        q_posterior=0.30,
-        q_lcb_5pct=0.22,
+        q_posterior=0.58,
+        q_lcb_5pct=0.52,
         trade_score=0.10,
         kelly_size_usd=0.05,
     )

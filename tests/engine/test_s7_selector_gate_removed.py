@@ -421,11 +421,11 @@ def test_opportunity_book_marks_qkernel_selected_candidate_as_live_admitted():
     selected_id = era._candidate_evaluation_id(proof_b)
     rec = next(c for c in book["candidates"] if c["candidate_id"] == selected_id)
 
-    assert book["admitted_count"] == 1
+    assert book["admitted_count"] == 0
     assert book["selection_authority"] == "qkernel_spine"
     assert book["selected_qkernel_execution_economics"] == qkernel_cert
     assert rec["legacy_admitted"] is False
-    assert rec["admitted"] is True
+    assert rec["admitted"] is False
     assert rec["live_decision_selected"] is True
     assert rec["live_selection_authority"] == "qkernel_spine"
     assert rec["qkernel_execution_economics"] == qkernel_cert

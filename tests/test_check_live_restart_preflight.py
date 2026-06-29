@@ -1317,6 +1317,9 @@ def test_position_projection_integrity_blocks_hard_terminal_reactivation(
     )
     now = datetime.now(timezone.utc).isoformat()
     trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
     trade.execute(
         """
         CREATE TABLE position_events (
@@ -1355,6 +1358,99 @@ def test_position_projection_integrity_blocks_hard_terminal_reactivation(
     assert result.ok is False
     assert result.evidence["risky"][0]["risk"] == "open_position_after_hard_terminal_event"
     assert result.evidence["risky"][0]["terminal_event"]["event_type"] == "ADMIN_VOIDED"
+
+
+def test_position_projection_integrity_allows_superseded_phantom_void_recovery(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, payload_json
+        ) VALUES (?, 'pos-1', ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "ev-terminal",
+                7,
+                "ADMIN_VOIDED",
+                now,
+                "pending_exit",
+                "voided",
+                '{"reason":"PHANTOM_NOT_ON_CHAIN"}',
+            ),
+            (
+                "ev-recovery",
+                8,
+                "REVIEW_REQUIRED",
+                now,
+                "voided",
+                "quarantined",
+                '{"reason":"chain_absent_confirmed_position_unattributed"}',
+            ),
+            (
+                "ev-chain-positive",
+                9,
+                "CHAIN_SIZE_CORRECTED",
+                now,
+                "pending_exit",
+                "pending_exit",
+                '{"chain_state":"synced","chain_shares_after":85.17}',
+            ),
+        ],
+    )
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               entry_method = 'qkernel_spine',
+               p_posterior = 0.21,
+               cost_basis_usd = 4.34,
+               chain_shares = 85.17
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
 
 
 def test_preflight_projection_integrity_checks_zero_chain_open_ghost(
@@ -2806,6 +2902,279 @@ def test_preflight_tolerates_pre_submit_exit_retry_without_exit_command(monkeypa
     assert tolerated["restart_resolution"] == "exit_lifecycle_pre_submit_retry_resume"
     assert tolerated["repair_evidence"]["command_state"] == "NO_EXIT_COMMAND_RETRY_PENDING"
     assert tolerated["repair_evidence"]["event_type"] == "EXIT_ORDER_REJECTED"
+
+
+def test_preflight_tolerates_pending_exit_phantom_sell_projection(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute("ALTER TABLE position_current ADD COLUMN order_id TEXT")
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            venue_order_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            venue_status TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at, order_id
+        ) VALUES (
+            'phantom-exit-pos', 'pending_exit', 'Miami', '2026-06-30', 'high',
+            '96-97F', 'buy_yes', 85.17, 85.17, 'sell_placed',
+            'ENTRY_SELECTION_GUARD_INVALID_EXIT', 2, NULL, 0.09, 1, 0.05, 1,
+            '2026-06-29T19:22:48+00:00',
+            '0xphantomexit'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'entry-cmd', 'phantom-exit-pos', 'ENTRY', 'CANCELLED', '0xentry',
+            85.17, '2026-06-29T11:18:50+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'phantom-exit-pos:monitor_refreshed:1',
+            'phantom-exit-pos',
+            1,
+            'MONITOR_REFRESHED',
+            '2026-06-29T19:19:48+00:00',
+            'sell_placed',
+            '{}'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_pending_exit_no_order_release"
+    assert tolerated["repair_evidence"]["projected_order_id"] == "0xphantomexit"
+    assert tolerated["repair_evidence"]["exit_command_count"] == 0
+    assert tolerated["repair_evidence"]["venue_order_fact_count"] == 0
+    assert tolerated["repair_evidence"]["venue_trade_fact_count"] == 0
+
+
+def test_preflight_tolerates_retrying_pending_exit_posted_without_venue_truth(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute("ALTER TABLE position_current ADD COLUMN order_id TEXT")
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            venue_order_id TEXT,
+            command_id TEXT,
+            state TEXT,
+            filled_size TEXT,
+            fill_price TEXT,
+            observed_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            venue_status TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at, order_id
+        ) VALUES (
+            'stale-posted-exit-pos', 'pending_exit', 'Miami', '2026-06-30', 'high',
+            '96-97F', 'buy_yes', 85.17, 85.17, 'sell_placed',
+            'ENTRY_SELECTION_GUARD_INVALID_EXIT', 2, NULL, 0.09, 1, 0.05, 1,
+            '2026-06-29T19:22:48+00:00',
+            '0xstaleexit'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'stale-posted-exit-pos:exit_order_posted:1',
+            'stale-posted-exit-pos',
+            1,
+            'EXIT_ORDER_POSTED',
+            '2026-06-29T18:09:53+00:00',
+            'sell_pending',
+            '{}'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "exit_lifecycle_pending_exit_no_order_release"
+    assert tolerated["repair_evidence"]["projected_order_id"] == "0xstaleexit"
+    assert tolerated["repair_evidence"]["exit_order_posted_count"] == 1
+    assert tolerated["repair_evidence"]["exit_retry_count"] == 2
+
+
+def test_preflight_blocks_pending_exit_with_real_exit_command(monkeypatch, tmp_path):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute("ALTER TABLE position_current ADD COLUMN order_id TEXT")
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            venue_status TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status, exit_reason,
+            exit_retry_count, next_exit_retry_at, last_monitor_prob,
+            last_monitor_prob_is_fresh, last_monitor_market_price,
+            last_monitor_market_price_is_fresh, updated_at, order_id
+        ) VALUES (
+            'real-exit-pos', 'pending_exit', 'Miami', '2026-06-30', 'high',
+            '96-97F', 'buy_yes', 85.17, 85.17, 'sell_placed',
+            'ENTRY_SELECTION_GUARD_INVALID_EXIT', 2, NULL, 0.09, 1, 0.05, 1,
+            '2026-06-29T19:22:48+00:00',
+            '0xrealexit'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO venue_commands VALUES (
+            'exit-cmd', 'real-exit-pos', 'EXIT', 'PLACED', '0xrealexit',
+            85.17, '2026-06-29T19:18:50+00:00'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(c for c in result["checks"] if c["name"] == "pending_exit_restart_risk")
+    assert pending["ok"] is False
+    assert pending["evidence"]["risky"][0]["position_id"] == "real-exit-pos"
 
 
 def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tmp_path):

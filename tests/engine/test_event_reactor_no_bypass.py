@@ -2870,6 +2870,64 @@ def test_selector_enabled_does_not_fallback_to_low_win_rate_positive_ev(monkeypa
     assert selected is None
 
 
+def test_selector_rejects_qkernel_side_not_armed_before_live_intent(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    unarmed_yes = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="cheap-tail"),
+        token_id="cheap-tail-yes-token",
+        direction="buy_yes",
+        row={"condition_id": "cheap-tail"},
+        executable_snapshot_id="cheap-tail-snapshot",
+        execution_price=ExecutionPrice(
+            0.01,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.82,
+        q_lcb_5pct=0.72,
+        c_cost_95pct=0.011,
+        p_fill_lcb=0.90,
+        trade_score=0.71,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "candidate_id": "DIRECT_YES:cheap-tail",
+            "route_id": "DIRECT_YES:cheap-tail@proof",
+            "side": "YES",
+            "bin_id": "cheap-tail",
+            "payoff_q_point": 0.82,
+            "payoff_q_lcb": 0.72,
+            "q_dot_payoff": 0.82,
+            "edge_lcb": 0.71,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": "6.25",
+            "optimal_delta_u": 0.02,
+            "cost": 0.01,
+            "false_edge_rate": 0.01,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SIDE_NOT_ARMED",
+            "selection_guard_abstained": True,
+            "selection_guard_q_safe": 0.0,
+        },
+    )
+
+    selected = _selected_candidate_proof({}, (unarmed_yes,))
+
+    assert selected is None
+
+
 def test_replacement_live_authority_direction_rebinds_to_sibling_proof():
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import (

@@ -52,13 +52,18 @@ class OpportunityBook:
         ]
         live_selected_candidate_id = actual_selected_candidate_id or self.selected_candidate_id
         for candidate in candidate_receipts:
-            legacy_admitted = bool(candidate.get("admitted"))
+            live_admitted = bool(candidate.get("admitted"))
             live_selected = bool(
                 live_selected_candidate_id
                 and str(candidate.get("candidate_id") or "") == str(live_selected_candidate_id)
             )
-            candidate["legacy_admitted"] = legacy_admitted
-            candidate["admitted"] = live_selected
+            # Admission and selection are different money-path facts.  A candidate
+            # can be admitted but not selected, or selected by a downstream qkernel
+            # authority only after its own live evidence is valid.  Do not rewrite
+            # "admitted" into "selected"; that made low-quality selected legs look
+            # like they had passed the live admission gate.
+            candidate["legacy_admitted"] = live_admitted
+            candidate["admitted"] = live_admitted
             candidate["live_decision_selected"] = live_selected
         if actual_selected_candidate_id:
             for candidate in candidate_receipts:
