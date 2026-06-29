@@ -2,11 +2,11 @@
 
 > Quantitative trading engine for weather-settlement prediction markets on Polymarket.
 
-Zeus trades daily high and low temperature markets. It reads the same weather everyone
-reads, turns it into a probability for each market that is honest about its own
-uncertainty, and commits capital only where that probability beats the price by a margin
-it can defend against its own settled record. What follows is exactly how a forecast
-becomes a position, and what keeps each step honest.
+Zeus trades daily high and low temperature markets. Predicting the weather is the easy part —
+everyone has the same forecasts. The work is turning those forecasts into a probability honest
+enough to bet real money against a market price: calibrated against what has actually settled,
+conservative where it is uncertain, and never confident for the wrong reasons. What follows is
+how it works, and what makes each step more than a weighted average.
 
 ```mermaid
 flowchart LR
@@ -30,90 +30,106 @@ flowchart LR
 
 ## What it trades
 
-Each market asks a yes/no question — *"will Tokyo's high land in 50–51°F?"* — and settles
-on the integer temperature an official provider reports for the day. That integer is the
-end of a rounding chain: a real `74.45°F` is measured by a sensor, rounded in the weather
-report, and posted as `74°F`. Zeus follows that chain exactly instead of treating
-temperature as a smooth number, because a fraction of a degree decides which side of a bin
-boundary the day lands on — and the cities don't all round the same way.
+Each market asks a yes/no question — *"will Tokyo's high land in 50–51°F?"* — and settles on
+the integer temperature an official provider reports for the day. That integer is the end of
+a rounding chain: a real `74.45°F` is measured by a sensor, rounded in the weather report,
+and posted as `74°F`. A fraction of a degree decides which side of a bin boundary the day
+lands on, and not every city rounds the same way — so the rounding itself has to be modelled,
+not assumed away. Markets come as an exact value or range (`50–51°F`), an open ceiling
+(`75°F or higher`), or an open floor (`30°C or below`); high and low markets for a city share
+nothing — separate measurement, separate history, separate calibration.
 
-A market is one of three shapes — an exact value or range (`50–51°F`), an open ceiling
-(`75°F or higher`), or an open floor (`30°C or below`). High and low markets for the same
-city share nothing: different measurement, different history, different calibration.
+---
 
-## How a position is made
+## The probability
 
-### 1 · From many forecasts to one probability
+Everything downstream is only as good as this number, so it is built with some care.
 
-The inputs are several independent global weather models — ECMWF, GFS, ICON, Arpège — and,
-for a city that settles on a known weather station, that nation's own official forecast for
-that exact station.
+**Forecasts, weighted by reliability rather than reputation.** The inputs are several
+independent global models — ECMWF, GFS, ICON, Arpège — and, for a city that settles on a
+known station, that nation's own official forecast for that exact station. Each model is
+first de-biased against its own settled history with an **empirical-Bayes shrinkage**: the
+correction is trusted in proportion to how much history supports it, so a long-tested model
+moves freely while a barely-seen one is held near a neutral prior. The de-biased models are
+then combined by **precision-weighted fusion** — each weighted by the inverse of how much it
+actually errs. The covariance that drives those weights is **shrunk toward its diagonal**
+(Ledoit–Wolf), because with only a handful of models the off-diagonal correlations are mostly
+noise; and models that are really the same forecast at two resolutions are collapsed into one
+**provider family**, so a popular model can't vote twice. On settled cells this fusion beats
+an equal-weighted average by more than ten times its own standard error — and beats betting on
+the single best model outright. *It wins because it fuses, not because it trusts any one
+source.*
 
-Every model runs warm or cold in its own way, so each is first corrected against its own
-settled history — and that correction is trusted only in proportion to how much history
-exists. A model with a long track record is believed; a barely-tested one is held close to a
-neutral prior until it earns more.
+**A physical correction the grid can't make for you.** A gridded model describes a square
+kilometre of map; a market settles at one airport thermometer, often kilometres away and at a
+different altitude. Zeus reads each model at the station's exact coordinates by interpolation,
+corrects the altitude gap with a **lapse rate fitted per city** from settled outcomes — not
+the textbook −6.5 °C/km, which sea-breezes and thin mountain air routinely break — and then
+treats the *remaining* distance-and-elevation mismatch as **added variance, not subtracted
+bias**. A far-off or badly-matched station isn't reliably cold; it is reliably *uncertain*,
+so the fusion simply leans on it less. No hand-written "distrust the coastal cities" rule
+exists anywhere.
 
-The corrected models are then combined by **reliability, not reputation**: each is weighted
-by how little it has actually erred, and two models that are really the same forecast at
-different resolutions are counted once, never twice. The result is a single best estimate
-with a single spread.
+**Width that can't lie.** The spread is then floored to the error the system has *actually*
+made at settlement for cells like this one. Overconfidence — a spread too narrow, piling
+probability onto one bin — is the single mistake that empties a book, so the served
+uncertainty is never allowed below the measured truth.
 
-That spread is where most systems quietly lie to themselves. A grid model describes a square
-of the map, but a market settles at one airport thermometer — often kilometres away and at a
-different altitude. Zeus reads the forecast at the station's exact coordinates and treats the
-leftover distance and elevation as *added uncertainty*, so a far-off or poorly-matched source
-counts for less on its own. The final spread is never allowed to be tighter than the errors
-the system has actually made at settlement, because overconfidence is the one mistake that
-empties a book.
+**Onto the bins, through the rounding.** Finally the distribution is integrated onto each
+market's bins across the **preimage of the rounding rule** — the set of real temperatures
+that *round* to the bin — rather than the bin's face value. The difference is not academic:
+get it wrong and a single-degree bin can read as zero probability when it is in fact the most
+likely outcome. The rule is part of the contract, and it matters — on Hong Kong's truncating
+oracle, integrating the correct asymmetric rounding matched every settled day in a test where
+ordinary rounding matched barely a third.
 
-Only then is the forecast laid onto the market's bins — through the precise rounding rule the
-city settles by — so the probability of `74°F` is the chance the true temperature *rounds* to
-74, not merely that it falls between 74 and 75.
+---
 
-### 2 · From a probability to an edge worth taking
+## The edge
 
-A number that beats the price is not yet a reason to trade. Each bin must pass four checks in
-order, and most fall at one of them:
+A number that beats the price is not yet a reason to trade. Each bin runs a gauntlet, and most
+are turned away:
 
-- **Confidence, not hope.** Zeus acts on a conservative lower bound of the probability, not
+- **Confidence, not hope** — Zeus acts on a conservative lower bound of the probability, not
   the optimistic midpoint.
-- **The honesty check.** This is the one that matters most. The simple rule "my probability
-  beats the price" quietly selects exactly the bins where the model is *most overconfident* —
-  it wins the bets it shouldn't. Zeus counters this by asking how often bins of this exact
-  kind have actually settled in its favour, and stands down where that record is thin or poor.
-- **A real margin.** The edge must clear the market price *and* the cost of trading.
-- **No flukes.** Across all the bins weighed in a cycle, a false-discovery control keeps the
+- **The winner's curse, answered.** This is the sharpest idea in the engine. The plain rule
+  "trade when my probability beats the price" quietly selects exactly the bins where the model
+  is *most overconfident* — it wins the bets it has no business winning. Zeus measures this
+  directly: it asks how often bins of this exact kind have actually settled in its favour, and
+  serves a conservative lower bound on that realised rate, standing down where the record is
+  thin or poor. On one live stretch the model believed a side at thirteen percent that settled
+  at thirty-three — the kind of gap no model-internal check can see, and exactly what this one
+  catches.
+- **A real margin** — the edge must clear the price *and* the cost of trading.
+- **No flukes** — across all the bins weighed in a cycle, a false-discovery control keeps the
   rate of edges that are really just noise in check.
 
-### 3 · From an edge to a sized position
+---
+
+## The position
 
 Among the bins that survive, Zeus takes the best **return per dollar at risk** — not the
-largest gross swing — so the book funds several independent bets rather than one oversized
-one. It will buy either side of any bin; the forecast's favoured outcome never vetoes the
-other.
+biggest gross swing — so the book funds several independent bets instead of one oversized one.
+It will buy either side of any bin; the forecast's favoured outcome never vetoes the other. The
+chosen bet is sized by **fractional Kelly**, scaled back through a chain of independent brakes
+— how wide the uncertainty, how far off settlement, how much risk the book already carries, how
+deep any recent drawdown — and it **fails safe**: a missing or broken input yields no trade,
+never a careless one.
 
-The chosen bet is sized by fractional Kelly, then scaled back through a chain of independent
-brakes — how wide the uncertainty is, how far off settlement, how much risk the book already
-carries, how deep any recent drawdown runs. And it fails safe: a missing or broken input
-produces no trade, never a careless one.
+A resting order is not forgotten. Every cycle it is re-examined against fresh prices and a fresh
+forecast, and pulled and decided again the moment the edge fades or the price drifts — a new
+model run on a market already held is itself new information. Held positions are reconciled
+against the blockchain, where a *missing* reading is never mistaken for a closed position; and
+when a market resolves, the outcome flows back into the calibration the next forecast leans on —
+with strict care that knowing the result never leaks backward into what the model is judged to
+have known beforehand.
 
-### 4 · Keeping the position honest until it settles
-
-A resting order is not forgotten. Every cycle it is re-examined against fresh prices and a
-fresh forecast, and pulled and decided again the moment the edge fades or the price drifts —
-a new model run on a market already held is itself new information.
-
-Held positions are monitored toward an exit and continually reconciled against the
-blockchain, where a *missing* reading is never mistaken for a closed position — only a clear,
-complete settlement counts. When a market resolves, the outcome flows back into the
-calibration the next forecast depends on, with strict care that knowing the result never
-leaks backward into what the model is judged to have known beforehand.
+---
 
 ## Strategies
 
-Five strategies trade live, each capturing a different inefficiency and fading at its own
-pace as the market competes it away:
+Five strategies trade live, each capturing a different inefficiency and fading at its own pace
+as the market competes it away:
 
 | Strategy | Where the edge comes from | Fades |
 |----------|---------------------------|:-----:|
@@ -122,8 +138,8 @@ pace as the market competes it away:
 | **Imminent Open Capture** | re-opened or next-day markets close to settlement | quickly |
 | **Opening Inertia** | mispricing in a freshly opened market | fastest |
 
-Each is graded on its own settled record; several more are registered but held back until
-the evidence earns them in.
+Each is graded on its own settled record; several more are registered but held back until the
+evidence earns them in.
 
 ---
 
@@ -139,9 +155,10 @@ docs/            Reference, domain, and operational documentation
 state/           Runtime databases (local, not committed)
 ```
 
-For the methods behind each step — the forecast fusion, the settlement calibration, the
-sizing — see [`docs/reference/theory_map.md`](docs/reference/theory_map.md), with terms
-defined in [`glossary.md`](docs/reference/glossary.md).
+The full derivations — the precision-fusion mathematics, the representativeness model, the
+settlement calibration, and the sizing — are indexed in
+[`docs/reference/theory_map.md`](docs/reference/theory_map.md), with terms defined in
+[`glossary.md`](docs/reference/glossary.md).
 
 ## License
 
