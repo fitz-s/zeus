@@ -230,3 +230,7 @@ evidence/topology_v_next_shadow/*.jsonl.gz
 evidence/topology_v_next_shadow/archive/*.jsonl
 evidence/topology_v_next_shadow/archive/*.jsonl.gz
 .zpkt-cache/
+
+# Operator-local working dirs (never tracked)
+.local/
+.ai-bridge/

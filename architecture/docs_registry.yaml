@@ -76,7 +76,6 @@ parent_coverage_allowed_patterns:
 - docs/operations/current/
 - docs/reports/
 - docs/artifacts/
-- docs/to-do-list/
 - docs/runbooks/
 - docs/reference/legacy/
 entries:
@@ -477,27 +476,7 @@ entries:
   doc_class: operations
   default_read: false
   direct_reference_allowed: true
-  current_role: compatibility pointer to active known-gap worklist
-  canonical_replaced_by:
-  - docs/to-do-list/known_gaps.md
-  next_action: keep
-  lifecycle_state: transitional
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: router
-  freshness_class: stable
-  supersedes: []
-  superseded_by:
-  - docs/to-do-list/known_gaps.md
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: true
-  refresh_source: n/a
-- path: docs/to-do-list/known_gaps.md
-  doc_class: checklist
-  default_read: false
-  direct_reference_allowed: true
-  current_role: active runtime gap worklist
+  current_role: active known-gap worklist (canonical home)
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: active
@@ -505,30 +484,11 @@ entries:
   parent_coverage_allowed: false
   truth_profile: volatile_current_fact
   freshness_class: audit_bound
-  supersedes:
-  - docs/operations/known_gaps.md
+  supersedes: []
   superseded_by: []
   may_live_in_reference: false
   contains_volatile_metrics: true
   current_tense_allowed: true
-  refresh_source: packet_audit
-- path: docs/to-do-list/known_gaps_archive.md
-  doc_class: archive_interface
-  default_read: false
-  direct_reference_allowed: true
-  current_role: closed gap antibody archive for resolved known_gaps entries
-  canonical_replaced_by: []
-  next_action: keep
-  lifecycle_state: historical
-  coverage_scope: exact
-  parent_coverage_allowed: false
-  truth_profile: report_evidence
-  freshness_class: historical
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
   refresh_source: packet_audit
 - path: docs/operations/current_data_state.md
   doc_class: operations
@@ -1655,24 +1615,6 @@ entries:
   refresh_source: n/a
   topic_authority: null
   superseded_chain: []
-- path: docs/to-do-list/
-  doc_class: checklist
-  default_read: false
-  direct_reference_allowed: false
-  current_role: checklist evidence and audit queues
-  canonical_replaced_by: []
-  next_action: retain_as_evidence
-  lifecycle_state: transitional
-  coverage_scope: descendants
-  parent_coverage_allowed: true
-  truth_profile: checklist_evidence
-  freshness_class: historical
-  supersedes: []
-  superseded_by: []
-  may_live_in_reference: false
-  contains_volatile_metrics: false
-  current_tense_allowed: false
-  refresh_source: n/a
 - path: docs/runbooks/
   doc_class: runbook
   default_read: false

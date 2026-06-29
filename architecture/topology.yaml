@@ -216,6 +216,42 @@ root_governed_files:
     zone: root
     authority_role: orientation
     orientation_note: Orientation document for human/professor review; does not outrank AGENTS.md, machine manifests, or executable authority.
+  - path: "LICENSE"
+    status: active
+    scope: global
+    zone: root
+    authority_role: legal
+    orientation_note: Proprietary all-rights-reserved notice; not architecture authority.
+  - path: "CONTRIBUTING.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: orientation
+    orientation_note: States the repo is closed to external contributions; routes readers to README/AGENTS.
+  - path: "SECURITY.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: orientation
+    orientation_note: Private vulnerability-disclosure path and credential discipline; not runtime authority.
+  - path: "CHANGELOG.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: orientation
+    orientation_note: Operational milestone log; the authoritative history is git, not this file.
+  - path: "REVIEW.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: orientation
+    orientation_note: Review-task routing for agents; defers to AGENTS.md and executable authority.
+  - path: "SECURITY-FALSE-POSITIVES.md"
+    status: active
+    scope: global
+    zone: root
+    authority_role: runtime_support
+    orientation_note: Allowlist of known secret-scan false positives; not architecture authority.
 
 state_surfaces:
   - path: "state/README.md"
