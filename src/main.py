@@ -14,7 +14,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-06-05
+# Last reused/audited: 2026-06-29
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md;
 #   MAJOR #1 antibody (2026-06-05) — assert_kelly_multiplier_within_correlated_ceiling boot guard (over-size door / iron rule 5)
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -5635,6 +5635,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                 trade_ro,
                 open_rests=open_rests,
                 decision_time=received_at,
+                candidate_redecisions=entry_redecisions,
             )
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
             open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, beliefs)
@@ -5822,6 +5823,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
                     trade_ro,
                     open_rests=open_rests,
                     decision_time=received_at,
+                    candidate_redecisions=entry_redecisions,
                 )
                 entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
                 rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)

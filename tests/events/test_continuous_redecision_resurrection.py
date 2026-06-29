@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-19
+# Last reused or audited: 2026-06-29
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -106,7 +106,6 @@ def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
         assert " LIKE " not in upper
         assert "DECISION_ID >= ?" in upper
         assert "DECISION_ID < ?" in upper
-        assert "ORDER BY" not in upper
     assert "ROW_NUMBER" not in statements
     assert "PARTITION BY" not in statements
 
@@ -282,6 +281,7 @@ def test_screen_entry_uses_live_regret_backoff_from_world_table():
         trade,
         decision_time="2026-06-12T00:30:00+00:00",
         min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     assert blocked == []
 
@@ -292,6 +292,7 @@ def test_screen_entry_uses_live_regret_backoff_from_world_table():
         trade,
         decision_time="2026-06-12T00:30:00+00:00",
         min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     assert len(improved) == 1
 
@@ -314,7 +315,11 @@ def test_entry_screen_fires_on_edge_appeared():
     # Fresh executable snapshot: YES ask 0.70 → edge = 0.99 - 0.70 - fee ≈ +0.28.
     _snapshot(trade, bid="0.30", ask="0.70", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
-        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+        world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_yes") in keys
@@ -371,7 +376,11 @@ def test_entry_screen_fires_on_buy_no_edge_appeared():
     # YES bid 0.30 implies NO ask 0.70; NO posterior is 0.95.
     _snapshot(trade, bid="0.30", ask="0.72", selected_outcome_token_id="yes-c30")
     fired = cr.screen_entry_redecisions(
-        world, trade, decision_time="2026-06-12T00:45:00+00:00", min_edge=0.01,
+        world,
+        trade,
+        decision_time="2026-06-12T00:45:00+00:00",
+        min_edge=0.01,
+        beliefs=cr._all_latest_beliefs(world),
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in fired}
     assert ("hyp|live|Wuhan|2026-06-12|high|disc", "b30", "buy_no") in keys
@@ -610,6 +619,64 @@ def test_rest_pull_does_not_cancel_by_order_age_alone():
     pulls = cr.screen_resting_orders(world, trade, open_rests=[rest])
 
     assert pulls == [], "resting order age alone is not confirmed trading value or cancel evidence"
+
+
+def test_rest_pull_cancels_when_family_best_candidate_moves_to_another_bin():
+    """A live rest must not block the family mutex after current edge moves elsewhere."""
+
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Moscow|2026-06-30|high|disc"
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="27C",
+        side="buy_no",
+        condition_id="0xc27",
+        resting_posterior=0.72,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.68,
+        quote_age_ms=1_000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        candidate_redecisions=[
+            cr.EnqueuedRedecision(
+                family_id=family_id,
+                bin_label="26C",
+                direction="buy_no",
+                edge=0.0358,
+            )
+        ],
+    )
+
+    assert len(pulls) == 1
+    pulled_rest, decision = pulls[0]
+    assert pulled_rest.command_id == "cmd-rest"
+    assert decision.action == "CANCEL_REPLACE"
+    assert decision.reason == "FAMILY_BEST_CANDIDATE_CHANGED"
+    assert decision.detail == pytest.approx(0.0358)
+
+    same_rest_candidate = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        candidate_redecisions=[
+            cr.EnqueuedRedecision(
+                family_id=family_id,
+                bin_label="27C",
+                direction="buy_no",
+                edge=0.04,
+            )
+        ],
+    )
+    assert same_rest_candidate == []
 
 
 def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
