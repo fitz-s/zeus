@@ -1916,6 +1916,7 @@ def test_clob_signature_type_config_blocks_missing_when_submit_armed(monkeypatch
     plist = tmp_path / "com.zeus.live-trading.plist"
     _write_live_plist_with_env(plist, {})
     monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+    monkeypatch.setattr(preflight, "CLOB_SIGNATURE_TYPE_SIDECAR_LABELS", ())
 
     result = preflight._clob_signature_type_config_check(required=True)
 
@@ -1929,6 +1930,7 @@ def test_clob_signature_type_config_blocks_unsupported_value(monkeypatch, tmp_pa
     plist = tmp_path / "com.zeus.live-trading.plist"
     _write_live_plist_with_env(plist, {"POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "9"})
     monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+    monkeypatch.setattr(preflight, "CLOB_SIGNATURE_TYPE_SIDECAR_LABELS", ())
 
     result = preflight._clob_signature_type_config_check(required=True)
 
@@ -1941,11 +1943,42 @@ def test_clob_signature_type_config_accepts_explicit_supported_value(monkeypatch
     plist = tmp_path / "com.zeus.live-trading.plist"
     _write_live_plist_with_env(plist, {"POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "2"})
     monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", plist)
+    monkeypatch.setattr(preflight, "CLOB_SIGNATURE_TYPE_SIDECAR_LABELS", ())
 
     result = preflight._clob_signature_type_config_check(required=True)
 
     assert result.ok is True
     assert result.evidence["configured_value"] == "2"
+
+
+def test_clob_signature_type_config_blocks_missing_sidecar_value(monkeypatch, tmp_path):
+    live = tmp_path / "com.zeus.live-trading.plist"
+    price = tmp_path / "com.zeus.price-channel-ingest.plist"
+    venue = tmp_path / "com.zeus.venue-heartbeat.plist"
+    _write_live_plist_with_env(live, {"POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "2"})
+    _write_live_plist_with_env(price, {"POLYMARKET_CLOB_V2_SIGNATURE_TYPE": "2"})
+    _write_live_plist_with_env(venue, {})
+    monkeypatch.setattr(preflight, "LIVE_TRADING_PLIST_PATH", live)
+    monkeypatch.setattr(
+        preflight,
+        "CLOB_SIGNATURE_TYPE_SIDECAR_LABELS",
+        ("price-channel-ingest", "venue-heartbeat"),
+    )
+    paths = {
+        "live-trading": live,
+        "price-channel-ingest": price,
+        "venue-heartbeat": venue,
+    }
+    monkeypatch.setattr(preflight, "_launchagent_plist_path_for_label", lambda label: paths[label])
+
+    result = preflight._clob_signature_type_config_check(required=True)
+
+    assert result.ok is False
+    assert "venue-heartbeat" in result.detail
+    assert any(
+        item["label"] == "venue-heartbeat" and item["present"] is False
+        for item in result.evidence["items"]
+    )
 
 
 def test_harvester_live_enabled_uses_live_plist_not_shell_env(monkeypatch, tmp_path):

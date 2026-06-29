@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import plistlib
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,9 @@ from src.state.db import init_schema
 from src.venue.polymarket_v2_adapter import HeartbeatAck
 import src.data.substrate_observer as substrate_observer
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_VENUE_HEARTBEAT_PLIST = _REPO_ROOT / "deploy" / "launchd" / "com.zeus.venue-heartbeat.plist"
+
 
 class FakeHeartbeatAdapter:
     def __init__(self, outcomes):
@@ -62,6 +66,20 @@ class FakeHeartbeatAdapter:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_venue_heartbeat_launchd_artifact_has_explicit_clob_signature_type() -> None:
+    assert _VENUE_HEARTBEAT_PLIST.exists(), (
+        "deploy/launchd/com.zeus.venue-heartbeat.plist artifact must exist; "
+        "the live order gate must not depend on a hand-maintained local plist."
+    )
+    with _VENUE_HEARTBEAT_PLIST.open("rb") as fh:
+        parsed = plistlib.load(fh)
+
+    assert parsed.get("Label") == "com.zeus.venue-heartbeat"
+    assert "src.control.heartbeat_supervisor" in parsed.get("ProgramArguments", [])
+    env = parsed.get("EnvironmentVariables") or {}
+    assert env.get("POLYMARKET_CLOB_V2_SIGNATURE_TYPE") == "2"
 
 
 def _intent() -> ExecutionIntent:

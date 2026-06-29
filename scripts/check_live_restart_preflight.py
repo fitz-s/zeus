@@ -40,6 +40,11 @@ from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
+CLOB_SIGNATURE_TYPE_SIDECAR_LABELS = (
+    "price-channel-ingest",
+    "post-trade-capital",
+    "venue-heartbeat",
+)
 
 
 def _runtime_state_dir(plist_path: Path = LIVE_TRADING_PLIST_PATH) -> Path:
@@ -279,11 +284,10 @@ def _live_trading_python_executable() -> str:
     return sys.executable
 
 
-def _live_trading_plist_env_value(key: str) -> tuple[str | None, str | None]:
-    """Read one non-secret launchd environment value from the live-trading plist."""
-
+def _plist_env_value(path: Path, key: str) -> tuple[str | None, str | None]:
+    """Read one non-secret launchd environment value from a plist."""
     try:
-        payload = plistlib.loads(LIVE_TRADING_PLIST_PATH.read_bytes())
+        payload = plistlib.loads(path.read_bytes())
     except Exception as exc:  # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
     env = payload.get("EnvironmentVariables")
@@ -293,21 +297,56 @@ def _live_trading_plist_env_value(key: str) -> tuple[str | None, str | None]:
     return (str(value).strip() if value is not None else None), None
 
 
+def _live_trading_plist_env_value(key: str) -> tuple[str | None, str | None]:
+    """Read one non-secret launchd environment value from the live-trading plist."""
+
+    return _plist_env_value(LIVE_TRADING_PLIST_PATH, key)
+
+
+def _launchagent_plist_path_for_label(label: str) -> Path:
+    if label == "live-trading":
+        return LIVE_TRADING_PLIST_PATH
+    return Path.home() / "Library" / "LaunchAgents" / f"com.zeus.{label}.plist"
+
+
 def _clob_signature_type_config_check(*, required: bool) -> CheckResult:
-    """Verify live submit boots with an explicit Polymarket CLOB V2 signature type."""
+    """Verify CLOB-using live money daemons have an explicit V2 signature type."""
 
     key = "POLYMARKET_CLOB_V2_SIGNATURE_TYPE"
-    value, error = _live_trading_plist_env_value(key)
+    allowed_values = {"0", "1", "2", "3"}
+    labels = ("live-trading", *CLOB_SIGNATURE_TYPE_SIDECAR_LABELS)
+    items: list[dict[str, Any]] = []
+    live_value: str | None = None
+    live_error: str | None = None
+    for label in labels:
+        path = _launchagent_plist_path_for_label(label)
+        value, error = _plist_env_value(path, key)
+        if label == "live-trading":
+            live_value = value
+            live_error = error
+        item: dict[str, Any] = {
+            "label": label,
+            "plist_path": str(path),
+            "present": bool(value),
+            "supported": bool(value in allowed_values) if value else False,
+        }
+        if value:
+            item["configured_value"] = value
+        if error:
+            item["plist_error"] = error
+        items.append(item)
+
     evidence: dict[str, Any] = {
         "plist_path": str(LIVE_TRADING_PLIST_PATH),
         "required": required,
-        "present": bool(value),
-        "allowed_values": ["0", "1", "2", "3"],
+        "present": bool(live_value),
+        "allowed_values": sorted(allowed_values),
+        "items": items,
     }
-    if value:
-        evidence["configured_value"] = value
-    if error:
-        evidence["plist_error"] = error
+    if live_value:
+        evidence["configured_value"] = live_value
+    if live_error:
+        evidence["plist_error"] = live_error
 
     if not required:
         return CheckResult(
@@ -316,20 +355,32 @@ def _clob_signature_type_config_check(*, required: bool) -> CheckResult:
             "explicit CLOB V2 signature type is not required while live submit is not armed",
             evidence,
         )
-    if not value:
+
+    failed = [
+        item
+        for item in items
+        if (not item["present"]) or (not item["supported"])
+    ]
+    if failed:
+        missing = [item["label"] for item in failed if not item["present"]]
+        unsupported = [item["label"] for item in failed if item["present"] and not item["supported"]]
+        issue_parts: list[str] = []
+        if missing:
+            issue_parts.append(f"missing: {', '.join(missing)}")
+        if unsupported:
+            issue_parts.append(f"unsupported: {', '.join(unsupported)}")
         return CheckResult(
             "clob_signature_type_config",
             False,
-            "live submit requires explicit POLYMARKET_CLOB_V2_SIGNATURE_TYPE in the live-trading LaunchAgent",
+            "live submit requires explicit supported POLYMARKET_CLOB_V2_SIGNATURE_TYPE "
+            f"in CLOB money-path LaunchAgents ({'; '.join(issue_parts)})",
             evidence,
         )
-    ok = value in {"0", "1", "2", "3"}
+
     return CheckResult(
         "clob_signature_type_config",
-        ok,
-        "live-trading LaunchAgent has an explicit supported CLOB V2 signature type"
-        if ok
-        else "live-trading LaunchAgent has an unsupported CLOB V2 signature type",
+        True,
+        "CLOB money-path LaunchAgents have explicit supported CLOB V2 signature types",
         evidence,
     )
 
