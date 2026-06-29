@@ -2037,6 +2037,8 @@ class OpportunityEventReactor:
             if _is_transient_money_path_reason(receipt.reason):
                 if receipt.reason:
                     self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
+                    if _is_executable_snapshot_refresh_reason(str(receipt.reason)):
+                        self._record_substrate_block(event, kind="snapshot")
                 return _EXECUTABLE_SNAPSHOT_RETRY
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
@@ -2200,6 +2202,8 @@ class OpportunityEventReactor:
         if _is_posterior_staleness_reason(reason):
             self._record_substrate_block(event, kind="posterior")
         if _is_transient_money_path_reason(reason):
+            if _is_executable_snapshot_refresh_reason(reason):
+                self._record_substrate_block(event, kind="snapshot")
             # Transient: the forecast source was re-ingested after this cycle's
             # decision moment, or the selected executable price expired between
             # the pre-submit family identity gate and the adapter's JIT scoring.
@@ -3093,6 +3097,34 @@ def _certificate_build_failed_is_book_authority_gap(reason: str) -> bool:
         "pre_submit_book_authority_missing" in suffix_lower
         or "pre_submit_book_authority_stale" in suffix_lower
     )
+
+
+def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
+    """True when a transient money-path reason is cured by fresh book/substrate capture."""
+
+    if not reason:
+        return False
+    segments = [seg.strip() for seg in str(reason).split(":")]
+    if any(
+        seg
+        in {
+            "EXECUTABLE_SNAPSHOT_BLOCKED",
+            "EXECUTABLE_SNAPSHOT_STALE",
+            "SUBMIT_ABORTED_PRICE_MOVED",
+            "SUBMIT_ABORTED_MODE_FLIPPED",
+            "LIVE_DEPTH_AUTHORITY_MISSING",
+        }
+        for seg in segments
+    ):
+        return True
+    base = _money_path_reason_base(str(reason))
+    if base == "EDLI_LIVE_CERTIFICATE_BUILD_FAILED":
+        suffix_lower = str(reason).lower()
+        return (
+            "would_cross_book" in suffix_lower
+            or _certificate_build_failed_is_book_authority_gap(str(reason))
+        )
+    return False
 
 
 def _is_transient_money_path_reason(reason: str | None) -> bool:

@@ -35,6 +35,7 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.reactor import (
     EventSubmissionReceipt,
     OpportunityEventReactor,
+    _is_executable_snapshot_refresh_reason,
     _is_transient_money_path_reason,
     _snapshot_block_retry_delay_seconds,
 )
@@ -364,6 +365,10 @@ def test_mode_flipped_is_transient():
     assert _is_transient_money_path_reason(_MODE_FLIPPED_REASON)
 
 
+def test_mode_flipped_requires_executable_snapshot_refresh():
+    assert _is_executable_snapshot_refresh_reason(_MODE_FLIPPED_REASON)
+
+
 def test_mode_flipped_no_submit_state_requeues_not_consumed():
     """ANTIBODY (live 2026-06-11 17:30:20Z, Busan x2): MODE_FLIPPED arrives as a
     typed no-side-effect NO_SUBMIT state (P0-1). It must be classified as a
@@ -408,6 +413,50 @@ def test_mode_flipped_no_submit_state_requeues_not_consumed():
     assert _status(conn, event.event_id) == "pending"
     n_receipts = conn.execute("SELECT count(*) FROM edli_no_submit_receipts").fetchone()[0]
     assert n_receipts == 0, "the aborted attempt must not persist a receipt"
+
+
+def test_mode_flipped_no_submit_queues_family_snapshot_refresh():
+    """The requeue must make the promised fresh re-rank real, not retry the same book."""
+
+    conn, store = _store()
+    event = _event("snap-mf-refresh")
+    store.insert_or_ignore(event)
+    refreshed: list[tuple[str, str, str]] = []
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Chicago",
+            target_date="2026-06-05",
+            metric="high",
+            side_effect_status="NO_SUBMIT",
+            trade_score_positive=True,
+            reason=_MODE_FLIPPED_REASON,
+        )
+
+    def _refresh(*, city, target_date, metric):
+        refreshed.append((city, target_date, metric))
+        return True
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+        family_snapshot_refresher=_refresh,
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.snapshot_refreshes == 1
+    assert refreshed == [("Chicago", "2026-06-05", "high")]
+    assert _status(conn, event.event_id) == "pending"
 
 
 def test_pre_submit_error_terminal_is_visible_rejection_not_silent_proof():
