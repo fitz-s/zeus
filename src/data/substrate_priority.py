@@ -75,8 +75,14 @@ def mark_money_path_substrate_priority(
     ttl_seconds: float | None = None,
     families: Iterable[tuple[str, str, str]] | None = None,
     condition_ids: Iterable[str] | None = None,
+    merge_existing: bool = False,
 ) -> None:
-    """Request scoped sidecar substrate capture for current live-money work."""
+    """Request scoped sidecar substrate capture for current live-money work.
+
+    The marker is a current-request contract, not a backlog.  Live money loops
+    may mark different families every few seconds; default replacement prevents
+    stale families from being carried forward by repeated TTL extension.
+    """
 
     now = datetime.now(timezone.utc)
     ttl = _priority_ttl_seconds() if ttl_seconds is None else max(1.0, min(float(ttl_seconds), 180.0))
@@ -84,24 +90,26 @@ def mark_money_path_substrate_priority(
     seen: set[tuple[str, str, str]] = set()
     merged_condition_ids: list[str] = []
     seen_condition_ids: set[str] = set()
-    existing = _priority_payload(now)
-    existing_families = existing.get("families", []) if isinstance(existing, dict) else []
-    for family in existing_families:
-        normalized = _normalize_family(family)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            merged_families.append(normalized)
+    existing = _priority_payload(now) if merge_existing else None
+    if merge_existing:
+        existing_families = existing.get("families", []) if isinstance(existing, dict) else []
+        for family in existing_families:
+            normalized = _normalize_family(family)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                merged_families.append(normalized)
     for family in families or ():
         normalized = _normalize_family(family)
         if normalized and normalized not in seen:
             seen.add(normalized)
             merged_families.append(normalized)
-    existing_condition_ids = existing.get("condition_ids", []) if isinstance(existing, dict) else []
-    for condition_id in existing_condition_ids:
-        normalized = _normalize_condition_id(condition_id)
-        if normalized and normalized not in seen_condition_ids:
-            seen_condition_ids.add(normalized)
-            merged_condition_ids.append(normalized)
+    if merge_existing:
+        existing_condition_ids = existing.get("condition_ids", []) if isinstance(existing, dict) else []
+        for condition_id in existing_condition_ids:
+            normalized = _normalize_condition_id(condition_id)
+            if normalized and normalized not in seen_condition_ids:
+                seen_condition_ids.add(normalized)
+                merged_condition_ids.append(normalized)
     for condition_id in condition_ids or ():
         normalized = _normalize_condition_id(condition_id)
         if normalized and normalized not in seen_condition_ids:

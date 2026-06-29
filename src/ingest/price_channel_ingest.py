@@ -102,6 +102,7 @@ EDLI_EVENT_DRIVEN_MODES = {
 
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
 MARKET_CHANNEL_HELD_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT = 30.0
+MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS = 10.0
 MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT = 4
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
@@ -2343,10 +2344,10 @@ def _edli_refresh_candidate_priority_quote_evidence(
     finally:
         world_read.close()
     started_monotonic = time.monotonic()
-    budget = max(0.001, float(budget_seconds))
-    deadline = started_monotonic + budget
+    requested_budget = max(0.001, float(budget_seconds))
     trade_read = get_trade_connection(write_class=None)
     try:
+        held_token_ids = _edli_held_position_priority_token_ids(trade_read)
         open_rest_token_ids = _edli_open_rest_priority_token_ids(trade_read)
         priority_token_ids = list(
             dict.fromkeys(
@@ -2370,11 +2371,21 @@ def _edli_refresh_candidate_priority_quote_evidence(
         )
     finally:
         trade_read.close()
+    held_priority_count = len(held_token_ids)
+    if held_priority_count:
+        budget = min(
+            requested_budget,
+            MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS,
+        )
+    else:
+        budget = requested_budget
+    deadline = started_monotonic + budget
 
     if not token_metadata:
         return {
             "candidate_priority_token_ids": len(candidate_token_ids),
             "open_rest_priority_token_ids": len(open_rest_token_ids),
+            "held_priority_token_ids": held_priority_count,
             "candidate_quote_refresh_events": 0,
             "skipped": "no_candidate_token_metadata",
         }
@@ -2403,6 +2414,8 @@ def _edli_refresh_candidate_priority_quote_evidence(
             extra={
                 "open_rest_priority_token_ids": len(open_rest_token_ids),
                 "quote_priority_token_ids": len(priority_token_ids),
+                "held_priority_token_ids": held_priority_count,
+                "budget_seconds": budget,
             },
         )
 
@@ -2442,15 +2455,21 @@ def _edli_refresh_candidate_priority_quote_evidence(
         result = {
             "candidate_priority_token_ids": len(candidate_token_ids),
             "open_rest_priority_token_ids": len(open_rest_token_ids),
+            "held_priority_token_ids": held_priority_count,
             "quote_priority_token_ids": len(priority_token_ids),
             "candidate_token_metadata": len(token_metadata),
             "candidate_quote_refresh_events": int(written),
             "candidate_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
+            "requested_budget_seconds": requested_budget,
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
         }
+        if held_priority_count:
+            result["held_active_budget_cap_seconds"] = (
+                MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS
+            )
         if service.rest_seed_backpressure_count:
             result["backpressure"] = True
             result["write_backpressure_count"] = service.rest_seed_backpressure_count

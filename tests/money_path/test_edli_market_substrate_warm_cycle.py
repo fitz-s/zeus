@@ -1381,6 +1381,64 @@ def test_substrate_priority_clear_is_pid_scoped(tmp_path, monkeypatch):
     assert not money_path_substrate_priority_active()
 
 
+def test_substrate_priority_marker_replaces_stale_live_scope(tmp_path, monkeypatch):
+    import src.config as config
+    from src.data.substrate_priority import (
+        mark_money_path_substrate_priority,
+        money_path_substrate_priority_condition_ids,
+        money_path_substrate_priority_families,
+    )
+
+    monkeypatch.setattr(config, "state_path", lambda rel: tmp_path / rel)
+
+    mark_money_path_substrate_priority(
+        reason="continuous_redecision_confirm_refresh",
+        ttl_seconds=60.0,
+        families=[("Paris", "2026-06-20", "low")],
+        condition_ids=["cond-old"],
+    )
+    mark_money_path_substrate_priority(
+        reason="decision_triggered_targeted_refresh",
+        ttl_seconds=60.0,
+        families=[("Shanghai", "2026-07-01", "high")],
+        condition_ids=["cond-new"],
+    )
+
+    assert money_path_substrate_priority_families() == [("Shanghai", "2026-07-01", "high")]
+    assert money_path_substrate_priority_condition_ids() == ["cond-new"]
+
+
+def test_substrate_priority_marker_can_explicitly_merge_same_request_scope(tmp_path, monkeypatch):
+    import src.config as config
+    from src.data.substrate_priority import (
+        mark_money_path_substrate_priority,
+        money_path_substrate_priority_condition_ids,
+        money_path_substrate_priority_families,
+    )
+
+    monkeypatch.setattr(config, "state_path", lambda rel: tmp_path / rel)
+
+    mark_money_path_substrate_priority(
+        reason="test",
+        ttl_seconds=60.0,
+        families=[("Paris", "2026-06-20", "low")],
+        condition_ids=["cond-1"],
+    )
+    mark_money_path_substrate_priority(
+        reason="test",
+        ttl_seconds=60.0,
+        families=[("Shanghai", "2026-07-01", "high")],
+        condition_ids=["cond-2"],
+        merge_existing=True,
+    )
+
+    assert money_path_substrate_priority_families() == [
+        ("Paris", "2026-06-20", "low"),
+        ("Shanghai", "2026-07-01", "high"),
+    ]
+    assert money_path_substrate_priority_condition_ids() == ["cond-1", "cond-2"]
+
+
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
     """Config gate: disabled edli → no refresh side effect."""
     calls: list[int] = []

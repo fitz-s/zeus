@@ -58,6 +58,7 @@ def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> Non
     from src.ingest import price_channel_ingest as pci
 
     assert 10.0 <= pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT < 60.0
+    assert pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS == 10.0
     assert pci.MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT <= 4
     assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS >= 15000
     assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
@@ -899,6 +900,68 @@ def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob
     assert result["candidate_quote_refresh_events"] == 0
     assert result["candidate_quote_refresh_attempted_tokens"] == 0
     assert result["budget_skipped_tokens"] == 2
+
+
+def test_candidate_priority_quote_refresh_budget_is_capped_when_held_positions_exist(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_candidate_priority_token_ids",
+        lambda conn, *, limit: ["no-token"],
+    )
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {"held-token"})
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: list(token_ids),
+    )
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="0xcondition",
+                token_id=token_id,
+                outcome_label="NO",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snap-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        state_db,
+        "get_world_connection_with_trades_required",
+        lambda *, write_class=None: (_ for _ in ()).throw(AssertionError("attached write DB must not open under backpressure")),
+    )
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda: (_ for _ in ()).throw(AssertionError("CLOB client must not open under backpressure")),
+    )
+
+    acquired = lane._rest_quote_seed_refresh_lock.acquire(blocking=False)
+    assert acquired, "test requires the process-local REST seed lock to be initially free"
+    try:
+        result = lane._edli_refresh_candidate_priority_quote_evidence(limit=4, budget_seconds=45.0)
+    finally:
+        lane._rest_quote_seed_refresh_lock.release()
+
+    assert result["backpressure"] is True
+    assert result["held_priority_token_ids"] == 1
+    assert result["budget_seconds"] == lane.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS
+    assert result["candidate_quote_refresh_events"] == 0
 
 
 def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkeypatch, tmp_path):
