@@ -1483,6 +1483,30 @@ def _replacement_bayes_precision_fusion_override(
             else:
                 _raw_m2_and_n[_ins.model] = (None, 0)
             _z_by_model[_ins.model] = float(_ins.z)
+        _station_entry_models_added: tuple[str, ...] = ()
+        try:
+            from src.data.forecast_source_registry import (  # noqa: PLC0415
+                SOURCES as _FORECAST_SOURCES,
+                source_allows_role as _source_allows_role,
+            )
+
+            _added: list[str] = []
+            for _m, (_value, _rid) in persisted_current.items():
+                _m_str = str(_m)
+                if _m_str in _z_by_model or not _m_str.startswith(("cwa_", "hko_")):
+                    continue
+                _spec = _FORECAST_SOURCES.get(_m_str)
+                if _spec is None or not _source_allows_role(_spec, "entry_primary"):
+                    continue
+                try:
+                    _z_by_model[_m_str] = float(_value)
+                except (TypeError, ValueError):
+                    continue
+                _raw_m2_and_n[_m_str] = (None, 0)
+                _added.append(_m_str)
+            _station_entry_models_added = tuple(sorted(_added))
+        except Exception:
+            _station_entry_models_added = ()
         # Include anchor as a MEMBER (not a separate Bayesian prior).
         if capture.anchor_z is not None:
             _raw_m2_and_n[_ANCHOR] = (capture.anchor_raw_m2_native, capture.anchor_raw_n_train)
@@ -1566,7 +1590,18 @@ def _replacement_bayes_precision_fusion_override(
             )
 
             _scheme = scheme_for_city(request.city)
-            if _scheme is not None:
+            # ADD-DATA (operator directive 2026-06-28 "加数据不禁数据"): a station-calibrated
+            # source (cwa_*/hko_* family) that is LIVE in the precision fusion but absent from the
+            # frozen grid_aware scheme must be ADDED, never banned by the frozen snapshot. When such
+            # a source is present, skip the frozen scheme and serve the live fusion center
+            # (_mu_diagonal computed above), which already added that source at its initial precision
+            # weight via raw_second_moment_weights. Targeted: only cities with a live station source
+            # leave the scheme; every other city serves its scheme byte-identically.
+            _station_live_omitted = _scheme is not None and any(
+                str(_m).startswith(("cwa_", "hko_")) and str(_m) not in _scheme.weights
+                for _m in persisted_current
+            )
+            if _scheme is not None and not _station_live_omitted:
                 _source_values: dict[str, float] = {
                     _ANCHOR: float(anchor_value_corrected_c),
                 }
@@ -1753,7 +1788,9 @@ def _replacement_bayes_precision_fusion_override(
             except Exception:
                 pass
 
-        used_models = _source_clock_used_models or tuple(fused.used_models)
+        used_models = _source_clock_used_models or tuple(
+            dict.fromkeys((*tuple(fused.used_models), *_station_entry_models_added))
+        )
         # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
         # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
         # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z

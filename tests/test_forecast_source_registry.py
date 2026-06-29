@@ -103,13 +103,13 @@ def test_openmeteo_live_ensemble_is_monitor_fallback_not_entry_primary() -> None
         gate_source_role(source, "entry_primary")
 
 
-def test_station_forecast_sources_are_not_entry_primary() -> None:
+def test_station_forecast_sources_are_live_entry_primary() -> None:
     for source_id in ("hko_fnd", "cwa_township"):
         source = SOURCES[source_id]
-        assert source.enabled_by_default is False
-        assert "entry_primary" not in source.allowed_roles
-        with pytest.raises(SourceNotEnabled, match="entry_primary"):
-            gate_source_role(source, "entry_primary")
+        assert source.enabled_by_default is True
+        assert source.degradation_level == "OK"
+        assert "entry_primary" in source.allowed_roles
+        gate_source_role(source, "entry_primary")
 
 
 def test_gated_source_active_when_artifact_present_AND_env_flag_set(tmp_path) -> None:
