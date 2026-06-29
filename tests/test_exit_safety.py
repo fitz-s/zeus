@@ -3035,6 +3035,182 @@ def test_mutex_held_blocks_concurrent_exit(conn):
     assert conn.execute("SELECT COUNT(*) FROM exit_mutex_holdings WHERE released_at IS NULL").fetchone()[0] == 2
 
 
+def test_exit_order_posted_projection_uses_exit_order_not_entry_order(conn):
+    from src.state.db import transition_phase
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="pos-projection-exit",
+        market_id="mkt-1",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="29C",
+        direction="buy_yes",
+        size_usd=1.0,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        entry_price=0.015,
+        p_posterior=0.1,
+        state="pending_exit",
+        pre_exit_state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        order_id="ord-entry-old",
+        order_status="partial",
+        exit_state="sell_placed",
+        last_exit_order_id="ord-exit-live",
+        exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+    )
+
+    assert transition_phase(
+        conn,
+        pos,
+        event_type="EXIT_ORDER_POSTED",
+        reason=pos.exit_reason,
+        error="",
+    )
+
+    row = conn.execute(
+        "SELECT phase, order_id, order_status FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "phase": "pending_exit",
+        "order_id": "ord-exit-live",
+        "order_status": "sell_placed",
+    }
+
+
+def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypatch):
+    from src.execution.exit_lifecycle import execute_exit
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    _insert_exit_command(
+        conn,
+        command_id="cmd-active-exit",
+        position_id="pos-active-exit",
+        venue_order_id="ord-active-exit",
+        size=9.7,
+        price=0.02,
+    )
+    _ack_exit(conn, command_id="cmd-active-exit", venue_order_id="ord-active-exit")
+
+    pos = Position(
+        trade_id="pos-active-exit",
+        market_id="mkt-1",
+        city="Chongqing",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="24C",
+        direction="buy_yes",
+        size_usd=1.0,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        entry_price=0.015,
+        p_posterior=0.1,
+        state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        order_id="ord-entry-old",
+        order_status="partial",
+    )
+
+    def no_new_sell(**_kwargs):
+        raise AssertionError("active prior exit sell must be adopted, not duplicated")
+
+    monkeypatch.setattr("src.execution.exit_lifecycle.place_sell_order", no_new_sell)
+
+    result = execute_exit(
+        PortfolioState(positions=[pos]),
+        pos,
+        ExitContext(
+            exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+            current_market_price=0.02,
+            current_market_price_is_fresh=True,
+            best_bid=0.019,
+            position_state="active",
+        ),
+        clob=None,
+        conn=conn,
+    )
+
+    assert result.startswith("sell_pending: active_prior_exit_sell")
+    assert pos.last_exit_order_id == "ord-active-exit"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 1
+    current = conn.execute(
+        "SELECT phase, order_id, order_status FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_id"] == "ord-active-exit"
+    assert current["order_status"] == "sell_placed"
+
+
+def test_exit_active_order_lock_retry_does_not_consume_backoff_budget(conn):
+    from src.execution.exit_lifecycle import _mark_exit_retry
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="pos-active-lock",
+        market_id="mkt-1",
+        city="Manila",
+        cluster="Asia",
+        target_date="2026-07-01",
+        bin_label="29C",
+        direction="buy_yes",
+        size_usd=1.0,
+        shares=9.7,
+        cost_basis_usd=0.15,
+        entry_price=0.015,
+        p_posterior=0.1,
+        state="pending_exit",
+        pre_exit_state="entered",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="C",
+        env="live",
+        strategy_key="center_buy",
+        exit_state="retry_pending",
+        exit_retry_count=3,
+        exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+    )
+
+    _mark_exit_retry(
+        pos,
+        reason="ENTRY_SELECTION_GUARD_INVALID_EXIT [SELL_ERROR]",
+        error=(
+            "venue_rejected_400: not enough balance / allowance: "
+            "sum of active orders: 9700000"
+        ),
+        conn=conn,
+    )
+
+    assert pos.exit_retry_count == 3
+    assert pos.exit_state == "retry_pending"
+    assert pos.next_exit_retry_at
+    current = conn.execute(
+        "SELECT phase, order_status, exit_retry_count, next_exit_retry_at FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "retry_pending"
+    assert current["exit_retry_count"] == 3
+    assert current["next_exit_retry_at"]
+
+
 def test_mutex_reacquire_released_row_fails_closed_on_stale_compare(conn):
     from src.execution.exit_safety import ExitMutex
 

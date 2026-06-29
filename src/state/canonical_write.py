@@ -213,13 +213,20 @@ def transition_phase(
         exit_state = str(getattr(position, "exit_state", "") or "").strip()
         if event_type == "EXIT_INTENT":
             projection["order_status"] = "exit_intent"
+            projection["order_id"] = None
         elif event_type == "EXIT_ORDER_POSTED":
             projection["order_status"] = "sell_placed"
+            projection["order_id"] = (
+                getattr(position, "last_exit_order_id", "") or None
+            )
         elif event_type == "EXIT_ORDER_REJECTED" and exit_state in {
             "retry_pending",
             "backoff_exhausted",
         }:
             projection["order_status"] = exit_state
+            projection["order_id"] = (
+                getattr(position, "last_exit_order_id", "") or None
+            )
         payload = {
             "status": exit_state,
             "exit_reason": getattr(position, "exit_reason", "") or reason,

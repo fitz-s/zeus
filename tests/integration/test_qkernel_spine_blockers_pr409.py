@@ -48,6 +48,43 @@ def _fast_band_draws(monkeypatch):
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _fully_licensed_selection_calibrator(monkeypatch):
+    """Keep qkernel integration fixtures independent from the generated live artifact.
+
+    The q_lcb OOF reliability guard and the selection calibrator are separate live gates. These
+    tests exercise qkernel route math, so they install a deep YES/NO selection artifact unless an
+    individual test intentionally monkeypatches ``family_decision_engine.apply_selection_calibrator``.
+    """
+
+    from src.decision import selection_calibrator as sc
+
+    cells: dict[str, dict[str, float | int]] = {}
+    for lead in ("L1", "L2_3", "L4P"):
+        for side in ("YES", "NO"):
+            for bin_class in ("modal", "nonmodal"):
+                for pb in range(len(sc.RAW_PROB_BUCKET_EDGES) - 1):
+                    cells[f"{side}|{lead}|{bin_class}|pb{pb}"] = {
+                        "n": 1000,
+                        "hit_rate": 0.95,
+                    }
+    artifact = {
+        "_meta": {
+            "authority": "selection_calibrator_v1_walkforward",
+            "version": "sel_v1",
+            "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "min_n": 30,
+            "armed_sides": ["YES", "NO"],
+            "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
+        },
+        "cells": cells,
+    }
+    monkeypatch.setattr(sc, "load_artifact", lambda: artifact)
+    sc.reset_artifact_cache()
+    yield
+    sc.reset_artifact_cache()
+
+
 def _install_sigma_floor_artifact(monkeypatch, tmp_path, *, sigma_floor_c: float = 1.0):
     """Install a minimal settlement sigma-floor artifact for tests that need a real floor."""
 
@@ -967,6 +1004,11 @@ def _overlay_proof(
         ),
         direction_law_ok=direction_law_ok,
         coherence_allows=coherence_allows,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key=f"{selected_route.side}|L2_3|modal|pb4",
+        selection_guard_n=80,
+        selection_guard_q_safe=max(float(economics.q_dot_payoff) - 0.01, 0.001),
     )
     decision = SimpleNamespace(
         selected=economics,
@@ -1352,6 +1394,11 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
         q_lcb_guard_cell_key="cell",
         direction_law_ok=True,
         coherence_allows=True,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L2_3|modal|pb1",
+        selection_guard_n=80,
+        selection_guard_q_safe=0.07,
     )
     decision = SimpleNamespace(
         selected=economics,

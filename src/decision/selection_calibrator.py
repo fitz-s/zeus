@@ -43,11 +43,11 @@ ARTIFACT (versioned, FAIL-CLOSED — absent is NOT inert): the table is read fro
 ``state/selection_calibrator.json`` (gitignored generated artifact, fit ONLY by
 scripts/fit_selection_calibrator.py walk-forward over settled rows). Unlike the OOF guard, absence
 is fail-closed: the live admission path emits NO new entries when the artifact is
-missing/malformed/stale/under-min-N, or when the executable side is not explicitly armed by the
-artifact. The artifact carries the posterior version it was fit under; a version mismatch is stale
--> fail-closed. An unarmed side is outside this correction's authority, and outside authority is not
-a live-money license. This module NEVER fits per-city offsets, NEVER moves mu, NEVER anchors to
-price, and NEVER constructs a parallel q.
+missing/malformed/stale/under-min-N, or when the executable side is not armed by explicit metadata
+or by deep cells in legacy artifacts that predate that metadata. The artifact carries the posterior
+version it was fit under; a version mismatch is stale -> fail-closed. An unarmed side is outside
+this correction's authority, and outside authority is not a live-money license. This module NEVER
+fits per-city offsets, NEVER moves mu, NEVER anchors to price, and NEVER constructs a parallel q.
 """
 from __future__ import annotations
 
@@ -484,12 +484,13 @@ def _fail_closed(cell_key: str, basis: str) -> CalibratorVerdict:
     )
 
 
-def _artifact_armed_sides(meta: Mapping) -> frozenset[str]:
+def _artifact_armed_sides(meta: Mapping, cells: Mapping, *, min_n: int) -> frozenset[str]:
     """Executable sides this artifact is authorized to calibrate.
 
-    Legacy ``sel_v1`` artifacts predate explicit side-scope metadata, but were promoted for the
-    buy-NO adverse-selection pathology. Treat them as NO-only unless a future artifact explicitly
-    opts in additional sides.
+    Prefer explicit side-scope metadata from current fitter output. Some already-promoted
+    ``sel_v1`` artifacts predate that metadata while still carrying deep YES/NO cells; in that
+    case infer side scope from cells whose selected support clears ``min_n``. Sparse bookkeeping
+    cells do not arm a side.
     """
 
     raw = (
@@ -497,10 +498,19 @@ def _artifact_armed_sides(meta: Mapping) -> frozenset[str]:
         or meta.get("calibrated_sides")
         or meta.get("selection_calibrated_sides")
     )
-    if raw is None and str(meta.get("version", "")) == "sel_v1":
-        raw = ("NO",)
     if raw is None:
-        return frozenset()
+        inferred: set[str] = set()
+        for key, cell in cells.items():
+            side = str(key).split("|", 1)[0].strip().upper()
+            if side not in {"YES", "NO"} or not isinstance(cell, Mapping):
+                continue
+            try:
+                support = int(cell.get("n_selected", cell.get("n", 0)) or 0)
+            except (TypeError, ValueError):
+                support = 0
+            if support >= int(min_n):
+                inferred.add(side)
+        return frozenset(inferred)
     if isinstance(raw, str):
         values = (raw,)
     else:
@@ -558,7 +568,7 @@ def apply_selection_calibrator(
 
     min_n = int(meta.get("min_n", MIN_N)) if isinstance(meta, Mapping) else MIN_N
     clean_side = "NO" if str(side).upper() == "NO" else "YES"
-    armed_sides = _artifact_armed_sides(meta)
+    armed_sides = _artifact_armed_sides(meta, cells, min_n=min_n)
     if clean_side not in armed_sides:
         return _fail_closed(key, "SIDE_NOT_ARMED")
 

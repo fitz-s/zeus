@@ -156,6 +156,23 @@ DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes between retries
 # Transient submit-channel gap: retry ~each monitor cycle and NEVER give up, so a
 # correct reversal exit sells once the channel recovers instead of being abandoned.
 CHANNEL_NOT_READY_COOLDOWN_SECONDS = 120
+EXIT_LOCKED_COOLDOWN_SECONDS = 60
+_ACTIVE_EXIT_SELL_STATES = frozenset(
+    {
+        "INTENT_CREATED",
+        "SNAPSHOT_BOUND",
+        "SIGNED_PERSISTED",
+        "POSTING",
+        "POST_ACKED",
+        "SUBMITTING",
+        "ACKED",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "PARTIAL",
+        "CANCEL_PENDING",
+        "REVIEW_REQUIRED",
+    }
+)
 
 
 def _is_channel_not_ready_error(error: str) -> bool:
@@ -182,6 +199,130 @@ def _is_channel_not_ready_error(error: str) -> bool:
         or "clob_market_info" in e
         or "venue_read_transient" in e
         or "transientvenueread" in e
+    )
+
+
+def _is_exit_transient_lock_error(error: str) -> bool:
+    """True when a sell is blocked by transient token reservation state.
+
+    These errors mean the exit cannot be submitted *right now*, usually because
+    an existing sell already locked the CTF shares or the wallet/read projection
+    has not caught up. They must not consume the bounded economic-exit retry
+    budget; the position is still supposed to be exited once the lock resolves.
+    """
+
+    if not error:
+        return False
+    e = error.lower()
+    if "pusd" in e:
+        return False
+    return (
+        "sum of active orders" in e
+        or ("active orders" in e and "not enough balance" in e)
+        or "ctf_tokens_insufficient" in e
+    )
+
+
+def _row_value(row: object, key: str, index: int) -> object:
+    try:
+        return row[key]  # type: ignore[index]
+    except Exception:
+        try:
+            return row[index]  # type: ignore[index]
+        except Exception:
+            return None
+
+
+def _active_exit_sell_command(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    token_id: str,
+) -> object | None:
+    if conn is None or not position_id or not token_id:
+        return None
+    states = tuple(sorted(_ACTIVE_EXIT_SELL_STATES))
+    placeholders = ", ".join("?" for _ in states)
+    try:
+        return conn.execute(
+            f"""
+            SELECT command_id, state, venue_order_id, updated_at, created_at
+              FROM venue_commands
+             WHERE position_id = ?
+               AND token_id = ?
+               AND side = 'SELL'
+               AND intent_kind = 'EXIT'
+               AND UPPER(COALESCE(state, '')) IN ({placeholders})
+             ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, command_id DESC
+             LIMIT 1
+            """,
+            (position_id, token_id, *states),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+
+
+def _active_exit_already_projected(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    venue_order_id: str,
+) -> bool:
+    if conn is None or not position_id or not venue_order_id:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT order_id, order_status
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    order_id = str(_row_value(row, "order_id", 0) or "")
+    order_status = str(_row_value(row, "order_status", 1) or "").lower()
+    return order_id == venue_order_id and order_status.startswith("sell_")
+
+
+def _adopt_active_exit_sell(
+    position: Position,
+    row: object,
+    *,
+    conn: sqlite3.Connection | None,
+    reason: str,
+) -> str:
+    command_id = str(_row_value(row, "command_id", 0) or "")
+    command_state = str(_row_value(row, "state", 1) or "")
+    venue_order_id = str(_row_value(row, "venue_order_id", 2) or "")
+    _mark_pending_exit(position)
+    if venue_order_id:
+        position.last_exit_order_id = venue_order_id
+    position.exit_state = "sell_pending"
+    position.order_status = "sell_pending"
+    position.next_exit_retry_at = None
+    position.last_exit_error = reason[:500]
+    if not str(getattr(position, "exit_reason", "") or ""):
+        position.exit_reason = reason
+    if not _active_exit_already_projected(
+        conn,
+        position_id=str(getattr(position, "trade_id", "") or ""),
+        venue_order_id=venue_order_id,
+    ):
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=position.exit_reason or reason,
+            error=reason,
+            event_type="EXIT_ORDER_POSTED",
+        )
+    return (
+        "sell_pending: active_prior_exit_sell "
+        f"command_id={command_id} order={venue_order_id or 'pending_ack'} state={command_state}"
     )
 PENDING_EXIT_REPRICE_MIN_TICKS = 2
 
@@ -1843,6 +1984,20 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=retry_reason, error="no_token_id")
         return "exit_blocked: no_token_id"
 
+    if conn is not None and not str(getattr(position, "last_exit_order_id", "") or ""):
+        active_exit = _active_exit_sell_command(
+            conn,
+            position_id=str(getattr(position, "trade_id", "") or ""),
+            token_id=token_id,
+        )
+        if active_exit is not None:
+            return _adopt_active_exit_sell(
+                position,
+                active_exit,
+                conn=conn,
+                reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
+            )
+
     snapshot_context = _latest_or_capture_exit_snapshot_context(
         conn,
         clob,
@@ -1903,6 +2058,19 @@ def _execute_live_exit(
             )
         except CollateralInsufficient as exc:
             collateral_reason = str(exc)
+            if _is_exit_transient_lock_error(collateral_reason):
+                active_exit = _active_exit_sell_command(
+                    conn,
+                    position_id=str(getattr(position, "trade_id", "") or ""),
+                    token_id=token_id,
+                )
+                if active_exit is not None:
+                    return _adopt_active_exit_sell(
+                        position,
+                        active_exit,
+                        conn=conn,
+                        reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_COLLATERAL]",
+                    )
             retry_reason = f"{exit_context.exit_reason} [COLLATERAL_REFRESH: {collateral_reason}]"
             _mark_exit_retry(
                 position,
@@ -1931,6 +2099,19 @@ def _execute_live_exit(
         conn=conn,
     )
     if not can_sell:
+        if _is_exit_transient_lock_error(collateral_reason or ""):
+            active_exit = _active_exit_sell_command(
+                conn,
+                position_id=str(getattr(position, "trade_id", "") or ""),
+                token_id=token_id,
+            )
+            if active_exit is not None:
+                return _adopt_active_exit_sell(
+                    position,
+                    active_exit,
+                    conn=conn,
+                    reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_COLLATERAL]",
+                )
         retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"
         _mark_exit_retry(
             position,
@@ -2055,6 +2236,19 @@ def _execute_live_exit(
 
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
+            if _is_exit_transient_lock_error(sell_error):
+                active_exit = _active_exit_sell_command(
+                    conn,
+                    position_id=str(getattr(position, "trade_id", "") or ""),
+                    token_id=token_id,
+                )
+                if active_exit is not None:
+                    return _adopt_active_exit_sell(
+                        position,
+                        active_exit,
+                        conn=conn,
+                        reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_SUBMIT]",
+                    )
             if _is_below_min_order_sell_error(sell_error):
                 dust_reason = f"{exit_context.exit_reason} [DUST: {sell_error}]"
                 _mark_exit_dust_hold(
@@ -3526,6 +3720,27 @@ def _mark_exit_retry(
         logger.info(
             "EXIT CHANNEL-NOT-READY %s: %s (budget NOT consumed; next retry %s)",
             position.trade_id, reason, position.next_exit_retry_at,
+        )
+        return
+
+    if _is_exit_transient_lock_error(error):
+        position.last_exit_error = error[:500]
+        position.exit_state = "retry_pending"
+        position.next_exit_retry_at = (
+            _utcnow() + timedelta(seconds=EXIT_LOCKED_COOLDOWN_SECONDS)
+        ).isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=reason,
+            error=error,
+            event_type="EXIT_ORDER_REJECTED",
+        )
+        logger.info(
+            "EXIT LOCKED %s: %s (budget NOT consumed; next retry %s)",
+            position.trade_id,
+            reason,
+            position.next_exit_retry_at,
         )
         return
 
