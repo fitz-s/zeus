@@ -1,5 +1,7 @@
 # Math defects 2.3 / 2.4 / 3.1 — unified design 2026-05-05
 
+Status: ACTIVE
+
 **Authority basis**: architect-opus 2026-05-05 unified plan, post Phase 0a migration + DDD INV-17 fix + calibration transfer scaffolding.
 
 ## TL;DR

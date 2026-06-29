@@ -1,5 +1,7 @@
 # Market-Cost Seam + Executable-Uncertainty Architecture Upgrade
 
+Status: ACTIVE
+
 **Created:** 2026-05-27
 **Last reused or audited:** 2026-05-27
 **Authority basis:** operator math/stat upgrade directive 2026-05-27 + 11-claim grep verification against origin/main HEAD cb4541da70 + Fitz §1 (structural decisions > patches) + Fitz §3 (immune system > security guard) + INV-12 (typed-probability seams) + INV-21 (Kelly typed price) + INV-eps-spec-conformance (operator-pinned deviations).

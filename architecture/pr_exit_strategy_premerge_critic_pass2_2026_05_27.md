@@ -1,4 +1,6 @@
 # Pre-Merge Critic Pass 2 — Exit Strategy Pure-Math PR
+
+Status: ARCHIVED_REFERENCE
 Commit: 7fd471a4ed (amended from aa14f1b466)
 Auditor: opus critic
 Date: 2026-05-27

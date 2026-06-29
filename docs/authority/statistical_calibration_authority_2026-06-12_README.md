@@ -1,5 +1,7 @@
 # Statistical calibration authority (2026-06-12)
 
+Status: ACTIVE
+
 Source: clean-room math consult REQ-20260612-174119 (zero Zeus context by operator
 directive — derivations from first principles + literature only). Full text:
 statistical_calibration_authority_2026-06-12.txt. Advisory until each step's

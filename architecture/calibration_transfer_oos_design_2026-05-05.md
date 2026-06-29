@@ -1,5 +1,7 @@
 # Calibration transfer OOS evidence — design 2026-05-05
 
+Status: ACTIVE
+
 **Authority basis**: critic-opus 2026-05-05 verdict on user Issue 2.2 + sonnet scoping report. PR #55 had OOS infrastructure; PR #56 merge removed it under assumption `oracle_evidence_status` would replace — wiring never completed. Legacy `evaluate_calibration_transfer_policy` (string-mapping) is currently load-bearing on `evaluator.py:900`.
 
 ## Required evidence (the math)

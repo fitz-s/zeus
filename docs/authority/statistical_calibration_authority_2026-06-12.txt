@@ -1,3 +1,5 @@
+Status: ACTIVE
+
 Verdict
 
 Highest-confidence diagnosis: the seven-loss “buy NO on the model’s near-modal bin” sequence is exactly the failure mode produced by fitting a global spread scale while omitting location bias, then adding a uniform mixture. A fixed bias δ that is not modeled is mathematically indistinguishable, to a variance-only fit, from extra residual variance; in the continuous Gaussian limit the variance-only MLE converges to

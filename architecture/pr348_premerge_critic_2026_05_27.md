@@ -1,5 +1,7 @@
 # PR #348 "market-cost seam" — Pre-merge deep review (reviewer + critic combined)
 
+Status: ARCHIVED_REFERENCE
+
 **Created:** 2026-05-27
 **Reviewer:** critic agent (adversarial, read-only)
 **Branch:** claude/market-cost-seam-2026-05-27  HEAD=ad2a160740
