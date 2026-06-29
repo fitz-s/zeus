@@ -2489,7 +2489,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
             ON snap.snapshot_id = cmd.snapshot_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state = 'FILLED'
+           AND cmd.state IN ('FILLED', 'PARTIAL')
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
            AND pc.position_id IS NULL
@@ -2889,6 +2889,164 @@ def _verified_edli_actionable_payload(
     return {}
 
 
+def _edli_payload_matches_token(payload: dict, *, semantic_key: str = "", token_id: str = "") -> bool:
+    token_id = str(token_id or "").strip()
+    if not token_id:
+        return True
+    candidates: set[str] = set()
+
+    def add_candidate(value: object) -> None:
+        if value not in (None, "") and not isinstance(value, (Mapping, list, tuple)):
+            candidates.add(str(value).strip())
+
+    for key in (
+        "token_id",
+        "selected_token_id",
+        "selected_outcome_token_id",
+        "actual_token_id",
+        "no_token_id",
+        "yes_token_id",
+    ):
+        add_candidate(payload.get(key))
+    audit = _json_mapping(payload.get("decision_audit"))
+    for key in (
+        "token_id",
+        "selected_token_id",
+        "selected_outcome_token_id",
+        "actual_token_id",
+        "no_token_id",
+        "yes_token_id",
+    ):
+        add_candidate(audit.get(key))
+    if token_id in candidates:
+        return True
+    final_intent_id = str(
+        payload.get("final_intent_id")
+        or audit.get("final_intent_id")
+        or ""
+    ).strip()
+    return token_id in str(semantic_key or "") or token_id in final_intent_id
+
+
+def _unit_from_bin_label(bin_label: str) -> str:
+    label = str(bin_label or "").strip().upper()
+    if "°C" in label or label.endswith(" C") or label.endswith("C"):
+        return "C"
+    if "°F" in label or label.endswith(" F") or label.endswith("F"):
+        return "F"
+    return ""
+
+
+def _edli_live_order_event_context(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    token_id: str,
+    decision_id: str,
+) -> dict:
+    """Recover current EDLI trade identity from the append-only live event stream.
+
+    The submit ACK projection runs inside the same live-money flow that writes
+    EDLI aggregate events and certificates.  Certificates are the preferred
+    authority, but at ACK time the certificate rows can be invisible to the
+    command-recovery connection/transaction while the aggregate events already
+    prove the final intent and pre-submit economics.  This reader is strictly
+    scoped to the same event id and selected token so it cannot hydrate a
+    command from an unrelated family.
+    """
+
+    ref = _edli_live_order_events_ref(conn)
+    event_id = str(event_id or "").strip()
+    token_id = str(token_id or "").strip()
+    decision_id = str(decision_id or "").strip()
+    if ref is None or not event_id or not token_id:
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT aggregate_id, event_type, payload_json, occurred_at, event_sequence
+          FROM {ref}
+         WHERE aggregate_id LIKE ?
+            OR payload_json LIKE ?
+         ORDER BY occurred_at DESC, event_sequence DESC
+         LIMIT 100
+        """,
+        (f"%{event_id}%", f"%{event_id}%"),
+    ).fetchall()
+    payloads: list[dict] = []
+    for row in rows:
+        record = _dict_row(row)
+        payload = _json_mapping(record.get("payload_json"))
+        if not payload:
+            continue
+        aggregate_id = str(record.get("aggregate_id") or "")
+        if not _edli_payload_matches_token(payload, semantic_key=aggregate_id, token_id=token_id):
+            continue
+        execution_command_id = str(payload.get("execution_command_id") or "").strip()
+        if execution_command_id and decision_id and execution_command_id != decision_id:
+            continue
+        event_type = str(record.get("event_type") or payload.get("event_type") or "").strip()
+        enriched = dict(payload)
+        enriched.setdefault("aggregate_id", aggregate_id)
+        enriched.setdefault("aggregate_event_type", event_type)
+        payloads.append(enriched)
+        audit = _json_mapping(payload.get("decision_audit"))
+        if audit and _edli_payload_matches_token(audit, semantic_key=aggregate_id, token_id=token_id):
+            audit_enriched = dict(audit)
+            audit_enriched.setdefault("event_type", payload.get("event_type"))
+            audit_enriched.setdefault("aggregate_id", aggregate_id)
+            audit_enriched.setdefault("aggregate_event_type", event_type)
+            payloads.append(audit_enriched)
+    if not payloads:
+        return {}
+
+    def first(*keys: str) -> object:
+        for payload in payloads:
+            for key in keys:
+                value = payload.get(key)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    condition_id = str(first("condition_id", "actual_condition_id") or "").strip()
+    direction = str(first("direction", "actual_direction") or "").strip().lower()
+    bin_label = str(first("bin_label", "actual_bin_label") or "").strip()
+    metric = str(first("metric", "temperature_metric") or "").strip().lower()
+    event_type = str(first("event_type") or "").strip()
+    qkernel_payload = first("qkernel_execution_economics")
+    q_live = first("q_live", "q_lcb_5pct")
+    if not (
+        condition_id
+        and direction in {"buy_yes", "buy_no"}
+        and bin_label
+        and metric in {"high", "low"}
+        and isinstance(qkernel_payload, dict)
+        and q_live not in (None, "")
+    ):
+        return {}
+    context = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "condition_id": condition_id,
+        "direction": direction,
+        "token_id": token_id,
+        "city": str(first("city") or "").strip(),
+        "target_date": str(first("target_date", "target_local_date") or "").strip(),
+        "bin_label": bin_label,
+        "metric": metric,
+        "temperature_metric": metric,
+        "unit": str(first("unit", "settlement_unit") or _unit_from_bin_label(bin_label)).strip().upper(),
+        "strategy_key": str(first("strategy_key") or "").strip(),
+        "q_live": q_live,
+        "q_lcb_5pct": first("q_lcb_5pct"),
+        "qkernel_execution_economics": qkernel_payload,
+        "selection_authority_applied": "qkernel_spine",
+        "causal_snapshot_id": str(first("causal_snapshot_id", "snapshot_id") or "").strip(),
+        "final_intent_id": str(first("final_intent_id") or "").strip(),
+        "source_authority": "edli_live_order_events",
+    }
+    return context if context["city"] and context["target_date"] and context["unit"] in {"F", "C"} else {}
+
+
 def _market_event_identity_for_condition(conn: sqlite3.Connection, condition_id: str) -> dict:
     ref = _market_events_ref(conn)
     if ref is None or not condition_id:
@@ -3012,7 +3170,7 @@ def _event_bound_strategy_key_from_payload(payload: dict) -> str:
         return strategy
     event_type = str(payload.get("event_type") or "").strip()
     direction = str(payload.get("direction") or "").strip().lower()
-    if event_type == "FORECAST_SNAPSHOT_READY":
+    if event_type in {"FORECAST_SNAPSHOT_READY", "EDLI_REDECISION_PENDING"}:
         return "opening_inertia" if direction == "buy_no" else "center_buy"
     if event_type == "DAY0_EXTREME_UPDATED":
         return "settlement_capture"
@@ -3035,6 +3193,12 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         event_id=event_id,
         token_id=selected_token_id,
     )
+    event_context = _edli_live_order_event_context(
+        conn,
+        event_id=event_id,
+        token_id=selected_token_id,
+        decision_id=decision_id,
+    )
     final_intent = _edli_certificate_payload(
         conn,
         certificate_type="FinalIntentCertificate",
@@ -3042,7 +3206,9 @@ def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, cli
         token_id=selected_token_id,
     )
     if not actionable:
-        return {}
+        actionable = dict(event_context)
+    if not final_intent and event_context:
+        final_intent = dict(event_context)
     qkernel_payload = actionable.get("qkernel_execution_economics")
     selection_authority = str(actionable.get("selection_authority_applied") or "").strip()
     qkernel_certified = selection_authority == "qkernel_spine" and isinstance(qkernel_payload, dict)
@@ -3222,6 +3388,8 @@ def _entry_recovery_position(
         or trade_case.get("no_token_id")
         or ""
     ).strip()
+    command_state = str(candidate.get("state") or "").strip().upper()
+    partial_fill = bool(filled and command_state == "PARTIAL")
     kind = "filled entry" if filled else "live entry"
     if not position_id or not command_id or not venue_order_id:
         raise ValueError(f"{kind} projection repair requires position, command, and order ids")
@@ -3314,7 +3482,7 @@ def _entry_recovery_position(
         condition_id=condition_id,
         order_id=venue_order_id,
         entry_order_id=venue_order_id,
-        order_status="filled" if filled else "pending",
+        order_status="partial" if partial_fill else ("filled" if filled else "pending"),
         entered_at=observed_at,
         order_posted_at=str(candidate.get("created_at") or observed_at),
         updated_at=observed_at,
@@ -3488,6 +3656,8 @@ def _log_filled_entry_execution_fact(
     position_id = str(position.trade_id)
     filled_at = str(candidate.get("fill_observed_at") or position.entered_at or _now_iso())
     posted_at = str(position.order_posted_at or candidate.get("created_at") or filled_at)
+    terminal_status = "partial" if str(position.order_status or "") == "partial" else "filled"
+    venue_status = "PARTIAL" if terminal_status == "partial" else str(position.fill_states or "FILLED")
     log_execution_fact(
         conn,
         intent_id=f"{position_id}:entry",
@@ -3501,8 +3671,8 @@ def _log_filled_entry_execution_fact(
         submitted_price=_float_or_none(candidate.get("price")),
         fill_price=_float_or_none(position.entry_price),
         shares=_float_or_none(position.shares),
-        venue_status=str(position.fill_states or "FILLED"),
-        terminal_exec_status="filled",
+        venue_status=venue_status,
+        terminal_exec_status=terminal_status,
     )
 
 

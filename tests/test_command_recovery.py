@@ -4963,6 +4963,97 @@ class TestRecoveryResolutionTable:
         assert trade_case["discovery_mode"] == "update_reaction"
         assert trade_case["p_posterior"] == pytest.approx(0.81)
 
+    def test_edli_trade_case_recovers_from_live_order_events_without_certificates(
+        self,
+        conn,
+    ):
+        """ACK-time projection may see EDLI aggregate events before certificates."""
+        from src.execution.command_recovery import _edli_trade_case_for_command
+
+        event_id = "edli_evt_event_only_projection"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "limit_price": 0.61,
+                "size": 12.29,
+            },
+            occurred_at="2026-06-07T00:00:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "EDLI_REDECISION_PENDING",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "q_live": 0.91,
+                "q_lcb_5pct": 0.82,
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33",
+                    "route_id": "DIRECT_NO:bin-33",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.91,
+                    "payoff_q_lcb": 0.82,
+                    "cost": 0.61,
+                    "edge_lcb": 0.21,
+                    "optimal_delta_u": 0.21,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
+            },
+            occurred_at="2026-06-07T00:00:01Z",
+        )
+
+        trade_case = _edli_trade_case_for_command(
+            conn,
+            {
+                "position_id": "pos-edli",
+                "decision_id": decision_id,
+                "token_id": no_token_id,
+                "env_condition_id": "condition-test",
+                "env_yes_token_id": yes_token_id,
+                "env_no_token_id": no_token_id,
+            },
+        )
+
+        assert trade_case["trade_id"] == "pos-edli"
+        assert trade_case["city"] == "Madrid"
+        assert trade_case["target_date"] == "2026-06-08"
+        assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
+        assert trade_case["direction"] == "buy_no"
+        assert trade_case["strategy_key"] == "opening_inertia"
+        assert trade_case["unit"] == "C"
+        assert trade_case["entry_method"] == "qkernel_spine"
+        assert trade_case["p_posterior"] == pytest.approx(0.91)
+
     def test_edli_trade_case_marks_non_qkernel_actionable_as_venue_fact_recovery(
         self,
         conn,
@@ -6197,6 +6288,273 @@ class TestRecoveryResolutionTable:
         ]
         assert [row["venue_status"] for row in event_types] == ["LIVE", "LIVE"]
         assert all(json.loads(row["payload_json"])["venue_status"] == "LIVE" for row in event_types)
+
+    def test_ensure_live_entry_projection_for_command_uses_edli_events_before_certificates(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "edli_evt_ack_event_only"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert(
+            conn,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=no_token_id,
+            outcome_label="NO",
+            decision_id=decision_id,
+            size=12.29,
+            price=0.61,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-live-edli")
+        _append_order_fact(
+            conn,
+            order_id="ord-live-edli",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="12.29",
+            source="REST",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "limit_price": 0.61,
+                "size": 12.29,
+            },
+            occurred_at="2026-06-07T00:00:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "EDLI_REDECISION_PENDING",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "q_live": 0.91,
+                "q_lcb_5pct": 0.82,
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33",
+                    "route_id": "DIRECT_NO:bin-33",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.91,
+                    "payoff_q_lcb": 0.82,
+                    "cost": 0.61,
+                    "edge_lcb": 0.21,
+                    "optimal_delta_u": 0.21,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
+            },
+            occurred_at="2026-06-07T00:00:01Z",
+        )
+
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, token_id, no_token_id,
+                   order_id, order_status, entry_method, strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_entry",
+            "city": "Madrid",
+            "target_date": "2026-06-08",
+            "direction": "buy_no",
+            "token_id": yes_token_id,
+            "no_token_id": no_token_id,
+            "order_id": "ord-live-edli",
+            "order_status": "pending",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "opening_inertia",
+        }
+
+    def test_partial_edli_entry_without_projection_recovers_active_partial_position_from_events(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "edli_evt_partial_event_only"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert(
+            conn,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=no_token_id,
+            outcome_label="NO",
+            decision_id=decision_id,
+            size=12.29,
+            price=0.61,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-live-edli")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-06-07T00:03:00Z",
+            payload={
+                "venue_order_id": "ord-live-edli",
+                "trade_id": "trade-partial-edli",
+                "filled_size": "5.128204",
+                "fill_price": "0.6100001092",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-live-edli",
+            trade_id="trade-partial-edli",
+            state="CONFIRMED",
+            filled_size="5.128204",
+            fill_price="0.6100001092",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-live-edli",
+            state="PARTIALLY_MATCHED",
+            matched_size="5.128204",
+            remaining_size="7.161796",
+            source="WS_USER",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="SubmitPlanBuilt",
+            payload={
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "limit_price": 0.61,
+                "size": 12.29,
+            },
+            occurred_at="2026-06-07T00:00:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="PreSubmitRevalidated",
+            payload={
+                "event_id": event_id,
+                "event_type": "EDLI_REDECISION_PENDING",
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-test",
+                "token_id": no_token_id,
+                "direction": "buy_no",
+                "city": "Madrid",
+                "target_date": "2026-06-08",
+                "metric": "high",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "q_live": 0.91,
+                "q_lcb_5pct": 0.82,
+                "qkernel_execution_economics": {
+                    "source": "qkernel_spine",
+                    "side": "NO",
+                    "candidate_id": "NO:bin-33:DIRECT_NO:bin-33",
+                    "route_id": "DIRECT_NO:bin-33",
+                    "bin_id": "bin-33",
+                    "payoff_q_point": 0.91,
+                    "payoff_q_lcb": 0.82,
+                    "cost": 0.61,
+                    "edge_lcb": 0.21,
+                    "optimal_delta_u": 0.21,
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                },
+            },
+            occurred_at="2026-06-07T00:00:01Z",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, direction, shares, entry_price,
+                   order_status, entry_method, strategy_key
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "city": "Madrid",
+            "target_date": "2026-06-08",
+            "direction": "buy_no",
+            "shares": pytest.approx(5.128204),
+            "entry_price": pytest.approx(0.6100001092),
+            "order_status": "partial",
+            "entry_method": "qkernel_spine",
+            "strategy_key": "opening_inertia",
+        }
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": pytest.approx(5.128204),
+            "fill_price": pytest.approx(0.6100001092),
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
 
     def test_live_buy_no_projection_repair_event_payload_uses_selected_no_token(
         self,

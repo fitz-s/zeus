@@ -245,14 +245,7 @@ from src.strategy.live_inference.live_admission import (
 )
 
 _SELECTION_DIAGNOSTIC_PI_MIN = 0.90
-# pr408 #1 CRITICAL (2026-06-14): the live calibration credential licenses through the K3
-# admission predicates (allows_arm = LICENSED/INSUFFICIENT_DATA license-by-default;
-# refutes_claim = UNLICENSED), NOT a status-name allowlist that excluded INSUFFICIENT_DATA
-# and rejected thin-settlement cold cells at submit as FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED.
-from src.calibration.settlement_backward_coverage import (
-    settlement_coverage_allows_arm,
-    settlement_coverage_refutes_claim,
-)
+from src.calibration.settlement_backward_coverage import settlement_coverage_refutes_claim
 from src.strategy import market_phase_evidence as _market_phase_evidence
 # The §7 robust marginal-expected-log-utility ranker IS the single live decision
 # surface (operator directive 2026-06-08; spec §6/§14.7/§14.8). _selected_candidate_proof
@@ -1804,10 +1797,11 @@ def _event_bound_strategy_live_quality_floors(strategy_key: str | None) -> dict[
 
 
 def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertificate) -> None:
-    """Identity fallback is evidence-only; it must never authorize real live commands."""
+    """Require executable calibration evidence before real live entry commands."""
 
     payload = calibration.payload
     authority = str(payload.get("authority") or "").strip().upper()
+    coverage_status = str(payload.get("coverage_status") or "").strip()
     n_samples_raw = payload.get("n_samples")
     try:
         n_samples = int(n_samples_raw) if n_samples_raw is not None else None
@@ -1824,16 +1818,10 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         raise ValueError(
             "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
         )
-    # FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE is the licensed replacement credential — it ADMITS
-    # for live. pr408 #1 CRITICAL (2026-06-14): a thin-history INSUFFICIENT_DATA license is
-    # admitted-by-default and carries n_samples==0 (no settled claim-days yet) BY DESIGN — the
-    # empty-sample guard must NOT block it (doing so was the second half of the cold-cell
-    # submit blocker: license-by-default upstream, then reject on n==0 here). The empty-sample
-    # belt-and-braces still applies to LICENSED / UNLICENSED-shrunk credentials, whose n is the
-    # settled coverage count (>0 by the licensing rule).
-    coverage_status = str(payload.get("coverage_status") or "").strip()
     if coverage_status == "INSUFFICIENT_DATA":
-        return
+        raise ValueError(
+            "EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:INSUFFICIENT_DATA"
+        )
     if authority == DAY0_OBSERVATION_CALIBRATION_AUTHORITY:
         return
     if n_samples is not None and n_samples <= 0:
@@ -14040,11 +14028,9 @@ def _replacement_family_coverage_verdict(
     verdict to the live q_lcb when the settled record proves overconfidence.
 
     Returns the family-representative ``CoverageVerdict`` (the buy_yes leg of the first
-    candidate whose q_lcb is present), or ``None`` when the check could not run / the scope
-    has no realized data at all. INSUFFICIENT_DATA is a real verdict (returned, not None) —
-    a thin-history cold cell yields INSUFFICIENT_DATA which the credential admits-by-default
-    (pr408 #1). Only a non-structural inability to even set up the check returns None
-    (→ UNEVALUATED → blocked).
+    candidate whose q_lcb is present), or ``None`` when the check could not run.  An
+    INSUFFICIENT_DATA verdict is returned for thin history and preserved for provenance,
+    but it does not license live entry.
 
     STRUCTURAL FAULT (pr408 #1 CRITICAL): a read/parse/schema fault in the observation
     build must NOT collapse into INSUFFICIENT_DATA or a swallowed None — it raises
@@ -14182,12 +14168,10 @@ def _build_replacement_calibration_credential(
 # STATUSES. This alias keeps the cert-layer name and pins the single-source registry entry
 # (#11); it must never regrow an inline frozenset literal.
 #
-# pr408 #1 CRITICAL (2026-06-14): the cert credential's PER-STATUS licensing decision
-# (_replacement_calibration_payload_from_credential) no longer reads this set directly — it
-# dispatches to the K3 predicates (settlement_coverage_allows_arm /_refutes_claim) because the
-# decision is now status-AND-shrink-aware (LICENSED/INSUFFICIENT_DATA license-by-default;
-# UNLICENSED licenses ONLY when the shrink was actually applied). The set remains the buy-NO
-# gate's vocabulary and the single-authority anchor.
+# The cert credential's per-status licensing decision is status-and-shrink aware:
+# LICENSED licenses directly; UNLICENSED licenses only when the live bound was
+# actually shrunk; INSUFFICIENT_DATA is preserved for observability but does not
+# license live entry.
 _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = SETTLEMENT_COVERAGE_LICENSING_STATUSES
 
 
@@ -14199,21 +14183,18 @@ def _replacement_calibration_payload_from_credential(
 ) -> dict[str, Any]:
     """Turn the stamped credential facts into the certificate calibration payload.
 
-    AUTHORITY (pr408 review C1+C2 #1 CRITICAL, 2026-06-14) — HONOR the K3 design:
-      * LICENSED / INSUFFICIENT_DATA (``settlement_coverage_allows_arm``) → admit with
-        authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE. INSUFFICIENT_DATA is
-        license-by-default (thin/absent settled claim history is NOT proof of
-        overconfidence — RULE 1; the MC/EMOS q_lcb already carries its own conservative
-        LCB floor). This is the fix: the prior mapping sent INSUFFICIENT_DATA to
-        UNEVALUATED→REJECTED, blocking every thin-settlement cold cell at submit.
+    AUTHORITY:
+      * LICENSED → admit with authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE.
       * UNLICENSED (``settlement_coverage_refutes_claim``) → admit ONLY when the selected
         leg's q_lcb was ACTUALLY shrunk (coverage gate flag ON and q_lcb_out < q_lcb_in,
         recorded as ``coverage.shrink_applied``). An UNLICENSED verdict whose shrink was
         NOT applied (flag OFF) is a proven-overconfident bound serving UNSHRUNK → block as
         UNEVALUATED. (Mirrors arm_gate_coverage_blocks, which refuses UNLICENSED outright;
         here we additionally LICENSE the case where the shrink made the bound honest.)
-      * None / unknown / no verdict → UNEVALUATED → reject with the distinct reason.
-    The INSUFFICIENT_DATA / UNLICENSED status string is preserved on the cert (coverage_status)
+      * INSUFFICIENT_DATA / None / unknown / no verdict → UNEVALUATED → reject with
+        the distinct reason. Thin/absent settled claim history is not evidence of
+        overconfidence, but it is also not a live-money entry license.
+    The status string is preserved on the cert (coverage_status)
     for observability regardless of the licensing decision. The payload carries the full
     provenance the receipt/verifier round-trips, plus the fields _validate_calibration_payload
     requires (horizon_profile == forecast's, training_cutoff/model_available_at <= decision_time,
@@ -14222,8 +14203,7 @@ def _replacement_calibration_payload_from_credential(
     coverage = credential.get("coverage") or {}
     status = coverage.get("status")
     status_str = status if isinstance(status, str) else ""
-    if settlement_coverage_allows_arm(status_str):
-        # LICENSED or INSUFFICIENT_DATA: a real non-refuting verdict admits.
+    if status_str == "LICENSED":
         licensed = True
     elif settlement_coverage_refutes_claim(status_str):
         # UNLICENSED: admit ONLY if the shrink was actually applied to the live leg

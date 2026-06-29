@@ -7,9 +7,9 @@
 #   RELATIONSHIP tests (Fitz methodology): they assert the cross-function invariant
 #   credential-state -> certificate-authority -> live-gate-verdict holds across the boundary
 #   between the calibration-authority builder, the live admission gate, and the verifier.
-#   pr408 review C1+C2 #1 CRITICAL (2026-06-14): the credential now HONORS the K3 design —
-#   INSUFFICIENT_DATA is admitted-by-default (was UNEVALUATED→blocked, the cold-cell submit
-#   blocker), and UNLICENSED admits ONLY when the shrink was actually applied to the leg.
+#   Live entry now requires realized calibration coverage: INSUFFICIENT_DATA is preserved
+#   for provenance but blocked, while UNLICENSED admits ONLY when the shrink was actually
+#   applied to the leg.
 """Quadrant relationship matrix for the replacement calibration credential.
 
 The credential bridges three modules whose boundary the bug lived at:
@@ -18,11 +18,12 @@ The credential bridges three modules whose boundary the bug lived at:
   (3) `_assert_event_bound_calibration_live_admitted` (the live gate) admits/rejects it,
   (4) the verifier's APPROVED_CALIBRATION_AUTHORITIES round-trips the admitted authority.
 
-The quadrants (pr408 #1 corrected):
-  Q1 replacement + bounds + LICENSED / INSUFFICIENT_DATA / UNLICENSED-shrunk -> admitted,
-     FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE (INSUFFICIENT_DATA is license-by-default)
+The quadrants:
+  Q1 replacement + bounds + LICENSED / UNLICENSED-shrunk -> admitted,
+     FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE
   Q2 replacement + NO bounds                   -> IDENTITY_FALLBACK reject (unchanged)
-  Q3 replacement + bounds, NO verdict (None) OR UNLICENSED-unshrunk -> UNEVALUATED reject
+  Q3 replacement + bounds, INSUFFICIENT_DATA / NO verdict (None) OR UNLICENSED-unshrunk
+     -> UNEVALUATED reject
   Q4 legacy candidate, no Platt bucket         -> IDENTITY_FALLBACK reject (unchanged)
 """
 from __future__ import annotations
@@ -159,11 +160,8 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
     assert FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
 
 
-def test_q1_insufficient_data_is_admitted_by_default():
-    """pr408 #1 CRITICAL: a thin-history INSUFFICIENT_DATA verdict (n=0, no realized backing)
-    is admitted-by-default — authority FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE, the live gate does
-    NOT raise, and the empty-sample guard does NOT block on n_samples==0. RED-on-revert:
-    restoring the {LICENSED,UNLICENSED} mapping sends this to UNEVALUATED→REJECTED."""
+def test_q3_insufficient_data_is_preserved_but_live_blocked():
+    """Thin-history INSUFFICIENT_DATA has no realized backing and cannot submit live."""
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
@@ -176,11 +174,12 @@ def test_q1_insufficient_data_is_admitted_by_default():
         family=_family(),
     )
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
     assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"  # preserved for observability
     assert cal_payload["n_samples"] == 0
     cert = SimpleNamespace(payload=cal_payload)
-    _assert_event_bound_calibration_live_admitted(cert)  # must NOT raise (admitted-by-default)
+    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
+        _assert_event_bound_calibration_live_admitted(cert)
 
 
 def test_day0_live_observation_hard_fact_calibration_authority_admits():
@@ -280,9 +279,9 @@ def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, 
 
 
 # ---------------------------------------------------------------------------
-# Q3 — replacement + bounds, NO coverage verdict (None) -> UNEVALUATED reject (distinct).
-#   pr408 #1: INSUFFICIENT_DATA is NO LONGER here (it admits-by-default, see Q1). Only the
-#   absence of ANY verdict (None — the machinery could not evaluate the scope) blocks.
+# Q3 — replacement + bounds, no live-licensing coverage -> UNEVALUATED reject (distinct).
+#   INSUFFICIENT_DATA is in this quadrant: the machinery evaluated the scope but found too
+#   little realized backing for live entry.
 # ---------------------------------------------------------------------------
 def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked():
     bundle = _replacement_bundle(
@@ -410,10 +409,7 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
     )
     assert verdict is not None
     assert verdict.status == "INSUFFICIENT_DATA"
-    # pr408 #1 CRITICAL: an INSUFFICIENT_DATA verdict is admitted-by-default — the credential
-    # is FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE (NOT UNEVALUATED). The cold thin-history cell now
-    # reaches live admission instead of being blocked. RED-on-revert: restoring the old
-    # mapping sends it to UNEVALUATED.
+    # INSUFFICIENT_DATA is preserved for provenance but does not license live entry.
     credential = _build_replacement_calibration_credential(
         replacement_bundle=_replacement_bundle(
             q_lcb={"bin-a": 0.80},
@@ -425,10 +421,10 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
         family=family,
     )
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
     assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
-    # the live gate ADMITS it even with n_samples==0 (empty-sample guard honors INSUFFICIENT_DATA)
-    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
+        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
 
 
 def test_family_coverage_verdict_none_when_no_candidate_lcb():
