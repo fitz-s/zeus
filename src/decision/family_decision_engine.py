@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-29
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871 [decision_id, case, predictive, omega, joint_q,
@@ -237,7 +237,8 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
     }
 )
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
-_ROI_FRONTIER_MIN_GROWTH_DENSITY = 0.01
+_ROI_FRONTIER_MIN_GROWTH_DENSITY = 0.0025
+_ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
 
 
 class FamilyDecisionError(ValueError):
@@ -1093,27 +1094,21 @@ class FamilyDecisionEngine:
         except Exception:  # noqa: BLE001
             stake = 0.0
             delta_u_at_min = 0.0
+        q_lcb = self._payoff_q_lcb(d)
         growth_density = self._robust_kelly_growth_density(d)
         return (
             np.isfinite(stake)
             and stake > 0.0
             and np.isfinite(delta_u_at_min)
             and delta_u_at_min > 0.0
+            and np.isfinite(q_lcb)
+            and q_lcb >= _ROI_FRONTIER_MIN_PAYOFF_Q_LCB
             and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
             and np.isfinite(growth_density)
             and growth_density >= _ROI_FRONTIER_MIN_GROWTH_DENSITY
         )
 
-    def _robust_kelly_growth_density(self, d: CandidateDecision) -> float:
-        """Capital-efficiency objective with confidence, not raw payout odds.
-
-        ``edge_lcb / cost`` alone over-rewards one-cent tails whose lower-bound
-        win probability only barely clears price. Multiplying by the binary
-        Kelly lower-bound fraction keeps Shanghai-style cheap center YES legs
-        dominant when their belief is genuinely strong, while refusing to let
-        tiny low-confidence tails beat a high-confidence lower-ROI leg.
-        """
-        roi = self._edge_roi_lcb(d)
+    def _payoff_q_lcb(self, d: CandidateDecision) -> float:
         try:
             cost = float(d.economics.cost.value)
             payoff_q_lcb = d.economics.payoff_q_lcb
@@ -1124,6 +1119,23 @@ class FamilyDecisionEngine:
             )
         except Exception:  # noqa: BLE001
             return float("-inf")
+        return q_lcb
+
+    def _robust_kelly_growth_density(self, d: CandidateDecision) -> float:
+        """Capital-efficiency objective with confidence, not raw payout odds.
+
+        ``edge_lcb / cost`` alone over-rewards one-cent tails whose lower-bound
+        win probability only barely clears price. Multiplying by the binary
+        Kelly lower-bound fraction keeps cheap center YES legs dominant when
+        their belief is genuinely strong, while refusing to let tiny
+        low-confidence tails beat a high-confidence lower-ROI leg.
+        """
+        roi = self._edge_roi_lcb(d)
+        try:
+            cost = float(d.economics.cost.value)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+        q_lcb = self._payoff_q_lcb(d)
         if not (
             np.isfinite(roi)
             and np.isfinite(cost)

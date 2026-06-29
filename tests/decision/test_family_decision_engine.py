@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-06-29
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
@@ -581,6 +581,7 @@ def _hand_decision(
     q_lcb_guard_basis: str = "",
     q_lcb_guard_abstained: bool = False,
     q_lcb_guard_cell_key: str = "",
+    payoff_q_lcb: Optional[float] = None,
 ) -> CandidateDecision:
     """A hand-built CandidateDecision (direction-law-legal + coherent) for the _select test."""
     economics = CandidateEconomics(
@@ -593,6 +594,7 @@ def _hand_decision(
         q_dot_payoff=0.5,
         cost=route.route_cost.avg_cost,
         route_id=route.route_cost.route_id,
+        payoff_q_lcb=payoff_q_lcb,
     )
     return CandidateDecision(
         route=route,
@@ -855,6 +857,45 @@ def test_select_roi_frontier_keeps_small_stake_high_confidence_yes(monkeypatch):
     assert engine._roi_frontier_useful(high_confidence_yes) is True
     assert reason is None
     assert selected is high_confidence_yes
+
+
+def test_select_roi_frontier_keeps_live_small_edge_yes(monkeypatch):
+    """Live qkernel must not stall when a small YES has positive edge and profit LCB."""
+    case = _case()
+    space = _outcome_space(case)
+    live_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.06),
+        edge_lcb=0.01770,
+        optimal_delta_u=0.000189,
+        delta_u_at_min=0.000079,
+        robust_trade_score=0.01770,
+        optimal_stake_usd=Decimal("1.559569057373046875"),
+        payoff_q_lcb=0.07770,
+    )
+    thin_tail = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b24", cost=0.005),
+        edge_lcb=0.005,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.001,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("1.50"),
+        payoff_q_lcb=0.010,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([thin_tail, live_yes])
+
+    assert engine._profit_lcb_usd(live_yes) > 0.25
+    assert 0.0025 <= engine._robust_kelly_growth_density(live_yes) < 0.01
+    assert engine._payoff_q_lcb(live_yes) >= 0.02
+    assert engine._roi_frontier_useful(live_yes) is True
+    assert engine._roi_frontier_useful(thin_tail) is False
+    assert reason is None
+    assert selected is live_yes
 
 
 def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):
