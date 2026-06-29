@@ -15,6 +15,7 @@ import os
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from typing import Callable
 
 from src.events.opportunity_event import OpportunityEvent
 
@@ -56,6 +57,7 @@ _TERMINAL_NO_VALUE_REFUTATION_SQL = """
 """
 _FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL = "COALESCE(executable_snapshot_id, '') = ''"
 _RECENT_RECAPTURE_EDGE_REVERSED_REASON = "SUBMIT_ABORTED_EDGE_REVERSED"
+_FamilyNormalizer = Callable[[object, object, object], tuple[str, str, str]]
 
 
 def _recapture_edge_backoff_seconds() -> int:
@@ -92,6 +94,16 @@ def _safe_int(value: object, default: int = 0) -> int:
 
 def _safe_bool_int(value: object) -> int:
     return 1 if _safe_int(value, 0) > 0 else 0
+
+
+def _default_family_normalizer(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
+    city_text = " ".join(str(city or "").strip().lower().replace("-", " ").replace("_", " ").split())
+    metric_text = " ".join(str(metric or "").strip().lower().replace("-", " ").replace("_", " ").split())
+    if metric_text in {"lowest", "min", "minimum", "tmin"} or metric_text.startswith("lowest "):
+        metric_text = "low"
+    elif metric_text in {"highest", "max", "maximum", "tmax"} or metric_text.startswith("highest "):
+        metric_text = "high"
+    return (city_text, str(target_date or "").strip(), metric_text)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -995,6 +1007,84 @@ class EventStore:
                 (now, now, self.consumer_name, *chunk),
             )
         return len(superseded_ids)
+
+    def archive_unmarketed_day0_events(
+        self,
+        *,
+        admitted_families: set[tuple[str, str, str]] | frozenset[tuple[str, str, str]],
+        normalizer: _FamilyNormalizer | None = None,
+        batch_limit: int = 5_000,
+    ) -> int:
+        """Expire active Day0 execution events for families with no live market/exposure.
+
+        Day0 observations are truth inputs, but a ``DAY0_EXTREME_UPDATED`` row in
+        ``opportunity_event_processing`` is an execution decision event. If the family has
+        no Polymarket market topology and no current held/open-rest exposure, the reactor
+        can only requeue it through executable-snapshot/Gamma-empty churn. Marking the
+        mutable processing row ``expired`` keeps the append-only observation provenance
+        while removing non-executable observation facts from the live money-path working set.
+        """
+
+        self._require_world_event_tables()
+        if normalizer is None:
+            normalizer = _default_family_normalizer
+        admitted = {tuple(family) for family in admitted_families if all(family)}
+
+        candidate_rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city')        AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date,
+                   json_extract(e.payload_json, '$.metric')      AS metric
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.city') IS NOT NULL
+               AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+               AND json_extract(e.payload_json, '$.metric') IS NOT NULL
+             ORDER BY p.updated_at ASC, p.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, max(1, int(batch_limit))),
+        ).fetchall()
+        if not candidate_rows:
+            return 0
+
+        expired_ids: list[str] = []
+        for row in candidate_rows:
+            try:
+                family = normalizer(row[1], row[2], row[3])
+            except Exception:  # noqa: BLE001
+                continue
+            if not all(family):
+                continue
+            if family not in admitted:
+                expired_ids.append(str(row[0]))
+        if not expired_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(expired_ids), _CHUNK):
+            chunk = expired_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       last_error = 'DAY0_UNMARKETED_EXECUTION_EVENT:no_market_topology_or_exposure',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(expired_ids)
 
     def ignore_channel_cache_events(self, *, batch_limit: int = 5_000) -> int:
         """Move channel cache-hydration events out of the submit reactor working set.

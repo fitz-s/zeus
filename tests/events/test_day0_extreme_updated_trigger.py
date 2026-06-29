@@ -182,6 +182,32 @@ def test_trigger_emit_idempotent():
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
 
 
+def test_trigger_family_admission_blocks_non_executable_day0_event():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn),
+        family_admission=lambda observation: observation["city"] == "Paris",
+    )
+
+    blocked = trigger.emit_from_observation(
+        observation=_observation(city="Chicago"),
+        settlement_semantics=FakeSettlementSemantics(74),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:08:00+00:00",
+    )
+    admitted = trigger.emit_from_observation(
+        observation=_observation(city="Paris"),
+        settlement_semantics=FakeSettlementSemantics(74),
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        received_at="2026-05-24T18:08:00+00:00",
+    )
+
+    assert blocked is None
+    assert admitted is not None and admitted.inserted is True
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+
+
 def test_scan_authority_rows_uses_recorded_available_at_and_extreme_changes():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)

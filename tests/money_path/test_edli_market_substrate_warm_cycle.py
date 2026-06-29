@@ -65,6 +65,80 @@ import src.data.market_scanner as market_scanner
 import src.data.substrate_observer as substrate_observer
 
 
+def _create_minimal_trade_exposure_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            phase TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            chain_cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            venue_order_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            token_id TEXT,
+            snapshot_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            state TEXT,
+            remaining_size REAL,
+            local_sequence INTEGER
+        )
+        """
+    )
+
+
+def test_day0_live_family_admission_uses_market_events_without_coldboot_flood():
+    forecasts_conn = sqlite3.connect(":memory:")
+    trade_conn = sqlite3.connect(":memory:")
+    _create_minimal_trade_exposure_tables(trade_conn)
+    forecasts_conn.execute(
+        "CREATE TABLE market_events (city TEXT, target_date TEXT, temperature_metric TEXT)"
+    )
+    forecasts_conn.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?)",
+        ("Paris", "2026-06-29", "low"),
+    )
+
+    admission = main_module._edli_day0_live_family_admission(forecasts_conn, trade_conn)
+
+    assert admission.expiry_safe is True
+    assert admission({"city": "Paris", "target_date": "2026-06-29", "metric": "lowest"})
+    assert not admission({"city": "Zhengzhou", "target_date": "2026-06-29", "metric": "high"})
+
+
+def test_day0_live_family_admission_empty_market_events_does_not_admit_unexposed_family():
+    forecasts_conn = sqlite3.connect(":memory:")
+    trade_conn = sqlite3.connect(":memory:")
+    _create_minimal_trade_exposure_tables(trade_conn)
+    forecasts_conn.execute(
+        "CREATE TABLE market_events (city TEXT, target_date TEXT, temperature_metric TEXT)"
+    )
+
+    admission = main_module._edli_day0_live_family_admission(forecasts_conn, trade_conn)
+
+    assert admission.expiry_safe is True
+    assert admission.admitted_families == frozenset()
+    assert not admission({"city": "Paris", "target_date": "2026-06-29", "metric": "low"})
+
+
 def test_confirmation_refresh_prune_restricts_to_priority_conditions():
     """Scoped redecision confirmation must not refresh every sibling bin."""
 

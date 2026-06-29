@@ -1059,6 +1059,7 @@ class Day0FastObsEmitter:
         received_at: str,
         limit: int = 50,
         day0_is_tradeable: bool = True,
+        family_admission=None,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
 
@@ -1090,7 +1091,9 @@ class Day0FastObsEmitter:
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
         trigger = Day0ExtremeUpdatedTrigger(
-            EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+            EventWriter(world_conn),
+            day0_is_tradeable=day0_is_tradeable,
+            family_admission=family_admission,
         )
         emitted = 0
         for city, source, target_date in prefetch.eligible:
@@ -1189,6 +1192,8 @@ class Day0FastObsEmitter:
                         decision_time=decision_time,
                         received_at=received_at,
                     )
+                    if result is None:
+                        continue
                     if result.inserted or result.duplicate:
                         # A PERSISTED live event advances the live memo. `inserted`
                         # is the normal path; `duplicate` is the restart/dedup path

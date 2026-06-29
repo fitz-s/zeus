@@ -152,6 +152,48 @@ def _event_row_still_present(conn: sqlite3.Connection, event_id: str) -> bool:
     )
 
 
+def test_archive_unmarketed_day0_events_expires_only_non_admitted_processing_rows():
+    conn = _world_conn()
+    store = EventStore(conn)
+    admitted = _day0_event(
+        "Paris",
+        "2026-06-29",
+        "low",
+        available_at="2026-06-29T05:00:00+00:00",
+        seq=1,
+    )
+    unmarketed = _day0_event(
+        "Zhengzhou",
+        "2026-06-29",
+        "high",
+        available_at="2026-06-29T05:01:00+00:00",
+        seq=2,
+    )
+    assert store.insert_or_ignore(admitted) is True
+    assert store.insert_or_ignore(unmarketed) is True
+
+    archived = store.archive_unmarketed_day0_events(
+        admitted_families={("paris", "2026-06-29", "low")}
+    )
+
+    assert archived == 1
+    rows = {
+        row["event_id"]: (row["processing_status"], row["last_error"])
+        for row in conn.execute(
+            """
+            SELECT event_id, processing_status, last_error
+              FROM opportunity_event_processing
+            """
+        ).fetchall()
+    }
+    assert rows[admitted.event_id][0] == "pending"
+    assert rows[unmarketed.event_id] == (
+        "expired",
+        "DAY0_UNMARKETED_EXECUTION_EVENT:no_market_topology_or_exposure",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
+
 # Decision time 2026-06-05T12:00:00Z: Chicago (UTC-5) local 06-05 07:00 → 06-04 is a PAST
 # local day; Auckland (UTC+12) local 06-06 00:00 → 06-06 is the CURRENT local day.
 _DECISION_TIME = "2026-06-05T12:00:00+00:00"

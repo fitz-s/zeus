@@ -161,6 +161,100 @@ def _substrate_refresh_family_key(
     )
 
 
+@dataclass(frozen=True)
+class _Day0LiveFamilyAdmission:
+    admitted_families: frozenset[tuple[str, str, str]]
+    expiry_safe: bool
+
+    def __call__(self, observation: dict[str, Any]) -> bool:
+        family = _substrate_refresh_family_key(
+            observation.get("city"),
+            observation.get("target_date"),
+            observation.get("metric"),
+        )
+        return all(family) and family in self.admitted_families
+
+
+def _edli_day0_live_family_admission(
+    forecasts_conn,
+    trade_conn,
+) -> _Day0LiveFamilyAdmission:
+    """Build the Day0 execution admission set from live market/exposure truth.
+
+    Day0 observations are valid observation facts, but live execution events must be
+    market-backed or tied to already-owned risk. Otherwise the reactor spends claim and
+    substrate budget on families where no order can ever be placed.
+    """
+
+    market_families: set[tuple[str, str, str]] = set()
+    market_surface_read_ok = False
+    try:
+        table_row = forecasts_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_events' LIMIT 1"
+        ).fetchone()
+        if table_row is not None:
+            rows = forecasts_conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE city IS NOT NULL
+                   AND target_date IS NOT NULL
+                   AND temperature_metric IN ('high', 'low')
+                """
+            ).fetchall()
+            market_surface_read_ok = True
+            for city, target_date, metric in rows:
+                family = _substrate_refresh_family_key(city, target_date, metric)
+                if all(family):
+                    market_families.add(family)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "EDLI day0 live family admission: market_events read failed; "
+            "Day0 execution emission restricted to current exposure families: %r",
+            exc,
+        )
+
+    exposure_families: set[tuple[str, str, str]] = set()
+    exposure_surface_read_ok = False
+    try:
+        trade_tables = {
+            str(row[0])
+            for row in trade_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        exposure_surface_read_ok = {
+            "position_current",
+            "venue_commands",
+            "venue_order_facts",
+        }.issubset(trade_tables)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EDLI day0 live family admission: trade exposure surface probe failed: %r", exc)
+
+    def _add_families(raw: Iterable[tuple[object, object, object]]) -> None:
+        for city, target_date, metric in raw or ():
+            family = _substrate_refresh_family_key(city, target_date, metric)
+            if all(family):
+                exposure_families.add(family)
+
+    try:
+        _add_families(_open_rest_family_rows_for_refresh(trade_conn))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EDLI day0 live family admission: open-rest family read failed: %r", exc)
+    try:
+        from src.data.replacement_cycle_advance_trigger import _held_position_families
+
+        _add_families(_held_position_families(trade_conn))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("EDLI day0 live family admission: held-position family read failed: %r", exc)
+
+    admitted = frozenset(market_families | exposure_families)
+    return _Day0LiveFamilyAdmission(
+        admitted_families=admitted,
+        expiry_safe=market_surface_read_ok and exposure_surface_read_ok,
+    )
+
+
 # Wave-2 item 5 (2026-06-12): "edli_live" is the only event-driven live mode.
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
@@ -4212,12 +4306,42 @@ def _edli_event_reactor_cycle() -> None:
         ):
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         _log_stage("day0_prefetch")
+        _day0_family_admission: _Day0LiveFamilyAdmission | None = None
+        if (
+            edli_cfg.get("day0_extreme_trigger_enabled")
+            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+        ):
+            try:
+                from src.state.db import get_trade_connection_read_only as _get_trade_ro
+
+                _day0_admission_trade_conn = _get_trade_ro()
+                try:
+                    _day0_family_admission = _edli_day0_live_family_admission(
+                        forecasts_conn,
+                        _day0_admission_trade_conn,
+                    )
+                finally:
+                    _day0_admission_trade_conn.close()
+            except Exception as _day0_admission_exc:  # noqa: BLE001
+                logger.warning(
+                    "EDLI day0 live family admission build failed; Day0 execution emit "
+                    "will be restricted this cycle and unmarketed pending expiry skipped: %r",
+                    _day0_admission_exc,
+                )
+                _day0_family_admission = _Day0LiveFamilyAdmission(
+                    admitted_families=frozenset(),
+                    expiry_safe=False,
+                )
         _prune_mutex = _world_write_mutex()
         _prune_lock_timeout_s = _edli_prune_lock_timeout_seconds(edli_cfg)
         _prune_acquired = _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
         if _prune_acquired:
             try:
-                _edli_prune_pending_working_set(store, decision_time=now)
+                _edli_prune_pending_working_set(
+                    store,
+                    decision_time=now,
+                    day0_family_admission=_day0_family_admission,
+                )
                 conn.commit()
             finally:
                 _prune_mutex.release()
@@ -4325,6 +4449,7 @@ def _edli_event_reactor_cycle() -> None:
                                 str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
                             ),
                             budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
+                            family_admission=_day0_family_admission,
                         )
                         _log_stage("day0_emit")
                     except sqlite3.OperationalError as _day0_emit_lock_exc:
@@ -7568,7 +7693,12 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 
-def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
+def _edli_prune_pending_working_set(
+    store,
+    *,
+    decision_time: datetime,
+    day0_family_admission: _Day0LiveFamilyAdmission | None = None,
+) -> None:
     """Prune stale/superseded rows before snapshotting the redecision skip set.
 
     Backlog pruning is maintenance, not trade decision logic. Keep it explicit
@@ -7802,6 +7932,31 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_superseded_day0_events sweep failed (non-fatal): %r",
             _d0_sweep_exc,
     )
+
+    try:
+        if _budget_exhausted("archive_unmarketed_day0_events"):
+            return
+        _step_started = time.monotonic()
+        _d0_unmarketed_archived = 0
+        if day0_family_admission is not None and day0_family_admission.expiry_safe:
+            _d0_unmarketed_archived = store.archive_unmarketed_day0_events(
+                admitted_families=set(day0_family_admission.admitted_families),
+                normalizer=_substrate_refresh_family_key,
+                batch_limit=batch_limit,
+            )
+        _log_prune_step("archive_unmarketed_day0_events", _step_started, _d0_unmarketed_archived)
+        if _d0_unmarketed_archived:
+            logger.info(
+                "EDLI reactor: expired %d unmarketed DAY0_EXTREME_UPDATED execution "
+                "events with no market topology or live exposure; observation provenance "
+                "kept, but non-executable Day0 facts no longer claim money-path budget",
+                _d0_unmarketed_archived,
+            )
+    except Exception as _d0_unmarketed_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_unmarketed_day0_events sweep failed (non-fatal): %r",
+            _d0_unmarketed_sweep_exc,
+        )
 
     try:
         if _budget_exhausted("expire_unready_forecast_snapshot_pending"):
@@ -8139,6 +8294,7 @@ def _edli_emit_day0_extreme_events(
     fast_prefetch=None,
     day0_is_tradeable: bool = True,
     budget_seconds: float | None = None,
+    family_admission: _Day0LiveFamilyAdmission | None = None,
 ) -> int:
     """Emit EDLI Day0 extreme events from live observation truth surfaces.
 
@@ -8179,6 +8335,7 @@ def _edli_emit_day0_extreme_events(
                     received_at=received_at,
                     limit=limit,
                     day0_is_tradeable=day0_is_tradeable,
+                    family_admission=family_admission,
                 )
             except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
                 logger.warning(
@@ -8190,6 +8347,7 @@ def _edli_emit_day0_extreme_events(
             EventWriter(world_conn),
             day0_is_tradeable=day0_is_tradeable,
             suppress_recent_no_value_refutations=True,
+            family_admission=family_admission,
         )
         authority_results, observation_results = _edli_scan_day0_with_lock_retry(
             trigger=trigger,
@@ -8202,8 +8360,11 @@ def _edli_emit_day0_extreme_events(
         # Structured per-lane counters (PR#404 P2 observability fix).
         logger.info(
             "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
-            "day0_observation_instants_emitted=%d",
-            fast_emitted, len(authority_results), len(observation_results),
+            "day0_observation_instants_emitted=%d admitted_families=%d",
+            fast_emitted,
+            len(authority_results),
+            len(observation_results),
+            0 if family_admission is None else len(family_admission.admitted_families),
         )
         return fast_emitted + len(authority_results) + len(observation_results)
     except sqlite3.OperationalError as exc:
