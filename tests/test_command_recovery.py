@@ -1321,6 +1321,27 @@ class TestRecoveryResolutionTable:
             created_at="2026-06-29T05:08:33+00:00",
         )
         _advance_to_submitting(seed, command_id="cmd-exit", venue_order_id=None)
+        _insert(
+            seed,
+            command_id="cmd-review-old",
+            position_id="pos-review-old",
+            decision_id="dec-review-old",
+            intent_kind="ENTRY",
+            side="BUY",
+            size=8.0,
+            price=0.56,
+            created_at="2026-06-23T19:13:43+00:00",
+        )
+        _advance_to_submitting(seed, command_id="cmd-review-old", venue_order_id=None)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            seed,
+            command_id="cmd-review-old",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-06-23T19:13:47+00:00",
+            payload={"reason": "recovery_no_venue_order_id"},
+        )
         seed.commit()
         seed.close()
 
@@ -1340,10 +1361,8 @@ class TestRecoveryResolutionTable:
                 "get_open_orders",
                 "get_trades",
                 "get_clob_market_info",
-                "find_order_by_idempotency_key",
             ]
         )
-        client.find_order_by_idempotency_key.return_value = None
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
 
@@ -1375,6 +1394,7 @@ class TestRecoveryResolutionTable:
 
         assert summary["scope"] == "restart_preflight"
         assert summary["restart_preflight_narrow"] is True
+        assert summary["scanned"] == 1
         assert summary["restart_no_venue_exit_retry_projection"] == {
             "scanned": 1,
             "advanced": 1,

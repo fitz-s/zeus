@@ -443,18 +443,23 @@ def _lookup_unknown_side_effect_order(
         )
     finder = getattr(client, "find_order_by_idempotency_key", None)
     if callable(finder):
-        found = finder(cmd.idempotency_key.value)
-        if found is None:
-            return "found", None, None, "idempotency_key"
-        payload = _venue_order_payload(found)
-        if payload is not None:
-            return "found", payload, None, "idempotency_key"
-        logger.warning(
-            "recovery: command %s idempotency-key lookup returned non-order %s; "
-            "treating lookup as unavailable",
-            cmd.command_id, type(found).__name__,
-        )
-        return "unavailable", None, None, "idempotency_key"
+        try:
+            found = finder(cmd.idempotency_key.value)
+        except Exception as exc:  # noqa: BLE001
+            if exc.__class__.__name__ != "SnapshotMissError":
+                raise
+        else:
+            if found is None:
+                return "found", None, None, "idempotency_key"
+            payload = _venue_order_payload(found)
+            if payload is not None:
+                return "found", payload, None, "idempotency_key"
+            logger.warning(
+                "recovery: command %s idempotency-key lookup returned non-order %s; "
+                "treating lookup as unavailable",
+                cmd.command_id, type(found).__name__,
+            )
+            return "unavailable", None, None, "idempotency_key"
     venue_status, venue_resp, proof = _lookup_unknown_side_effect_by_venue_reads(cmd, client)
     return venue_status, venue_resp, proof, "authenticated_venue_absence"
 
@@ -12674,6 +12679,19 @@ def _active_venue_command_priming_rows(conn: sqlite3.Connection) -> list[dict]:
     return [_dict_row(row) for row in rows]
 
 
+def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dict]:
+    restart_states = {
+        CommandState.SUBMITTING.value,
+        CommandState.UNKNOWN.value,
+        CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+    }
+    return [
+        row
+        for row in find_unresolved_commands(conn)
+        if str(row.get("state") or "") in restart_states
+    ]
+
+
 def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "full") -> dict:
     """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
 
@@ -12704,7 +12722,10 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
 
     # The in-flight scan (per-row _reconcile_row venue lookups).
     try:
-        _harvest(find_unresolved_commands(conn))
+        if scope == "restart_preflight":
+            _harvest(_restart_preflight_unresolved_commands(conn))
+        else:
+            _harvest(find_unresolved_commands(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
     if scope == "restart_preflight":
@@ -13196,7 +13217,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     # In-flight per-row scan (find_unresolved_commands + _reconcile_row).
     def _scan_inflight(conn, snap_client):
         ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-        rows = find_unresolved_commands(conn)
+        rows = (
+            _restart_preflight_unresolved_commands(conn)
+            if scope == "restart_preflight"
+            else find_unresolved_commands(conn)
+        )
         ps["scanned"] = len(rows)
         for row in rows:
             try:

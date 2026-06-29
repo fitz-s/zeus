@@ -206,6 +206,18 @@ def _plist_path_for_label(label: str) -> Path:
     return LAUNCHAGENTS_DIR / f"{label}.plist"
 
 
+def _live_trading_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST.read_bytes())
+        plist_env = payload.get("EnvironmentVariables")
+        if isinstance(plist_env, dict):
+            env.update({str(key): str(value) for key, value in plist_env.items()})
+    except Exception:
+        pass
+    return env
+
+
 def _launchctl_service_loaded(label: str) -> bool:
     try:
         res = subprocess.run(
@@ -342,6 +354,7 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
         res = subprocess.run(
             cmd,
             cwd=live_repo,
+            env=_live_trading_subprocess_env(),
             capture_output=True,
             text=True,
             timeout=120.0,
@@ -375,6 +388,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         res = subprocess.run(
             [py, "-c", code],
             cwd=live_repo,
+            env=_live_trading_subprocess_env(),
             capture_output=True,
             text=True,
             timeout=120.0,
