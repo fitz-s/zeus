@@ -1832,6 +1832,36 @@ def test_status_views_use_real_exit_event_status_over_newer_non_exit_noise(tmp_p
     assert loader_view["positions"][0]["exit_state"] == "retry_pending"
 
 
+def test_status_views_restore_stranded_exit_intent_from_canonical_event(tmp_path):
+    from src.state.db import query_portfolio_loader_view, query_position_current_status_view
+
+    conn = get_connection(tmp_path / "stranded-exit-intent-status.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="stranded-exit-intent-pos",
+        phase="pending_exit",
+        order_status="filled",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="stranded-exit-intent-pos",
+        event_type="EXIT_INTENT",
+        status="exit_intent",
+        occurred_at="2026-04-01T00:05:00+00:00",
+        sequence_no=1,
+    )
+    conn.commit()
+
+    status_view = query_position_current_status_view(conn)
+    loader_view = query_portfolio_loader_view(conn)
+    conn.close()
+
+    assert status_view["positions"][0]["exit_state"] == "exit_intent"
+    assert status_view["exit_state_counts"]["exit_intent"] == 1
+    assert loader_view["positions"][0]["exit_state"] == "exit_intent"
+
+
 def test_status_views_clear_exit_state_on_retry_release(tmp_path):
     from src.state.db import query_portfolio_loader_view, query_position_current_status_view
 

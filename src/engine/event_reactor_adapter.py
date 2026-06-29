@@ -1961,6 +1961,28 @@ def _valid_qkernel_execution_economics_payload(
         return None
     if cert.get("coherence_allows") is not True:
         return None
+    selection_guard_basis = str(cert.get("selection_guard_basis") or "").strip()
+    if not selection_guard_basis or selection_guard_basis == "SIDE_NOT_ARMED":
+        return None
+    raw_selection_guard_abstained = cert.get("selection_guard_abstained")
+    if isinstance(raw_selection_guard_abstained, bool):
+        selection_guard_abstained = raw_selection_guard_abstained
+    else:
+        raw_text = str(raw_selection_guard_abstained).strip().lower()
+        if raw_text in {"0", "false", "no"}:
+            selection_guard_abstained = False
+        elif raw_text in {"1", "true", "yes"}:
+            selection_guard_abstained = True
+        else:
+            return None
+    if selection_guard_abstained:
+        return None
+    try:
+        selection_guard_q_safe = float(cert.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(selection_guard_q_safe) and selection_guard_q_safe > 0.0):
+        return None
     return cert
 
 
@@ -10242,6 +10264,9 @@ _QKERNEL_EXECUTION_ECONOMICS_REQUIRED_KEYS = frozenset(
         "false_edge_rate",
         "direction_law_ok",
         "coherence_allows",
+        "selection_guard_basis",
+        "selection_guard_abstained",
+        "selection_guard_q_safe",
     }
 )
 

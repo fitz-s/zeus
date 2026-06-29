@@ -1469,6 +1469,11 @@ def _overlay_spine_economics_onto_proof_with_reason(
     )
     if qkernel_execution_economics is None:
         return _OverlayResult(None, "PAYLOAD_BUILD_FAILED")
+    selection_guard_reason = _qkernel_selection_guard_rejection_reason(
+        qkernel_execution_economics
+    )
+    if selection_guard_reason:
+        return _OverlayResult(None, selection_guard_reason)
     qkernel_q_point, qkernel_q_lcb = _direct_route_probability_pair(
         qkernel_execution_economics
     )
@@ -1518,6 +1523,36 @@ def _overlay_spine_economics_onto_proof_with_reason(
         return _OverlayResult(replace(proof, **overlay))
     except Exception:  # noqa: BLE001 — non-replaceable proof is a bridge wiring fault
         return _OverlayResult(None, "PROOF_REPLACE_FAILED")
+
+
+def _qkernel_selection_guard_rejection_reason(
+    qkernel_execution_economics: Mapping[str, Any],
+) -> str:
+    basis = str(qkernel_execution_economics.get("selection_guard_basis") or "").strip()
+    if not basis:
+        return "SELECTION_GUARD_MISSING"
+    if basis == "SIDE_NOT_ARMED":
+        return "SELECTION_GUARD_SIDE_NOT_ARMED"
+    raw_abstained = qkernel_execution_economics.get("selection_guard_abstained")
+    if isinstance(raw_abstained, bool):
+        abstained = raw_abstained
+    else:
+        text = str(raw_abstained).strip().lower()
+        if text in {"0", "false", "no"}:
+            abstained = False
+        elif text in {"1", "true", "yes"}:
+            abstained = True
+        else:
+            return "SELECTION_GUARD_ABSTAINED_UNKNOWN"
+    if abstained:
+        return "SELECTION_GUARD_ABSTAINED"
+    try:
+        q_safe = float(qkernel_execution_economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return "SELECTION_GUARD_Q_SAFE_MISSING"
+    if not (math.isfinite(q_safe) and q_safe > 0.0):
+        return "SELECTION_GUARD_Q_SAFE_NON_POSITIVE"
+    return ""
 
 
 def _qkernel_execution_direction_admitted(

@@ -1613,10 +1613,9 @@ class FamilyDecisionEngine:
         candidate-local ``payoff_q_lcb`` used by edge, robust DeltaU, stake, and ROI.
 
         Active armed cells that are missing/thin/stale are live-money abstains.
-        Unarmed modal sides may pass through because the forecast center is the
-        primary authority there. Unarmed nonmodal/tail sides are live-money
-        abstains: without selected-side evidence, a cheap tail quote is not proof
-        of market alpha.
+        Unarmed sides are also live-money abstains: the forecast center is the
+        probability authority, but live entry still needs selected-side empirical
+        evidence before a candidate can outrank alternatives or reach execution.
         """
         lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
 
@@ -1678,23 +1677,20 @@ class FamilyDecisionEngine:
                     bin_class=bin_class,
                     admission_margin=cost,
                 )
-                unarmed_nonmodal = (
-                    str(verdict.basis) == "SIDE_NOT_ARMED"
-                    and bin_class != "modal"
-                )
+                unarmed_side = str(verdict.basis) == "SIDE_NOT_ARMED"
                 q_safe = float(min(prior_lcb, float(verdict.q_safe)))
-                if unarmed_nonmodal:
+                if unarmed_side:
                     q_safe = 0.0
                 guard_fields = {
                     "selection_guard_basis": str(verdict.basis),
                     "selection_guard_abstained": bool(
-                        verdict.abstained or not verdict.trade or unarmed_nonmodal
+                        verdict.abstained or not verdict.trade or unarmed_side
                     ),
                     "selection_guard_cell_key": str(verdict.cell_key),
                     "selection_guard_n": int(getattr(verdict, "n_g", 0) or 0),
                     "selection_guard_q_safe": float(q_safe),
                 }
-                if not verdict.trade or unarmed_nonmodal:
+                if not verdict.trade or unarmed_side:
                     new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
                     out.append(replace(d, economics=new_econ, **guard_fields))
                     continue

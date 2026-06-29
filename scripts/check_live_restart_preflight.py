@@ -2829,6 +2829,7 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
     tolerated: list[dict[str, Any]] = []
     full_fill_repairable = _exit_full_fill_repairable_by_position()
     retry_resumable = _exit_retry_resumable_by_position()
+    stranded_intent_recoverable = _stranded_exit_intent_recoverable_by_position()
     for row in rows:
         if row["phase"] != "pending_exit":
             continue
@@ -2863,6 +2864,14 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
                 "repair_evidence": _retry_evidence,
             }
             tolerated.append(item)
+        elif str(row["position_id"] or "") in stranded_intent_recoverable:
+            _intent_evidence = stranded_intent_recoverable[str(row["position_id"] or "")]
+            item = {
+                **item,
+                "restart_resolution": "exit_lifecycle_stranded_intent_recovery",
+                "repair_evidence": _intent_evidence,
+            }
+            tolerated.append(item)
         elif reason == "EXIT_CHAIN_DUST_STILL_HELD" and shares <= DUST_SHARE_LIMIT:
             tolerated.append(item)
             if order_status != "backoff_exhausted":
@@ -2877,6 +2886,76 @@ def _pending_exit_check(rows: list[sqlite3.Row]) -> CheckResult:
         "no restart-dangerous pending exits" if not risky else "pending exits need resolution before armed restart",
         {"risky": risky, "tolerated": tolerated},
     )
+
+
+def _stranded_exit_intent_recoverable_by_position() -> dict[str, dict[str, Any]]:
+    with _connect_live_ro() as conn:
+        if not (
+            _table_exists(conn, "main", "venue_commands")
+            and _table_exists(conn, "main", "position_current")
+            and _table_exists(conn, "main", "position_events")
+        ):
+            return {}
+        rows = conn.execute(
+            """
+            WITH latest_exit AS (
+                SELECT cmd.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cmd.position_id
+                           ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
+                       ) AS rn
+                  FROM venue_commands cmd
+                 WHERE cmd.intent_kind = 'EXIT'
+            ),
+            latest_exit_event AS (
+                SELECT pe.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pe.position_id
+                           ORDER BY pe.sequence_no DESC, datetime(pe.occurred_at) DESC
+                       ) AS rn
+                  FROM position_events pe
+                 WHERE pe.event_type IN (
+                       'EXIT_INTENT',
+                       'EXIT_ORDER_POSTED',
+                       'EXIT_ORDER_REJECTED',
+                       'EXIT_ORDER_FILLED',
+                       'EXIT_ORDER_VOIDED',
+                       'EXIT_RETRY_SCHEDULED',
+                       'EXIT_BACKOFF_EXHAUSTED'
+                 )
+            )
+            SELECT pc.position_id,
+                   pc.order_status,
+                   pc.exit_retry_count,
+                   pc.next_exit_retry_at,
+                   latest_exit_event.event_id,
+                   latest_exit_event.event_type,
+                   latest_exit_event.venue_status,
+                   latest_exit_event.occurred_at
+              FROM position_current pc
+              LEFT JOIN latest_exit
+                ON latest_exit.position_id = pc.position_id
+               AND latest_exit.rn = 1
+              JOIN latest_exit_event
+                ON latest_exit_event.position_id = pc.position_id
+               AND latest_exit_event.rn = 1
+             WHERE pc.phase = 'pending_exit'
+               AND latest_exit.command_id IS NULL
+               AND latest_exit_event.event_type = 'EXIT_INTENT'
+            """
+        ).fetchall()
+    recoverable: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        recoverable[str(row["position_id"])] = {
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "venue_status": row["venue_status"],
+            "event_occurred_at": row["occurred_at"],
+            "order_status": row["order_status"],
+            "exit_retry_count": row["exit_retry_count"],
+            "next_exit_retry_at": row["next_exit_retry_at"],
+        }
+    return recoverable
 
 
 def _exit_full_fill_repairable_by_position() -> dict[str, dict[str, Any]]:

@@ -83,6 +83,7 @@ CANONICAL_STRATEGY_KEYS = frozenset(
 _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
     {
         "EXIT_ORDER_POSTED",
+        "EXIT_INTENT",
         "EXIT_ORDER_ATTEMPTED",
         "EXIT_ORDER_FILLED",
         "EXIT_ORDER_REJECTED",

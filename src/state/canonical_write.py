@@ -210,8 +210,18 @@ def transition_phase(
         if projection.get("phase") != "pending_exit":
             return False
         projection["updated_at"] = occurred_at
+        exit_state = str(getattr(position, "exit_state", "") or "").strip()
+        if event_type == "EXIT_INTENT":
+            projection["order_status"] = "exit_intent"
+        elif event_type == "EXIT_ORDER_POSTED":
+            projection["order_status"] = "sell_placed"
+        elif event_type == "EXIT_ORDER_REJECTED" and exit_state in {
+            "retry_pending",
+            "backoff_exhausted",
+        }:
+            projection["order_status"] = exit_state
         payload = {
-            "status": getattr(position, "exit_state", ""),
+            "status": exit_state,
             "exit_reason": getattr(position, "exit_reason", "") or reason,
             "error": error or getattr(position, "last_exit_error", ""),
             "retry_count": getattr(position, "exit_retry_count", 0),

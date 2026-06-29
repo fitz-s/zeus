@@ -379,12 +379,13 @@ def test_entry_authority_quarantined_position_can_transition_to_pending_exit():
     ) is True
 
     row = conn.execute(
-        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
         (pos.trade_id,),
     ).fetchone()
     assert dict(row) == {
         "phase": LifecyclePhase.PENDING_EXIT.value,
         "chain_state": "entry_authority_quarantined",
+        "order_status": "exit_intent",
     }
     event = conn.execute(
         """
@@ -473,12 +474,13 @@ def test_chain_absent_confirmed_position_can_transition_to_pending_exit():
     ) is True
 
     row = conn.execute(
-        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
         (pos.trade_id,),
     ).fetchone()
     assert dict(row) == {
         "phase": LifecyclePhase.PENDING_EXIT.value,
         "chain_state": "chain_absent_confirmed_position_unattributed",
+        "order_status": "exit_intent",
     }
     event = conn.execute(
         """

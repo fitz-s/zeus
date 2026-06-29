@@ -2315,6 +2315,13 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     if (
         not runtime_exit_state
         and state == "pending_exit"
+        and str(row.get("order_status") or "")
+        in {"exit_intent", "sell_placed", "sell_pending", "retry_pending"}
+    ):
+        runtime_exit_state = str(row.get("order_status") or "")
+    if (
+        not runtime_exit_state
+        and state == "pending_exit"
         and exit_retry_count > 0
         and next_exit_retry_at
     ):

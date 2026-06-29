@@ -43,12 +43,11 @@ ARTIFACT (versioned, FAIL-CLOSED — absent is NOT inert): the table is read fro
 ``state/selection_calibrator.json`` (gitignored generated artifact, fit ONLY by
 scripts/fit_selection_calibrator.py walk-forward over settled rows). Unlike the OOF guard, absence
 is fail-closed: the live admission path emits NO new entries when the artifact is
-missing/malformed/stale/under-min-N for an armed side. The artifact carries the posterior version
-it was fit under; a version mismatch is stale -> fail-closed. The artifact also declares which
-executable sides it is armed to calibrate. An unarmed side is outside this correction's authority
-and passes through unchanged to the existing q_lcb/price/qkernel/family optimizer gates. This
-module NEVER fits per-city offsets, NEVER moves μ, NEVER anchors to price, and NEVER constructs a
-parallel q.
+missing/malformed/stale/under-min-N, or when the executable side is not explicitly armed by the
+artifact. The artifact carries the posterior version it was fit under; a version mismatch is stale
+-> fail-closed. An unarmed side is outside this correction's authority, and outside authority is not
+a live-money license. This module NEVER fits per-city offsets, NEVER moves mu, NEVER anchors to
+price, and NEVER constructs a parallel q.
 """
 from __future__ import annotations
 
@@ -561,22 +560,7 @@ def apply_selection_calibrator(
     clean_side = "NO" if str(side).upper() == "NO" else "YES"
     armed_sides = _artifact_armed_sides(meta)
     if clean_side not in armed_sides:
-        try:
-            q_identity = float(raw_side_prob)
-        except (TypeError, ValueError):
-            q_identity = 0.0
-        if not math.isfinite(q_identity):
-            q_identity = 0.0
-        q_identity = max(0.0, min(1.0, q_identity))
-        return CalibratorVerdict(
-            q_safe=q_identity,
-            trade=True,
-            abstained=False,
-            cell_key=key,
-            L_g=float("nan"),
-            n_g=0,
-            basis="SIDE_NOT_ARMED",
-        )
+        return _fail_closed(key, "SIDE_NOT_ARMED")
 
     cell = cells.get(key)
     if not isinstance(cell, Mapping):

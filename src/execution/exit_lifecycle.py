@@ -2006,6 +2006,7 @@ def _execute_live_exit(
 
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
+    position.order_status = "exit_intent"
     _dual_write_canonical_pending_exit_if_available(
         conn,
         position,
@@ -2068,6 +2069,7 @@ def _execute_live_exit(
         order_id = sell_result.external_order_id or sell_result.order_id or ""
         position.last_exit_order_id = order_id
         position.exit_state = "sell_placed"
+        position.order_status = "sell_placed"
         if conn is not None:
             # FIX 2d (2026-06-20): canonical EXIT_ORDER_POSTED dual-write.
             # log_pending_exit_recovery_event below only writes the legacy
@@ -2160,6 +2162,7 @@ def _execute_live_exit(
             else:
                 # Not filled yet — will be checked next cycle
                 position.exit_state = "sell_pending"
+                position.order_status = "sell_pending"
                 if conn is not None:
                     log_exit_attempt_event(
                         conn,
@@ -2174,6 +2177,7 @@ def _execute_live_exit(
                 return f"sell_pending: order={order_id}, status={status}"
 
         position.exit_state = "sell_pending"
+        position.order_status = "sell_pending"
         if conn is not None:
             log_exit_attempt_event(
                 conn,

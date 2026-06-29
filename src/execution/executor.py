@@ -636,6 +636,19 @@ def _float_field(value: Any) -> float | None:
     return parsed
 
 
+def _bool_field(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    return None
+
+
 def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dict:
     """Executor-side live ENTRY submit proof.
 
@@ -759,6 +772,9 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     econ_false_edge_rate = _float_field(economics.get("false_edge_rate"))
     payoff_q_point = _float_field(economics.get("payoff_q_point"))
     payoff_q_lcb = _float_field(economics.get("payoff_q_lcb"))
+    selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
+    selection_guard_abstained = _bool_field(economics.get("selection_guard_abstained"))
+    selection_guard_q_safe = _float_field(economics.get("selection_guard_q_safe"))
     try:
         from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 
@@ -767,6 +783,14 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         max_false_edge_rate = 0.05
     if econ_source != "qkernel_spine":
         reason = "qkernel_source_missing"
+    elif not selection_guard_basis:
+        reason = "qkernel_selection_guard_missing"
+    elif selection_guard_abstained is not False:
+        reason = "qkernel_selection_guard_abstained"
+    elif selection_guard_basis == "SIDE_NOT_ARMED":
+        reason = "qkernel_selection_side_not_armed"
+    elif selection_guard_q_safe is None or selection_guard_q_safe <= 0.0:
+        reason = "qkernel_selection_q_safe_non_positive"
     elif expected_side and econ_side != expected_side:
         reason = "qkernel_side_mismatch"
     elif econ_cost is None:
@@ -821,6 +845,13 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             max_false_edge_rate=max_false_edge_rate,
             qkernel_payoff_q_point=payoff_q_point if payoff_q_point is not None else "",
             qkernel_payoff_q_lcb=payoff_q_lcb if payoff_q_lcb is not None else "",
+            qkernel_selection_guard_basis=selection_guard_basis,
+            qkernel_selection_guard_abstained=(
+                selection_guard_abstained if selection_guard_abstained is not None else ""
+            ),
+            qkernel_selection_guard_q_safe=(
+                selection_guard_q_safe if selection_guard_q_safe is not None else ""
+            ),
         )
     return _capability_component(
         "entry_economics",

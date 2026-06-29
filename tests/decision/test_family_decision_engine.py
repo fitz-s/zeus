@@ -1920,13 +1920,13 @@ def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
                 basis="EB_THIN_SELECTED",
             )
         return SimpleNamespace(
-            q_safe=float(kwargs["raw_side_prob"]),
+            q_safe=0.35,
             trade=True,
             abstained=False,
-            cell_key="YES|SIDE_NOT_ARMED",
-            L_g=float("nan"),
-            n_g=0,
-            basis="SIDE_NOT_ARMED",
+            cell_key="YES|L1|modal|pb10",
+            L_g=0.35,
+            n_g=80,
+            basis="SELECTION_BETA_95",
         )
 
     monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
@@ -1961,15 +1961,15 @@ def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
     assert blocked_no.selection_guard_abstained is True
     assert blocked_no.economics.edge_lcb < 0.0
     assert blocked_no.economics.optimal_delta_u <= 0.0
-    assert passed_yes.selection_guard_basis == "SIDE_NOT_ARMED"
+    assert passed_yes.selection_guard_basis == "SELECTION_BETA_95"
 
     selected, reason = engine._select(guarded)
     assert reason is None
     assert selected is passed_yes
 
 
-def test_selection_calibrator_blocks_unarmed_nonmodal_yes(monkeypatch):
-    """Unarmed selected-side evidence cannot license cheap nonmodal tail YES."""
+def test_selection_calibrator_blocks_unarmed_yes(monkeypatch):
+    """Unarmed selected-side evidence cannot license YES, modal or nonmodal."""
 
     case = _case()
     space = _outcome_space(case)
@@ -1992,11 +1992,11 @@ def test_selection_calibrator_blocks_unarmed_nonmodal_yes(monkeypatch):
 
     def _selection_verdict(**kwargs):
         return SimpleNamespace(
-            q_safe=float(kwargs["raw_side_prob"]),
-            trade=True,
-            abstained=False,
+            q_safe=0.0,
+            trade=False,
+            abstained=True,
             cell_key=f"{kwargs['side']}|SIDE_NOT_ARMED",
-            L_g=float("nan"),
+            L_g=0.0,
             n_g=0,
             basis="SIDE_NOT_ARMED",
         )
@@ -2036,8 +2036,10 @@ def test_selection_calibrator_blocks_unarmed_nonmodal_yes(monkeypatch):
     assert blocked_tail.economics.edge_lcb < 0.0
     assert blocked_tail.economics.optimal_delta_u <= 0.0
     assert passed_modal.selection_guard_basis == "SIDE_NOT_ARMED"
-    assert passed_modal.selection_guard_abstained is False
-    assert passed_modal.economics.edge_lcb > 0.0
+    assert passed_modal.selection_guard_abstained is True
+    assert passed_modal.selection_guard_q_safe == pytest.approx(0.0)
+    assert passed_modal.economics.edge_lcb < 0.0
+    assert passed_modal.economics.optimal_delta_u <= 0.0
 
 
 def test_selection_calibrator_deflation_recomputes_qkernel_stake(monkeypatch):

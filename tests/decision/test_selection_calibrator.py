@@ -157,10 +157,10 @@ def test_selection_calibrator_preserves_genuine_edge_buy_yes():
     assert v.q_safe <= raw_yes_prob + 1e-9  # still a lower bound
 
 
-def test_legacy_sel_v1_artifact_is_no_only_so_buy_yes_passes_through():
+def test_legacy_sel_v1_artifact_is_no_only_so_buy_yes_fails_closed():
     # The promoted sel_v1 artifact was fitted for the buy-NO adverse-selection pathology. It may
     # contain sparse YES cells as corpus bookkeeping, but without explicit YES arming those cells
-    # are not live authority and must not zero every buy_yes candidate.
+    # are not live authority. Outside live authority is not a license to trade raw q.
     side, lead_b, bin_class = "YES", "L1", "modal"
     raw_yes_prob = 0.65
     bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
@@ -175,10 +175,10 @@ def test_legacy_sel_v1_artifact_is_no_only_so_buy_yes_passes_through():
         admission_margin=0.20,
         artifact=art,
     )
-    assert v.trade is True
-    assert v.abstained is False
+    assert v.trade is False
+    assert v.abstained is True
     assert v.basis == "SIDE_NOT_ARMED"
-    assert v.q_safe == pytest.approx(raw_yes_prob)
+    assert v.q_safe == 0.0
 
 
 def test_explicitly_armed_yes_missing_cell_still_fails_closed():
@@ -283,7 +283,7 @@ def test_blocker_fix_runtime_and_fitter_version_strings_agree():
     key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
     # Artifact stamped exactly as the fitter would stamp it.
     art = {
-        "_meta": {"posterior_version": fsc.POSTERIOR_VERSION, "min_n": 30},
+        "_meta": {"posterior_version": fsc.POSTERIOR_VERSION, "min_n": 30, "armed_sides": ["NO"]},
         "cells": {key: {"n": 104, "hit_rate": 0.679}},
     }
     v = sc.apply_selection_calibrator(
