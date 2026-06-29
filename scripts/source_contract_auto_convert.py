@@ -1531,6 +1531,10 @@ def write_source_validity_patch(
 def backup_world_db(db_path: Path, *, evidence_root: Path) -> dict[str, Any]:
     if not db_path.exists():
         raise RuntimeError(f"world DB does not exist: {db_path}")
+    if os.environ.get("ZEUS_ALLOW_LIVE_DB_BACKUP") != "1":
+        raise RuntimeError(
+            "refusing to create live DB backup without ZEUS_ALLOW_LIVE_DB_BACKUP=1"
+        )
     evidence_root.mkdir(parents=True, exist_ok=True)
     backup_path = evidence_root / f"{db_path.name}.backup"
     shutil.copy2(db_path, backup_path)

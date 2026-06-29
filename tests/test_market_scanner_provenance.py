@@ -2350,6 +2350,7 @@ class TestSourceContractGate:
     ):
         from scripts import source_contract_auto_convert as auto
 
+        monkeypatch.setenv("ZEUS_ALLOW_LIVE_DB_BACKUP", "1")
         fixture = tmp_path / "events.json"
         fixture.write_text(
             json.dumps(
@@ -2487,11 +2488,21 @@ class TestSourceContractGate:
         assert any("--apply" in command for command in commands)
         assert any("--no-dry-run" in command for command in commands)
 
+    def test_source_auto_convert_db_backup_requires_explicit_opt_in(self, tmp_path):
+        from scripts import source_contract_auto_convert as auto
+
+        db_path = tmp_path / "zeus-world.db"
+        db_path.write_bytes(b"fixture")
+
+        with pytest.raises(RuntimeError, match="ZEUS_ALLOW_LIVE_DB_BACKUP=1"):
+            auto.backup_world_db(db_path, evidence_root=tmp_path / "evidence")
+
     def test_auto_convert_execute_apply_rolls_back_config_and_source_fact_on_failure(
         self, monkeypatch, tmp_path, capsys
     ):
         from scripts import source_contract_auto_convert as auto
 
+        monkeypatch.setenv("ZEUS_ALLOW_LIVE_DB_BACKUP", "1")
         fixture = tmp_path / "events.json"
         fixture.write_text(
             json.dumps(
