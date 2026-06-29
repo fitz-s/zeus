@@ -515,6 +515,8 @@ def _adopt_active_exit_sell(
     command_state = str(_row_value(row, "state", 1) or "")
     venue_order_id = str(_row_value(row, "venue_order_id", 2) or "")
     _mark_pending_exit(position)
+    if command_id:
+        position.last_exit_command_id = command_id
     if venue_order_id:
         position.last_exit_order_id = venue_order_id
     position.exit_state = "sell_pending"

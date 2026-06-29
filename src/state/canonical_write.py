@@ -234,6 +234,7 @@ def transition_phase(
             "retry_count": getattr(position, "exit_retry_count", 0),
             "next_retry_at": getattr(position, "next_exit_retry_at", ""),
             "last_exit_order_id": getattr(position, "last_exit_order_id", ""),
+            "last_exit_command_id": getattr(position, "last_exit_command_id", ""),
         }
         env = str(getattr(position, "env", "") or "live")
         if env not in {"live", "test", "replay", "backtest"}:
@@ -253,7 +254,7 @@ def transition_phase(
             "decision_id": None,
             "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
             "order_id": getattr(position, "last_exit_order_id", "") or None,
-            "command_id": None,
+            "command_id": getattr(position, "last_exit_command_id", "") or None,
             "caused_by": "transition_phase",
             "idempotency_key": f"{trade_id}:phase_transition:{sequence_no}",
             "venue_status": str(getattr(position, "exit_state", "") or "rejected"),

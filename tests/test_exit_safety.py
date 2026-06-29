@@ -3460,6 +3460,18 @@ def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn
     assert current["phase"] == "pending_exit"
     assert current["order_id"] == "ord-venue-open-exit"
     assert current["order_status"] == "sell_placed"
+    event = conn.execute(
+        """
+        SELECT command_id
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_POSTED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert event["command_id"] == command["command_id"]
 
 
 def test_check_pending_exits_recovers_adopted_open_sell_from_canonical_event(
