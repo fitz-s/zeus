@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-11
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-29
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -74,6 +74,10 @@ _CANCEL_TERMINAL_STATUSES = frozenset({
     "CANCELLED", "CANCELED", "EXPIRED", "REJECTED",
 })
 _LIVE_ORDER_STATUSES = frozenset({"LIVE", "OPEN", "RESTING"})
+# Fresh maker-rest cancels can read a stale live order snapshot before the
+# venue has applied the cancel. Keep the command in-flight briefly so the next
+# recovery pass can observe terminal cancel truth instead of erasing redecision.
+_MAKER_REST_CANCEL_LIVE_READ_GRACE_SECONDS = 15.0
 _POINT_ORDER_LIVE_DATA_KEYS = (
     "size",
     "original_size",
@@ -8066,12 +8070,33 @@ def _latest_cancel_unknown_payload(events: list[dict]) -> dict | None:
 
 
 def _latest_maker_rest_cancel_requested_payload(events: list[dict]) -> dict | None:
-    latest_event_type, latest_payload = _latest_event_payload(events)
-    if latest_event_type != CommandEventType.CANCEL_REQUESTED.value:
+    latest = _latest_maker_rest_cancel_requested_event(events)
+    if latest is None:
         return None
+    return _json_dict(latest.get("payload_json"))
+
+
+def _latest_maker_rest_cancel_requested_event(events: list[dict]) -> dict | None:
+    if not events:
+        return None
+    latest = events[-1]
+    if str(latest.get("event_type") or "") != CommandEventType.CANCEL_REQUESTED.value:
+        return None
+    latest_payload = _json_dict(latest.get("payload_json"))
     if str(latest_payload.get("source") or "") != "maker_rest_escalation":
         return None
-    return latest_payload
+    return latest
+
+
+def _maker_rest_cancel_request_age_seconds(events: list[dict], *, now_iso: str) -> float | None:
+    latest = _latest_maker_rest_cancel_requested_event(events)
+    if latest is None:
+        return None
+    occurred_at = _parse_ts(str(latest.get("occurred_at") or ""))
+    now = _parse_ts(now_iso)
+    if occurred_at is None or now is None:
+        return None
+    return max(0.0, (now - occurred_at).total_seconds())
 
 
 def _trade_matches_venue_order_id(raw: dict, venue_order_id: str) -> bool:
@@ -12248,6 +12273,19 @@ def _reconcile_row(
                 events = _command_events(conn, cmd.command_id)
                 cancel_requested_payload = _latest_maker_rest_cancel_requested_payload(events)
                 if cancel_requested_payload is not None:
+                    cancel_request_age = _maker_rest_cancel_request_age_seconds(events, now_iso=now)
+                    if (
+                        cancel_request_age is not None
+                        and cancel_request_age < _MAKER_REST_CANCEL_LIVE_READ_GRACE_SECONDS
+                    ):
+                        logger.info(
+                            "recovery: command %s CANCEL_PENDING maker-rest cancel still "
+                            "inside live-read grace %.1fs; venue status=%s; leaving",
+                            cmd.command_id,
+                            cancel_request_age,
+                            venue_status,
+                        )
+                        return "stayed"
                     append_event(
                         conn,
                         command_id=cmd.command_id,

@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-29
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-06-24
+# Last reused/audited: 2026-06-29
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -2892,6 +2892,48 @@ class TestRecoveryResolutionTable:
         assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
         assert summary["stayed"] == 1
         assert summary["advanced"] == 0
+
+    def test_maker_rest_cancel_pending_live_order_waits_inside_cancel_grace(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        import src.execution.command_recovery as recovery
+        from src.state.venue_command_repo import append_event
+
+        monkeypatch.setattr(recovery, "_now_iso", lambda: "2026-04-26T00:03:05+00:00")
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id="vord-maker-live")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={
+                "venue_order_id": "vord-maker-live",
+                "source": "maker_rest_escalation",
+            },
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "vord-maker-live",
+            "status": "LIVE",
+            "matched_size": "0",
+        }
+
+        summary = recovery.reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "CANCEL_PENDING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        event_types = [event["event_type"] for event in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_REQUESTED"
 
     def test_maker_rest_cancel_pending_live_order_restores_acked(self, conn, mock_client):
         from src.state.venue_command_repo import append_event
