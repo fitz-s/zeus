@@ -47,10 +47,12 @@ separate daemons per feed.
    stays near a structural prior, long history trusts the model's own mean. The fit uses only
    residuals that had settled before the forecast date.
 
-2. **Fuse.** The de-biased models are combined into one mean and variance by inverse-variance
-   (precision) weighting. The residual covariance is shrunk toward its diagonal (Ledoit–Wolf)
-   so noisy cross-correlations do not dominate at small sample sizes, and models that are the
-   same forecast at two resolutions are collapsed into one provider family.
+2. **Fuse.** The de-biased model values `z` are combined into one posterior mean and variance by
+   inverse-variance (precision) weighting against an ECMWF prior `(μ₀, τ₀²)`:
+   `V* = (τ₀⁻² + 1ᵀΣ⁻¹1)⁻¹`, `μ* = V*(τ₀⁻²μ₀ + 1ᵀΣ⁻¹z)`. The residual covariance `Σ` is shrunk
+   toward its diagonal (Ledoit–Wolf) so noisy cross-correlations do not dominate at small sample
+   sizes, and models that are the same forecast at two resolutions are collapsed into one
+   provider family so none is counted twice.
 
 3. **Localize.** A grid value is read at the settlement station's exact coordinates by
    interpolation rather than nearest-cell. The altitude difference between grid and station is
@@ -103,6 +105,27 @@ and partial fills track their remainder. Exits run a separate state machine, and
 fill-or-kill is coerced to fill-and-kill so a thin book does not reject it whole. An hourly
 sweep reconciles local intent against venue and chain facts. Settlement is read from the market
 feed; redemption of winning tokens is recorded for accounting.
+
+## Worked example
+
+One market through the loop, with illustrative numbers — Tokyo daily high, the `50–51°F` bin,
+two days out (Tokyo rounds half-up):
+
+```
+Models (de-biased, °F)   ECMWF 50.4 · global ICON 51.0 · UKMO 50.1 · …
+Fuse                     precision-weighted → μ* = 50.3 °F, fused sd 0.9 °F
+Localize                 station 8 km / +5 m from the grid cell → +representativeness variance
+Spread                   √(V* + resid²) = 1.3 °F, floored to realized settlement error → σ = 1.4 °F
+Integrate (half-up)      P(50–51) = Φ((51.5−50.3)/1.4) − Φ((49.5−50.3)/1.4) = 0.804 − 0.284 = 0.52
+Lower bound              5th-percentile bootstrap → 0.46
+Calibrator               cell settled in favour 57% over 60 samples → Wilson lower bound 0.46
+Edge                     market YES at 0.40, cost 0.01 → 0.46 − 0.40 − 0.01 = 0.05  (> 0, passes FDR)
+Size                     f* = (0.46 − 0.40)/(1 − 0.40) = 0.10, reduced by the cascade
+Order                    rest as maker buying YES at 0.40; escalate to a taker cross if the edge holds
+```
+
+The same numbers drive an exit: if a later forecast cycle moves `μ*` away and the lower-bound
+probability falls below the price plus cost, the position's edge has reversed and it is closed.
 
 ## State and learning
 
