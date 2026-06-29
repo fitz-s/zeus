@@ -207,6 +207,18 @@ class RepriceDecision:
     action: str
     reason: str
     detail: float = 0.0  # |Δbelief| for BELIEF_WORSENING; bid-limit drift for BOOK_MOVED.
+    replacement_condition_id: str = ""
+    replacement_bin_label: str = ""
+    replacement_side: str = ""
+
+
+@dataclass(frozen=True)
+class _FamilyRestCandidate:
+    condition_id: str
+    bin_label: str
+    side: str
+    score: float
+    quote: PriceQuote
 
 
 def _no_value_refutation_event_types_compatible(
@@ -2099,6 +2111,172 @@ class OpenRest:
     metric: str = ""
 
 
+def _fresh_quote_or_none(quote: PriceQuote | None, screen_time: datetime) -> PriceQuote | None:
+    if quote is None:
+        return None
+    try:
+        deadline = _parse(quote.freshness_deadline)
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        compare_time = screen_time
+        if compare_time.tzinfo is None:
+            compare_time = compare_time.replace(tzinfo=timezone.utc)
+        if deadline.astimezone(timezone.utc) <= compare_time.astimezone(timezone.utc):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return quote
+
+
+def _belief_side_probability(
+    belief: CachedBelief,
+    *,
+    idx: int,
+    side: str,
+) -> tuple[float, float] | None:
+    try:
+        yes_post = float(belief.p_posterior_vec[idx])
+    except (IndexError, TypeError, ValueError):
+        return None
+    if not math.isfinite(yes_post) or not (0.0 <= yes_post <= 1.0):
+        return None
+    if side == "buy_yes":
+        q_lcb = _vec_float_at(belief.q_lcb_yes_vec, idx)
+        posterior = yes_post
+    elif side == "buy_no":
+        q_lcb = _vec_float_at(belief.q_lcb_no_vec, idx)
+        posterior = one_minus(yes_post)
+    else:
+        return None
+    if q_lcb is None:
+        return None
+    return posterior, q_lcb
+
+
+def _family_rest_candidate_score(
+    belief: CachedBelief,
+    *,
+    idx: int,
+    side: str,
+    price: float,
+    tick_size: object = None,
+) -> float | None:
+    probs = _belief_side_probability(belief, idx=idx, side=side)
+    if probs is None:
+        return None
+    posterior, q_lcb = probs
+    score = _entry_screen_robust_trade_score(
+        q_posterior=posterior,
+        q_lcb_5pct=q_lcb,
+        price=float(price),
+        tick_size=tick_size,
+    )
+    if not math.isfinite(score):
+        return None
+    return score
+
+
+def _family_optimum_shift_pull(
+    rest: OpenRest,
+    *,
+    belief: CachedBelief | None,
+    price_by_cid: dict[tuple[str, str], PriceQuote],
+    screen_time: datetime,
+    value_refresh_min_age_seconds: float,
+) -> RepriceDecision | None:
+    """Pull a live maker rest only when a different family sibling is now superior.
+
+    This is the order-management bridge between "one active live order per
+    weather family" and "keep chasing the best executable window until fill".
+    Duplicate suppression still owns final no-double-submit safety. This
+    function only proves that the current rest is no longer the best use of the
+    family's live slot, then asks the existing cancel + redecision path to
+    re-run the full reactor.
+    """
+
+    if belief is None or rest.side not in {"buy_yes", "buy_no"}:
+        return None
+    if rest.quote_age_ms < float(value_refresh_min_age_seconds) * 1000.0:
+        return None
+    labels = [str(label or "") for label in (belief.bin_labels or [])]
+    condition_ids = [str(c or "").strip() for c in (belief.condition_ids or [])]
+    try:
+        rest_idx = labels.index(str(rest.bin_label or ""))
+    except ValueError:
+        return None
+    if rest_idx >= len(condition_ids):
+        return None
+
+    rest_quote = _fresh_quote_or_none(
+        price_by_cid.get((str(rest.condition_id or "").strip(), rest.side)),
+        screen_time,
+    )
+    rest_tick = rest_quote.tick_size if rest_quote is not None else TICK_SIZE
+    current_score = _family_rest_candidate_score(
+        belief,
+        idx=rest_idx,
+        side=rest.side,
+        price=float(rest.limit_price),
+        tick_size=rest_tick,
+    )
+    if current_score is None:
+        return None
+
+    best: _FamilyRestCandidate | None = None
+    for idx, raw_condition_id in enumerate(condition_ids):
+        condition_id = str(raw_condition_id or "").strip()
+        if not condition_id:
+            continue
+        label = labels[idx] if idx < len(labels) else ""
+        for side in ("buy_yes", "buy_no"):
+            if condition_id == str(rest.condition_id or "").strip() and side == rest.side:
+                continue
+            quote = _fresh_quote_or_none(price_by_cid.get((condition_id, side)), screen_time)
+            if quote is None:
+                continue
+            score = _family_rest_candidate_score(
+                belief,
+                idx=idx,
+                side=side,
+                price=float(quote.price),
+                tick_size=quote.tick_size,
+            )
+            if score is None:
+                continue
+            floor = _improve_delta_for_tick(quote.tick_size)
+            if score < floor - _EPS:
+                continue
+            if best is None or score > best.score:
+                best = _FamilyRestCandidate(
+                    condition_id=condition_id,
+                    bin_label=label,
+                    side=side,
+                    score=score,
+                    quote=quote,
+                )
+
+    if best is None:
+        return None
+    material_floor = max(
+        _improve_delta_for_tick(rest_tick),
+        _improve_delta_for_tick(best.quote.tick_size),
+    )
+    score_delta = best.score - current_score
+    if score_delta < material_floor - _EPS:
+        return None
+    return RepriceDecision(
+        family_id=rest.family_id,
+        bin_label=rest.bin_label,
+        side=rest.side,
+        action="CANCEL_REPLACE",
+        reason="FAMILY_OPTIMUM_SHIFT",
+        detail=score_delta,
+        replacement_condition_id=best.condition_id,
+        replacement_bin_label=best.bin_label,
+        replacement_side=best.side,
+    )
+
+
 def screen_resting_orders(
     world_conn: sqlite3.Connection,
     trade_conn: sqlite3.Connection,
@@ -2120,11 +2298,26 @@ def screen_resting_orders(
     order-management evidence produced for that rest.
     """
     screen_time = _parse(decision_time) if decision_time is not None else datetime.now().astimezone()
+    beliefs_by_family: dict[str, CachedBelief] = {}
     condition_ids = {r.condition_id for r in open_rests if r.condition_id}
+    for rest in open_rests:
+        family_id = str(rest.family_id or "")
+        if not family_id or family_id in beliefs_by_family:
+            continue
+        belief = latest_cached_belief(world_conn, family_id=family_id)
+        if belief is None:
+            continue
+        beliefs_by_family[family_id] = belief
+        condition_ids.update(
+            str(c or "").strip()
+            for c in (belief.condition_ids or [])
+            if str(c or "").strip()
+        )
     bid_by_cid = read_freshest_resting_best_bids(trade_conn, condition_ids=condition_ids)
     ask_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=condition_ids)
     out: list[tuple[OpenRest, RepriceDecision]] = []
     for rest in open_rests:
+        belief = beliefs_by_family.get(str(rest.family_id or ""))
         # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
         decision = screen_reprice(
             world_conn,
@@ -2180,7 +2373,6 @@ def screen_resting_orders(
                 except (TypeError, ValueError):
                     ask = None
             if ask is not None and rest.quote_age_ms >= float(value_refresh_min_age_seconds) * 1000.0:
-                belief = latest_cached_belief(world_conn, family_id=rest.family_id)
                 held_q_lcb = (
                     _held_side_q_lcb(belief, bin_label=rest.bin_label, side=rest.side)
                     if belief is not None
@@ -2215,6 +2407,20 @@ def screen_resting_orders(
                                 reason="CONFIRMED_VALUE_REFRESH",
                                 detail=score,
                             )
+        if decision is None:
+            # 4) Family optimum shift. A family-level duplicate mutex should not
+            # make a stale open rest invisible when a different sibling/direction
+            # is now the materially better executable window. Pull the old rest
+            # only after the maker window and only when the replacement leg has
+            # a positive robust edge that beats the current rest by round-trip
+            # friction; the full reactor still owns the replacement submit.
+            decision = _family_optimum_shift_pull(
+                rest,
+                belief=belief,
+                price_by_cid=ask_by_cid,
+                screen_time=screen_time,
+                value_refresh_min_age_seconds=value_refresh_min_age_seconds,
+            )
         if decision is not None:
             out.append((rest, decision))
     return out

@@ -1403,6 +1403,43 @@ def test_rest_pull_condition_scope_uses_rest_family_identity_without_belief():
     }
 
 
+def test_rest_pull_condition_scope_includes_family_optimum_replacement_condition():
+    """Replacement pulls must refresh the sibling condition before redecision emits."""
+
+    from src.events.continuous_redecision import OpenRest, RepriceDecision
+
+    rest = OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id="family-rest",
+        bin_label="29C",
+        side="buy_no",
+        condition_id="cond-old",
+        resting_posterior=0.7,
+        resting_snapshot_id="snap-rest",
+        limit_price=0.6,
+        quote_age_ms=301_000,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+    decision = RepriceDecision(
+        family_id="family-rest",
+        bin_label="29C",
+        side="buy_no",
+        action="CANCEL_REPLACE",
+        reason="FAMILY_OPTIMUM_SHIFT",
+        detail=0.12,
+        replacement_condition_id="cond-new",
+        replacement_bin_label="30C",
+        replacement_side="buy_yes",
+    )
+
+    assert main._edli_rest_pull_condition_scope([(rest, decision)], []) == {
+        ("Shanghai", "2026-06-20", "high"): {"cond-old", "cond-new"}
+    }
+
+
 def test_entry_redecision_excludes_current_held_families(monkeypatch):
     monkeypatch.setattr(
         main,

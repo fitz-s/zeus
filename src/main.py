@@ -6487,11 +6487,18 @@ def _edli_rest_pull_condition_scope(
     rest_pulls: Iterable[tuple[Any, Any]],
     beliefs: Iterable[Any],
 ) -> dict[tuple[str, str, str], set[str]]:
-    """Map live maker-rest pulls to the exact condition_ids being cancelled/repriced."""
+    """Map live maker-rest pulls to the exact condition_ids being cancelled/repriced.
+
+    A family-optimum replacement pull cancels the current rest so the existing
+    reactor can re-certify a sibling. The confirmation refresh must therefore
+    prioritize both the cancelled condition and the replacement condition, or
+    the next pass can cancel correctly but still lack fresh substrate for the
+    better sibling.
+    """
 
     by_family_id = {str(getattr(belief, "family_id", "") or ""): belief for belief in beliefs}
     out: dict[tuple[str, str, str], set[str]] = {}
-    for rest, _decision in rest_pulls or ():
+    for rest, decision in rest_pulls or ():
         family_key = _edli_family_key_from_rest(rest)
         if family_key is None:
             belief = by_family_id.get(str(getattr(rest, "family_id", "") or ""))
@@ -6501,6 +6508,11 @@ def _edli_rest_pull_condition_scope(
         condition_id = str(getattr(rest, "condition_id", "") or "").strip()
         if condition_id:
             out.setdefault(family_key, set()).add(condition_id)
+        replacement_condition_id = str(
+            getattr(decision, "replacement_condition_id", "") or ""
+        ).strip()
+        if replacement_condition_id:
+            out.setdefault(family_key, set()).add(replacement_condition_id)
     return out
 
 

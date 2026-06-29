@@ -758,6 +758,152 @@ def test_duplicate_suppressed_receipt_does_not_pull_same_active_rest():
     assert pulls == []
 
 
+def test_rest_pull_replaces_when_family_sibling_is_materially_superior():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Shanghai|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Shanghai",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "30C"],
+        p_posterior_vec=[0.30, 0.70],
+        condition_ids=["0xc29", "0xc30"],
+        q_lcb_yes_vec=[0.20, 0.66],
+        q_lcb_no_vec=[0.61, 0.24],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.62",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.39",
+        ask="0.40",
+        snapshot_id="s30",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.70,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=6 * 60 * 1000.0,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert len(pulls) == 1
+    _rest, decision = pulls[0]
+    assert decision.reason == "FAMILY_OPTIMUM_SHIFT"
+    assert decision.replacement_condition_id == "0xc30"
+    assert decision.replacement_bin_label == "30C"
+    assert decision.replacement_side == "buy_yes"
+    assert decision.detail > cr.IMPROVE_DELTA
+
+
+def test_rest_pull_family_sibling_shift_holds_inside_maker_window():
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Shanghai|2026-06-20|high|disc"
+    cr.cache_belief(
+        world,
+        family_id=family_id,
+        city="Shanghai",
+        target_date="2026-06-20",
+        snapshot_id="snap-family",
+        calibrator_model_hash="identity",
+        bin_labels=["29C", "30C"],
+        p_posterior_vec=[0.30, 0.70],
+        condition_ids=["0xc29", "0xc30"],
+        q_lcb_yes_vec=[0.20, 0.66],
+        q_lcb_no_vec=[0.61, 0.24],
+        recorded_at="2026-06-20T00:00:00+00:00",
+        temperature_metric="high",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc29",
+        yes_token_id="yes-c29",
+        no_token_id="no-c29",
+        selected_outcome_token_id="no-c29",
+        bid="0.59",
+        ask="0.62",
+        snapshot_id="s29",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc30",
+        yes_token_id="yes-c30",
+        no_token_id="no-c30",
+        selected_outcome_token_id="yes-c30",
+        bid="0.39",
+        ask="0.40",
+        snapshot_id="s30",
+        freshness_deadline="2026-06-20T02:00:00+00:00",
+        captured_at="2026-06-20T00:30:00+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-rest",
+        venue_order_id="order-rest",
+        family_id=family_id,
+        bin_label="29C",
+        side="buy_no",
+        condition_id="0xc29",
+        resting_posterior=0.70,
+        resting_snapshot_id="snap-family",
+        limit_price=0.60,
+        quote_age_ms=60 * 1000.0,
+        city="Shanghai",
+        target_date="2026-06-20",
+        metric="high",
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-20T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
 def test_rest_pull_refreshes_confirmed_value_after_cooldown_with_fresh_book():
     world = _mem_world()
     trade = _mem_trade()
