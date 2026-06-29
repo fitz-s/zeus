@@ -22,6 +22,7 @@ import plistlib
 import sqlite3
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -45,6 +46,28 @@ CLOB_SIGNATURE_TYPE_SIDECAR_LABELS = (
     "post-trade-capital",
     "venue-heartbeat",
 )
+
+
+@contextmanager
+def _live_trading_plist_environment_overlay():
+    """Temporarily mirror the live LaunchAgent environment for in-process checks."""
+
+    previous: dict[str, str | None] = {}
+    try:
+        payload = plistlib.loads(LIVE_TRADING_PLIST_PATH.read_bytes())
+        env_vars = payload.get("EnvironmentVariables")
+        if isinstance(env_vars, dict):
+            for key, value in env_vars.items():
+                key_text = str(key)
+                previous[key_text] = os.environ.get(key_text)
+                os.environ[key_text] = str(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _runtime_state_dir(plist_path: Path = LIVE_TRADING_PLIST_PATH) -> Path:
@@ -1176,8 +1199,9 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
 def _preflight_venue_adapter():
     from src.data.polymarket_client import PolymarketClient
 
-    client = PolymarketClient(public_http_timeout=PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS)
-    return client, client._ensure_v2_adapter()
+    with _live_trading_plist_environment_overlay():
+        client = PolymarketClient(public_http_timeout=PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS)
+        return client, client._ensure_v2_adapter()
 
 
 def _venue_payload(value: object | None) -> dict[str, Any] | None:
