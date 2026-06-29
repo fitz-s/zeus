@@ -195,9 +195,9 @@ _ORDER_FACT_STATES = frozenset(
         "CANCEL_FAILED",
         "EXPIRED",
         "VENUE_WIPED",
-        "HEARTBEAT_CANCEL_SUSPECTED",
     }
-)
+)  # HEARTBEAT_CANCEL_SUSPECTED removed 2026-06-29: 0 live rows, no writer (dead value).
+# DB CHECK in db.py still permits it; it is narrowed out in the CHECK-narrowing step.
 _TERMINAL_ZERO_REMAINDER_ORDER_FACT_STATES = frozenset(
     {"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
@@ -2907,6 +2907,7 @@ def append_order_fact(
                     TERMINAL_NO_FILL,
                     VenueOrderTruthReducer,
                 )
+                from src.state.canonical_projections import is_open_order_fact
 
                 reduced = VenueOrderTruthReducer.reduce(
                     order_facts=[
@@ -2918,7 +2919,7 @@ def append_order_fact(
                         prior_terminal,
                     ],
                     trade_filled_size="0",
-                    open_order_present=state in {"LIVE", "RESTING", "PARTIALLY_MATCHED"},
+                    open_order_present=is_open_order_fact(state),
                 )
                 if reduced.proof_class in {TERMINAL_NO_FILL, TERMINAL_PARTIAL}:
                     return int(prior_terminal["fact_id"])

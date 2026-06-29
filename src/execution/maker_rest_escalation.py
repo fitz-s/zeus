@@ -47,12 +47,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
+
 logger = logging.getLogger("zeus.maker_rest_escalation")
 
 UTC = timezone.utc
 
-# Latest-fact states that mean "this order is resting open at the venue".
-OPEN_REST_FACT_STATES = ("LIVE", "RESTING", "PARTIALLY_MATCHED")
+# Latest-fact states that mean "this order is resting open at the venue" — the
+# single canonical open-order-fact set (was a local {LIVE,RESTING,PARTIALLY_MATCHED}).
+OPEN_REST_FACT_STATES = tuple(sorted(OPEN_ORDER_FACT_STATES))
 TERMINAL_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
 )

@@ -12149,7 +12149,7 @@ def _family_rest_state(
     now = decision_time.astimezone(UTC)
     recent_cutoff = (now - timedelta(hours=24)).isoformat()
     placeholders = ",".join("?" for _ in token_ids)
-    open_fact_states = ("LIVE", "RESTING", "PARTIALLY_MATCHED")
+    from src.state.canonical_projections import is_open_order_fact
     terminal_unfilled_states = ("CANCEL_CONFIRMED", "EXPIRED")
     nonterminal_command_states = ("SUBMITTING", "POSTING", "POST_ACKED", "ACKED", "PARTIAL")
     try:
@@ -12238,7 +12238,7 @@ def _family_rest_state(
     # safe ordering, with no double-submit window.
     unexpired_rest = False
     for command_state, created_at, fact_state_s, fact_state, _observed_at in parsed_rows:
-        is_open = fact_state_s in open_fact_states or (
+        is_open = is_open_order_fact(fact_state_s) or (
             fact_state is None and command_state in nonterminal_command_states
         )
         if not is_open:

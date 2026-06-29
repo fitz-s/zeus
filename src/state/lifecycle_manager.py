@@ -1,24 +1,18 @@
 from __future__ import annotations
 
 import logging
-from enum import Enum
+from enum import Enum  # noqa: F401 — retained for any sibling enums / back-compat
 
 from src.architecture.decorators import capability, protects
+from src.contracts.canonical_lifecycle import PositionPhase
 
 logger = logging.getLogger(__name__)
 
 
-class LifecyclePhase(str, Enum):
-    PENDING_ENTRY = "pending_entry"
-    ACTIVE = "active"
-    DAY0_WINDOW = "day0_window"
-    PENDING_EXIT = "pending_exit"
-    ECONOMICALLY_CLOSED = "economically_closed"
-    SETTLED = "settled"
-    VOIDED = "voided"
-    QUARANTINED = "quarantined"
-    ADMIN_CLOSED = "admin_closed"
-    UNKNOWN = "unknown"
+# A5 unification (2026-06-29): LifecyclePhase IS the canonical PositionPhase — one
+# enum, not two. Members + values are identical; LifecyclePhase is retained as the
+# name used across lifecycle_manager + its consumers.
+LifecyclePhase = PositionPhase
 
 
 PENDING_EXIT_RUNTIME_STATES = frozenset(

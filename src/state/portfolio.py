@@ -262,10 +262,10 @@ def _compute_exit_correlation_crowding(
 
 # Administrative exit reasons — excluded from P&L calculations
 ADMIN_EXITS = frozenset({
-    "GHOST_DUPLICATE", "PHANTOM_NOT_ON_CHAIN",
+    "PHANTOM_NOT_ON_CHAIN",
     "UNFILLED_ORDER", "SETTLED_NOT_IN_API", "EXIT_FAILED",
     "SETTLED_UNKNOWN_DIRECTION", "EXIT_CHAIN_MISSING_REVIEW_REQUIRED",
-})
+})  # GHOST_DUPLICATE removed 2026-06-29: 0 live rows, no writer (dead value)
 
 # K1/#49: Sentinel for quarantine placeholder fields — downstream code must
 # check `pos.is_quarantine_placeholder` instead of comparing city == "UNKNOWN".
@@ -2914,7 +2914,6 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
 INACTIVE_RUNTIME_STATES = frozenset(
     set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
 )
-LEGACY_NONVOCABULARY_INACTIVE_STATES = frozenset({"quarantine_fill_failed", "quarantine_void_failed"})
 NO_EXPOSURE_CHAIN_STATES = frozenset(
     {
         "chain_confirmed_zero",
@@ -2945,7 +2944,6 @@ def _is_runtime_open_position(pos: Position) -> bool:
     )
     return (
         state not in INACTIVE_RUNTIME_STATES
-        and state not in LEGACY_NONVOCABULARY_INACTIVE_STATES
         and not no_exposure_chain_state
         and not local_projection_without_chain_exposure
     )
