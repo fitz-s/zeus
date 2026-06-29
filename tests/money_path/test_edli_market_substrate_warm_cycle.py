@@ -442,6 +442,63 @@ def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
     assert "ordinary_families[start_offset:] + ordinary_families[:start_offset]" in src
 
 
+def test_substrate_held_scope_includes_chain_backed_quarantine_and_voided(
+    monkeypatch,
+    tmp_path,
+):
+    """Chain-positive quarantine/voided exposure must stay in hot substrate scope."""
+
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                shares REAL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("Munich", "2026-06-30", "high", "cond-munich-30", "quarantined", "chain_absent_confirmed_position_unattributed", 29.14, 29.14),
+                ("Madrid", "2026-06-30", "high", "cond-madrid-29", "voided", "synced", 4.5, 0.0),
+                ("Paris", "2026-06-30", "low", "cond-paris-19", "day0_window", "synced", 5.0, 5.0),
+                ("Seoul", "2026-06-30", "high", "cond-zero", "quarantined", "synced", 0.0, 10.0),
+                ("London", "2026-06-30", "high", "cond-closed", "economically_closed", "synced", 7.0, 7.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    import src.state.db as state_db
+
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda: sqlite3.connect(db_path),
+    )
+
+    assert set(substrate_observer._edli_current_held_position_condition_ids()) == {
+        "cond-munich-30",
+        "cond-madrid-29",
+        "cond-paris-19",
+    }
+    assert substrate_observer._edli_current_held_position_family_keys() == {
+        ("Munich", "2026-06-30", "high"),
+        ("Madrid", "2026-06-30", "high"),
+        ("Paris", "2026-06-30", "low"),
+    }
+
+
 def test_continuous_redecision_confirms_money_path_before_emit():
     """Continuous redecision must not enqueue from an unconfirmed first-pass screen.
 

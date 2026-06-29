@@ -314,17 +314,21 @@ def test_open_position_tokens_are_market_channel_seed_priority():
             position_id TEXT PRIMARY KEY,
             phase TEXT,
             token_id TEXT,
-            no_token_id TEXT
+            no_token_id TEXT,
+            chain_shares REAL
         )
         """
     )
     conn.executemany(
-        "INSERT INTO position_current VALUES (?,?,?,?)",
+        "INSERT INTO position_current VALUES (?,?,?,?,?)",
         [
-            ("active-1", "active", "yes-active", "no-active"),
-            ("day0-1", "day0_window", None, "no-day0"),
-            ("exit-1", "pending_exit", "yes-exit", None),
-            ("closed-1", "economically_closed", "yes-closed", "no-closed"),
+            ("active-1", "active", "yes-active", "no-active", 5.0),
+            ("day0-1", "day0_window", None, "no-day0", 3.0),
+            ("exit-1", "pending_exit", "yes-exit", None, 2.0),
+            ("chain-quarantine-1", "quarantined", "yes-quarantine", "no-quarantine", 29.14),
+            ("zero-quarantine-1", "quarantined", "yes-zero-quarantine", "no-zero-quarantine", 0.0),
+            ("chain-voided-1", "voided", "yes-voided", "no-voided", 4.0),
+            ("closed-1", "economically_closed", "yes-closed", "no-closed", 7.0),
         ],
     )
 
@@ -333,6 +337,10 @@ def test_open_position_tokens_are_market_channel_seed_priority():
         "no-active",
         "no-day0",
         "yes-exit",
+        "yes-quarantine",
+        "no-quarantine",
+        "yes-voided",
+        "no-voided",
     }
 
 

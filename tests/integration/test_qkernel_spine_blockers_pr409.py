@@ -1,5 +1,5 @@
 # Created: 2026-06-15
-# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-29
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -920,6 +920,121 @@ def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
         assert exposure[bin_id] == 12.0
 
 
+def test_selection_exposure_includes_quarantined_chain_backed_position():
+    """Quarantined chain-backed exposure must still shape family selection.
+
+    A local quarantine label is not proof that the venue exposure is gone. Munich
+    Jun30 reproduced this: 30C NO was quarantined with positive chain shares, then
+    the selector treated the family as empty and allowed 29C NO. The selection
+    exposure map must see that old NO payoff before choosing a sibling route.
+    """
+    from types import SimpleNamespace
+
+    from src.state.portfolio import Position
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {}
+    for proof in proofs:
+        bin_by_condition.setdefault(proof.candidate.condition_id, era._candidate_bin_id(proof))
+
+    position = Position(
+        trade_id="munich-30c",
+        market_id="m",
+        city=family.city,
+        cluster="eu",
+        target_date=family.target_date,
+        bin_label="30C",
+        direction="buy_no",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        condition_id="cond-1",
+        chain_shares=29.14,
+        chain_cost_basis_usd=21.27,
+        chain_avg_price=0.73,
+        fill_authority="venue_position_observed",
+    )
+    state = SimpleNamespace(positions=[position])
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=lambda: state,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(21.27)
+    for cond, bin_id in bin_by_condition.items():
+        if cond == "cond-1":
+            continue
+        assert exposure[bin_id] == pytest.approx(21.27)
+
+
+def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
+    """The canonical trade DB path must not depend on an in-memory portfolio provider.
+
+    Restart/recovery adapter constructions can have ``held_position_conn`` but no
+    provider. Munich-style chain-backed NO exposure must still shape the next
+    family selection in that shape.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {}
+    for proof in proofs:
+        bin_by_condition.setdefault(proof.candidate.condition_id, era._candidate_bin_id(proof))
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            condition_id TEXT,
+            direction TEXT,
+            phase TEXT,
+            chain_shares REAL,
+            chain_cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            condition_id, direction, phase, chain_shares, chain_cost_basis_usd
+        ) VALUES ('cond-1', 'buy_no', 'quarantined', 29.14, 21.27)
+        """
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=None,
+        held_position_conn=conn,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(21.27)
+    for cond, bin_id in bin_by_condition.items():
+        if cond == "cond-1":
+            continue
+        assert exposure[bin_id] == pytest.approx(21.27)
+
+
 # ===========================================================================
 # BLOCKER 5 — the spine->legacy overlay must write one coherent qkernel-selected
 # probability authority into the proof fields consumed by receipts, submit, monitor, and
@@ -1018,20 +1133,15 @@ def _overlay_proof(
     return bridge._overlay_spine_economics_onto_proof(proof, decision)
 
 
-def test_overlay_threads_qkernel_probability_fields_and_updates_score():
-    """qkernel controls the selected proof's receipt/monitor probability authority.
-
-    Once qkernel is the selector, entry, submit receipts, monitor, and redecision
-    must consume the same direct-route selected-side belief. The pre-qkernel scalar
-    values are preserved as certificate provenance only.
-    """
+def test_overlay_preserves_live_posterior_probability_fields_and_updates_score():
+    """qkernel may rank the route but must not loosen live posterior authority."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
     new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.70, economics=economics)
 
-    assert new_proof.q_posterior == pytest.approx(0.202)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
+    assert new_proof.q_posterior == pytest.approx(0.80)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.70)
     assert new_proof.trade_score == pytest.approx(0.050)
     assert new_proof.q_source != "qkernel_spine"
     assert new_proof.selection_authority_applied == "qkernel_spine"
@@ -1050,30 +1160,26 @@ def test_overlay_threads_qkernel_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
         0.70
     )
+    assert new_proof.qkernel_execution_economics["persisted_posterior_q_posterior"] == pytest.approx(
+        0.80
+    )
+    assert new_proof.qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] == pytest.approx(
+        0.70
+    )
 
 
-def test_overlay_collapses_direct_route_probability_authority_split():
-    """Direct qkernel routes become the selected-side probability used by monitor."""
+def test_overlay_rejects_qkernel_bound_above_persisted_posterior_bound():
+    """Shanghai/Miami-class guard: qkernel cannot turn proof-level no-trade into live entry."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
 
-    new_proof = _overlay_proof(
+    assert _overlay_proof(
         q_posterior=0.80,
         q_lcb_5pct=0.001,
         economics=economics,
-    )
-
-    assert new_proof is not None
-    assert new_proof.q_posterior == pytest.approx(0.202)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
-    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
-        0.80
-    )
-    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
-        0.001
-    )
+    ) is None
 
 
 def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
@@ -1132,13 +1238,18 @@ def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
         qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
     )
 
-    assert annotated.q_posterior == pytest.approx(0.061)
-    assert annotated.q_lcb_5pct == pytest.approx(0.012)
+    assert annotated.q_posterior == pytest.approx(0.02)
+    assert annotated.q_lcb_5pct == pytest.approx(0.000001)
     assert annotated.trade_score == 0.0
     assert annotated.passed_prefilter is False
     assert annotated.missing_reason == "QKERNEL_DIRECTION_LAW_REJECTED:side=YES"
     assert annotated.selection_authority_applied is None
-    assert annotated.qkernel_execution_economics == cert
+    assert annotated.qkernel_execution_economics == {
+        **cert,
+        "persisted_posterior_q_posterior": pytest.approx(0.02),
+        "persisted_posterior_q_lcb_5pct": pytest.approx(0.000001),
+        "q_lcb_authority": "persisted_posterior_bound",
+    }
 
 
 def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
@@ -1384,6 +1495,21 @@ def test_overlay_refuses_to_clear_center_buy_ultra_low_live_blocker():
         economics=economics,
         direction="buy_yes",
         missing_reason="CENTER_BUY_ULTRA_LOW_PRICE(0.0150<=0.02)",
+    )
+
+    assert new_proof is None
+
+
+def test_overlay_rejects_center_buy_yes_below_strategy_floor_without_legacy_blocker():
+    """Cheap center-buy YES cannot become qkernel-authorized actionable evidence."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.015, q_dot_payoff=0.08, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.08,
+        q_lcb_5pct=0.08,
+        economics=economics,
+        direction="buy_yes",
     )
 
     assert new_proof is None

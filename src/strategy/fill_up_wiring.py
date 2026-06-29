@@ -77,6 +77,28 @@ _FILL_UP_BLOCKING_PHASES: frozenset[str] = frozenset(
         "review_required",
     }
 )
+_LIVE_CHAIN_SHARE_EPSILON = 0.000001
+
+
+def _live_position_phase_sql(cols: set[str]) -> tuple[str, list[object]]:
+    """Live exposure predicate: open lifecycle OR chain-proven shares.
+
+    A quarantine/void label is not proof the venue exposure is gone. If chain
+    reconciliation still sees positive shares, management lanes must treat the row
+    as live so fill-up/shift can decide against the real portfolio state.
+    """
+
+    clauses: list[str] = []
+    params: list[object] = []
+    if "phase" in cols:
+        clauses.append("phase IN ({})".format(",".join("?" for _ in _FILL_UP_BLOCKING_PHASES)))
+        params.extend(sorted(_FILL_UP_BLOCKING_PHASES))
+    if "chain_shares" in cols:
+        clauses.append("COALESCE(chain_shares, 0) > ?")
+        params.append(_LIVE_CHAIN_SHARE_EPSILON)
+    if not clauses:
+        return "1=1", []
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 @dataclass(frozen=True)
@@ -181,11 +203,7 @@ def read_held_same_token_exposure(
         return None
 
     token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _FILL_UP_BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
     cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
     if not cost_terms:
@@ -205,8 +223,7 @@ def read_held_same_token_exposure(
         f"WHERE {phase_sql} AND ({token_sql}){positive_sql} {order_sql} LIMIT 1"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_FILL_UP_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend(token for _ in token_cols)
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
@@ -395,11 +412,7 @@ def presubmit_reread_aborts(
         else "metric" if "metric" in cols
         else ""
     )
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _FILL_UP_BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
     positive_sql = (
         " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
@@ -417,8 +430,7 @@ def presubmit_reread_aborts(
         f"WHERE {phase_sql} AND city = ? AND target_date = ?{positive_sql}"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_FILL_UP_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend([str(city), str(target_date)])
     try:
         rows = conn.execute(sql, tuple(params)).fetchall()

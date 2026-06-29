@@ -5,6 +5,7 @@ from enum import Enum  # noqa: F401 — retained for any sibling enums / back-co
 
 from src.architecture.decorators import capability, protects
 from src.contracts.canonical_lifecycle import PositionPhase
+from src.state.canonical_projections import derive_position_phase
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,46 @@ def phase_for_runtime_position(
         normalized_state,
     )
     return LifecyclePhase.UNKNOWN
+
+
+def derive_runtime_position_phase(
+    *,
+    state: object,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> LifecyclePhase:
+    """Authority-aware bridge from the runtime (state, exit_state, chain_state) triple
+    to the canonical derive_position_phase. Maps the primary `state` to EXPLICIT A5
+    facts and chain/exit to FALLBACK facts, replicating phase_for_runtime_position's
+    authority model. Proven byte-identical to phase_for_runtime_position over the full
+    runtime domain (tests/test_a5_phase_equivalence.py).
+
+    NOT yet wired into any writer: the canonical runtime projection remains
+    phase_for_runtime_position until the A5 cutover. This is the proven-equivalent
+    reducer the cutover will switch to (it eliminates the stranding bug where a chain-
+    quarantine flag would re-quarantine an economically_closed / pending_exit position).
+    """
+    normalized_state = _normalized_state(state)
+    normalized_exit_state = _normalized_state(exit_state)
+    normalized_chain_state = _normalized_state(chain_state)
+    return derive_position_phase(
+        has_admin_close=(normalized_state == "admin_closed"),
+        is_voided=(normalized_state == "voided"),
+        has_settlement=(normalized_state == "settled"),
+        has_economic_close=(normalized_state == "economically_closed"),
+        has_explicit_quarantine=(normalized_state == "quarantined"),
+        has_explicit_pending_exit=(normalized_state == "pending_exit"),
+        has_chain_quarantine_fallback=(
+            normalized_chain_state in {"quarantined", "quarantine_expired"}
+        ),
+        has_exit_fallback=(
+            normalized_exit_state in PENDING_EXIT_RUNTIME_STATES
+            or normalized_chain_state == "exit_pending_missing"
+        ),
+        has_positive_exposure=(normalized_state in {"entered", "holding", "day0_window"}),
+        in_day0_window=(normalized_state == "day0_window"),
+        has_entry_intent=(normalized_state == "pending_tracked"),
+    )
 
 
 def fold_lifecycle_phase(

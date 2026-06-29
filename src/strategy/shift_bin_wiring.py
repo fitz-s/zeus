@@ -65,8 +65,9 @@ from src.strategy.family_rebalance import (
 # Reuse the EXACT same live-committed/in-flight phase set + schema helpers the D1
 # fill-up wiring uses (no parallel exposure-phase truth).
 from src.strategy.fill_up_wiring import (
-    _FILL_UP_BLOCKING_PHASES as _BLOCKING_PHASES,
+    _LIVE_CHAIN_SHARE_EPSILON,
     _columns,
+    _live_position_phase_sql,
     _norm_metric,
     _row_get,
     _table_exists,
@@ -171,11 +172,7 @@ def read_held_sibling_exposure(
     if not metric_col:
         return None
 
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
     if not cost_terms:
         return None
@@ -194,8 +191,7 @@ def read_held_sibling_exposure(
         f"WHERE {phase_sql} AND city = ? AND target_date = ?{positive_sql} {order_sql}"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend([str(city), str(target_date)])
     try:
         rows = conn.execute(sql, tuple(params)).fetchall()
@@ -318,17 +314,13 @@ def read_old_leg_residual_usd(
     if "token_id" not in cols:
         return float("inf")
     token_cols = [c for c in ("token_id", "no_token_id") if c in cols]
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
-    )
+    phase_sql, phase_params = _live_position_phase_sql(cols)
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
     cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
     if not cost_terms:
         return float("inf")
     positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
-    selected_names = ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+    selected_names = ("chain_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_shares")
     select_cols = [c if c in cols else f"NULL AS {c}" for c in selected_names]
     order_sql = "ORDER BY updated_at DESC" if "updated_at" in cols else ""
     sql = (
@@ -336,8 +328,7 @@ def read_old_leg_residual_usd(
         f"WHERE {phase_sql} AND ({token_sql}){positive_sql} {order_sql} LIMIT 1"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend(token for _ in token_cols)
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
@@ -346,12 +337,20 @@ def read_old_leg_residual_usd(
     if row is None:
         return 0.0  # no live row for the old token → proven closed
 
-    chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
-    if chain_available_shares == 0.0:
-        return 0.0
-
     def _g(name: str):
         return _row_get(row, selected_names, name)
+
+    row_chain_shares = None
+    try:
+        row_chain_shares = float(_g("chain_shares")) if _g("chain_shares") is not None else None
+    except (TypeError, ValueError):
+        row_chain_shares = None
+    chain_available_shares = _chain_collateral_available_shares(conn, token_id=token)
+    if (
+        chain_available_shares == 0.0
+        and (row_chain_shares is None or row_chain_shares <= _LIVE_CHAIN_SHARE_EPSILON)
+    ):
+        return 0.0
 
     for value in (_g("chain_cost_basis_usd"), _g("cost_basis_usd"), _g("size_usd")):
         try:

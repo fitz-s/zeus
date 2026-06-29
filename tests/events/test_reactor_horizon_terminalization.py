@@ -781,6 +781,57 @@ def test_day0_after_gamma_enddate_requeues_until_local_day_past():
     assert _status(conn, event.event_id) == "pending"
 
 
+def test_day0_stale_snapshot_selection_deadline_survives_restart_persisted_last_error():
+    """Persisted stale-snapshot selection deadlines are price freshness, not event life."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13", suffix="persisted-stale")
+    store.insert_or_ignore(event)
+    store.requeue_pending(event.event_id, last_error=_SELECTION_DEADLINE_STALE_REASON)
+    reactor = _reactor_with_reason(conn, store, _SELECTION_DEADLINE_STALE_REASON)
+    from src.events.reactor import ReactorResult
+
+    res = ReactorResult()
+    reactor._finalize_disposition(
+        event,
+        "RETRY_EXECUTABLE_SNAPSHOT_PENDING",
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST,
+        result=res,
+    )
+
+    assert res.dead_lettered == 0
+    assert res.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+
+
+def test_day0_false_stale_snapshot_selection_deadline_dead_letter_is_requeued():
+    """Old terminal rows for stale executable selection deadlines recover automatically."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13", suffix="recover-stale")
+    store.insert_or_ignore(event)
+    store.mark_dead_letter(
+        event,
+        failure_stage="MONEY_PATH_HORIZON_EXPIRED",
+        error_message=(
+            "money-path transient terminalized at event horizon "
+            "(SELECTION_DEADLINE_PAST: selection_deadline=2026-06-13T11:55:00+00:00); "
+            "last reason: EXECUTABLE_SNAPSHOT_STALE:"
+            "selection_deadline=2026-06-13T11:55:00+00:00:"
+            "decision_time=2026-06-13T14:00:00+00:00"
+        ),
+        created_at="2026-06-13T14:00:00+00:00",
+    )
+
+    recovered = store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST.isoformat(),
+    )
+
+    assert recovered == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert store.processing_last_error(event.event_id) == (
+        "RECOVERED_FALSE_EXECUTABLE_SNAPSHOT_SELECTION_DEADLINE_DAY0"
+    )
+
+
 def test_day0_live_future_close_family_does_not_terminalize():
     """RELATIONSHIP (no over-termination): a local-day active DAY0 family MUST NOT
     terminalize."""

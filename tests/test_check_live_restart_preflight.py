@@ -594,6 +594,10 @@ def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_misma
             "optimal_delta_u": 0.013993788651471595,
             "false_edge_rate": 0.02599350162459385,
             "direction_law_ok": False,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.05049776073684555,
+            "selection_guard_cell_key": "high|L2_3|YES|nonmodal|pb17",
             "coherence_allows": True,
         },
     }
@@ -634,6 +638,10 @@ def test_live_actionable_certificate_semantics_blocks_referenced_qkernel_mismatc
             "optimal_delta_u": 0.01,
             "false_edge_rate": 0.01,
             "direction_law_ok": False,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
+            "selection_guard_cell_key": "high|L2_3|YES|nonmodal|pb17",
             "q_lcb_guard_basis": "OOF_WILSON_95",
             "q_lcb_guard_abstained": False,
             "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
@@ -1360,6 +1368,78 @@ def test_position_projection_integrity_blocks_hard_terminal_reactivation(
     assert result.evidence["risky"][0]["terminal_event"]["event_type"] == "ADMIN_VOIDED"
 
 
+def test_position_projection_integrity_allows_legacy_terminal_chain_exposure_monitor_only(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
+    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               chain_shares = 9.0,
+               entry_method = 'ens_member_counting',
+               p_posterior = 0.0,
+               cost_basis_usd = 6.30
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, payload_json
+        ) VALUES (
+            'ev-terminal', 'pos-1', 7, 'ADMIN_VOIDED', ?, 'pending_exit', 'voided', '{}'
+        )
+        """,
+        (now,),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._position_current_projection_integrity_check(
+        preflight._open_positions()
+    )
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["covered_count"] == 1
+    assert (
+        result.evidence["covered"][0]["restart_resolution"]
+        == "legacy_chain_exposure_monitor_only_terminal_projection"
+    )
+
+
 def test_position_projection_integrity_allows_superseded_phantom_void_recovery(
     monkeypatch, tmp_path
 ):
@@ -1514,6 +1594,138 @@ def test_preflight_projection_integrity_checks_zero_chain_open_ghost(
     assert preflight._open_positions() == []
     assert result.ok is False
     assert result.evidence["risky"][0]["risk"] == "open_position_after_hard_terminal_event"
+
+
+def test_preflight_open_positions_include_terminal_phase_positive_chain_exposure(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               shares = 0.0,
+               chain_shares = 10.7
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    rows = preflight._open_positions()
+
+    assert [row["position_id"] for row in rows] == ["pos-1"]
+    assert rows[0]["phase"] == "voided"
+    assert rows[0]["chain_shares"] == 10.7
+
+
+def test_preflight_open_positions_exclude_quarantined_zero_chain_local_ghost(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               shares = 19.0,
+               chain_shares = 0.0,
+               cost_basis_usd = 11.40
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    assert preflight._open_positions() == []
+
+
+def test_preflight_open_positions_exclude_economically_closed_stale_chain_projection(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed',
+               shares = 0.0,
+               chain_shares = 10.7
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    assert preflight._open_positions() == []
+
+
+def test_preflight_open_positions_exclude_settled_stale_quarantine_chain_state(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'entry_authority_quarantined',
+               shares = 0.0,
+               chain_shares = 10.7
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    assert preflight._open_positions() == []
 
 
 def test_execution_feasibility_allows_canonical_day0_without_quote_table(
@@ -3507,7 +3719,7 @@ def test_day0_observation_unavailable_replacement_fallback_covers_held_belief(
     assert covered["monitor_projection"]["source"] == "day0_monitor_replacement_fallback"
 
 
-def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
+def test_preflight_allows_stale_belief_repairable_by_restart_reseed(
     monkeypatch, tmp_path
 ):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
@@ -3583,18 +3795,21 @@ def test_preflight_blocks_stale_belief_repairable_but_not_materialized(
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
-    assert belief["ok"] is False
-    risky_risks = [r["risk"] for r in belief["evidence"]["risky"]]
-    assert any("stale_live_belief_repairable_only_not_materialized" in r for r in risky_risks)
+    assert belief["ok"] is True
+    assert belief["evidence"]["risky"] == []
+    covered_resolutions = [
+        row.get("restart_resolution") for row in belief["evidence"]["covered"]
+    ]
+    assert "single_family_cycle_advance_reseed_before_monitor_exit" in covered_resolutions
     repair = belief["evidence"]["repairable"][0]
     assert repair["position_id"] == "karachi-pos"
     assert repair["risk"] == "stale_live_belief_repairable_by_single_family_reseed"
     assert repair["posterior_id"] == "1"
 
 
-def test_preflight_blocks_missing_belief_repairable_but_not_materialized(
+def test_preflight_allows_missing_belief_repairable_by_restart_reseed(
     monkeypatch, tmp_path
 ):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
@@ -3656,11 +3871,14 @@ def test_preflight_blocks_missing_belief_repairable_but_not_materialized(
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
-    assert belief["ok"] is False
-    risky_risks = [r["risk"] for r in belief["evidence"]["risky"]]
-    assert any("missing_live_belief_repairable_only_not_materialized" in r for r in risky_risks)
+    assert belief["ok"] is True
+    assert belief["evidence"]["risky"] == []
+    covered_resolutions = [
+        row.get("restart_resolution") for row in belief["evidence"]["covered"]
+    ]
+    assert "single_family_cycle_advance_reseed_before_monitor_exit" in covered_resolutions
     assert belief["evidence"]["repairable"][0]["position_id"] == "sh-pos"
 
 
@@ -4032,6 +4250,80 @@ def test_execution_feasibility_freshness_tolerates_small_writer_clock_skew():
     covered = result["covered"][0]
     assert covered["age_seconds"] == -1.0
     assert covered["clock_skew_tolerated_seconds"] == 1.0
+
+
+def test_execution_feasibility_freshness_uses_fresh_executable_snapshot_quote():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(hours=3)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            outcome_label TEXT,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER,
+            orderbook_top_bid TEXT,
+            orderbook_top_ask TEXT,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?, ?, ?, ?)",
+        ("cond-target", "tok-no-target", stale.isoformat(), stale.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots VALUES (
+            'snap-fresh', 'cond-target', 'tok-yes-target', 'tok-no-target',
+            'tok-no-target', 'NO', 1, 0, 1, '0.71', '0.73', ?, ?
+        )
+        """,
+        (now.isoformat(), (now + timedelta(minutes=2)).isoformat()),
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "quarantined",
+                "city": "Munich",
+                "target_date": "2026-06-30",
+                "temperature_metric": "high",
+                "bin_label": "Will the highest temperature in Munich be 30°C on June 30?",
+                "direction": "buy_no",
+                "condition_id": "cond-target",
+                "tokens": ["tok-no-target", "tok-yes-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["freshness_basis"] == "executable_market_snapshots.captured_at"
+    assert covered["snapshot_id"] == "snap-fresh"
+    assert covered["execution_feasibility_age_seconds"] > 3600
 
 
 def test_execution_feasibility_freshness_blocks_large_future_timestamp():

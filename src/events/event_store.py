@@ -1785,6 +1785,19 @@ class EventStore:
         ).fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
+    def processing_last_error(self, event_id: str) -> str | None:
+        """Durable retry/dead-letter context for one event processing row."""
+
+        self._require_world_event_tables()
+        row = self.conn.execute(
+            "SELECT last_error FROM opportunity_event_processing "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (self.consumer_name, event_id),
+        ).fetchone()
+        if row is None or row[0] in {None, ""}:
+            return None
+        return str(row[0])
+
     def requeue_pending(
         self,
         event_id: str,
@@ -1921,6 +1934,80 @@ class EventStore:
                        claimed_at = NULL,
                        processed_at = NULL,
                        last_error = 'RECOVERED_FALSE_STATIC_VENUE_CLOSE_DAY0',
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status = 'dead_letter'
+                """,
+                (now, self.consumer_name, event_id),
+            )
+        return len(recover)
+
+    def requeue_false_executable_snapshot_deadline_day0_dead_letters(
+        self,
+        *,
+        decision_time: str,
+        batch_limit: int = 500,
+    ) -> int:
+        """Recover Day0 events killed by treating stale price deadlines as event life.
+
+        ``EXECUTABLE_SNAPSHOT_STALE:selection_deadline=...`` is selected-book
+        freshness evidence. The cure is targeted executable-substrate refresh plus
+        retry; it is not a Day0 event horizon. Older runtime rows terminalized these
+        as ``MONEY_PATH_HORIZON_EXPIRED:SELECTION_DEADLINE_PAST``. Revive only that
+        exact shape while the city-local target day is still active.
+        """
+
+        self._require_world_event_tables()
+        decision_time_utc = _parse_utc(decision_time)
+        limit = max(1, min(int(batch_limit or 500), 5000))
+        rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city') AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date
+              FROM opportunity_event_processing p
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+              JOIN event_dead_letters d
+                ON d.consumer_name = p.consumer_name
+               AND d.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status = 'dead_letter'
+               AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND d.failure_stage = 'MONEY_PATH_HORIZON_EXPIRED'
+               AND d.error_message LIKE '%SELECTION_DEADLINE_PAST%'
+               AND d.error_message LIKE '%EXECUTABLE_SNAPSHOT_STALE%'
+             ORDER BY d.created_at DESC
+             LIMIT ?
+            """,
+            (self.consumer_name, limit),
+        ).fetchall()
+
+        recover: list[str] = []
+        for event_id, city, target_date in rows:
+            if not event_id:
+                continue
+            if self._strictly_past_in_tz(
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                decision_time_utc,
+            ):
+                continue
+            recover.append(str(event_id))
+
+        if not recover:
+            return 0
+
+        now = _utc_now()
+        for event_id in recover:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'pending',
+                       claimed_at = NULL,
+                       processed_at = NULL,
+                       last_error = 'RECOVERED_FALSE_EXECUTABLE_SNAPSHOT_SELECTION_DEADLINE_DAY0',
                        updated_at = ?
                  WHERE consumer_name = ?
                    AND event_id = ?

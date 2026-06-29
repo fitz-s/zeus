@@ -55,6 +55,7 @@ CREATE TABLE position_current (
     entry_ci_width REAL,
     cost_basis_usd REAL,
     chain_cost_basis_usd REAL,
+    chain_shares REAL,
     size_usd REAL,
     updated_at TEXT
 )
@@ -80,6 +81,8 @@ def _insert_held(
     p_posterior=0.50,
     entry_ci_width=0.20,  # entry q_lcb = 0.50 - 0.10 = 0.40
     cost_basis_usd=4.0,
+    chain_cost_basis_usd=None,
+    chain_shares=10.0,
 ):
     conn.execute(
         """
@@ -87,12 +90,13 @@ def _insert_held(
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric,
             p_posterior, entry_ci_width, cost_basis_usd, chain_cost_basis_usd,
-            size_usd, updated_at
+            chain_shares, size_usd, updated_at
         ) VALUES (?, ?, ?, '', ?, ?, 'cond-1', 'Tokyo', '2026-06-23', 'high',
-                  ?, ?, ?, NULL, ?, '2026-06-22T06:00:00')
+                  ?, ?, ?, ?, ?, ?, '2026-06-22T06:00:00')
         """,
         (position_id, phase, token_id, bin_label, direction,
-         p_posterior, entry_ci_width, cost_basis_usd, cost_basis_usd),
+         p_posterior, entry_ci_width, cost_basis_usd, chain_cost_basis_usd,
+         chain_shares, cost_basis_usd),
     )
 
 
@@ -143,15 +147,37 @@ def test_held_same_token_prefers_chain_cost_basis_when_present():
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric,
             p_posterior, entry_ci_width, cost_basis_usd, chain_cost_basis_usd,
-            size_usd, updated_at
+            chain_shares, size_usd, updated_at
         ) VALUES ('p2', 'active', 'tok-A', '', '60-61F', 'buy_yes',
                   'cond-1', 'Tokyo', '2026-06-23', 'high',
-                  0.50, 0.20, 4.0, 7.0, 4.0, '2026-06-22T06:00:00')
+                  0.50, 0.20, 4.0, 7.0, 10.0, 4.0, '2026-06-22T06:00:00')
         """
     )
     held = fuw.read_held_same_token_exposure(conn, token_id="tok-A")
     assert held is not None
     # chain truth (7.0) is the authoritative committed exposure when present.
+    assert held.current_live_usd == pytest.approx(7.0)
+
+
+def test_held_same_token_reads_quarantined_chain_backed_position():
+    """A chain-backed quarantine row is still a held token for fill-up planning."""
+    conn = _conn()
+    _insert_held(
+        conn,
+        phase="quarantined",
+        token_id="tok-A",
+        p_posterior=0.60,
+        entry_ci_width=0.10,
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=11.0,
+    )
+
+    held = fuw.read_held_same_token_exposure(conn, token_id="tok-A")
+
+    assert held is not None
+    assert held.position_id == "p1"
+    assert held.entry_q_lcb == pytest.approx(0.55)
     assert held.current_live_usd == pytest.approx(7.0)
 
 

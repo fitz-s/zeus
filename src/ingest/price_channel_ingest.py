@@ -1556,12 +1556,30 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     if not has_table:
         return set()
     try:
+        columns = {
+            str(row[1])
+            for row in trade_conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        if not {"phase", "token_id", "no_token_id"}.issubset(columns):
+            return set()
+        open_phase_clause = "phase IN ('pending_entry','active','day0_window','pending_exit')"
+        exposure_clause = open_phase_clause
+        params: tuple[object, ...] = ()
+        if "chain_shares" in columns:
+            exposure_clause = (
+                f"({open_phase_clause} OR ("
+                "phase IN ('quarantined','voided') "
+                "AND COALESCE(chain_shares, 0) > ?"
+                "))"
+            )
+            params = (0.000001,)
         rows = trade_conn.execute(
-            """
+            f"""
             SELECT token_id, no_token_id
               FROM position_current
-             WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
-            """
+             WHERE {exposure_clause}
+            """,
+            params,
         ).fetchall()
     except Exception:
         return set()

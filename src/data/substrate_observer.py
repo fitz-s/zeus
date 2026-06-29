@@ -699,14 +699,13 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
             required = {"city", "target_date", "temperature_metric", "phase", "condition_id"}
             if not required.issubset(cols):
                 return []
-            if "chain_shares" in cols and "shares" in cols:
-                share_expr = "COALESCE(chain_shares, shares, 0)"
-            elif "chain_shares" in cols:
-                share_expr = "COALESCE(chain_shares, 0)"
-            elif "shares" in cols:
-                share_expr = "COALESCE(shares, 0)"
-            else:
+            if "chain_shares" not in cols:
                 return []
+            open_share_expr = (
+                "COALESCE(chain_shares, shares, 0)"
+                if "shares" in cols
+                else "COALESCE(chain_shares, 0)"
+            )
             chain_state_filter = (
                 "AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')"
                 if "chain_state" in cols
@@ -716,11 +715,19 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
                 f"""
                 SELECT DISTINCT city, target_date, temperature_metric, condition_id
                   FROM position_current
-                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                 WHERE (
+                        (
+                            phase IN ('active', 'day0_window', 'pending_exit')
+                            AND {open_share_expr} > 0.000001
+                            {chain_state_filter}
+                        )
+                        OR (
+                            phase IN ('quarantined', 'voided')
+                            AND COALESCE(chain_shares, 0) > 0.000001
+                        )
+                       )
                    AND condition_id IS NOT NULL
                    AND TRIM(condition_id) != ''
-                   AND {share_expr} > 0.000001
-                   {chain_state_filter}
                 """
             ).fetchall()
         finally:

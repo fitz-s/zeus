@@ -19,6 +19,7 @@ here ONLY to keep this pilot behavior-identical to governor's current logic.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from src.contracts.canonical_lifecycle import (
@@ -163,53 +164,166 @@ def derive_order_result_status(
 
 
 # --------------------------------------------------------------------------- #
-# A5 — PositionPhase derived (10-rule monotonic precedence over truth facts)   #
+# A5 — PositionPhase derived (authority-aware precedence over truth facts)      #
 # --------------------------------------------------------------------------- #
+
+def _derive_phase_and_authority(
+    *,
+    has_admin_close: bool,
+    is_voided: bool,
+    has_settlement: bool,
+    has_economic_close: bool,
+    has_explicit_quarantine: bool,
+    has_explicit_pending_exit: bool,
+    has_chain_quarantine_fallback: bool,
+    has_exit_fallback: bool,
+    has_positive_exposure: bool,
+    in_day0_window: bool,
+    has_entry_intent: bool,
+) -> tuple[PositionPhase, str]:
+    """The authority-aware A5 precedence (consult 6a42bc3d ruling). Returns the phase
+    and the authority tier that decided it. EXPLICIT A5-owned state/event facts win;
+    chain-quarantine and exit-state are FALLBACKS ranked below economic-close /
+    explicit-pending-exit, so an economically_closed / pending_exit position is NOT
+    re-quarantined by a chain-quarantine review flag."""
+    if has_admin_close:
+        return PositionPhase.ADMIN_CLOSED, "primary_state"
+    if is_voided:
+        return PositionPhase.VOIDED, "primary_state"
+    if has_settlement:
+        return PositionPhase.SETTLED, "primary_state"
+    if has_economic_close:
+        return PositionPhase.ECONOMICALLY_CLOSED, "primary_state"
+    if has_explicit_quarantine:
+        return PositionPhase.QUARANTINED, "primary_state"
+    if has_explicit_pending_exit:
+        return PositionPhase.PENDING_EXIT, "primary_state"
+    if has_chain_quarantine_fallback:
+        return PositionPhase.QUARANTINED, "chain_fallback"
+    if has_exit_fallback:
+        return PositionPhase.PENDING_EXIT, "exit_fallback"
+    if has_positive_exposure and in_day0_window:
+        return PositionPhase.DAY0_WINDOW, "exposure_fallback"
+    if has_positive_exposure:
+        return PositionPhase.ACTIVE, "exposure_fallback"
+    if has_entry_intent:
+        return PositionPhase.PENDING_ENTRY, "primary_state"
+    return PositionPhase.UNKNOWN, "unknown"
+
 
 def derive_position_phase(
     *,
+    # A5-owned explicit lifecycle facts / trusted primary state (authority tier).
     has_admin_close: bool = False,
-    has_settlement: bool = False,
     is_voided: bool = False,
-    is_quarantined: bool = False,
+    has_settlement: bool = False,
     has_economic_close: bool = False,
-    has_open_exit: bool = False,
+    has_explicit_quarantine: bool = False,
+    has_explicit_pending_exit: bool = False,
+    # A7 chain / A6 exit FALLBACK facts (project only when no A5 authority is above).
+    has_chain_quarantine_fallback: bool = False,
+    has_exit_fallback: bool = False,
+    # Exposure / intent facts.
     has_positive_exposure: bool = False,
     in_day0_window: bool = False,
     has_entry_intent: bool = False,
+    strict_terminal_conflict: bool = False,
 ) -> PositionPhase:
     """Derive the coarse position phase from decision-relevant truth facts.
 
-    The booleans are themselves projections of the underlying facts (admin/manual
-    override events; settlement/P&L recorded; entry voided/terminal-no-fill/phantom-
-    zero; chain-only or review-bucket chain visibility; exit terminal fill; any open
-    exit order; positive exposure from active lot / chain-observed / entry fill; day0
-    window; local entry intent). Precedence is monotonic terminal-first so the phase
-    never regresses. `has_admin_close` is an EXPLICIT operator terminal override and
-    intentionally outranks settlement — it is not ordinary post-settlement
-    bookkeeping; if a report consumer needs economic resolution to dominate the
-    operator phase, split that out rather than re-ranking here. The fact->boolean
-    computation is wired at the call sites (lifecycle_manager / projection) in the
-    A5 cutover; this is the pure decision."""
-    if has_admin_close:
-        return PositionPhase.ADMIN_CLOSED
-    if has_settlement:
-        return PositionPhase.SETTLED
-    if is_voided:
-        return PositionPhase.VOIDED
-    if is_quarantined:
-        return PositionPhase.QUARANTINED
-    if has_economic_close:
-        return PositionPhase.ECONOMICALLY_CLOSED
-    if has_open_exit:
-        return PositionPhase.PENDING_EXIT
-    if has_positive_exposure and in_day0_window:
-        return PositionPhase.DAY0_WINDOW
-    if has_positive_exposure:
-        return PositionPhase.ACTIVE
-    if has_entry_intent:
-        return PositionPhase.PENDING_ENTRY
-    return PositionPhase.UNKNOWN
+    Authority-aware precedence (consult 6a42bc3d): explicit A5 state/event facts
+    (admin / void / settlement / economic-close / explicit-quarantine / explicit-
+    pending-exit) win; chain-quarantine and exit-state are FALLBACKS ranked BELOW
+    economic-close and explicit-pending-exit, so a closed/exiting position keeps its
+    phase and a stale chain-quarantine flag does not strand it (the chain discrepancy
+    stays visible as an A7 review overlay — see project_position_phase). This makes the
+    function an exact decomposition of the live owner phase_for_runtime_position over
+    the runtime domain.
+
+    `has_admin_close` is an EXPLICIT operator terminal override and outranks settlement.
+    The default defensive ordering prefers VOIDED over SETTLED (a wrongly-settled
+    phantom is worse than a voided row in review). For INDEPENDENT reconstruction where
+    mutually-exclusive terminal facts may conflict (the market-resolved-vs-position-
+    settled bug class), pass strict_terminal_conflict=True to fail loud instead of
+    silently ranking. No writer is wired to this yet; it is the pure decision."""
+    if strict_terminal_conflict:
+        n_terminal = sum((has_admin_close, is_voided, has_settlement, has_economic_close))
+        if n_terminal > 1:
+            raise ValueError(
+                "conflicting terminal/economic facts in independent reconstruction "
+                f"(admin_close={has_admin_close}, voided={is_voided}, "
+                f"settlement={has_settlement}, economic_close={has_economic_close}) — "
+                "resolve via the trusted primary state / fold event stream, do not rank"
+            )
+    phase, _authority = _derive_phase_and_authority(
+        has_admin_close=has_admin_close,
+        is_voided=is_voided,
+        has_settlement=has_settlement,
+        has_economic_close=has_economic_close,
+        has_explicit_quarantine=has_explicit_quarantine,
+        has_explicit_pending_exit=has_explicit_pending_exit,
+        has_chain_quarantine_fallback=has_chain_quarantine_fallback,
+        has_exit_fallback=has_exit_fallback,
+        has_positive_exposure=has_positive_exposure,
+        in_day0_window=in_day0_window,
+        has_entry_intent=has_entry_intent,
+    )
+    return phase
+
+
+@dataclass(frozen=True)
+class PositionPhaseProjection:
+    """A5 phase plus the A7 chain-review overlay (consult 6a42bc3d [S2]).
+
+    The phase obeys A5 authority (chain-quarantine does not clobber a closed/exiting
+    phase), but a chain-quarantine fallback that was present is still surfaced as
+    `chain_review_required` so a real chain discrepancy on a closed/exiting position
+    stays visible to operator/reconcile reports instead of being silently dropped."""
+
+    phase: PositionPhase
+    chain_review_required: bool
+    chain_review_reason: str | None
+    phase_authority: str
+
+
+def project_position_phase(
+    *,
+    has_admin_close: bool = False,
+    is_voided: bool = False,
+    has_settlement: bool = False,
+    has_economic_close: bool = False,
+    has_explicit_quarantine: bool = False,
+    has_explicit_pending_exit: bool = False,
+    has_chain_quarantine_fallback: bool = False,
+    has_exit_fallback: bool = False,
+    has_positive_exposure: bool = False,
+    in_day0_window: bool = False,
+    has_entry_intent: bool = False,
+    chain_review_reason: str | None = None,
+) -> PositionPhaseProjection:
+    """Project the A5 phase together with the A7 chain-review overlay. The phase is
+    derive_position_phase(...); chain_review_required is True whenever a chain-quarantine
+    fallback fact was present (even if A5 authority won the phase), preserving the
+    discrepancy as a review signal rather than a phase override."""
+    phase, authority = _derive_phase_and_authority(
+        has_admin_close=has_admin_close,
+        is_voided=is_voided,
+        has_settlement=has_settlement,
+        has_economic_close=has_economic_close,
+        has_explicit_quarantine=has_explicit_quarantine,
+        has_explicit_pending_exit=has_explicit_pending_exit,
+        has_chain_quarantine_fallback=has_chain_quarantine_fallback,
+        has_exit_fallback=has_exit_fallback,
+        has_positive_exposure=has_positive_exposure,
+        in_day0_window=in_day0_window,
+        has_entry_intent=has_entry_intent,
+    )
+    return PositionPhaseProjection(
+        phase=phase,
+        chain_review_required=bool(has_chain_quarantine_fallback),
+        chain_review_reason=chain_review_reason if has_chain_quarantine_fallback else None,
+        phase_authority=authority,
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -1290,7 +1290,7 @@ class OpportunityEventReactor:
         deadline_horizon = _event_deadline_horizon(
             event,
             decision_time=decision_time,
-            transient_reason=self._transient_requeue_reasons.get(event.event_id),
+            transient_reason=self._last_transient_requeue_reason(event),
         )
         if deadline_horizon is not None:
             return deadline_horizon
@@ -1369,7 +1369,7 @@ class OpportunityEventReactor:
         """
         if self._family_market_absence_provider is None:
             return None
-        last_reason = self._transient_requeue_reasons.get(event.event_id)
+        last_reason = self._last_transient_requeue_reason(event)
         if _money_path_reason_base(last_reason or "") != "EXECUTABLE_SNAPSHOT_BLOCKED":
             return None
         family = self._family_identity(event)
@@ -1392,6 +1392,30 @@ class OpportunityEventReactor:
             "VENUE_MARKET_NOT_LISTED",
             f"Gamma/topology has no listed Polymarket market for {city}/{target_date}/{metric}",
         )
+
+    def _last_transient_requeue_reason(self, event: OpportunityEvent) -> str | None:
+        """Return the transient cause from memory or durable processing state.
+
+        ``_transient_requeue_reasons`` is process-local. After a daemon restart,
+        the durable retry cause lives in ``opportunity_event_processing.last_error``.
+        Losing it lets a stale executable-snapshot ``selection_deadline`` be read
+        as an event horizon instead of price evidence.
+        """
+
+        event_id = str(getattr(event, "event_id", "") or "")
+        if not event_id:
+            return None
+        live_reason = self._transient_requeue_reasons.get(event_id)
+        if live_reason:
+            return live_reason
+        try:
+            stored_reason = self._store.processing_last_error(event_id)
+        except Exception:
+            return None
+        if stored_reason and _is_transient_money_path_reason(stored_reason):
+            self._transient_requeue_reasons[event_id] = stored_reason
+            return stored_reason
+        return None
 
     @staticmethod
     def _family_identity(event: OpportunityEvent) -> tuple[str, str, str] | None:
@@ -1689,7 +1713,7 @@ class OpportunityEventReactor:
                 # (after capture completes / book settles / risk clears). Do NOT
                 # consume the event the way mark_processed would. There is NO
                 # attempt cap — the event requeues until a horizon terminal fires.
-                last_reason = self._transient_requeue_reasons.get(event.event_id)
+                last_reason = self._last_transient_requeue_reason(event)
                 retry_not_before = None
                 if _money_path_reason_base(last_reason or "") in {
                     "EXECUTABLE_SNAPSHOT_BLOCKED",
@@ -2640,6 +2664,7 @@ def _event_deadline_horizon(
     reason_base = _money_path_reason_base(str(transient_reason or ""))
     if (
         reason_base != "EXECUTABLE_SNAPSHOT_STALE"
+        and not _reason_wraps_executable_snapshot_selection_deadline(transient_reason)
         and reason_selection_deadline is not None
         and reason_selection_deadline <= decision_time_utc
     ):
@@ -2648,6 +2673,14 @@ def _event_deadline_horizon(
             f"selection_deadline={reason_selection_deadline.isoformat()}",
         )
     return None
+
+
+def _reason_wraps_executable_snapshot_selection_deadline(reason: object | None) -> bool:
+    text = str(reason or "")
+    return (
+        "EXECUTABLE_SNAPSHOT_STALE" in text
+        and "selection_deadline=" in text
+    )
 
 
 def _receipt_or_payload(

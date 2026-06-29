@@ -65,28 +65,100 @@ def test_phase_exposure_in_day0_is_day0() -> None:
     assert derive_position_phase(has_positive_exposure=True, in_day0_window=True) is PositionPhase.DAY0_WINDOW
 
 
-def test_phase_open_exit_is_pending_exit() -> None:
-    assert derive_position_phase(has_positive_exposure=True, has_open_exit=True) is PositionPhase.PENDING_EXIT
+def test_phase_explicit_pending_exit_is_pending_exit() -> None:
+    assert derive_position_phase(has_positive_exposure=True, has_explicit_pending_exit=True) is PositionPhase.PENDING_EXIT
+
+
+def test_phase_exit_fallback_is_pending_exit() -> None:
+    assert derive_position_phase(has_positive_exposure=True, has_exit_fallback=True) is PositionPhase.PENDING_EXIT
 
 
 def test_phase_economic_close_beats_exposure() -> None:
-    assert derive_position_phase(has_positive_exposure=True, has_open_exit=True, has_economic_close=True) is PositionPhase.ECONOMICALLY_CLOSED
+    assert derive_position_phase(has_positive_exposure=True, has_explicit_pending_exit=True, has_economic_close=True) is PositionPhase.ECONOMICALLY_CLOSED
 
 
-def test_phase_quarantined() -> None:
-    assert derive_position_phase(is_quarantined=True, has_positive_exposure=True) is PositionPhase.QUARANTINED
+def test_phase_explicit_quarantine() -> None:
+    assert derive_position_phase(has_explicit_quarantine=True, has_positive_exposure=True) is PositionPhase.QUARANTINED
+
+
+# --- the consult ruling (6a42bc3d): A5 authority beats chain-quarantine FALLBACK -- #
+
+def test_phase_economic_close_beats_chain_quarantine_fallback() -> None:
+    # A closed economic state keeps its phase; a chain-quarantine fallback is a
+    # review overlay, not a hard A5 override (else settlement machinery is stranded).
+    assert derive_position_phase(
+        has_economic_close=True, has_chain_quarantine_fallback=True
+    ) is PositionPhase.ECONOMICALLY_CLOSED
+
+
+def test_phase_explicit_pending_exit_beats_chain_quarantine_fallback() -> None:
+    assert derive_position_phase(
+        has_explicit_pending_exit=True, has_chain_quarantine_fallback=True
+    ) is PositionPhase.PENDING_EXIT
+
+
+def test_phase_chain_quarantine_fallback_projects_when_no_stronger_authority() -> None:
+    # With no economic/exit A5 authority above it, the chain-quarantine fallback DOES
+    # project the phase to QUARANTINED (over exposure / exit-fallback / intent).
+    assert derive_position_phase(
+        has_positive_exposure=True, has_chain_quarantine_fallback=True
+    ) is PositionPhase.QUARANTINED
+    assert derive_position_phase(
+        has_exit_fallback=True, has_chain_quarantine_fallback=True
+    ) is PositionPhase.QUARANTINED
+
+
+def test_phase_explicit_quarantine_beats_exit_fallback() -> None:
+    assert derive_position_phase(
+        has_explicit_quarantine=True, has_exit_fallback=True
+    ) is PositionPhase.QUARANTINED
 
 
 def test_phase_voided_beats_quarantine() -> None:
-    assert derive_position_phase(is_voided=True, is_quarantined=True) is PositionPhase.VOIDED
+    assert derive_position_phase(is_voided=True, has_explicit_quarantine=True) is PositionPhase.VOIDED
 
 
-def test_phase_settled_beats_voided() -> None:
-    assert derive_position_phase(has_settlement=True, is_voided=True, has_economic_close=True) is PositionPhase.SETTLED
+def test_phase_nonstrict_prefers_voided_over_settled() -> None:
+    # Default defensive ordering (ruling [S1]): VOIDED over SETTLED — a wrongly-settled
+    # phantom/unfilled position is worse than a voided row left in review.
+    assert derive_position_phase(is_voided=True, has_settlement=True) is PositionPhase.VOIDED
 
 
 def test_phase_admin_close_is_highest() -> None:
     assert derive_position_phase(has_admin_close=True, has_settlement=True, is_voided=True) is PositionPhase.ADMIN_CLOSED
+
+
+def test_phase_strict_mode_raises_on_conflicting_terminals() -> None:
+    # Independent reconstruction must not silently rank contradictory terminal facts
+    # (the market-resolved-vs-position-settled bug class). Strict mode fails loud.
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        derive_position_phase(is_voided=True, has_settlement=True, strict_terminal_conflict=True)
+    with _pytest.raises(ValueError):
+        derive_position_phase(has_admin_close=True, has_settlement=True, strict_terminal_conflict=True)
+
+
+def test_position_phase_projection_preserves_chain_review_overlay() -> None:
+    # A7 chain-review must stay visible even when A5 phase authority wins (ruling [S2]).
+    from src.state.canonical_projections import project_position_phase
+    proj = project_position_phase(
+        has_economic_close=True,
+        has_chain_quarantine_fallback=True,
+        chain_review_reason="chain_shares_mismatch",
+    )
+    assert proj.phase is PositionPhase.ECONOMICALLY_CLOSED
+    assert proj.chain_review_required is True
+    assert proj.chain_review_reason == "chain_shares_mismatch"
+    assert proj.phase_authority == "primary_state"
+
+
+def test_position_phase_projection_no_overlay_when_no_chain_flag() -> None:
+    from src.state.canonical_projections import project_position_phase
+    proj = project_position_phase(has_positive_exposure=True)
+    assert proj.phase is PositionPhase.ACTIVE
+    assert proj.chain_review_required is False
+    assert proj.chain_review_reason is None
+    assert proj.phase_authority == "exposure_fallback"
 
 
 # --------------------------------------------------------------------------- #

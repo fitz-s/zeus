@@ -39,7 +39,7 @@ CREATE TABLE position_current (
     bin_label TEXT, direction TEXT, condition_id TEXT, city TEXT,
     target_date TEXT, temperature_metric TEXT, p_posterior REAL,
     entry_ci_width REAL, cost_basis_usd REAL, chain_cost_basis_usd REAL,
-    shares REAL, size_usd REAL, updated_at TEXT
+    shares REAL, chain_shares REAL, size_usd REAL, updated_at TEXT
 )
 """
 
@@ -94,6 +94,7 @@ def _insert_held(
     direction="buy_yes",
     cost_basis_usd=4.0,
     chain_cost_basis_usd=None,
+    chain_shares=10.0,
     city="Tokyo",
     target_date="2026-06-23",
     metric="high",
@@ -103,12 +104,12 @@ def _insert_held(
         INSERT INTO position_current (
             position_id, phase, token_id, no_token_id, bin_label, direction,
             condition_id, city, target_date, temperature_metric, p_posterior,
-            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, size_usd, updated_at
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares, size_usd, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, 'cond-1', ?, ?, ?, 0.50, 0.20, ?, ?, 10.0, ?,
-                  '2026-06-22T06:00:00')
+                  ?, '2026-06-22T06:00:00')
         """,
         (position_id, phase, token_id, no_token_id, bin_label, direction, city, target_date,
-         metric, cost_basis_usd, chain_cost_basis_usd, cost_basis_usd),
+         metric, cost_basis_usd, chain_cost_basis_usd, chain_shares, cost_basis_usd),
     )
 
 
@@ -216,6 +217,36 @@ def test_buy_no_sibling_returns_no_token_as_sellable_old_leg():
     assert held.current_live_usd == pytest.approx(4.0)
 
 
+def test_quarantined_chain_backed_buy_no_sibling_is_returned():
+    """A quarantine label is not closure when chain shares are still positive."""
+    conn = _conn()
+    _insert_held(
+        conn,
+        position_id="munich-30-no",
+        token_id="yes-30",
+        no_token_id="no-30",
+        phase="quarantined",
+        bin_label="30C",
+        direction="buy_no",
+        cost_basis_usd=21.27,
+        chain_cost_basis_usd=21.27,
+        chain_shares=29.14,
+        city="Munich",
+        target_date="2026-06-30",
+        metric="high",
+    )
+
+    held = sbw.read_held_sibling_exposure(
+        conn, city="Munich", target_date="2026-06-30", temperature_metric="high",
+        selected_token_id="no-29", selected_bin_label="29C",
+    )
+
+    assert held is not None
+    assert held.position_id == "munich-30-no"
+    assert held.token_id == "no-30"
+    assert held.current_live_usd == pytest.approx(21.27)
+
+
 def test_same_token_held_is_not_a_sibling():
     """Selected token == held token is FILL-UP, not a sibling shift → None."""
     conn = _conn()
@@ -261,6 +292,22 @@ def test_old_leg_residual_prefers_chain_cost_basis():
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
 
 
+def test_old_leg_residual_reads_quarantined_chain_backed_row():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="yes-30",
+        no_token_id="no-30",
+        phase="quarantined",
+        direction="buy_no",
+        cost_basis_usd=21.27,
+        chain_cost_basis_usd=21.27,
+        chain_shares=29.14,
+    )
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="no-30") == pytest.approx(21.27)
+
+
 def test_old_leg_residual_reads_buy_no_no_token():
     conn = _conn()
     _insert_held(
@@ -283,10 +330,30 @@ def test_old_leg_residual_zero_when_not_held():
 
 def test_old_leg_residual_zero_when_chain_collateral_has_no_token():
     conn = _conn()
-    _insert_held(conn, token_id="tok-A", cost_basis_usd=4.0, chain_cost_basis_usd=7.0)
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=0.0,
+    )
     _insert_chain_collateral(conn, {})
 
     assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(0.0)
+
+
+def test_old_leg_residual_position_chain_shares_override_empty_collateral():
+    conn = _conn()
+    _insert_held(
+        conn,
+        token_id="tok-A",
+        cost_basis_usd=4.0,
+        chain_cost_basis_usd=7.0,
+        chain_shares=10.0,
+    )
+    _insert_chain_collateral(conn, {})
+
+    assert sbw.read_old_leg_residual_usd(conn, token_id="tok-A") == pytest.approx(7.0)
 
 
 def test_old_leg_residual_keeps_local_value_when_chain_collateral_has_token():

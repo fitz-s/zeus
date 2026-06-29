@@ -671,13 +671,49 @@ _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
 )
 _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
-    {"active", "day0_window", "pending_exit"}
+    {"active", "day0_window", "pending_exit", "quarantined"}
 )
 _ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
     {"pending_entry", *_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES}
 )
 _ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
 _ENTRY_HELD_FAMILY_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
+_POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
+
+
+def _position_phase_or_positive_chain_clause(
+    columns: set[str],
+    phases: frozenset[str],
+) -> tuple[str, tuple[object, ...]]:
+    """SQL clause for position rows that are monitor-owned or chain-exposed.
+
+    Local lifecycle labels can lag venue truth. A quarantined/voided row with
+    positive venue shares is still real exposure; settled/economically_closed
+    stale projections are not reopened by this helper.
+    """
+    if "phase" in columns:
+        phase_sql = "phase IN ({})".format(",".join("?" for _ in phases))
+        params: list[object] = list(sorted(phases))
+    else:
+        phase_sql = "1=1"
+        params = []
+    if "chain_shares" in columns:
+        terminal_phase_sql = (
+            "phase IN ('quarantined', 'voided')"
+            if "phase" in columns
+            else (
+                "chain_state IN ('entry_authority_quarantined', "
+                "'chain_absent_confirmed_position_unattributed')"
+                if "chain_state" in columns
+                else "0"
+            )
+        )
+        return (
+            f"({phase_sql} OR (COALESCE(chain_shares, 0) > ? "
+            f"AND ({terminal_phase_sql})))",
+            tuple([*params, _POSITIVE_CHAIN_EXPOSURE_EPS]),
+        )
+    return phase_sql, tuple(params)
 
 
 def _is_entry_held_family_reason(reason: object) -> bool:
@@ -740,23 +776,32 @@ def _durable_live_cap_usage_is_represented_in_trade_truth(
 
         token = _durable_live_cap_final_intent_token(final_intent_id)
         if token and _adapter_table_exists(trade_conn, "position_current"):
+            columns = _position_current_columns(trade_conn)
+            phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+                columns,
+                _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES,
+            )
+            positive_terms = [
+                f"COALESCE({name}, 0) > 0"
+                for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd")
+                if name in columns
+            ]
+            if not positive_terms:
+                return False
+            token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
+            if not token_columns:
+                return False
+            token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
             row = trade_conn.execute(
-                """
+                f"""
                 SELECT 1
                   FROM position_current
-                 WHERE phase IN (?, ?, ?)
-                   AND (
-                        token_id = ?
-                     OR no_token_id = ?
-                   )
-                   AND (
-                        COALESCE(cost_basis_usd, 0) > 0
-                     OR COALESCE(chain_cost_basis_usd, 0) > 0
-                     OR COALESCE(shares, 0) > 0
-                   )
+                 WHERE {phase_sql}
+                   AND ({token_sql})
+                   AND ({" OR ".join(positive_terms)})
                  LIMIT 1
                 """,
-                (*sorted(_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES), token, token),
+                (*phase_params, *(token for _ in token_columns)),
             ).fetchone()
             if row is not None:
                 return True
@@ -810,12 +855,9 @@ def _entry_held_position_same_token_reason(
         ]
         positive_sql = " AND (" + " OR ".join(positive_terms) + ")" if positive_terms else ""
         token_sql = " OR ".join(f"NULLIF({name}, '') = ?" for name in token_columns)
-        phase_sql = (
-            "phase IN ({})".format(
-                ",".join("?" for _ in _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES)
-            )
-            if "phase" in columns
-            else "1=1"
+        phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+            columns,
+            _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES,
         )
         row = conn.execute(
             f"""
@@ -827,11 +869,7 @@ def _entry_held_position_same_token_reason(
              LIMIT 1
             """,
             (
-                *(
-                    sorted(_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES)
-                    if "phase" in columns
-                    else ()
-                ),
+                *phase_params,
                 *(token for _ in token_columns),
             ),
         ).fetchone()
@@ -909,12 +947,9 @@ def _entry_held_position_same_family_reason(
             return None
         positive_sql = " AND (" + " OR ".join(positive_terms) + ")"
         order_sql = "ORDER BY updated_at DESC" if "updated_at" in columns else ""
-        phase_sql = (
-            "phase IN ({})".format(
-                ",".join("?" for _ in _ENTRY_HELD_POSITION_BLOCKING_PHASES)
-            )
-            if "phase" in columns
-            else "1=1"
+        phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+            columns,
+            _ENTRY_HELD_POSITION_BLOCKING_PHASES,
         )
         rows = conn.execute(
             f"""
@@ -932,11 +967,7 @@ def _entry_held_position_same_family_reason(
              {order_sql}
             """,
             (
-                *(
-                    sorted(_ENTRY_HELD_POSITION_BLOCKING_PHASES)
-                    if "phase" in columns
-                    else ()
-                ),
+                *phase_params,
                 city,
                 target_date,
             ),
@@ -1176,10 +1207,9 @@ def _read_old_leg_exit_inputs(
     share_terms = [c for c in ("chain_shares", "shares") if c in cols]
     if not token_cols or not share_terms:
         return None
-    phase_sql = (
-        "phase IN ({})".format(",".join("?" for _ in _ENTRY_HELD_POSITION_BLOCKING_PHASES))
-        if "phase" in cols
-        else "1=1"
+    phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+        cols,
+        _ENTRY_HELD_POSITION_BLOCKING_PHASES,
     )
     token_sql = " OR ".join(f"NULLIF({c}, '') = ?" for c in token_cols)
     selected_columns = (
@@ -1198,8 +1228,7 @@ def _read_old_leg_exit_inputs(
         f"WHERE {phase_sql} AND ({token_sql}) {order_sql} LIMIT 1"
     )
     params: list[object] = []
-    if "phase" in cols:
-        params.extend(sorted(_ENTRY_HELD_POSITION_BLOCKING_PHASES))
+    params.extend(phase_params)
     params.extend(token for _ in token_cols)
     try:
         row = conn.execute(sql, tuple(params)).fetchone()
@@ -2072,7 +2101,7 @@ def _qkernel_direct_route_matches_receipt_probability(
         for value in (payoff_q_point, payoff_q_lcb, receipt_q_point, receipt_q_lcb)
     ):
         return False
-    if abs(payoff_q_point - receipt_q_point) > 1e-6:
+    if payoff_q_point > receipt_q_point + 1e-6:
         return False
     if payoff_q_lcb > receipt_q_lcb + 1e-6:
         return False
@@ -3894,6 +3923,7 @@ def _build_event_bound_no_submit_receipt_core(
     _selection_exposure = _family_existing_exposure_for_selection_by_bin_id(
         proofs=proofs,
         portfolio_state_provider=portfolio_state_provider,
+        held_position_conn=trade_conn,
         family=family,
     )
     if _spine_eligible_event and not _is_day0_event and not _spine_flag_on:
@@ -6190,7 +6220,36 @@ def _build_event_bound_taker_quality_proof(
             }
         q_live = _optional_float(qkernel_cert.get("payoff_q_point"))
         q_lcb = _optional_float(qkernel_cert.get("payoff_q_lcb"))
-        q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
+        payload_q_live = _optional_float(actionable_payload.get("q_live"))
+        payload_q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
+        if (
+            q_live is None
+            or q_lcb is None
+            or payload_q_live is None
+            or payload_q_lcb is None
+        ):
+            return {
+                "schema_version": 1,
+                "passed": False,
+                "reason": "qkernel_live_posterior_bound_missing",
+                "model_confidence": "0",
+                "taker_fee_adjusted_edge": "0",
+                "taker_expected_profit_usd": "0",
+                "maker_expected_profit_usd": "0",
+                "incremental_expected_profit_usd": "0",
+            }
+        if q_live > payload_q_live + 1e-6 or q_lcb > payload_q_lcb + 1e-6:
+            return {
+                "schema_version": 1,
+                "passed": False,
+                "reason": "qkernel_payoff_exceeds_live_posterior_bound",
+                "model_confidence": "0",
+                "taker_fee_adjusted_edge": "0",
+                "taker_expected_profit_usd": "0",
+                "maker_expected_profit_usd": "0",
+                "incremental_expected_profit_usd": "0",
+            }
+        q_lcb_source = "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
     else:
         q_live = _optional_float(actionable_payload.get("q_live"))
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
@@ -7050,6 +7109,34 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
         raise ValueError(
             "LIVE_ENTRY_QKERNEL_CERT_BIN_MISMATCH:"
             f"cert_bin_id={cert_bin_id}:payload_bin_id={payload_bin_id}"
+        )
+    cert_q_live = _optional_float(cert.get("payoff_q_point"))
+    cert_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
+    payload_q_live = _optional_float(actionable_payload.get("q_live"))
+    payload_q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
+    if (
+        cert_q_live is None
+        or cert_q_lcb is None
+        or payload_q_live is None
+        or payload_q_lcb is None
+    ):
+        raise ValueError("LIVE_ENTRY_QKERNEL_POSTERIOR_BOUND_MISSING")
+    if cert_q_live > payload_q_live + 1e-6 or cert_q_lcb > payload_q_lcb + 1e-6:
+        raise ValueError(
+            "LIVE_ENTRY_QKERNEL_PAYOFF_EXCEEDS_POSTERIOR_BOUND:"
+            f"cert_q={cert_q_live:.9f}:payload_q={payload_q_live:.9f}:"
+            f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
+        )
+    min_entry_price = _optional_float(actionable_payload.get("min_entry_price"))
+    cert_cost = _optional_float(cert.get("cost"))
+    if (
+        min_entry_price is not None
+        and cert_cost is not None
+        and cert_cost + 1e-12 < min_entry_price
+    ):
+        raise ValueError(
+            "LIVE_ENTRY_QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
+            f"cost={cert_cost:.9f}:min_entry_price={min_entry_price:.9f}"
         )
 
 
@@ -11154,7 +11241,11 @@ def _proofs_with_qkernel_candidate_economics(
             return float("-inf")
         return stake * (edge_lcb / cost)
 
-    def _qkernel_receipt_rejection_reason(cert: Mapping[str, Any]) -> str | None:
+    def _qkernel_receipt_rejection_reason(
+        cert: Mapping[str, Any],
+        *,
+        min_entry_price: float | None = None,
+    ) -> str | None:
         try:
             side = str(cert.get("side") or "").strip().upper()
             cost = float(cert.get("cost"))
@@ -11164,6 +11255,16 @@ def _proofs_with_qkernel_candidate_economics(
             optimal_stake_usd = float(cert.get("optimal_stake_usd") or 0.0)
         except (TypeError, ValueError):
             return "QKERNEL_EXECUTION_ECONOMICS_INVALID"
+        if (
+            min_entry_price is not None
+            and math.isfinite(min_entry_price)
+            and min_entry_price > 0.0
+            and cost + 1e-12 < min_entry_price
+        ):
+            return (
+                "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
+                f"side={side or 'UNKNOWN'}:cost={cost:.9f}:min_entry_price={min_entry_price:.9f}"
+            )
         if cert.get("direction_law_ok") is not True:
             return f"QKERNEL_DIRECTION_LAW_REJECTED:side={side or 'UNKNOWN'}"
         if cert.get("coherence_allows") is not True:
@@ -11229,15 +11330,57 @@ def _proofs_with_qkernel_candidate_economics(
         if cert is None:
             annotated.append(proof)
             continue
-        qkernel_reason = _qkernel_receipt_rejection_reason(cert)
+        min_entry_price = None
+        if str(getattr(proof, "direction", "") or "").strip().lower() == "buy_yes":
+            try:
+                min_entry_price = _event_bound_strategy_live_quality_floors("center_buy")[
+                    "min_entry_price"
+                ]
+            except Exception:  # noqa: BLE001
+                min_entry_price = 0.05
+        qkernel_reason = _qkernel_receipt_rejection_reason(
+            cert,
+            min_entry_price=min_entry_price,
+        )
         q_point = _optional_float(cert.get("payoff_q_point"))
         q_lcb = _optional_float(cert.get("payoff_q_lcb"))
         trade_score = _optional_float(cert.get("edge_lcb"))
+        try:
+            proof_q_point = float(proof.q_posterior)
+            proof_q_lcb = float(proof.q_lcb_5pct)
+        except (TypeError, ValueError):
+            proof_q_point = float("nan")
+            proof_q_lcb = float("nan")
+        if (
+            qkernel_reason is None
+            and (
+                not math.isfinite(proof_q_point)
+                or not math.isfinite(proof_q_lcb)
+                or not (0.0 <= proof_q_lcb <= proof_q_point <= 1.0)
+            )
+        ):
+            qkernel_reason = "QKERNEL_PERSISTED_POSTERIOR_BOUND_INVALID"
+        if (
+            qkernel_reason is None
+            and q_point is not None
+            and q_point > proof_q_point + 1e-6
+        ):
+            qkernel_reason = "QKERNEL_PAYOFF_Q_EXCEEDS_PERSISTED_POSTERIOR_POINT"
+        if (
+            qkernel_reason is None
+            and q_lcb is not None
+            and q_lcb > proof_q_lcb + 1e-6
+        ):
+            qkernel_reason = "QKERNEL_PAYOFF_QLCB_EXCEEDS_PERSISTED_POSTERIOR_BOUND"
+        cert_payload = dict(cert)
+        if math.isfinite(proof_q_point):
+            cert_payload["persisted_posterior_q_posterior"] = proof_q_point
+        if math.isfinite(proof_q_lcb):
+            cert_payload["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
+        cert_payload["q_lcb_authority"] = "persisted_posterior_bound"
         annotated.append(
             dataclass_replace(
                 proof,
-                q_posterior=q_point if q_point is not None else proof.q_posterior,
-                q_lcb_5pct=q_lcb if q_lcb is not None else proof.q_lcb_5pct,
                 trade_score=(
                     trade_score
                     if trade_score is not None and qkernel_reason is None
@@ -11245,7 +11388,7 @@ def _proofs_with_qkernel_candidate_economics(
                 ),
                 passed_prefilter=qkernel_reason is None,
                 missing_reason=qkernel_reason,
-                qkernel_execution_economics=dict(cert),
+                qkernel_execution_economics=cert_payload,
             )
         )
         changed = True
@@ -13831,6 +13974,7 @@ def _family_existing_exposure_for_selection_by_bin_id(
     *,
     proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
     portfolio_state_provider: "Callable[[], Any] | None",
+    held_position_conn: sqlite3.Connection | None = None,
     family,
 ) -> dict[str, float]:
     """PRE-SELECTION per-bin family exposure for the spine's ΔU SELECTION (Fix #4).
@@ -13854,12 +13998,10 @@ def _family_existing_exposure_for_selection_by_bin_id(
     geometry as ``FamilyPayoffMatrix`` before the concave ΔU objective shrinks
     against it. Same-cycle reservations are city-keyed with NO bin identity, so
     they are NOT fabricated onto a bin here — the post-selection recapture
-    already nets them by city. Returns ``{}`` (flat baseline, prior behavior
-    byte-for-byte) when no provider is wired or no open position matches a
-    family bin's condition_id.
+    already nets them by city. When ``held_position_conn`` is supplied it is the
+    canonical live execution state and is read even if no portfolio provider is
+    wired; the provider is a secondary in-memory/projected source.
     """
-    if portfolio_state_provider is None:
-        return {}
     # condition_id -> bin_id for THIS family (a bin's YES and NO proofs share both).
     bin_id_by_condition: dict[str, str] = {}
     for proof in proofs:
@@ -13867,6 +14009,92 @@ def _family_existing_exposure_for_selection_by_bin_id(
         if cond:
             bin_id_by_condition.setdefault(cond, _candidate_bin_id(proof))
     if not bin_id_by_condition:
+        return {}
+    all_family_outcomes = tuple(dict.fromkeys(bin_id_by_condition.values())) + (
+        utility_ranker.OUTSIDE_OUTCOME,
+    )
+    exposure_by_bin: dict[str, float] = {}
+
+    def _add_exposure(*, condition_id: str, direction: str, committed: float) -> None:
+        bin_id = bin_id_by_condition.get(condition_id)
+        if bin_id is None or committed <= 0.0:
+            return
+        if direction == "buy_no":
+            outcome_ids = tuple(
+                outcome for outcome in all_family_outcomes if outcome != bin_id
+            )
+        else:
+            outcome_ids = (bin_id,)
+        for outcome_id in outcome_ids:
+            exposure_by_bin[outcome_id] = exposure_by_bin.get(outcome_id, 0.0) + committed
+
+    if held_position_conn is not None:
+        try:
+            columns = _position_current_columns(held_position_conn)
+            if "condition_id" in columns:
+                phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+                    columns,
+                    _ENTRY_HELD_POSITION_BLOCKING_PHASES,
+                )
+                positive_terms = [
+                    f"COALESCE({name}, 0) > 0"
+                    for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+                    if name in columns
+                ]
+                if positive_terms:
+                    condition_placeholders = ",".join("?" for _ in bin_id_by_condition)
+                    direction_select = "direction" if "direction" in columns else "NULL AS direction"
+                    chain_cost_select = (
+                        "chain_cost_basis_usd"
+                        if "chain_cost_basis_usd" in columns
+                        else "NULL AS chain_cost_basis_usd"
+                    )
+                    cost_select = (
+                        "cost_basis_usd" if "cost_basis_usd" in columns else "NULL AS cost_basis_usd"
+                    )
+                    size_select = "size_usd" if "size_usd" in columns else "NULL AS size_usd"
+                    rows = held_position_conn.execute(
+                        f"""
+                        SELECT condition_id, {direction_select},
+                               {chain_cost_select}, {cost_select}, {size_select}
+                          FROM position_current
+                         WHERE {phase_sql}
+                           AND condition_id IN ({condition_placeholders})
+                           AND ({" OR ".join(positive_terms)})
+                        """,
+                        (*phase_params, *bin_id_by_condition.keys()),
+                    ).fetchall()
+                    for row in rows:
+                        try:
+                            condition_id = str(row["condition_id"] or "")
+                            direction_raw = row["direction"]
+                            committed = (
+                                _optional_float(row["chain_cost_basis_usd"])
+                                or _optional_float(row["cost_basis_usd"])
+                                or _optional_float(row["size_usd"])
+                                or 0.0
+                            )
+                        except Exception:
+                            condition_id = str(row[0] or "")
+                            direction_raw = row[1]
+                            committed = (
+                                _optional_float(row[2])
+                                or _optional_float(row[3])
+                                or _optional_float(row[4])
+                                or 0.0
+                            )
+                        direction = str(getattr(direction_raw, "value", direction_raw) or "").strip().lower()
+                        _add_exposure(
+                            condition_id=condition_id,
+                            direction=direction,
+                            committed=float(committed),
+                        )
+                    if exposure_by_bin:
+                        return exposure_by_bin
+        except (TypeError, ValueError, sqlite3.Error):
+            exposure_by_bin = {}
+
+    if portfolio_state_provider is None:
         return {}
     try:
         from src.state.portfolio import (
@@ -13877,27 +14105,14 @@ def _family_existing_exposure_for_selection_by_bin_id(
         state = portfolio_state_provider()
         if state is None:
             return {}
-        all_family_outcomes = tuple(dict.fromkeys(bin_id_by_condition.values())) + (
-            utility_ranker.OUTSIDE_OUTCOME,
-        )
-        exposure_by_bin: dict[str, float] = {}
         for pos in get_open_positions(state):
             cond = str(getattr(pos, "condition_id", "") or "")
-            bin_id = bin_id_by_condition.get(cond)
-            if bin_id is None:
-                continue
             committed = float(_runtime_open_exposure_usd(pos))
             if committed <= 0.0:
                 continue
-            direction = str(getattr(pos, "direction", "") or "").strip()
-            if direction == "buy_no":
-                outcome_ids = tuple(
-                    outcome for outcome in all_family_outcomes if outcome != bin_id
-                )
-            else:
-                outcome_ids = (bin_id,)
-            for outcome_id in outcome_ids:
-                exposure_by_bin[outcome_id] = exposure_by_bin.get(outcome_id, 0.0) + committed
+            direction_raw = getattr(pos, "direction", "")
+            direction = str(getattr(direction_raw, "value", direction_raw) or "").strip().lower()
+            _add_exposure(condition_id=cond, direction=direction, committed=committed)
         return exposure_by_bin
     except (TypeError, ValueError, ImportError):
         return {}

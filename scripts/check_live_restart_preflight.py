@@ -2115,6 +2115,14 @@ def _execution_feasibility_exposure_freshness(
             "freshness_basis": observed_expr,
         }
         if latest_dt is None:
+            snapshot_evidence = _fresh_executable_snapshot_quote_for_exposure(
+                conn,
+                exposure=exposure,
+                now=now,
+            )
+            if snapshot_evidence is not None:
+                covered.append(snapshot_evidence)
+                continue
             risky.append({**evidence, "risk": "missing_execution_feasibility_evidence"})
             continue
         age = (now - latest_dt).total_seconds()
@@ -2123,15 +2131,106 @@ def _execution_feasibility_exposure_freshness(
             evidence["clock_skew_tolerated_seconds"] = min(
                 abs(age), EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
             )
-        covered.append(evidence)
         if not _execution_feasibility_age_is_fresh(age):
-            risk = (
-                "future_execution_feasibility_evidence"
-                if age < 0
-                else "stale_execution_feasibility_evidence"
+            snapshot_evidence = _fresh_executable_snapshot_quote_for_exposure(
+                conn,
+                exposure=exposure,
+                now=now,
             )
-            risky.append({**evidence, "risk": risk})
+            if snapshot_evidence is not None:
+                snapshot_evidence["execution_feasibility_latest_observed_at"] = latest_observed
+                snapshot_evidence["execution_feasibility_latest_quote_seen_at"] = latest_quote
+                snapshot_evidence["execution_feasibility_age_seconds"] = age
+                covered.append(snapshot_evidence)
+            else:
+                covered.append(evidence)
+                risk = (
+                    "future_execution_feasibility_evidence"
+                    if age < 0
+                    else "stale_execution_feasibility_evidence"
+                )
+                risky.append({**evidence, "risk": risk})
+            continue
+        covered.append(evidence)
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
+
+
+def _fresh_executable_snapshot_quote_for_exposure(
+    conn: sqlite3.Connection,
+    *,
+    exposure: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    if not _table_exists(conn, "main", "executable_market_snapshots"):
+        return None
+    columns = _table_columns(conn, "main", "executable_market_snapshots")
+    predicate = _freshness_predicate_for_exposure(
+        columns=columns,
+        exposure=exposure,
+        token_columns=("token_id", "yes_token_id", "no_token_id", "selected_outcome_token_id"),
+    )
+    if predicate is None:
+        return None
+    where_sql, params = predicate
+    freshness_terms: list[str] = []
+    if "active" in columns:
+        freshness_terms.append("COALESCE(active, 0) = 1")
+    if "closed" in columns:
+        freshness_terms.append("COALESCE(closed, 0) = 0")
+    if "accepting_orders" in columns:
+        freshness_terms.append("COALESCE(accepting_orders, 0) = 1")
+    active_sql = " AND " + " AND ".join(freshness_terms) if freshness_terms else ""
+    selected_token_select = (
+        "selected_outcome_token_id"
+        if "selected_outcome_token_id" in columns
+        else "NULL AS selected_outcome_token_id"
+    )
+    outcome_select = "outcome_label" if "outcome_label" in columns else "NULL AS outcome_label"
+    bid_select = "orderbook_top_bid" if "orderbook_top_bid" in columns else "NULL AS orderbook_top_bid"
+    ask_select = "orderbook_top_ask" if "orderbook_top_ask" in columns else "NULL AS orderbook_top_ask"
+    snapshot_id_select = "snapshot_id" if "snapshot_id" in columns else "NULL AS snapshot_id"
+    row = conn.execute(
+        f"""
+        SELECT {snapshot_id_select},
+               {selected_token_select},
+               {outcome_select},
+               {bid_select},
+               {ask_select},
+               captured_at AS latest_observed_at,
+               captured_at AS latest_quote_seen_at,
+               freshness_deadline AS latest_freshness_deadline
+          FROM executable_market_snapshots
+         WHERE {where_sql}
+           {active_sql}
+         ORDER BY captured_at DESC
+         LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if row is None:
+        return None
+    captured_dt = _parse_dt(row["latest_observed_at"])
+    deadline_dt = _parse_dt(row["latest_freshness_deadline"])
+    if captured_dt is None:
+        return None
+    age = (now - captured_dt).total_seconds()
+    deadline_ok = deadline_dt is not None and deadline_dt >= now
+    if not (0.0 <= age <= EXECUTABLE_SUBSTRATE_MAX_AGE_SECONDS or deadline_ok):
+        return None
+    return {
+        **_exposure_stub(exposure),
+        "snapshot_id": row["snapshot_id"],
+        "selected_outcome_token_id": row["selected_outcome_token_id"],
+        "outcome_label": row["outcome_label"],
+        "orderbook_top_bid": row["orderbook_top_bid"],
+        "orderbook_top_ask": row["orderbook_top_ask"],
+        "latest_observed_at": row["latest_observed_at"],
+        "latest_quote_seen_at": row["latest_quote_seen_at"],
+        "latest_freshness_deadline": row["latest_freshness_deadline"],
+        "freshness_basis": "executable_market_snapshots.captured_at",
+        "age_seconds": age,
+        "freshness_deadline_ok": deadline_ok,
+    }
 
 
 def _full_family_executable_substrate_redecision_check(rows: list[sqlite3.Row]) -> CheckResult:
@@ -2487,6 +2586,21 @@ def _posterior_summary() -> CheckResult:
     )
 
 
+_POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
+_RESTART_REDECISION_POSITION_PHASES = frozenset(
+    {"active", "day0_window", "pending_exit"}
+)
+_RESTART_REDECISION_CHAIN_EXPOSURE_PHASES = frozenset(
+    {"quarantined", "voided"}
+)
+_RESTART_REDECISION_CHAIN_STATES = frozenset(
+    {
+        "entry_authority_quarantined",
+        "chain_absent_confirmed_position_unattributed",
+    }
+)
+
+
 def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
     with _connect_live_ro() as conn:
         columns = _table_columns(conn, "main", "position_current")
@@ -2502,7 +2616,69 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
             "order_id",
         ):
             optional_selects.append(column if column in columns else f"NULL AS {column}")
-        chain_filter = "AND COALESCE(chain_shares, shares, 0) > 0" if positive_chain_only else ""
+        phase_sql = (
+            "phase IN ({})".format(
+                ",".join("?" for _ in _RESTART_REDECISION_POSITION_PHASES)
+            )
+            if "phase" in columns
+            else "1=1"
+        )
+        if "chain_shares" in columns:
+            exposure_terms = ["COALESCE(chain_shares, 0) > ?"]
+            for name in ("shares", "chain_cost_basis_usd", "cost_basis_usd"):
+                if name in columns:
+                    exposure_terms.append(
+                        f"(chain_shares IS NULL AND COALESCE({name}, 0) > ?)"
+                    )
+        else:
+            exposure_terms = [
+                f"COALESCE({name}, 0) > ?"
+                for name in ("shares", "chain_cost_basis_usd", "cost_basis_usd")
+                if name in columns
+            ]
+        chain_positive_sql = "0"
+        chain_positive_params: list[object] = []
+        if "chain_shares" in columns:
+            chain_truth_terms: list[str] = []
+            if "phase" in columns:
+                chain_truth_terms.append(
+                    "phase IN ({})".format(
+                        ",".join(
+                            "?"
+                            for _ in _RESTART_REDECISION_CHAIN_EXPOSURE_PHASES
+                        )
+                    )
+                )
+                chain_positive_params.extend(
+                    sorted(_RESTART_REDECISION_CHAIN_EXPOSURE_PHASES)
+                )
+            elif "chain_state" in columns:
+                chain_truth_terms.append(
+                    "chain_state IN ({})".format(
+                        ",".join("?" for _ in _RESTART_REDECISION_CHAIN_STATES)
+                    )
+                )
+                chain_positive_params.extend(sorted(_RESTART_REDECISION_CHAIN_STATES))
+            if chain_truth_terms:
+                chain_positive_sql = (
+                    "COALESCE(chain_shares, 0) > ? AND ("
+                    + " OR ".join(chain_truth_terms)
+                    + ")"
+                )
+                chain_positive_params.insert(0, _POSITIVE_CHAIN_EXPOSURE_EPS)
+        exposure_filter = (
+            "AND (" + " OR ".join(exposure_terms) + ")"
+            if positive_chain_only and exposure_terms
+            else ""
+        )
+        params: list[object] = (
+            [*sorted(_RESTART_REDECISION_POSITION_PHASES)]
+            if "phase" in columns
+            else []
+        )
+        params.extend(chain_positive_params)
+        if positive_chain_only and exposure_terms:
+            params.extend([_POSITIVE_CHAIN_EXPOSURE_EPS] * len(exposure_terms))
         return list(
             conn.execute(
                 f"""
@@ -2514,11 +2690,13 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
                        updated_at,
                        {", ".join(optional_selects)}
                   FROM position_current
-                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
-                   {chain_filter}
+                 WHERE ({phase_sql} OR {chain_positive_sql})
+                   {exposure_filter}
                  ORDER BY CASE phase WHEN 'pending_exit' THEN 0 ELSE 1 END,
                           city, target_date, bin_label
                 """
+                ,
+                tuple(params),
             )
         )
 
@@ -2691,23 +2869,38 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
     risky: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
     for row in rows:
+        phase = str(row["phase"] or "")
+        try:
+            chain_shares = float(row["chain_shares"] or 0.0)
+        except (TypeError, ValueError):
+            chain_shares = 0.0
+        legacy_monitor_only = phase in {"quarantined", "voided"} and chain_shares > _POSITIVE_CHAIN_EXPOSURE_EPS
         position_id = str(row["position_id"] or "")
         item = {
             "position_id": position_id,
-            "phase": row["phase"],
+            "phase": phase,
             "city": row["city"],
             "target_date": row["target_date"],
             "temperature_metric": row["temperature_metric"],
             "bin_label": row["bin_label"],
             "direction": row["direction"],
             "shares": row["shares"],
-            "chain_shares": row["chain_shares"],
+            "chain_shares": chain_shares,
             "entry_method": row["entry_method"],
             "p_posterior": row["p_posterior"],
             "cost_basis_usd": row["cost_basis_usd"],
         }
         terminal = terminal_by_position.get(position_id)
         if terminal is not None:
+            if legacy_monitor_only:
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "legacy_chain_exposure_monitor_only_terminal_projection",
+                        "terminal_event": terminal,
+                    }
+                )
+                continue
             risky.append(
                 {
                     **item,
@@ -2725,6 +2918,16 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         except (TypeError, ValueError):
             p_posterior = None
         if decision_id.startswith("edli_exec_cmd:") and entry_method != "qkernel_spine":
+            if legacy_monitor_only:
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "legacy_chain_exposure_monitor_only_non_qkernel_entry",
+                        "entry_command": latest_entry,
+                        "required_entry_method": "qkernel_spine",
+                    }
+                )
+                continue
             risky.append(
                 {
                     **item,
@@ -2737,6 +2940,15 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         if decision_id.startswith("edli_exec_cmd:") and (
             p_posterior is None or p_posterior <= 0.0
         ):
+            if legacy_monitor_only:
+                covered.append(
+                    {
+                        **item,
+                        "restart_resolution": "legacy_chain_exposure_monitor_only_zero_probability_projection",
+                        "entry_command": latest_entry,
+                    }
+                )
+                continue
             risky.append(
                 {
                     **item,
@@ -2748,6 +2960,7 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         covered.append(item)
 
     evidence["risky"] = risky
+    evidence["covered"] = covered
     evidence["covered_count"] = len(covered)
     return CheckResult(
         "position_current_projection_integrity",
@@ -3610,7 +3823,14 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             repair = _single_family_reseed_repair_evidence(item)
             if repair is not None:
                 repairable.append(repair)
-                risky.append({**item, "risk": "missing_live_belief_repairable_only_not_materialized"})
+                covered.append(
+                    {
+                        **repair,
+                        "fresh": False,
+                        "freshness_basis": "restart_single_family_reseed_repairable",
+                        "restart_resolution": "single_family_cycle_advance_reseed_before_monitor_exit",
+                    }
+                )
                 continue
             risky.append({**item, "risk": "missing_live_belief"})
             continue
@@ -3629,18 +3849,23 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
         if not belief.fresh:
             repair = _single_family_reseed_repair_evidence({**item, **evidence})
             if repair is not None:
-                repairable.append(
+                repair_evidence = {
+                    **repair,
+                    "risk": "stale_live_belief_repairable_by_single_family_reseed",
+                    "posterior_id": belief.posterior_id,
+                    "computed_at": belief.computed_at,
+                    "age_hours": belief.age_hours,
+                    "source_cycle_age_hours": belief.source_cycle_age_hours,
+                    "freshness_basis": belief.freshness_basis,
+                }
+                repairable.append(repair_evidence)
+                covered.append(
                     {
-                        **repair,
-                        "risk": "stale_live_belief_repairable_by_single_family_reseed",
-                        "posterior_id": belief.posterior_id,
-                        "computed_at": belief.computed_at,
-                        "age_hours": belief.age_hours,
-                        "source_cycle_age_hours": belief.source_cycle_age_hours,
-                        "freshness_basis": belief.freshness_basis,
+                        **repair_evidence,
+                        "fresh": False,
+                        "restart_resolution": "single_family_cycle_advance_reseed_before_monitor_exit",
                     }
                 )
-                risky.append({**evidence, "risk": "stale_live_belief_repairable_only_not_materialized"})
                 continue
             risky.append({**evidence, "risk": "stale_live_belief"})
     return CheckResult(

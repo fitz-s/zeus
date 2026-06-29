@@ -4517,6 +4517,114 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     conn.close()
 
 
+def test_chain_projection_preserves_fresh_monitor_snapshot(tmp_path):
+    """Chain sync writes must not erase the last monitor belief/quote snapshot."""
+    from src.engine.lifecycle_events import (
+        build_chain_economics_observed_canonical_write,
+        build_entry_canonical_write,
+        build_monitor_refreshed_canonical_write,
+    )
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "chain-preserve-monitor.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="chain-preserve-monitor-1",
+        state="holding",
+        city="Munich",
+        target_date="2026-06-30",
+        order_id="o-chain-preserve-monitor",
+        entered_at="2026-06-29T08:55:40+00:00",
+        order_posted_at="2026-06-29T08:55:21+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="Will the highest temperature in Munich be 30°C on June 30?",
+        condition_id="0xchainpreservemonitor000000000000000000000000000000000001",
+        size_usd=21.27,
+        shares=29.14,
+        cost_basis_usd=21.27,
+        entry_price=0.73,
+        token_id="tok-munich-30-yes",
+        no_token_id="tok-munich-30-no",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-chain-preserve-monitor-entry",
+        source_module="tests/test_chain_projection_preserves_fresh_monitor_snapshot",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    pos.last_monitor_prob = 0.98
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = 0.22
+    pos.last_monitor_market_price = 0.76
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_at = "2026-06-29T20:02:40+00:00"
+    monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_chain_projection_preserves_fresh_monitor_snapshot",
+    )
+    append_many_and_project(conn, monitor_events, monitor_projection)
+
+    chain_pos = _make_position(
+        trade_id=pos.trade_id,
+        state="holding",
+        city=pos.city,
+        target_date=pos.target_date,
+        order_id=pos.order_id,
+        order_status=pos.order_status,
+        strategy_key=pos.strategy_key,
+        bin_label=pos.bin_label,
+        condition_id=pos.condition_id,
+        size_usd=pos.size_usd,
+        shares=pos.shares,
+        cost_basis_usd=pos.cost_basis_usd,
+        entry_price=pos.entry_price,
+        token_id=pos.token_id,
+        no_token_id=pos.no_token_id,
+        chain_state="synced",
+        chain_shares=29.14,
+        chain_avg_price=0.73,
+        chain_cost_basis_usd=21.27,
+        chain_verified_at="2026-06-29T22:20:52+00:00",
+    )
+    chain_events, chain_projection = build_chain_economics_observed_canonical_write(
+        chain_pos,
+        chain_observed_at="2026-06-29T22:20:52+00:00",
+        sequence_no=5,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        chain_shares_before=29.14,
+        source_module="tests/test_chain_projection_preserves_fresh_monitor_snapshot",
+    )
+    append_many_and_project(conn, chain_events, chain_projection)
+
+    current = conn.execute(
+        """
+        SELECT chain_state, chain_shares, chain_cost_basis_usd,
+               last_monitor_prob, last_monitor_prob_is_fresh, last_monitor_edge,
+               last_monitor_market_price, last_monitor_market_price_is_fresh,
+               updated_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["chain_state"] == "synced"
+    assert current["chain_shares"] == pytest.approx(29.14)
+    assert current["chain_cost_basis_usd"] == pytest.approx(21.27)
+    assert current["last_monitor_prob"] == pytest.approx(0.98)
+    assert current["last_monitor_prob_is_fresh"] == 1
+    assert current["last_monitor_edge"] == pytest.approx(0.22)
+    assert current["last_monitor_market_price"] == pytest.approx(0.76)
+    assert current["last_monitor_market_price_is_fresh"] == 1
+    assert current["updated_at"] == "2026-06-29T22:20:52+00:00"
+    conn.close()
+
+
 def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monkeypatch):
     """Monitor refresh canonical evidence must include the final hold/exit decision."""
     from src.contracts import EdgeContext, EntryMethod

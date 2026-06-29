@@ -55,7 +55,6 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
     BlockingScheduler = None
 
 from src.config import cities_by_name, get_mode, settings
-from src.contracts.position_truth import REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
 from src.runtime import bankroll_provider
@@ -6646,12 +6645,6 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
         }
         if not required.issubset(cols):
             return {}
-        redecision_quarantine_states = tuple(
-            sorted(REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES)
-        )
-        redecision_quarantine_placeholders = ",".join(
-            "?" for _ in redecision_quarantine_states
-        )
         rows = trade_ro.execute(
             """
             SELECT city, target_date, temperature_metric, condition_id
@@ -6662,17 +6655,13 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
                         AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')
                     )
                     OR (
-                        phase = 'quarantined'
-                        AND COALESCE(chain_state, '') IN ({redecision_quarantine_placeholders})
+                        phase IN ('quarantined', 'voided')
                     )
                    )
                AND condition_id IS NOT NULL
                AND TRIM(condition_id) != ''
                AND COALESCE(chain_shares, 0) > 0.000001
-            """.format(
-                redecision_quarantine_placeholders=redecision_quarantine_placeholders
-            ),
-            redecision_quarantine_states,
+            """,
         ).fetchall()
         for row in rows:
             family_key = (
@@ -7998,6 +7987,34 @@ def _edli_prune_pending_working_set(
             "EDLI reactor: false static venue-close DAY0 recovery sweep failed "
             "(non-fatal; normal pending events still drain): %r",
             _static_close_recovery_exc,
+        )
+
+    try:
+        if _budget_exhausted("requeue_false_executable_snapshot_deadline_day0_dead_letters"):
+            return
+        _step_started = time.monotonic()
+        _snapshot_deadline_recovered = (
+            store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
+                decision_time=decision_time.isoformat(),
+                batch_limit=min(batch_limit, 1000),
+            )
+        )
+        _log_prune_step(
+            "requeue_false_executable_snapshot_deadline_day0_dead_letters",
+            _step_started,
+            _snapshot_deadline_recovered,
+        )
+        if _snapshot_deadline_recovered:
+            logger.warning(
+                "EDLI reactor: requeued %d DAY0 events falsely dead-lettered by "
+                "old executable-snapshot selection-deadline horizon logic",
+                _snapshot_deadline_recovered,
+            )
+    except Exception as _snapshot_deadline_recovery_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: false executable-snapshot selection-deadline DAY0 "
+            "recovery sweep failed (non-fatal; normal pending events still drain): %r",
+            _snapshot_deadline_recovery_exc,
         )
 
     try:

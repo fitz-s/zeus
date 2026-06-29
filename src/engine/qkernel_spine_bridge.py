@@ -1435,11 +1435,12 @@ def _overlay_spine_economics_onto_proof_with_reason(
     """Overlay the spine decision's economics onto the selected reactor proof.
 
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` /
-    ``trade_score`` / ``execution_price`` etc. off the proof. Once the spine is
-    the selection authority, those receipt-facing selected-side probability fields
-    must carry the same direct-route belief the qkernel used to rank and size the
-    leg. Otherwise entry, submit receipts, monitoring, and redecision evaluate
-    different beliefs and the live lane correctly fails closed as a wiring split.
+    ``trade_score`` / ``execution_price`` etc. off the proof. The qkernel may
+    rank executable routes, but it may not loosen the live posterior authority
+    already materialized on the proof. Its direct-route payoff probability must
+    be no higher than the persisted selected-side posterior pair, otherwise a
+    wide execution-space band can turn conservative posterior no-trades into
+    cheap-tail live orders.
 
     The executable identity (row / token / execution_price /
     native_quote_available) is LEFT UNCHANGED — the spine selected this exact
@@ -1480,11 +1481,41 @@ def _overlay_spine_economics_onto_proof_with_reason(
     )
     if selection_guard_reason:
         return _OverlayResult(None, selection_guard_reason)
+    yes_floor_reason = _qkernel_buy_yes_strategy_floor_rejection_reason(
+        proof,
+        qkernel_execution_economics,
+    )
+    if yes_floor_reason:
+        return _OverlayResult(None, yes_floor_reason)
     qkernel_q_point, qkernel_q_lcb = _direct_route_probability_pair(
         qkernel_execution_economics
     )
     if qkernel_q_point is None or qkernel_q_lcb is None:
         return _OverlayResult(None, "INVALID_DIRECT_Q_PAIR")
+    try:
+        proof_q_point = float(getattr(proof, "q_posterior"))
+        proof_q_lcb = float(getattr(proof, "q_lcb_5pct"))
+    except (TypeError, ValueError):
+        return _OverlayResult(None, "PERSISTED_POSTERIOR_BOUND_INVALID")
+    if not (
+        math.isfinite(proof_q_point)
+        and math.isfinite(proof_q_lcb)
+        and 0.0 <= proof_q_lcb <= proof_q_point <= 1.0
+    ):
+        return _OverlayResult(None, "PERSISTED_POSTERIOR_BOUND_INVALID")
+    qkernel_execution_economics["persisted_posterior_q_posterior"] = proof_q_point
+    qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
+    qkernel_execution_economics["q_lcb_authority"] = "persisted_posterior_bound"
+    if qkernel_q_point > proof_q_point + 1e-9:
+        return _OverlayResult(
+            None,
+            "QKERNEL_PAYOFF_Q_EXCEEDS_PERSISTED_POSTERIOR_POINT",
+        )
+    if qkernel_q_lcb > proof_q_lcb + 1e-9:
+        return _OverlayResult(
+            None,
+            "QKERNEL_PAYOFF_QLCB_EXCEEDS_PERSISTED_POSTERIOR_BOUND",
+        )
     if not _qkernel_execution_direction_admitted(
         qkernel_execution_economics,
         direction=str(getattr(proof, "direction", "") or ""),
@@ -1507,14 +1538,10 @@ def _overlay_spine_economics_onto_proof_with_reason(
     except (TypeError, ValueError):
         pass
     overlay: dict[str, Any] = {
-        # The selected qkernel candidate is licensed by one direct-route
-        # selected-side belief. Carry it into the legacy-named proof fields so
-        # downstream receipts, submit checks, monitor, and redecision use the same
-        # probability surface as the qkernel ranker.
-        "q_posterior": qkernel_q_point,
-        "q_lcb_5pct": qkernel_q_lcb,
-        # The score stays on the same conservative economics the downstream
-        # FDR/receipt surfaces consume.
+        # The selected qkernel candidate is licensed by route economics, but the
+        # receipt-facing probability authority remains the live posterior already
+        # on the proof. The guard above guarantees the route economics cannot be
+        # more optimistic than that posterior bound.
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
@@ -1544,6 +1571,40 @@ def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool
             "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
         )
     )
+
+
+def _qkernel_buy_yes_strategy_floor_rejection_reason(
+    proof: Any,
+    qkernel_execution_economics: Mapping[str, Any],
+) -> str:
+    """Block center-buy cheap YES before it can become qkernel-authorized.
+
+    The final submit path also checks min_entry_price, but the bridge must not
+    create an actionable qkernel authority for a center_buy YES whose own cost is
+    already below the live strategy floor.
+    """
+
+    if str(getattr(proof, "direction", "") or "").strip().lower() != "buy_yes":
+        return ""
+    try:
+        cost = float(qkernel_execution_economics.get("cost"))
+    except (TypeError, ValueError):
+        return "QKERNEL_COST_INVALID"
+    if not math.isfinite(cost):
+        return "QKERNEL_COST_INVALID"
+    try:
+        from src.strategy.strategy_profile import try_get
+
+        profile = try_get("center_buy")
+        floor = float(getattr(profile, "min_entry_price", 0.05) if profile is not None else 0.05)
+    except Exception:  # noqa: BLE001
+        floor = 0.05
+    if cost + 1e-12 < floor:
+        return (
+            "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
+            f"strategy=center_buy:cost={cost:.9f}:min_entry_price={floor:.9f}"
+        )
+    return ""
 
 
 def _qkernel_selection_guard_rejection_reason(

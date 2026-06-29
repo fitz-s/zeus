@@ -250,6 +250,16 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "chain_absence_at",
     }
 )
+_MONITOR_SNAPSHOT_COLUMNS = frozenset(
+    {
+        "last_monitor_prob",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_edge",
+        "last_monitor_market_price",
+        "last_monitor_market_price_is_fresh",
+    }
+)
+_CHAIN_PROJECTION_EVENT_TYPES = frozenset({"CHAIN_SIZE_CORRECTED", "CHAIN_SYNCED"})
 
 
 def _preserve_existing_monitor_refresh_authority(
@@ -281,6 +291,49 @@ def _preserve_existing_monitor_refresh_authority(
         merged.get("chain_state") or ""
     ) in {"", "unknown", "local_only"}:
         merged["chain_state"] = "synced"
+    return merged
+
+
+def _preserve_existing_monitor_snapshot_for_chain_projection(
+    conn: sqlite3.Connection, projection: dict
+) -> dict:
+    """Keep fresh monitor truth across chain-only projection writes.
+
+    Chain reconciliation events update venue/chain exposure truth. They are not a
+    monitor refresh and must not erase the last fresh belief/quote snapshot just
+    because the in-memory reconciliation object did not carry monitor fields.
+    """
+
+    if projection.get("_canonical_event_type") not in _CHAIN_PROJECTION_EVENT_TYPES:
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id:
+        return projection
+    current_columns = table_columns(conn, "position_current")
+    preserved = tuple(
+        column
+        for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        if column in _MONITOR_SNAPSHOT_COLUMNS and column in current_columns
+    )
+    if not preserved:
+        return projection
+    row = conn.execute(
+        f"SELECT {', '.join(preserved)} FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return projection
+
+    current = {column: row[index] for index, column in enumerate(preserved)}
+    merged = dict(projection)
+    if bool(current.get("last_monitor_prob_is_fresh")):
+        for column in ("last_monitor_prob", "last_monitor_prob_is_fresh", "last_monitor_edge"):
+            if column in current:
+                merged[column] = current[column]
+    if bool(current.get("last_monitor_market_price_is_fresh")):
+        for column in ("last_monitor_market_price", "last_monitor_market_price_is_fresh"):
+            if column in current:
+                merged[column] = current[column]
     return merged
 
 
@@ -324,6 +377,7 @@ def _projection_allows_redecision_quarantine_pending_exit(projection: dict) -> b
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     projection = _preserve_existing_monitor_refresh_authority(conn, projection)
+    projection = _preserve_existing_monitor_snapshot_for_chain_projection(conn, projection)
     # F109 writer-side idempotency check (2026-05-17).
     # Runs before INSERT so the race window with the partial UNIQUE INDEX is
     # tight. If a same-token open-phase row exists with a *different*

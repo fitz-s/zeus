@@ -1,29 +1,25 @@
 # Created: 2026-06-29
 # Last audited: 2026-06-29
 # Authority basis: docs/operations/current/reports/state_vocabulary_canonical_redesign_2026-06-29.md
-#   A5 PositionPhase projection; consult review thread 6a42bc3d (Step 3 audit finding).
+#   A5 PositionPhase projection; consult ruling thread 6a42bc3d (authority-aware reducer).
 
-"""A5 equivalence antibody — derive_position_phase vs the live runtime phase owner.
+"""A5 equivalence antibody — authority-aware derive_position_phase vs the live owner.
 
-`phase_for_runtime_position` (lifecycle_manager) is the MATURE live projection: a
+`phase_for_runtime_position` (lifecycle_manager) is the canonical live projection: a
 single-state-string dispatcher giving the primary `state` field authority, with
-`chain_state`/`exit_state` only as fallbacks when the state is non-terminal. The
-redesign's `derive_position_phase` is a DIFFERENT input model — nine independent
-truth booleans with a flat monotonic precedence.
+`chain_state`/`exit_state` only as FALLBACKS that fire when the primary state has not
+already reached a stronger economic/exit/terminal disposition.
 
-For every single-fact runtime input the two AGREE, so derive is a faithful
-decomposition of the live owner. They diverge on exactly one edge class: when the
-primary state is `economically_closed`/`pending_exit` AND a chain-quarantine
-fallback is also set, the live owner keeps the economic/exit phase (state-field
-authority) while derive's flat precedence ranks QUARANTINED higher.
+The redesign's `derive_position_phase` is now authority-aware (consult 6a42bc3d
+ruling): it splits quarantine into explicit A5 quarantine vs A7 chain-quarantine
+FALLBACK, and pending-exit into explicit A5 pending-exit vs exit-state FALLBACK, with
+the fallbacks ranked BELOW economic-close / explicit-pending-exit. That makes it an
+EXACT decomposition of the live owner over the whole input domain — the previously
+"sanctioned" divergence (economically_closed/pending_exit + chain-quarantine being
+re-quarantined) is gone, because A5 authority now wins.
 
-This antibody PINS that relationship so:
-  - derive_position_phase is proven equivalent to the live owner on all non-edge
-    inputs (the cutover would be behavior-preserving there), and
-  - the four documented divergence combos cannot silently change on either side
-    without breaking this test — derive is therefore NOT a drop-in replacement for
-    phase_for_runtime_position until the state-authority-vs-quarantine-override
-    semantics are ruled on (open design question, consult 6a42bc3d follow-up).
+This antibody proves 192/192 exact equivalence, so the authority-aware reducer is a
+behavior-preserving basis for a future A5 cutover. (No writer is cut over here.)
 """
 
 from __future__ import annotations
@@ -36,6 +32,7 @@ from src.contracts.canonical_lifecycle import PositionPhase
 from src.state.canonical_projections import derive_position_phase
 from src.state.lifecycle_manager import (
     PENDING_EXIT_RUNTIME_STATES,
+    derive_runtime_position_phase,
     phase_for_runtime_position,
 )
 
@@ -48,34 +45,25 @@ _RUNTIME_STATES = [
 _EXIT_STATES = ["", "exit_intent", "sell_pending", "backoff_exhausted"]
 _CHAIN_STATES = ["", "quarantined", "quarantine_expired", "exit_pending_missing"]
 
-# The ONLY sanctioned derive-vs-live divergences (state-field authority vs flat
-# quarantine precedence). Pinned until the semantics are ruled on.
-_SANCTIONED_DIVERGENCE = {
-    ("economically_closed", "quarantined"),
-    ("economically_closed", "quarantine_expired"),
-    ("pending_exit", "quarantined"),
-    ("pending_exit", "quarantine_expired"),
-}
-
 
 def _runtime_state_to_phase_facts(state: str, exit_state: str = "", chain_state: str = "") -> dict:
-    """Map the runtime (state, exit_state, chain_state) onto derive_position_phase's
-    independent truth booleans, replicating the live owner's fallback structure
-    (chain-quarantine / exit-pending fill in only as facts, not state-authority)."""
+    """Map the runtime (state, exit_state, chain_state) onto the authority-aware
+    derive_position_phase inputs, replicating the live owner's authority model:
+    the primary `state` value sets exactly one EXPLICIT A5 fact; chain-quarantine and
+    exit-state set FALLBACK facts that project the phase only when no stronger A5
+    authority is present."""
     s = str(state or "").strip().lower()
     es = str(exit_state or "").strip().lower()
     cs = str(chain_state or "").strip().lower()
     return dict(
         has_admin_close=(s == "admin_closed"),
-        has_settlement=(s == "settled"),
         is_voided=(s == "voided"),
-        is_quarantined=(s == "quarantined") or (cs in {"quarantined", "quarantine_expired"}),
+        has_settlement=(s == "settled"),
         has_economic_close=(s == "economically_closed"),
-        has_open_exit=(
-            (s == "pending_exit")
-            or (es in PENDING_EXIT_RUNTIME_STATES)
-            or (cs == "exit_pending_missing")
-        ),
+        has_explicit_quarantine=(s == "quarantined"),
+        has_explicit_pending_exit=(s == "pending_exit"),
+        has_chain_quarantine_fallback=(cs in {"quarantined", "quarantine_expired"}),
+        has_exit_fallback=(es in PENDING_EXIT_RUNTIME_STATES or cs == "exit_pending_missing"),
         has_positive_exposure=(s in {"entered", "holding", "day0_window"}),
         in_day0_window=(s == "day0_window"),
         has_entry_intent=(s == "pending_tracked"),
@@ -104,19 +92,46 @@ def test_single_state_derive_matches_live_owner(state: str, expected: PositionPh
     assert derived is expected
 
 
-# --- full-domain antibody: equivalent except the four pinned divergence combos -- #
+# --- the ruling's explicit edge fixtures (state authority vs chain fallback) ----- #
 
-def test_derive_phase_equivalent_to_live_owner_except_pinned_divergence() -> None:
-    observed_divergence: set[tuple[str, str]] = set()
+@pytest.mark.parametrize("state,chain,expected", [
+    ("economically_closed", "quarantined", PositionPhase.ECONOMICALLY_CLOSED),
+    ("economically_closed", "quarantine_expired", PositionPhase.ECONOMICALLY_CLOSED),
+    ("pending_exit", "quarantined", PositionPhase.PENDING_EXIT),
+    ("pending_exit", "quarantine_expired", PositionPhase.PENDING_EXIT),
+    ("entered", "quarantined", PositionPhase.QUARANTINED),
+    ("day0_window", "quarantined", PositionPhase.QUARANTINED),
+    ("pending_tracked", "quarantined", PositionPhase.QUARANTINED),
+])
+def test_state_authority_vs_chain_quarantine_fallback(state: str, chain: str, expected: PositionPhase) -> None:
+    live = phase_for_runtime_position(state=state, chain_state=chain)
+    derived = derive_position_phase(**_runtime_state_to_phase_facts(state, chain_state=chain))
+    assert live is expected
+    assert derived is expected
+
+
+def test_exit_fallback_with_chain_quarantine_is_quarantined() -> None:
+    # An exit-state fallback on a non-terminal state, with chain quarantine, is
+    # QUARANTINED (the chain fallback outranks the exit fallback).
+    live = phase_for_runtime_position(state="entered", exit_state="exit_intent", chain_state="quarantined")
+    derived = derive_position_phase(**_runtime_state_to_phase_facts("entered", "exit_intent", "quarantined"))
+    assert live is PositionPhase.QUARANTINED
+    assert derived is PositionPhase.QUARANTINED
+
+
+# --- full-domain antibody: EXACT equivalence (zero divergence) post-ruling ------- #
+
+def test_derive_phase_exactly_equivalent_to_live_owner_full_domain() -> None:
     for s, es, cs in product(_RUNTIME_STATES, _EXIT_STATES, _CHAIN_STATES):
         live = phase_for_runtime_position(state=s, exit_state=es, chain_state=cs)
         derived = derive_position_phase(**_runtime_state_to_phase_facts(s, es, cs))
-        if live is derived:
-            continue
-        # Any divergence MUST be the sanctioned state-authority-vs-quarantine edge.
-        assert (s, cs) in _SANCTIONED_DIVERGENCE, f"unexpected divergence: {(s, es, cs, live.value, derived.value)}"
-        assert live.value in {"economically_closed", "pending_exit"}
-        assert derived is PositionPhase.QUARANTINED
-        observed_divergence.add((s, cs))
-    # The pinned set is exhaustive — every sanctioned combo actually occurs.
-    assert observed_divergence == _SANCTIONED_DIVERGENCE
+        assert derived is live, f"divergence at {(s, es, cs)}: live={live.value} derived={derived.value}"
+
+
+def test_runtime_adapter_byte_identical_to_live_owner_full_domain() -> None:
+    # The production runtime adapter (lifecycle_manager.derive_runtime_position_phase)
+    # must reproduce phase_for_runtime_position exactly across the whole domain.
+    for s, es, cs in product(_RUNTIME_STATES, _EXIT_STATES, _CHAIN_STATES):
+        live = phase_for_runtime_position(state=s, exit_state=es, chain_state=cs)
+        bridged = derive_runtime_position_phase(state=s, exit_state=es, chain_state=cs)
+        assert bridged is live, f"adapter divergence at {(s, es, cs)}: live={live.value} bridged={bridged.value}"
