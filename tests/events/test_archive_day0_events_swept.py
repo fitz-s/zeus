@@ -19,6 +19,7 @@ is mutated; the immutable opportunity_events row is never deleted.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import sqlite3
 
 from src.events.event_store import EventStore
@@ -192,6 +193,20 @@ def test_archive_unmarketed_day0_events_expires_only_non_admitted_processing_row
         "DAY0_UNMARKETED_EXECUTION_EVENT:no_market_topology_or_exposure",
     )
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 2
+
+
+def test_reactor_prune_archives_unmarketed_day0_before_legacy_repair_sweeps():
+    source = (Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
+    prune_start = source.index("def _edli_prune_pending_working_set(")
+    prune_source = source[
+        prune_start:
+        source.index("def _edli_day0_hourly_refresh_cycle(", prune_start)
+    ]
+
+    unmarketed_idx = prune_source.index('archive_unmarketed_day0_events"')
+    assert prune_source.index('archive_expired_candidates"') < unmarketed_idx
+    assert unmarketed_idx < prune_source.index('repair_missing_processing_rows"')
+    assert unmarketed_idx < prune_source.index('archive_superseded_channel_events"')
 
 
 # Decision time 2026-06-05T12:00:00Z: Chicago (UTC-5) local 06-05 07:00 → 06-04 is a PAST

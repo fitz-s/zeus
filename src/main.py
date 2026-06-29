@@ -7865,6 +7865,31 @@ def _edli_prune_pending_working_set(
     )
 
     try:
+        if _budget_exhausted("archive_unmarketed_day0_events"):
+            return
+        _step_started = time.monotonic()
+        _d0_unmarketed_archived = 0
+        if day0_family_admission is not None and day0_family_admission.expiry_safe:
+            _d0_unmarketed_archived = store.archive_unmarketed_day0_events(
+                admitted_families=set(day0_family_admission.admitted_families),
+                normalizer=_substrate_refresh_family_key,
+                batch_limit=batch_limit,
+            )
+        _log_prune_step("archive_unmarketed_day0_events", _step_started, _d0_unmarketed_archived)
+        if _d0_unmarketed_archived:
+            logger.info(
+                "EDLI reactor: expired %d unmarketed DAY0_EXTREME_UPDATED execution "
+                "events with no market topology or live exposure; observation provenance "
+                "kept, but non-executable Day0 facts no longer claim money-path budget",
+                _d0_unmarketed_archived,
+            )
+    except Exception as _d0_unmarketed_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_unmarketed_day0_events sweep failed (non-fatal): %r",
+            _d0_unmarketed_sweep_exc,
+        )
+
+    try:
         if _budget_exhausted("repair_missing_processing_rows"):
             return
         _step_started = time.monotonic()
@@ -7979,31 +8004,6 @@ def _edli_prune_pending_working_set(
             "EDLI reactor: archive_superseded_day0_events sweep failed (non-fatal): %r",
             _d0_sweep_exc,
     )
-
-    try:
-        if _budget_exhausted("archive_unmarketed_day0_events"):
-            return
-        _step_started = time.monotonic()
-        _d0_unmarketed_archived = 0
-        if day0_family_admission is not None and day0_family_admission.expiry_safe:
-            _d0_unmarketed_archived = store.archive_unmarketed_day0_events(
-                admitted_families=set(day0_family_admission.admitted_families),
-                normalizer=_substrate_refresh_family_key,
-                batch_limit=batch_limit,
-            )
-        _log_prune_step("archive_unmarketed_day0_events", _step_started, _d0_unmarketed_archived)
-        if _d0_unmarketed_archived:
-            logger.info(
-                "EDLI reactor: expired %d unmarketed DAY0_EXTREME_UPDATED execution "
-                "events with no market topology or live exposure; observation provenance "
-                "kept, but non-executable Day0 facts no longer claim money-path budget",
-                _d0_unmarketed_archived,
-            )
-    except Exception as _d0_unmarketed_sweep_exc:  # noqa: BLE001 — fail-soft
-        logger.warning(
-            "EDLI reactor: archive_unmarketed_day0_events sweep failed (non-fatal): %r",
-            _d0_unmarketed_sweep_exc,
-        )
 
     try:
         if _budget_exhausted("expire_unready_forecast_snapshot_pending"):
