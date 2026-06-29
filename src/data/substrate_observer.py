@@ -514,7 +514,13 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     markets: list[dict],
     *,
     fresh_at_iso: str,
+    restrict_to_condition_ids: Iterable[str] | None = None,
 ) -> tuple[list[dict], int, int]:
+    scoped_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (restrict_to_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
     pruned: list[dict] = []
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
@@ -524,6 +530,8 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
             if not isinstance(outcome, dict):
                 continue
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            if scoped_conditions and cid not in scoped_conditions:
+                continue
             if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
                 fresh_conditions_skipped += 1
                 continue
@@ -821,6 +829,7 @@ def _refresh_pending_family_snapshots(
         for condition_id in (priority_condition_ids or ())
         if str(condition_id or "").strip()
     }
+    explicit_priority_conditions = set(priority_conditions)
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     if include_pending_families:
@@ -1123,7 +1132,7 @@ def _refresh_pending_family_snapshots(
                 for trow in topology_rows
             ]
             family_key = _refresh_family_key(city, target_date, metric)
-            if family_key in priority_keys:
+            if family_key in priority_keys and not explicit_priority_conditions:
                 for trow in topology_rows:
                     cid = str(trow.get("condition_id") or "").strip()
                     if cid:
@@ -1634,12 +1643,13 @@ def _refresh_pending_family_snapshots(
             )
             if family_key in priority_keys:
                 market["_zeus_refresh_urgency"] = 4
-                for outcome in market.get("outcomes", []) or []:
-                    if not isinstance(outcome, dict):
-                        continue
-                    cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
-                    if cid:
-                        priority_conditions.add(cid)
+                if not explicit_priority_conditions:
+                    for outcome in market.get("outcomes", []) or []:
+                        if not isinstance(outcome, dict):
+                            continue
+                        cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+                        if cid:
+                            priority_conditions.add(cid)
 
         if not markets:
             logger.warning(
@@ -1687,6 +1697,9 @@ def _refresh_pending_family_snapshots(
                     snapshot_read_conn,
                     markets,
                     fresh_at_iso=now_iso,
+                    restrict_to_condition_ids=(
+                        explicit_priority_conditions if explicit_priority_conditions else None
+                    ),
                 )
             )
         if not markets_for_refresh:
@@ -2045,11 +2058,14 @@ def _edli_market_substrate_warm_cycle() -> None:
             deadline_monotonic=claim_deadline,
         )
         try:
-            claim_priority_families = _claim_order_priority_families_for_refresh(
-                conn,
-                consumer_name="edli_reactor_v1",
-                now_utc=datetime.now(timezone.utc),
-            )
+            if priority_marker_condition_ids:
+                claim_priority_families = []
+            else:
+                claim_priority_families = _claim_order_priority_families_for_refresh(
+                    conn,
+                    consumer_name="edli_reactor_v1",
+                    now_utc=datetime.now(timezone.utc),
+                )
         finally:
             _cancel_sqlite_deadline_interrupt(claim_deadline_timer)
             if claim_deadline_installed:

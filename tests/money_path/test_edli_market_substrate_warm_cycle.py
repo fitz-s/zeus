@@ -108,6 +108,17 @@ def test_confirmation_refresh_prune_restricts_to_priority_conditions():
     assert scoped[0]["condition_ids"] == ["priority-cond"]
     assert ordinary_stale == 2
     assert [o["condition_id"] for o in ordinary[0]["outcomes"]] == ["priority-cond", "sibling-cond"]
+    sidecar_scoped, _sidecar_fresh, sidecar_stale = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            conn,
+            [market],
+            fresh_at_iso="2026-06-26T00:00:00+00:00",
+            restrict_to_condition_ids={"priority-cond"},
+        )
+    )
+    assert sidecar_stale == 1
+    assert [o["condition_id"] for o in sidecar_scoped[0]["outcomes"]] == ["priority-cond"]
+    assert sidecar_scoped[0]["condition_ids"] == ["priority-cond"]
 
 
 def _venue_open_now(target_date: str) -> datetime:
@@ -1011,7 +1022,7 @@ def test_market_substrate_warm_cycle_services_blocked_family_priority_marker(mon
     substrate_observer._edli_market_substrate_warm_cycle()
 
     assert calls
-    assert calls[0]["extra_priority_families"] == marker_families + claim_families
+    assert calls[0]["extra_priority_families"] == marker_families
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
@@ -1107,6 +1118,109 @@ def test_priority_family_expands_to_condition_priority_for_captured_books(monkey
     assert result["status"] == "refreshed"
     assert result["priority_condition_ids_requested"] == 2
     assert set(captured_kwargs[0]["priority_condition_ids"]) == {"cond-30", "cond-31"}
+
+
+def test_priority_condition_scope_does_not_expand_to_family_siblings(monkeypatch):
+    """Concrete money-path condition scope must not become a whole-family refresh.
+
+    The reactor marker already knows which condition blocked submit. Expanding
+    that into every sibling in every priority family makes the live sidecar spend
+    the orderbook window on unrelated bins before the blocked condition is fresh.
+    """
+
+    family = ("Shanghai", "2026-06-29", "high")
+    world_conn = _pending_family_conn("event-1", *family)
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-shanghai-on-june-29-2026",
+            "city": "Shanghai",
+            "target_date": "2026-06-29",
+            "temperature_metric": "high",
+            "condition_id": "cond-30",
+            "token_id": "yes-30",
+            "range_label": "30C",
+        },
+        {
+            "market_slug": "highest-temperature-in-shanghai-on-june-29-2026",
+            "city": "Shanghai",
+            "target_date": "2026-06-29",
+            "temperature_metric": "high",
+            "condition_id": "cond-31",
+            "token_id": "yes-31",
+            "range_label": "31C",
+        },
+    ]
+    cached_market = {
+        "slug": "highest-temperature-in-shanghai-on-june-29-2026",
+        "city": SimpleNamespace(name="Shanghai"),
+        "target_date": "2026-06-29",
+        "temperature_metric": "high",
+        "condition_ids": ["cond-30", "cond-31"],
+        "outcomes": [
+            {
+                "condition_id": "cond-30",
+                "market_id": "cond-30",
+                "token_id": "yes-30",
+                "no_token_id": "no-30",
+                "question_id": "q-30",
+            },
+            {
+                "condition_id": "cond-31",
+                "market_id": "cond-31",
+                "token_id": "yes-31",
+                "no_token_id": "no-31",
+                "question_id": "q-31",
+            },
+        ],
+    }
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    monkeypatch.setattr(topology_rows_module, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(substrate_observer, "_edli_current_held_position_family_keys", lambda: set())
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    captured_markets: list[list[dict]] = []
+    captured_kwargs: list[dict] = []
+
+    def _refresh(_conn, *, markets, **kwargs):
+        captured_markets.append(markets)
+        captured_kwargs.append(kwargs)
+        return {
+            "attempted": 2,
+            "inserted": 2,
+            "direct_clob_prefetch_selected_priority_condition_count": len(
+                kwargs.get("priority_condition_ids") or []
+            ),
+        }
+
+    monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 6, 29, 0, 0, tzinfo=timezone.utc),
+        extra_priority_families=[family],
+        include_pending_families=False,
+        priority_condition_ids=["cond-31"],
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["priority_condition_ids_requested"] == 1
+    assert captured_kwargs[0]["priority_condition_ids"] == {"cond-31"}
+    assert [out["condition_id"] for out in captured_markets[0][0]["outcomes"]] == ["cond-31"]
+    assert captured_markets[0][0]["condition_ids"] == ["cond-31"]
 
 
 def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):
