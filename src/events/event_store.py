@@ -517,9 +517,11 @@ class EventStore:
         self._require_world_event_tables()
         decision_time_utc = _parse_utc(decision_time)
 
-        # Oceania-frontier cheap bound: the most-advanced local calendar date on Earth
+        # Oceania-frontier bound: the most-advanced local calendar date on Earth
         # at decision_time, minus one day of margin. Any target_date strictly before
-        # this is past in EVERY timezone and needs no per-city check.
+        # this is past in EVERY timezone; target_date exactly equal to the frontier
+        # band still needs the per-city check below. Keep the SQL candidate band
+        # inclusive so yesterday's UTC-negative rows do not remain pending forever.
         frontier_floor = _oceania_frontier_target_floor(decision_time_utc)
         # DAY0 uses a TODAY-INCLUSIVE frontier (2026-06-15). The -1 day margin exists for
         # forecast-decision rows whose target can be a future TRADING day still ambiguous
@@ -562,7 +564,7 @@ class EventStore:
                     (
                         e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                         AND (
-                            json_extract(e.payload_json, '$.target_date') < ?
+                            json_extract(e.payload_json, '$.target_date') <= ?
                             OR json_extract(e.payload_json, '$.target_date') <= ?
                         )
                     )
@@ -594,7 +596,7 @@ class EventStore:
             target_date = row[2]
             event_type = str(row[3] or "")
             if event_type in _FORECAST_DECISION_EVENT_TYPES:
-                if not (target_date < frontier_floor or target_date <= venue_close_ceiling):
+                if not (target_date <= frontier_floor or target_date <= venue_close_ceiling):
                     continue
             elif event_type == "DAY0_EXTREME_UPDATED":
                 if not (target_date < day0_floor or target_date <= venue_close_ceiling):
@@ -2218,7 +2220,10 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
     Reactor-level interleave only works if the fetched page already contains both
     lanes. Live can run with a work limit near one event while hundreds of current
     Day0 observations sit ahead of FSR rows, so the fairness boundary must be the
-    store's final claim order, before ``limit`` is applied.
+    store's final claim order, before ``limit`` is applied. If a forecast or
+    redecision row exists, it takes the first slot; otherwise a one-event budget
+    still gives the whole cycle to Day0 and the entry/redecision lane remains
+    invisible.
     """
 
     forecast = [item for item in records if _is_forecast_decision_lane_item(item)]
@@ -2227,24 +2232,15 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
     rest = [item for item in records if not _is_forecast_decision_lane_item(item)]
     if not rest:
         return records
-    start_with_forecast = _is_forecast_decision_lane_item(records[0])
     out: list[dict] = []
     i = j = 0
     while i < len(forecast) or j < len(rest):
-        if start_with_forecast:
-            if i < len(forecast):
-                out.append(forecast[i])
-                i += 1
-            if j < len(rest):
-                out.append(rest[j])
-                j += 1
-        else:
-            if j < len(rest):
-                out.append(rest[j])
-                j += 1
-            if i < len(forecast):
-                out.append(forecast[i])
-                i += 1
+        if i < len(forecast):
+            out.append(forecast[i])
+            i += 1
+        if j < len(rest):
+            out.append(rest[j])
+            j += 1
     return out
 
 

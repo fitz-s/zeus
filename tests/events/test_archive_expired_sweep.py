@@ -311,6 +311,50 @@ def test_expired_sweep_prefilters_target_band_before_batch_limit():
     assert _status_of(conn, active.event_id) == "pending"
 
 
+def test_frontier_equal_target_gets_exact_city_tz_check():
+    """Rows exactly on the Oceania frontier floor must be examined, not skipped.
+
+    Live regression, 2026-06-29: Auckland's local date made the archive frontier
+    floor 2026-06-28. Old 2026-06-28 FSR rows were not ``< frontier_floor`` so
+    they never reached the exact per-city predicate and stayed pending. The SQL
+    candidate band must include equality, while the city-tz predicate still
+    prevents over-archiving a western city whose target local day is not done.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    decision = "2026-06-29T06:00:00+00:00"
+    # At 06:00Z, Auckland local date is 2026-06-29, so frontier_floor is
+    # 2026-06-28. Chicago's 2026-06-28 local day ended at 05:00Z.
+    expired_fsr = _fsr_event(
+        "Chicago",
+        "2026-06-28",
+        "snap-frontier-exp-fsr",
+        available_at="2026-06-28T02:00:00+00:00",
+    )
+    expired_redecision = _redecision_event(
+        "Chicago",
+        "2026-06-28",
+        "snap-frontier-exp-red",
+        available_at="2026-06-28T02:01:00+00:00",
+    )
+    # Los Angeles's 2026-06-28 local day ends at 07:00Z, so it must survive.
+    active_west = _fsr_event(
+        "Los Angeles",
+        "2026-06-28",
+        "snap-frontier-active",
+        available_at="2026-06-28T02:02:00+00:00",
+    )
+    for event in (expired_fsr, expired_redecision, active_west):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_expired_candidates(decision_time=decision)
+
+    assert archived == 2
+    assert _status_of(conn, expired_fsr.event_id) == "expired"
+    assert _status_of(conn, expired_redecision.event_id) == "expired"
+    assert _status_of(conn, active_west.event_id) == "pending"
+
+
 def test_sweep_is_idempotent():
     """A second sweep at the same decision time archives nothing new (no double
     work, no churn) — the sweep is idempotent and budget-safe."""
