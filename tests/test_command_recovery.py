@@ -1276,6 +1276,125 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] >= 1
         assert "SUBMIT_REJECTED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
 
+    def test_restart_preflight_recovers_no_venue_exit_into_retry_projection(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery, venue_sync_contract
+        from src.state.db import init_schema
+
+        db_path = tmp_path / "restart-preflight.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        _seed_pending_entry_projection(
+            seed,
+            position_id="pos-exit",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        seed.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 21.42,
+                   chain_shares = 21.42,
+                   cost_basis_usd = 14.35,
+                   entry_price = 0.67,
+                   order_status = 'filled',
+                   exit_reason = 'FAMILY_DIRECT_SELL_DOMINATES_HOLD',
+                   chain_state = 'synced',
+                   updated_at = '2026-06-29T05:08:33+00:00'
+             WHERE position_id = 'pos-exit'
+            """
+        )
+        _insert(
+            seed,
+            command_id="cmd-exit",
+            position_id="pos-exit",
+            decision_id="exit:pos-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            size=21.42,
+            price=0.58,
+            created_at="2026-06-29T05:08:33+00:00",
+        )
+        _advance_to_submitting(seed, command_id="cmd-exit", venue_order_id=None)
+        seed.commit()
+        seed.close()
+
+        def _conn_factory():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_conn_factory",
+            _conn_factory,
+        )
+        client = MagicMock(
+            spec_set=[
+                "get_order",
+                "get_open_orders",
+                "get_trades",
+                "get_clob_market_info",
+                "find_order_by_idempotency_key",
+            ]
+        )
+        client.find_order_by_idempotency_key.return_value = None
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(
+            client=client,
+            scope="restart_preflight",
+        )
+
+        check = sqlite3.connect(db_path)
+        check.row_factory = sqlite3.Row
+        current = check.execute(
+            """
+            SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+              FROM position_current
+             WHERE position_id = 'pos-exit'
+            """
+        ).fetchone()
+        command_state = _get_state(check, "cmd-exit")
+        latest_event = check.execute(
+            """
+            SELECT event_type, venue_status, payload_json
+              FROM position_events
+             WHERE position_id = 'pos-exit'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        check.close()
+
+        assert summary["scope"] == "restart_preflight"
+        assert summary["restart_preflight_narrow"] is True
+        assert summary["restart_no_venue_exit_retry_projection"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert command_state == "REJECTED"
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_status": "retry_pending",
+            "exit_retry_count": 1,
+            "next_exit_retry_at": current["next_exit_retry_at"],
+        }
+        assert current["next_exit_retry_at"]
+        assert latest_event["event_type"] == "EXIT_ORDER_REJECTED"
+        assert latest_event["venue_status"] == "retry_pending"
+        event_payload = json.loads(latest_event["payload_json"])
+        assert event_payload["exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+        assert "submit absence for exit command cmd-exit" in event_payload["error"]
+
     def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
         self, conn, mock_client
     ):

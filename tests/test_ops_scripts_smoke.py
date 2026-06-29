@@ -423,6 +423,35 @@ def test_deploy_live_trading_restart_requires_preflight(monkeypatch, tmp_path):
     assert calls
 
 
+def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_recovery", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        calls.append(cmd)
+        if cmd[1] == "-c" and "restart_preflight" in cmd[2]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                '{"advanced": 1, "errors": 0, "scope": "restart_preflight"}\n',
+                "",
+            )
+        raise AssertionError(f"unexpected subprocess call: {cmd!r}")
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_recovery_if_needed(["com.zeus.live-trading"])
+
+    assert ok is True
+    assert "restart recovery passed" in detail
+    assert calls
+
+
 def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
     dl = _load("deploy_live_preflight_skip", "deploy_live.py")
 
@@ -432,6 +461,20 @@ def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
     monkeypatch.setattr(dl.subprocess, "run", _boom)
 
     ok, detail = dl._run_restart_preflight_if_needed(["com.zeus.price-channel-ingest"])
+
+    assert ok is True
+    assert "not required" in detail
+
+
+def test_deploy_live_non_trading_restart_skips_recovery(monkeypatch):
+    dl = _load("deploy_live_recovery_skip", "deploy_live.py")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("recovery subprocess should not run")
+
+    monkeypatch.setattr(dl.subprocess, "run", _boom)
+
+    ok, detail = dl._run_restart_recovery_if_needed(["com.zeus.price-channel-ingest"])
 
     assert ok is True
     assert "not required" in detail
@@ -527,7 +570,7 @@ def test_deploy_live_retries_bootstrap_after_reload_race(monkeypatch, tmp_path):
     assert sum(1 for call in calls if call[:2] == ["launchctl", "bootstrap"]) == 2
 
 
-def test_deploy_live_live_restart_stops_before_preflight(monkeypatch, capsys):
+def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
 
@@ -541,11 +584,16 @@ def test_deploy_live_live_restart_stops_before_preflight(monkeypatch, capsys):
         calls.append(("preflight", tuple(labels)))
         return True, "live restart preflight passed"
 
+    def _recovery(labels):
+        calls.append(("recovery", tuple(labels)))
+        return True, "live restart recovery passed"
+
     def _launch(label):
         calls.append(("launch", label))
         return True, f"bootstrapped {label}"
 
     monkeypatch.setattr(dl, "_stop_label", _stop)
+    monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
 
@@ -554,6 +602,7 @@ def test_deploy_live_live_restart_stops_before_preflight(monkeypatch, capsys):
     assert rc == 0
     assert calls == [
         ("stop", dl.LIVE_TRADING_LABEL),
+        ("recovery", (dl.LIVE_TRADING_LABEL,)),
         ("preflight", (dl.LIVE_TRADING_LABEL,)),
         ("launch", dl.LIVE_TRADING_LABEL),
     ]
@@ -572,6 +621,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     )
     monkeypatch.setattr(
         dl,
+        "_run_restart_recovery_if_needed",
+        lambda labels: (calls.append(("recovery", tuple(labels))) or (True, "recovery ok")),
+    )
+    monkeypatch.setattr(
+        dl,
         "_run_restart_preflight_if_needed",
         lambda labels: (calls.append(("preflight", tuple(labels))) or (True, "preflight ok")),
     )
@@ -585,11 +639,13 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
 
     assert rc == 0
     assert calls[0] == ("stop", dl.LIVE_TRADING_LABEL)
+    recovery_index = calls.index(("recovery", tuple(dl.DAEMONS.values())))
     preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
+    assert recovery_index < preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     non_live_launches = [
-        call for call in calls[1:preflight_index]
+        call for call in calls[1:recovery_index]
         if call[0] == "launch"
     ]
     assert {label for _, label in non_live_launches} == {
@@ -609,6 +665,11 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         dl,
+        "_run_restart_recovery_if_needed",
+        lambda labels: (calls.append(("recovery", tuple(labels))) or (True, "recovery ok")),
+    )
+    monkeypatch.setattr(
+        dl,
         "_run_restart_preflight_if_needed",
         lambda labels: (calls.append(("preflight", tuple(labels))) or (False, "not green")),
     )
@@ -623,6 +684,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     assert rc == 1
     assert calls == [
         ("stop", dl.LIVE_TRADING_LABEL),
+        ("recovery", (dl.LIVE_TRADING_LABEL,)),
         ("preflight", (dl.LIVE_TRADING_LABEL,)),
     ]
     err = capsys.readouterr().err

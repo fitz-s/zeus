@@ -46,6 +46,7 @@ SAFETY
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import plistlib
 import subprocess
@@ -354,6 +355,43 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
 
 
+def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
+    """Run bounded restart recovery before the read-only live-trading preflight."""
+
+    if LIVE_TRADING_LABEL not in labels:
+        return True, "restart recovery not required for this daemon"
+    live_repo = _require_live_repo()
+    py = os.path.join(live_repo, ".venv", "bin", "python")
+    if not os.path.exists(py):
+        py = sys.executable
+    code = (
+        "import json; "
+        "from src.execution.command_recovery import reconcile_unresolved_commands; "
+        "summary = reconcile_unresolved_commands(scope='restart_preflight'); "
+        "print(json.dumps(summary, sort_keys=True, default=str)); "
+        "raise SystemExit(1 if int(summary.get('errors') or 0) else 0)"
+    )
+    try:
+        res = subprocess.run(
+            [py, "-c", code],
+            cwd=live_repo,
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"live restart recovery could not run: {exc}"
+    output = (res.stdout or res.stderr or "").strip()
+    tail = "\n".join(output.splitlines()[-40:]) if output else "<no output>"
+    if res.returncode != 0:
+        return False, f"live restart recovery failed rc={res.returncode}:\n{tail}"
+    try:
+        summary = json.loads(output.splitlines()[-1])
+    except Exception:
+        summary = {}
+    return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"
+
+
 def cmd_restart(args: argparse.Namespace) -> int:
     target = args.daemon
     if target == "all":
@@ -407,6 +445,15 @@ def cmd_restart(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return rc_all
+
+    recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
+    if not recovery_ok:
+        print("REFUSING to restart — live restart recovery is not green:")
+        print(recovery_detail)
+        if live_was_stopped:
+            print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
+        return 1
+    print(recovery_detail)
 
     preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:

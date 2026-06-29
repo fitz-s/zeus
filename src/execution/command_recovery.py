@@ -12320,6 +12320,10 @@ def reconcile_unresolved_commands(
     ``scope="boot_fast"`` is narrower: it clears submit/cap/family locks before
     scheduler start, but deliberately skips historical maker-fill economics and
     partial-remainder maintenance so boot cannot be delayed by old filled rows.
+    ``scope="restart_preflight"`` is the deploy-time recovery seam: it runs only
+    the venue-backed in-flight command scan plus the no-venue EXIT retry
+    projection needed to clear restart-dangerous pending exits before the
+    read-only restart preflight.  It must stay narrower than ``live_tick``.
 
     DB connection: if conn is None, opens get_trade_connection_with_world_required()
     internally (with a try/finally to close). CycleRunner passes the per-cycle
@@ -12345,7 +12349,7 @@ def reconcile_unresolved_commands(
         2026-06-11. Reconciliation SEMANTICS are unchanged: each pass body runs
         verbatim against a venue snapshot captured off-lock.
     """
-    if scope not in {"full", "live_tick", "boot_fast"}:
+    if scope not in {"full", "live_tick", "boot_fast", "restart_preflight"}:
         raise ValueError(f"unsupported command recovery scope: {scope!r}")
     if conn is not None and scope != "full":
         raise ValueError("non-full command recovery scopes require conn=None")
@@ -12703,6 +12707,12 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         _harvest(find_unresolved_commands(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
+    if scope == "restart_preflight":
+        return {
+            "order_ids": order_ids,
+            "idempotency_keys": idem_keys,
+            "condition_ids": condition_ids,
+        }
     try:
         _harvest(_active_venue_command_priming_rows(conn))
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
@@ -12750,6 +12760,186 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         "idempotency_keys": idem_keys,
         "condition_ids": condition_ids,
     }
+
+
+def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_command_events")
+        and _table_exists(conn, "venue_trade_facts")
+        and _table_exists(conn, "position_current")
+    ):
+        return []
+    pc_cols = _table_columns(conn, "position_current")
+    pc_select = ", ".join(f"pc.{col} AS pc_{col}" for col in pc_cols)
+    rows = conn.execute(
+        f"""
+        WITH latest_rejected_exit AS (
+            SELECT cmd.command_id,
+                   cmd.position_id,
+                   cmd.state AS command_state,
+                   cmd.venue_order_id,
+                   cmd.updated_at AS command_updated_at,
+                   cmd.price AS command_price,
+                   cmd.size AS command_size,
+                   evt.occurred_at AS rejected_at,
+                   evt.payload_json AS rejected_payload_json,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY cmd.position_id
+                       ORDER BY datetime(evt.occurred_at) DESC, evt.event_id DESC
+                   ) AS rn
+              FROM venue_commands cmd
+              JOIN venue_command_events evt
+                ON evt.command_id = cmd.command_id
+               AND evt.event_type = 'SUBMIT_REJECTED'
+             WHERE cmd.intent_kind = 'EXIT'
+               AND cmd.state IN ('REJECTED', 'SUBMIT_REJECTED')
+               AND COALESCE(cmd.venue_order_id, '') = ''
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM venue_trade_facts tf
+                    WHERE tf.command_id = cmd.command_id
+                      AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                      AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+               )
+        )
+        SELECT rejected.command_id,
+               rejected.command_state,
+               rejected.command_updated_at,
+               rejected.command_price,
+               rejected.command_size,
+               rejected.rejected_at,
+               rejected.rejected_payload_json,
+               {pc_select}
+          FROM latest_rejected_exit rejected
+          JOIN position_current pc
+            ON pc.position_id = rejected.position_id
+         WHERE rejected.rn = 1
+           AND pc.phase = 'pending_exit'
+           AND COALESCE(pc.next_exit_retry_at, '') = ''
+         ORDER BY datetime(rejected.rejected_at), rejected.command_id
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def _retry_projection_position_from_candidate(candidate: dict, *, reason: str) -> SimpleNamespace:
+    current = {
+        key.removeprefix("pc_"): value
+        for key, value in candidate.items()
+        if key.startswith("pc_")
+    }
+    position_id = str(current.get("position_id") or current.get("trade_id") or "")
+    shares = current.get("chain_shares")
+    if shares in (None, ""):
+        shares = current.get("shares") or 0.0
+    occurred_at = str(candidate.get("rejected_at") or current.get("updated_at") or _now_iso())
+    return SimpleNamespace(
+        **{
+            **current,
+            "trade_id": position_id,
+            "state": "pending_exit",
+            "pre_exit_state": "pending_exit",
+            "exit_state": "retry_pending",
+            "exit_reason": str(current.get("exit_reason") or reason),
+            "last_exit_error": reason,
+            "last_exit_order_id": "",
+            "order_id": current.get("order_id") or "",
+            "order_status": "retry_pending",
+            "effective_shares": shares,
+            "shares": current.get("shares") if current.get("shares") not in (None, "") else shares,
+            "chain_shares": current.get("chain_shares") if current.get("chain_shares") not in (None, "") else shares,
+            "env": current.get("env") or "live",
+            "market_id": current.get("market_id") or current.get("condition_id") or "",
+            "cluster": current.get("cluster") or current.get("city") or "",
+            "unit": current.get("unit") or "F",
+            "size_usd": current.get("size_usd") or current.get("cost_basis_usd") or 0.0,
+            "cost_basis_usd": current.get("cost_basis_usd") or current.get("chain_cost_basis_usd") or 0.0,
+            "entry_price": current.get("entry_price") or current.get("chain_avg_price") or 0.0,
+            "p_posterior": current.get("p_posterior") or 0.0,
+            "entry_ci_width": current.get("entry_ci_width") or 0.0,
+            "entry_method": current.get("entry_method") or "",
+            "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
+            "edge_source": current.get("edge_source") or "",
+            "discovery_mode": current.get("discovery_mode") or "",
+            "chain_state": current.get("chain_state") or "synced",
+            "token_id": current.get("token_id") or "",
+            "no_token_id": current.get("no_token_id") or "",
+            "condition_id": current.get("condition_id") or current.get("market_id") or "",
+            "updated_at": current.get("updated_at") or occurred_at,
+            "entered_at": current.get("entered_at") or current.get("updated_at") or occurred_at,
+            "order_posted_at": current.get("order_posted_at") or current.get("updated_at") or occurred_at,
+            "temperature_metric": current.get("temperature_metric") or "high",
+            "fill_authority": current.get("fill_authority") or "",
+            "recovery_authority": current.get("recovery_authority") or "",
+            "chain_avg_price": current.get("chain_avg_price"),
+            "chain_cost_basis_usd": current.get("chain_cost_basis_usd"),
+            "chain_verified_at": current.get("chain_seen_at") or current.get("chain_verified_at") or "",
+            "last_chain_absence_observed_at": current.get("chain_absence_at") or "",
+            "last_monitor_prob": current.get("last_monitor_prob"),
+            "last_monitor_prob_is_fresh": current.get("last_monitor_prob_is_fresh"),
+            "last_monitor_edge": current.get("last_monitor_edge"),
+            "last_monitor_market_price": current.get("last_monitor_market_price"),
+            "last_monitor_market_price_is_fresh": current.get("last_monitor_market_price_is_fresh"),
+            "decision_snapshot_id": current.get("decision_snapshot_id") or "",
+            "exit_retry_count": int(current.get("exit_retry_count") or 0),
+            "next_exit_retry_at": current.get("next_exit_retry_at") or "",
+        }
+    )
+
+
+def reconcile_restart_no_venue_exit_retry_projections(conn: sqlite3.Connection) -> dict:
+    """Project proven no-side-effect EXIT submit failures into retry state."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _restart_no_venue_exit_retry_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        reason = "EXIT_SUBMIT_NO_VENUE_SIDE_EFFECT"
+        error = (
+            "command_recovery proved submit absence for exit command "
+            f"{command_id}; releasing pending_exit to retry/redecision"
+        )
+        try:
+            from src.execution.exit_lifecycle import _mark_exit_retry
+
+            position = _retry_projection_position_from_candidate(candidate, reason=reason)
+            if not str(getattr(position, "trade_id", "") or ""):
+                summary["stayed"] += 1
+                continue
+            before_retry = int(getattr(position, "exit_retry_count", 0) or 0)
+            _mark_exit_retry(
+                position,
+                reason=reason,
+                error=error,
+                cooldown_seconds=0,
+                conn=conn,
+            )
+            current = conn.execute(
+                """
+                SELECT phase, exit_retry_count, next_exit_retry_at
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (position.trade_id,),
+            ).fetchone()
+            if (
+                current is None
+                or str(current["phase"] or "") != "pending_exit"
+                or int(current["exit_retry_count"] or 0) <= before_retry
+                or not str(current["next_exit_retry_at"] or "")
+            ):
+                summary["stayed"] += 1
+                continue
+            summary["advanced"] += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "recovery: restart no-venue EXIT retry projection failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scope: str = "full") -> None:
@@ -13044,6 +13234,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             conn_factory=conn_factory, label="recovery.inflight_scan",
         ),
     )
+
+    if scope == "restart_preflight":
+        _db_pass(
+            "restart_no_venue_exit_retry_projection",
+            reconcile_restart_no_venue_exit_retry_projections,
+            "restart_no_venue_exit_retry_projection",
+        )
+        summary["scope"] = scope
+        summary["restart_preflight_narrow"] = True
+        return
 
     if scope in {"live_tick", "boot_fast"}:
         # Keep the high-cadence live tick light, but do not defer terminal
