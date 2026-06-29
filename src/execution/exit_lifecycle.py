@@ -1460,7 +1460,18 @@ def handle_exit_pending_missing(
       - RPC failure  → fail-open, fall through to existing logic (no destructive action)
     """
 
-    if position.chain_state != "exit_pending_missing":
+    raw_chain_state = getattr(position, "chain_state", "") or ""
+    chain_state_value = str(getattr(raw_chain_state, "value", raw_chain_state) or "")
+    runtime_state_value = _runtime_state_value(position)
+    if chain_state_value not in {
+        "exit_pending_missing",
+        "chain_absent_confirmed_position_unattributed",
+    }:
+        return {"action": "ignore", "position": None}
+    if (
+        chain_state_value == "chain_absent_confirmed_position_unattributed"
+        and runtime_state_value != "pending_exit"
+    ):
         return {"action": "ignore", "position": None}
 
     # ── Chain-truth gate ──────────────────────────────────────────────────────

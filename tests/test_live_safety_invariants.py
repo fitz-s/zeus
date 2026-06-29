@@ -3410,6 +3410,37 @@ def test_pending_exit_chain_absent_positive_exposure_stays_open_for_exit_lifecyc
     assert get_open_positions(_make_portfolio(zero)) == []
 
 
+def test_pending_exit_chain_absent_zero_balance_uses_chain_truth_resolution(monkeypatch):
+    """Pending-exit chain-absent review rows must resolve via balanceOf instead of sell retry."""
+    from src.execution.exit_lifecycle import handle_exit_pending_missing
+
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "1" * 40)
+    pos = _make_position(
+        trade_id="pending-chain-absent-zero",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        shares=9.7,
+        chain_shares=9.7,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        token_id="123456789",
+        condition_id="condition-pending-chain-absent-zero",
+    )
+    portfolio = _make_portfolio(pos)
+
+    result = handle_exit_pending_missing(
+        portfolio,
+        pos,
+        rpc_call=lambda *_args, **_kwargs: "0x0",
+    )
+
+    assert result["action"] == "closed"
+    assert result["position"].state == "voided"
+    assert result["position"].exit_reason == "CHAIN_CONFIRMED_ZERO"
+    assert portfolio.positions == []
+
+
 def test_monitor_entry_selection_guard_invalidates_unarmed_qkernel_hold():
     """Monitor must not keep an unarmed qkernel entry as a raw-posterior hold."""
     from src.engine import cycle_runtime
