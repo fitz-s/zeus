@@ -40,10 +40,12 @@ from src.riskguard.metrics import (
 )
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.runtime import bankroll_provider
+from src.runtime.bankroll_provider import BankrollOfRecord
 from src.state.db import (
     RISK_DB_PATH,
     get_connection,
     get_trade_connection_with_world_required,
+    _zeus_trade_db_path,
     query_authoritative_settlement_rows,
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
@@ -77,6 +79,10 @@ TRAILING_LOSS_STATUSES = {
     "inconsistent_history",
     "no_reference_row",
 }
+_BANKROLL_TRUTH_SOURCES_OF_RECORD = frozenset({
+    "polymarket_wallet",
+    "collateral_ledger_snapshot",
+})
 
 
 def _finite_float_or_none(value):
@@ -96,6 +102,61 @@ def _get_runtime_trade_connection() -> sqlite3.Connection:
     if get_connection.__module__ != "src.state.db":
         return get_connection()
     return get_trade_connection_with_world_required(write_class="live")
+
+
+def _install_riskguard_collateral_ledger() -> bool:
+    """Install the P4-produced collateral ledger reader in this process.
+
+    RiskGuard runs in its own launchd process, so it cannot rely on
+    ``src.main`` having installed the process-local global ledger singleton.
+    The ledger is path-backed and opens short-lived DB connections only; it
+    consumes post-trade-capital's durable CHAIN snapshots and performs no venue
+    I/O.
+    """
+
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger, get_global_ledger
+
+    if get_global_ledger() is not None:
+        return True
+    try:
+        configure_global_ledger(CollateralLedger(db_path=_zeus_trade_db_path()))
+        logger.info(
+            "RiskGuard CollateralLedger reader installed (db=%s)",
+            _zeus_trade_db_path(),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - tick fail-closed handles missing truth.
+        logger.warning("RiskGuard CollateralLedger reader install failed: %s", exc)
+        return False
+
+
+def _bankroll_of_record_for_riskguard() -> BankrollOfRecord | None:
+    """Return current live bankroll truth for RiskGuard.
+
+    Source order is deliberate:
+    1. Fresh durable collateral snapshot from the post-trade-capital sidecar.
+       This is live CHAIN collateral truth already used by submit preflight and
+       avoids duplicating a fragile wallet/positions API read in RiskGuard.
+    2. Direct bankroll provider current() for compatibility when the sidecar
+       snapshot is unavailable.
+
+    If neither live truth source is available, callers fail closed at
+    DATA_DEGRADED.
+    """
+
+    try:
+        snapshot_record = bankroll_provider.warm_from_collateral_snapshot()
+    except Exception as exc:  # noqa: BLE001 - direct wallet path still has a chance.
+        snapshot_record = None
+        logger.warning("RiskGuard collateral snapshot bankroll read failed: %s", exc)
+    if snapshot_record is not None:
+        return snapshot_record
+
+    try:
+        return bankroll_provider.current()
+    except Exception as exc:  # noqa: BLE001 - caller writes the fail-closed row.
+        logger.warning("RiskGuard direct bankroll read failed: %s", exc)
+        return None
 
 
 def _load_riskguard_capital_metadata() -> tuple[PortfolioState, str]:
@@ -219,10 +280,11 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             len(positions), len(quarantined), len(metadata_positions)
         )
 
-    # Bankroll truth comes from on-chain wallet via src.runtime.bankroll_provider.
+    # Bankroll truth comes from the live bankroll path upstream. This metadata
+    # value is intentionally not promoted back into bankroll authority.
     # If metadata_state has no bankroll (or 0/falsy), do NOT fall back to a config
     # literal — return 0.0 so downstream sizing fails-CLOSED and RiskGuard.tick()
-    # surfaces DATA_DEGRADED via the bankroll_provider.current() check upstream.
+    # surfaces DATA_DEGRADED via the live bankroll check upstream.
     # Removed 2026-05-04: previously fell back to retired config-literal capital;
     # see docs/operations/task_2026-05-01_bankroll_truth_chain/.
     bankroll = float(getattr(metadata_state, "bankroll", 0.0) or 0.0)
@@ -440,9 +502,9 @@ def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
     # `effective_bankroll`. After cutover, `effective_bankroll` is the real
     # on-chain wallet. Without this guard, trailing-loss math could compare
     # different economic objects and trigger false RED → force_exit_review.
-    # Only rows tagged `bankroll_truth_source="polymarket_wallet"` are eligible
+    # Only rows tagged with a live bankroll truth source are eligible
     # references. Old rows (no field, or any other value) are filtered out.
-    if str(details.get("bankroll_truth_source") or "") != "polymarket_wallet":
+    if str(details.get("bankroll_truth_source") or "") not in _BANKROLL_TRUTH_SOURCES_OF_RECORD:
         return None
 
     initial_bankroll = _coerce_finite_float(details.get("initial_bankroll"))
@@ -504,7 +566,10 @@ def _trailing_loss_reference(
         SELECT id, checked_at, details_json
         FROM risk_state
         WHERE checked_at <= ?
-          AND json_extract(details_json, '$.bankroll_truth_source') = 'polymarket_wallet'
+          AND json_extract(details_json, '$.bankroll_truth_source') IN (
+              'polymarket_wallet',
+              'collateral_ledger_snapshot'
+          )
         ORDER BY checked_at DESC, id DESC
         LIMIT 100
         """,
@@ -1510,27 +1575,22 @@ def _tick_once() -> RiskLevel:
     risk_conn: sqlite3.Connection | None = None
 
     # P0-A bankroll truth chain (architect memo §7): trailing-loss math must
-    # use the on-chain wallet, NOT the config constant routed through
+    # use live chain/collateral truth, NOT the config constant routed through
     # PortfolioState.bankroll. When the wallet is unreachable AND no fresh
-    # cache exists, fail-closed at DATA_DEGRADED rather than silently falling
-    # back to retired config-literal capital.
+    # collateral snapshot/cache exists, fail-closed at DATA_DEGRADED rather
+    # than silently falling back to retired config-literal capital.
     #
     # CONN-ACROSS-IO INVARIANT (T0-1, dimension-#4): this fetch is hoisted ABOVE
-    # the zeus_conn/risk_conn opens. `bankroll_provider.current()` is 30s-cached,
-    # but on a STALE cache it performs a Polymarket wallet NETWORK fetch; with the
-    # ~60s tick that network IO previously fired roughly every other tick WHILE
-    # both write-class conns were held (the conn-across-IO lock-contention class —
-    # the report's unconfirmed "2113 RISK_GUARD_BLOCKED/17h"). Fetching before any
-    # conn opens guarantees NO network IO ever happens while a write-class conn is
-    # held. The 30s cache, the fail-closed-to-DATA_DEGRADED contract (the
-    # `bankroll_of_record is None` branch below, which still runs after risk_conn
-    # opens so the DATA_DEGRADED attestation row can be written), the short
-    # busy_timeout, and the WAL-leak fix are all preserved; ONLY the fetch POINT
-    # moves earlier. The captured value is identical to what the old in-conn call
-    # returned and flows to the same downstream consumers (current_bankroll_usd,
-    # the details_json bankroll_truth block, the component log).
+    # the zeus_conn/risk_conn opens. The primary path consumes the post-trade
+    # sidecar's durable collateral snapshot (no venue I/O); compatibility direct
+    # wallet reads may still perform network I/O. Fetching before any conn opens
+    # guarantees NO network I/O ever happens while a write-class conn is held.
+    # The fail-closed-to-DATA_DEGRADED contract (the `bankroll_of_record is None`
+    # branch below, which still runs after risk_conn opens so the DATA_DEGRADED
+    # attestation row can be written), the short busy_timeout, and the WAL-leak
+    # fix are all preserved.
     # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
-    bankroll_of_record = bankroll_provider.current()
+    bankroll_of_record = _bankroll_of_record_for_riskguard()
 
     try:
         zeus_conn = _get_runtime_trade_connection()
@@ -1553,9 +1613,9 @@ def _tick_once() -> RiskLevel:
         portfolio, portfolio_truth = _load_riskguard_portfolio_truth(zeus_conn)
 
         # Bankroll truth was fetched BEFORE the conns opened (see the hoisted
-        # `bankroll_provider.current()` above — conn-across-IO invariant T0-1).
+        # `_bankroll_of_record_for_riskguard()` above — conn-across-IO invariant T0-1).
         # The fail-closed write below needs risk_conn, so the None-handling stays
-        # here; the network fetch itself no longer runs under a held conn.
+        # here; direct venue I/O itself never runs under a held conn.
         if bankroll_of_record is None:
             now_ts = datetime.now(timezone.utc).isoformat()
             risk_conn.execute(
@@ -1573,7 +1633,7 @@ def _tick_once() -> RiskLevel:
                             "fetched_at": None,
                             "staleness_seconds": None,
                             "cached": False,
-                            "reason": "wallet query failed and no fresh cache",
+                            "reason": "collateral snapshot and direct wallet query both unavailable",
                         },
                     }),
                     now_ts,
@@ -1581,7 +1641,8 @@ def _tick_once() -> RiskLevel:
             )
             risk_conn.commit()
             logger.error(
-                "RiskGuard tick fail-closed: bankroll_provider unavailable (no fresh cache)",
+                "RiskGuard tick fail-closed: bankroll truth unavailable "
+                "(no fresh collateral snapshot and no direct wallet value)",
             )
             return RiskLevel.DATA_DEGRADED
 
@@ -1815,9 +1876,9 @@ def _tick_once() -> RiskLevel:
                 # this provenance marker tells `_trailing_loss_reference` to skip
                 # pre-cutover rows whose `effective_bankroll` came from retired
                 # config-literal capital.
-                # New rows after this code lands carry "polymarket_wallet"; old rows
-                # have no `bankroll_truth_source` field at all → filtered out.
-                "bankroll_truth_source": "polymarket_wallet",
+                # New rows carry the concrete live truth source; old rows have
+                # no `bankroll_truth_source` field at all → filtered out.
+                "bankroll_truth_source": bankroll_of_record.source,
                 "bankroll_truth": {
                     "value_usd": round(current_bankroll_usd, 2),
                     "source": bankroll_of_record.source,
@@ -2147,9 +2208,9 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
         # tick_with_portfolio is the graceful-degradation entry used by callers
         # that have already loaded a portfolio. Trailing-loss math here was
         # reading `portfolio.bankroll` (= config-constant fiction). Same DEF A
-        # rewire as tick(): on-chain wallet for both equity AND threshold base,
-        # no PnL math added. Fail-closed at DATA_DEGRADED if wallet unreachable.
-        bankroll_of_record = bankroll_provider.current()
+        # rewire as tick(): live bankroll truth for both equity AND threshold base,
+        # no PnL math added. Fail-closed at DATA_DEGRADED if bankroll truth is unreachable.
+        bankroll_of_record = _bankroll_of_record_for_riskguard()
         if bankroll_of_record is None:
             logger.error(
                 "RiskGuard tick_with_portfolio fail-closed: bankroll_provider unavailable",
@@ -2345,6 +2406,7 @@ if __name__ == "__main__":
 
     from src.data.proxy_health import bypass_dead_proxy_env_vars
     bypass_dead_proxy_env_vars()
+    _install_riskguard_collateral_ledger()
 
     while True:
         try:
