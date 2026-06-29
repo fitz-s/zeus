@@ -50,14 +50,20 @@ class OpportunityBook:
         candidate_receipts = [
             evaluation.to_receipt_dict() for evaluation in self.evaluations
         ]
+        live_selected_candidate_id = actual_selected_candidate_id or self.selected_candidate_id
+        for candidate in candidate_receipts:
+            legacy_admitted = bool(candidate.get("admitted"))
+            live_selected = bool(
+                live_selected_candidate_id
+                and str(candidate.get("candidate_id") or "") == str(live_selected_candidate_id)
+            )
+            candidate["legacy_admitted"] = legacy_admitted
+            candidate["admitted"] = live_selected
+            candidate["live_decision_selected"] = live_selected
         if actual_selected_candidate_id:
             for candidate in candidate_receipts:
                 if str(candidate.get("candidate_id") or "") != str(actual_selected_candidate_id):
                     continue
-                legacy_admitted = bool(candidate.get("admitted"))
-                candidate["legacy_admitted"] = legacy_admitted
-                candidate["admitted"] = True
-                candidate["live_decision_selected"] = True
                 if selection_authority is not None:
                     candidate["live_selection_authority"] = selection_authority
                 if selected_qkernel_execution_economics is not None:

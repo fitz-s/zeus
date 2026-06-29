@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 
 from src.events.candidate_evaluation import CandidateEvaluation
+from src.events.opportunity_book import build_family_opportunity_book
 
 
 def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars():
@@ -15,7 +16,7 @@ def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars
         family_id="family-1",
         condition_id="condition-1",
         token_id="token-1",
-        direction="buy_no",
+        direction="buy_yes",
         bin_label="16C",
         execution_price=0.80,
         q_posterior=0.90,
@@ -114,6 +115,40 @@ def test_candidate_evaluation_keeps_positive_ev_low_payout_for_ranking():
     assert evaluation.admitted is True
     assert evaluation.live_capital_efficiency_reason is None
     assert evaluation.max_payout_roi < 0.10
+
+
+def test_opportunity_book_admitted_means_live_selected_not_legacy_positive_edge():
+    evaluation = CandidateEvaluation(
+        candidate_id="cand-positive-edge",
+        family_id="family-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        direction="buy_yes",
+        bin_label="31C",
+        execution_price=0.07,
+        q_posterior=0.12,
+        q_lcb_5pct=0.10,
+        c_cost_95pct=0.08,
+        p_fill_lcb=0.8,
+        trade_score=0.03,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+    )
+
+    book = build_family_opportunity_book(
+        family_id="family-1",
+        evaluations=(evaluation,),
+        event_id="event-1",
+        decided_candidate_id=None,
+    ).to_receipt_dict()
+    receipt = book["candidates"][0]
+
+    assert evaluation.admitted is True
+    assert receipt["legacy_admitted"] is True
+    assert receipt["admitted"] is False
+    assert receipt["live_decision_selected"] is False
+    assert book["admitted_count"] == 0
 
 
 def test_candidate_evaluation_rejects_buy_no_when_yes_bin_is_material():

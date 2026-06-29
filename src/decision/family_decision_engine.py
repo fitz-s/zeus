@@ -239,6 +239,8 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
 _ROI_FRONTIER_MIN_GROWTH_DENSITY = 0.0025
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = 0.02
+_ROI_FRONTIER_MIN_DIRECT_ROI_LCB = 0.05
+_ROI_FRONTIER_MIN_DIRECT_PAYOFF_Q_LCB = 0.05
 
 
 class FamilyDecisionError(ValueError):
@@ -1096,7 +1098,7 @@ class FamilyDecisionEngine:
             delta_u_at_min = 0.0
         q_lcb = self._payoff_q_lcb(d)
         growth_density = self._robust_kelly_growth_density(d)
-        return (
+        base_useful = (
             np.isfinite(stake)
             and stake > 0.0
             and np.isfinite(delta_u_at_min)
@@ -1104,8 +1106,16 @@ class FamilyDecisionEngine:
             and np.isfinite(q_lcb)
             and q_lcb >= _ROI_FRONTIER_MIN_PAYOFF_Q_LCB
             and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
-            and np.isfinite(growth_density)
-            and growth_density >= _ROI_FRONTIER_MIN_GROWTH_DENSITY
+        )
+        if not base_useful:
+            return False
+        if np.isfinite(growth_density) and growth_density >= _ROI_FRONTIER_MIN_GROWTH_DENSITY:
+            return True
+        roi_lcb = self._edge_roi_lcb(d)
+        return (
+            np.isfinite(roi_lcb)
+            and roi_lcb >= _ROI_FRONTIER_MIN_DIRECT_ROI_LCB
+            and q_lcb >= _ROI_FRONTIER_MIN_DIRECT_PAYOFF_Q_LCB
         )
 
     def _payoff_q_lcb(self, d: CandidateDecision) -> float:

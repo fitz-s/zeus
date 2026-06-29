@@ -10869,6 +10869,45 @@ def _proofs_with_qkernel_candidate_economics(
     """
     if not qkernel_economics_by_bin_side:
         return proofs
+    try:
+        from src.decision import family_decision_engine as _fde_thresholds
+
+        min_profit_lcb_usd = float(_fde_thresholds._ROI_FRONTIER_MIN_PROFIT_LCB_USD)
+        min_growth_density = float(_fde_thresholds._ROI_FRONTIER_MIN_GROWTH_DENSITY)
+        min_payoff_q_lcb = float(_fde_thresholds._ROI_FRONTIER_MIN_PAYOFF_Q_LCB)
+        min_direct_roi_lcb = float(_fde_thresholds._ROI_FRONTIER_MIN_DIRECT_ROI_LCB)
+        min_direct_payoff_q_lcb = float(
+            _fde_thresholds._ROI_FRONTIER_MIN_DIRECT_PAYOFF_Q_LCB
+        )
+    except Exception:  # noqa: BLE001
+        min_profit_lcb_usd = 0.25
+        min_growth_density = 0.0025
+        min_payoff_q_lcb = 0.02
+        min_direct_roi_lcb = 0.05
+        min_direct_payoff_q_lcb = 0.05
+
+    def _qkernel_growth_density(*, cost: float, edge_lcb: float, payoff_q_lcb: float) -> float:
+        if not (
+            math.isfinite(cost)
+            and math.isfinite(edge_lcb)
+            and math.isfinite(payoff_q_lcb)
+            and 0.0 < cost < 1.0
+            and payoff_q_lcb > cost
+        ):
+            return float("-inf")
+        roi = edge_lcb / cost
+        return roi * ((payoff_q_lcb - cost) / (1.0 - cost))
+
+    def _qkernel_profit_lcb_usd(*, stake: float, cost: float, edge_lcb: float) -> float:
+        if not (
+            math.isfinite(stake)
+            and stake > 0.0
+            and math.isfinite(cost)
+            and cost > 0.0
+            and math.isfinite(edge_lcb)
+        ):
+            return float("-inf")
+        return stake * (edge_lcb / cost)
 
     def _qkernel_receipt_rejection_reason(cert: Mapping[str, Any]) -> str | None:
         try:
@@ -10899,6 +10938,37 @@ def _proofs_with_qkernel_candidate_economics(
             return (
                 "QKERNEL_STAKE_NON_POSITIVE:"
                 f"stake={optimal_stake_usd:.6f}:edge_lcb={edge_lcb:.6f}"
+            )
+        growth_density = _qkernel_growth_density(
+            cost=cost,
+            edge_lcb=edge_lcb,
+            payoff_q_lcb=payoff_q_lcb,
+        )
+        profit_lcb_usd = _qkernel_profit_lcb_usd(
+            stake=optimal_stake_usd,
+            cost=cost,
+            edge_lcb=edge_lcb,
+        )
+        direct_roi_lcb = edge_lcb / cost if cost > 0.0 else float("-inf")
+        growth_useful = (
+            math.isfinite(profit_lcb_usd)
+            and profit_lcb_usd >= min_profit_lcb_usd
+            and math.isfinite(growth_density)
+            and growth_density >= min_growth_density
+            and payoff_q_lcb >= min_payoff_q_lcb
+        )
+        direct_roi_useful = (
+            math.isfinite(profit_lcb_usd)
+            and profit_lcb_usd >= min_profit_lcb_usd
+            and math.isfinite(direct_roi_lcb)
+            and direct_roi_lcb >= min_direct_roi_lcb
+            and payoff_q_lcb >= min_direct_payoff_q_lcb
+        )
+        if not (growth_useful or direct_roi_useful):
+            return (
+                "QKERNEL_ROI_FRONTIER_NOT_USEFUL:"
+                f"profit_lcb_usd={profit_lcb_usd:.6f}:growth_density={growth_density:.9f}:"
+                f"edge_roi_lcb={direct_roi_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}"
             )
         return None
 

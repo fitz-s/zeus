@@ -67,7 +67,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     assert verdict["reason"] == "expected_edge_non_positive"
 
 
-def test_entry_economics_blocks_lottery_price_even_with_positive_edge():
+def test_entry_economics_allows_low_price_when_qkernel_economics_clear_floors():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -93,8 +93,9 @@ def test_entry_economics_blocks_lottery_price_even_with_positive_edge():
         shares=1497.78,
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "entry_price_below_live_floor"
+    assert verdict["allowed"] is True
+    assert verdict["details"]["submit_edge_density"] > 0.05
+    assert verdict["details"]["expected_profit_usd"] > 1.0
 
 
 def test_entry_economics_blocks_missing_receipt_fields():

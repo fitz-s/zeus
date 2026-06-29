@@ -433,7 +433,7 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"q_lcb_5pct": 0.39, "limit_price": 0.40}, "positive submit q_lcb-minus-limit"),
         ({"expected_edge": 0.25}, "expected_edge exceeds"),
         ({"size": 0.0}, "positive size"),
-        ({"limit_price": 0.05}, "entry price below"),
+        ({"min_entry_price": -0.01}, "min_entry_price"),
         ({"min_expected_profit_usd": 10.0}, "expected profit below"),
         ({"min_submit_edge_density": 0.75}, "submit edge density below"),
         ({"expected_edge_source_certificate_hash": ""}, "expected_edge_source_certificate_hash"),
@@ -461,7 +461,7 @@ def test_pre_submit_revalidation_failures_block_command(override, message):
         )
 
 
-def test_pre_submit_rejects_lucknow_lottery_price_submit_split():
+def test_pre_submit_rejects_lucknow_negative_submit_edge():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -471,7 +471,7 @@ def test_pre_submit_rejects_lucknow_lottery_price_submit_split():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
+    with pytest.raises(LiveOrderAggregateError, match="positive submit q_lcb-minus-limit"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
@@ -484,6 +484,53 @@ def test_pre_submit_rejects_lucknow_lottery_price_submit_split():
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
+
+
+def test_pre_submit_allows_low_price_yes_when_qkernel_economics_clear_floors():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(
+            q_live=0.118809820736935,
+            q_lcb_5pct=0.100708440505795,
+            limit_price=0.07,
+            expected_edge=0.0307084405057945,
+            size=5.0,
+            min_entry_price=0.05,
+            min_expected_profit_usd=0.05,
+            min_submit_edge_density=0.02,
+            current_best_bid=0.06,
+            current_best_ask=0.08,
+            qkernel_execution_economics={
+                "source": "qkernel_spine",
+                "route_id": "DIRECT_YES:b23@proof",
+                "route_type": "direct",
+                "side": "YES",
+                "payoff_q_point": 0.118809820736935,
+                "payoff_q_lcb": 0.100708440505795,
+                "cost": 0.07,
+                "edge_lcb": 0.0307084405057945,
+                "optimal_delta_u": 0.000411243383550307,
+                "false_edge_rate": 0.01,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+            },
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
 
 
 def test_pre_submit_rejects_jeddah_qkernel_payoff_above_submit_lcb():

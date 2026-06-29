@@ -959,6 +959,35 @@ def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
     assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 
 
+def test_select_roi_frontier_allows_direct_roi_candidate_below_growth_density(monkeypatch):
+    """Karachi/Shenzhen shape: a real lower-bound profit + ROI edge is not dust."""
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="YES", bin_id="b25", cost=0.14)
+    candidate = _hand_decision(
+        route,
+        edge_lcb=0.0100720692012259,
+        optimal_delta_u=0.000288,
+        delta_u_at_min=0.000045,
+        robust_trade_score=0.0100720692012259,
+        optimal_stake_usd=Decimal("5.64889651611328125"),
+        payoff_q_lcb=0.150072069201226,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([candidate])
+
+    assert engine._robust_kelly_growth_density(candidate) < 0.0025
+    assert engine._profit_lcb_usd(candidate) >= 0.25
+    assert engine._edge_roi_lcb(candidate) >= 0.05
+    assert selected is candidate
+    assert reason is None
+
+
 def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):
     """Tokyo-class regression: an abstained OOF cell must zero economics, not direction."""
     case = _case(metric="low")

@@ -775,8 +775,6 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires cost_basis_source_certificate_hash")
     submit_edge = q_lcb - limit_price
-    if limit_price <= min_entry_price + 1e-9:
-        raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if submit_edge <= 0.0:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires positive submit q_lcb-minus-limit")
     if expected_edge > submit_edge + 1e-6:

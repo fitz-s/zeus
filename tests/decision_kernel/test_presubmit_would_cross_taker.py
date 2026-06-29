@@ -303,7 +303,7 @@ class TestLayer2VerifyPreSubmitForCommand:
 
     def test_negative_submit_edge_raises(self):
         ps = _maker_pre_submit(q_live=0.0054, q_lcb_5pct=0.003, limit_price=0.006)
-        with pytest.raises(CertificateVerificationError, match="entry price below strategy floor"):
+        with pytest.raises(CertificateVerificationError, match="submit q_lcb-minus-limit"):
             self._call(ps)
 
     def test_micro_edge_density_raises(self):

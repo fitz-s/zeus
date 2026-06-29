@@ -714,8 +714,6 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
     )
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif limit_price <= min_entry_price + 1e-9:
-        reason = "entry_price_below_live_floor"
     elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
     elif min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY:

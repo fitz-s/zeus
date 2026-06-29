@@ -676,8 +676,6 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation expected_edge must be positive")
     if min_entry_price < 0.0:
         raise CertificateVerificationError("pre-submit revalidation min_entry_price must be non-negative")
-    if limit_price <= min_entry_price + 1e-9:
-        raise CertificateVerificationError("pre-submit revalidation entry price below strategy floor")
     submit_edge = q_lcb - limit_price
     if submit_edge <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
