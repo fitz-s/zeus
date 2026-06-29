@@ -28,6 +28,13 @@ from datetime import datetime, timezone
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_cap_usage_schema import ensure_table
 
+# Runtime scope for the exactly-once live execution reservation. The older
+# ``tiny_live_canary`` / ``live_canary`` scopes remain readable only as
+# compatibility aliases for already-durable rows; new live receipts must not
+# serialize canary language.
+LIVE_EXECUTION_RESERVATION_SCOPE = "live_execution_reservation"
+LEGACY_LIVE_RESERVATION_SCOPES = ("tiny_live_canary", "live_canary")
+
 # Inert provenance constants written into the durable row so the legacy schema's
 # CHECK (max_orders_per_day > 0) / (max_notional_usd >= 0) constraints are still
 # satisfied. They are NOT caps — nothing reads them as a limit anymore.
@@ -108,6 +115,20 @@ class LiveCapLedger:
             """,
             (event_id, cap_scope),
         ).fetchone()
+        if existing is None and cap_scope == LIVE_EXECUTION_RESERVATION_SCOPE:
+            legacy_placeholders = ",".join("?" for _ in LEGACY_LIVE_RESERVATION_SCOPES)
+            existing = self.conn.execute(
+                f"""
+                SELECT *
+                FROM edli_live_cap_usage
+                WHERE event_id = ?
+                  AND cap_scope IN ({legacy_placeholders})
+                  AND reservation_status IN ('RESERVED', 'CONSUMED')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (event_id, *LEGACY_LIVE_RESERVATION_SCOPES),
+            ).fetchone()
         if existing is not None:
             # Exactly-once while live: a re-reserve of the same active event
             # returns the SAME row. Drift guard: a changed reserved notional /

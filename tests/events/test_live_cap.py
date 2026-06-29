@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.events.live_cap import (
+    LIVE_EXECUTION_RESERVATION_SCOPE,
     LiveCapError,
     LiveCapLedger,
 )
@@ -92,7 +93,7 @@ def test_live_cap_no_per_day_order_cap_admits_many_orders_same_day():
         r = ledger.reserve(
             event_id=f"event-{n}",
             decision_time=NOW,
-            cap_scope="tiny_live_canary",
+            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
             requested_notional_usd=10.0,
         )
         assert r.reservation_status == "RESERVED"
@@ -114,7 +115,7 @@ def test_live_cap_no_notional_cap_passes_arbitrary_kelly_size_through():
     reservation = ledger.reserve(
         event_id="event-1",
         decision_time=NOW,
-        cap_scope="tiny_live_canary",
+        cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
         requested_notional_usd=over,
     )
 
@@ -131,7 +132,7 @@ def test_live_cap_no_rate_window_cap_admits_many_orders_same_window():
         r = ledger.reserve(
             event_id=f"event-{n}",
             decision_time=NOW.replace(second=n),
-            cap_scope="tiny_live_canary",
+            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
             requested_notional_usd=10.0,
         )
         assert r.reservation_status == "RESERVED"
@@ -225,9 +226,51 @@ def test_live_cap_reserve_rejects_nonpositive_notional():
         ledger.reserve(
             event_id="event-1",
             decision_time=NOW,
-            cap_scope="tiny_live_canary",
+            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
             requested_notional_usd=0.0,
         )
+
+
+def test_live_execution_scope_dedupes_legacy_canary_reservation():
+    ledger = LiveCapLedger(_conn())
+    legacy = ledger.reserve(
+        event_id="event-legacy",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=12.0,
+        final_intent_id="intent-1",
+    )
+
+    current = ledger.reserve(
+        event_id="event-legacy",
+        decision_time=NOW,
+        cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
+        requested_notional_usd=12.0,
+        final_intent_id="intent-1",
+    )
+
+    assert current.usage_id == legacy.usage_id
+    assert current.cap_scope == "tiny_live_canary"
+    assert (
+        ledger.conn.execute(
+            "SELECT COUNT(*) FROM edli_live_cap_usage WHERE event_id = 'event-legacy'"
+        ).fetchone()[0]
+        == 1
+    )
+
+
+def test_new_live_execution_scope_serializes_no_canary_language():
+    ledger = LiveCapLedger(_conn())
+
+    reservation = ledger.reserve(
+        event_id="event-current",
+        decision_time=NOW,
+        cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
+        requested_notional_usd=12.0,
+    )
+
+    assert reservation.cap_scope == LIVE_EXECUTION_RESERVATION_SCOPE
+    assert "canary" not in reservation.certificate_payload()["cap_scope"]
 
 
 def test_reserve_signature_has_no_cap_parameters():

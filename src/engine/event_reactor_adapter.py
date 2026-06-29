@@ -2635,9 +2635,8 @@ def event_bound_live_adapter_from_trade_conn(
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
-    This first full-live increment deliberately stops before executor submit
-    when real submit is disabled. It creates the durable proof shape that a
-    later live-canary authorization can submit through the existing executor seam.
+    This live adapter creates the durable proof shape that submits through the
+    existing executor seam whenever real submit is armed.
 
     Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
     ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
@@ -2763,11 +2762,9 @@ def event_bound_live_adapter_from_trade_conn(
             return no_submit_receipt
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
-        # Wave-1 2026-06-12: the LIVE_CANARY_DISABLED gate (real_order_submit_enabled AND
-        # NOT live_canary_enabled -> refuse submit) is DELETED. The canary on/off knob was
-        # an artificial throttle; the real gates remain the operator arm + real-submit flag
-        # + durable outbox + executor boundary below. Live submit now proceeds whenever
-        # those are present (byte-identical to the prior canary-enabled live behaviour).
+        # Wave-1 2026-06-12: the legacy submit throttle is DELETED. The real
+        # gates remain the operator arm + real-submit flag + durable outbox +
+        # executor boundary below. Live submit proceeds whenever those are present.
         if real_order_submit_enabled and not durable_submit_outbox_enabled:
             return EventSubmissionReceipt(
                 False,
@@ -2785,8 +2782,8 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=False,
             )
         # FIX-2b (PR_SPEC.md §2) OPERATOR ARM GATE: every real submit on the EDLI
-        # boundary requires the operator-arm capability token, regardless of mode
-        # (canary included). The token is constructible ONLY in main.py via
+        # boundary requires the operator-arm capability token, regardless of mode.
+        # The token is constructible ONLY in main.py via
         # ``require_operator_arm`` after asserting ``edli_live_operator_authorized is
         # True``. Absent the token this fails closed BEFORE the live-order build /
         # executor seam. This is an UPSTREAM guard on the EDLI adapter only; the
@@ -2808,10 +2805,11 @@ def event_bound_live_adapter_from_trade_conn(
         # computed + annotated on the receipt for the operator's ARM review only; it can
         # never change a decision. This makes "mainstream changes a decision"
         # UNCONSTRUCTABLE (not merely flag-OFF). The dead config key is left inert.
-        # Wave-1 2026-06-12: the canary force-taker KNOB is DELETED entirely (twin-authority
-        # disease: a knob that force-flips the proof's mode to TAKER competes with the single
-        # mode authority). The proof's execution_mode_intent (REST-then-cross policy) is the
-        # SOLE mode authority; the build chain no longer carries a force-taker override.
+        # Wave-1 2026-06-12: the legacy force-taker KNOB is DELETED entirely
+        # (twin-authority disease: a knob that force-flips the proof's mode to
+        # TAKER competes with the single mode authority). The proof's
+        # execution_mode_intent (REST-then-cross policy) is the SOLE mode
+        # authority; the build chain no longer carries a force-taker override.
         _live_order_build_phase = "not_started"
         try:
             if real_order_submit_enabled:
@@ -5847,7 +5845,7 @@ class _SubmitAbortedModeFlipped(ValueError):
     ``execution_mode_intent`` was PROVEN through submit recapture under that mode's
     economics (a MAKER rests at the admitted limit with zero taker fee and skips the
     PRICE_MOVED ceiling; a TAKER pays full fee under the bounded ceiling). The final
-    command builder may NOT re-decide the mode. If the FRESH book / governor / canary /
+    command builder may NOT re-decide the mode. If the FRESH book / governor /
     EV boundary would change it — in EITHER direction (MAKER->TAKER or TAKER->MAKER) —
     the proven economics are stale: raise so the submit aborts and the next cycle does a
     FULL re-rank rather than submitting under an unproven mode.
@@ -6417,7 +6415,7 @@ def _build_live_execution_command_certificates(
         # The proof's execution_mode_intent was computed at candidate-generation on the
         # snapshot book AND proven through submit recapture under that mode's economics
         # (zero taker fee + skipped PRICE_MOVED ceiling for MAKER; full fee + ceiling for
-        # TAKER). If the fresh book / governor / canary / EV boundary would change the
+        # TAKER). If the fresh book / governor / EV boundary would change the
         # mode — in EITHER direction (MAKER->TAKER and TAKER->MAKER) — those proven
         # economics are stale: abort SUBMIT_ABORTED_MODE_FLIPPED so the next cycle does a
         # FULL re-rank rather than submitting under an unproven mode. NO inline flip.
@@ -6433,7 +6431,7 @@ def _build_live_execution_command_certificates(
         # REST_DEFAULT/MAKER for the whole licensed class while the legacy
         # governor+EV-override re-derivation here still said TAKER — a 100%
         # flip rate that silently requeued the entire day-ahead lane to the
-        # retry cap. Wave-1 2026-06-12: the canary force-taker bypass is DELETED —
+        # retry cap. Wave-1 2026-06-12: the legacy force-taker bypass is DELETED —
         # the fresh mode comes UNCONDITIONALLY from the same rest-then-cross policy
         # as the proof, so the two doctrines can never disagree by construction.
         _fresh_mode = _fresh_rest_then_cross_mode(
@@ -6927,7 +6925,7 @@ def _build_live_execution_command_certificates(
             pre_submit_revalidation_cert=pre_submit,
             decision_time=decision_time,
         )
-        from src.events.live_cap import LiveCapLedger
+        from src.events.live_cap import LIVE_EXECUTION_RESERVATION_SCOPE, LiveCapLedger
 
         # Durable re-reservation of the Kelly notional already computed by
         # _build_live_cap_certificate_from_ledger above (which built the cert with
@@ -6938,7 +6936,7 @@ def _build_live_execution_command_certificates(
         reserve_result = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
             decision_time=decision_time,
-            cap_scope="tiny_live_canary",
+            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
@@ -7930,7 +7928,7 @@ def _build_live_cap_certificate_from_ledger(
 ) -> DecisionCertificate:
     if live_cap_conn is None:
         raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
-    from src.events.live_cap import LiveCapLedger
+    from src.events.live_cap import LIVE_EXECUTION_RESERVATION_SCOPE, LiveCapLedger
 
     # 2026-06-08 operator directive: the tiny_live $5 notional + per-day/window
     # order-count caps are DELETED. Order size is governed SOLELY by the
@@ -7941,12 +7939,12 @@ def _build_live_cap_certificate_from_ledger(
     kelly_usd = float(receipt.kelly_size_usd or 0.0)
     min_order_notional = max(price, 0.01)
     requested_notional = max(kelly_usd, min_order_notional)
-    usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
+    usage_id = LiveCapLedger._usage_id(event.event_id, LIVE_EXECUTION_RESERVATION_SCOPE)
     if persist:
         reservation = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
             decision_time=decision_time,
-            cap_scope="tiny_live_canary",
+            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
             requested_notional_usd=float(requested_notional),
             final_intent_id=receipt.final_intent_id,
         )
@@ -7957,7 +7955,7 @@ def _build_live_cap_certificate_from_ledger(
             usage_id=usage_id,
             event_id=event.event_id,
             decision_time=decision_time,
-            cap_scope="tiny_live_canary",
+            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
             reserved_notional_usd=float(requested_notional),
             reservation_status="RESERVED",
             final_intent_id=receipt.final_intent_id,
@@ -7975,9 +7973,9 @@ def _build_live_cap_certificate_from_ledger(
         payload=payload,
         parent_edges=(),
         parent_certificates=(),
-        authority_id="edli.live_cap",
+        authority_id="edli.live_execution_reservation",
         authority_version="v1",
-        algorithm_id="edli.submit_disabled_live_cap",
+        algorithm_id="edli.live_execution_reservation",
         algorithm_version="v1",
     )
 
@@ -8390,7 +8388,7 @@ def _select_edli_order_mode(
 ) -> str:
     """Select MAKER/TAKER for the entry per design §1-§2 (governor + REST-then-cross policy).
 
-    Wave-1 2026-06-12: the canary force-taker knob is DELETED — the proof's
+    Wave-1 2026-06-12: the legacy force-taker knob is DELETED — the proof's
     rest_then_cross_policy is the single mode authority. Authority order:
       1. Governor (§1): consult ``maker_or_taker`` when a global governor is
          configured. NO_TRADE is impossible here (the candidate already cleared
@@ -8529,8 +8527,8 @@ def _proof_order_rests_at_admitted_price(proof: "_CandidateProof") -> bool:
     return mode == "MAKER"
 
 
-# Wave-1 2026-06-12: _post_cross_edge (the §7 canary edge-floor numerator) is DELETED
-# with the canary force-taker knob — it had no remaining caller.
+# Wave-1 2026-06-12: _post_cross_edge (the old cross edge-floor numerator) is
+# DELETED with the legacy force-taker knob — it had no remaining caller.
 
 
 def _ev_boundary_favors_cross(

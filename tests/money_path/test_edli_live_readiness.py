@@ -372,6 +372,7 @@ def test_live_order_build_savepoint_does_not_retry_non_lock_operational_error(mo
 
 def test_live_cap_certificate_is_backed_by_usage_row():
     from src.engine import event_reactor_adapter as adapter
+    from src.events.live_cap import LIVE_EXECUTION_RESERVATION_SCOPE
     from src.events.reactor import EventSubmissionReceipt
 
     conn = sqlite3.connect(":memory:")
@@ -403,10 +404,14 @@ def test_live_cap_certificate_is_backed_by_usage_row():
 
     assert row is not None
     assert row["event_id"] == event.event_id
-    assert row["cap_scope"] == "tiny_live_canary"
+    assert row["cap_scope"] == LIVE_EXECUTION_RESERVATION_SCOPE
     assert row["reservation_status"] == "RESERVED"
     assert row["reserved_notional_usd"] == cert.payload["reserved_notional_usd"]
     assert row["final_intent_id"] == "intent-1"
+    assert cert.payload["cap_scope"] == LIVE_EXECUTION_RESERVATION_SCOPE
+    assert "canary" not in cert.payload["cap_scope"]
+    assert cert.header.algorithm_id == "edli.live_execution_reservation"
+    assert cert.header.authority_id == "edli.live_execution_reservation"
 
 
 def test_live_cap_provisional_and_durable_share_uncapped_notional(monkeypatch):
