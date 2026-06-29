@@ -264,16 +264,17 @@ def test_full_family_capture_cap_is_decoupled_from_direct_clob_threshold():
     )
     src = inspect.getsource(market_scanner.refresh_executable_market_substrate_snapshots)
     assert "max_candidates = None" in src
-    assert "len(priority_conditions) <= _priority_direct_clob_prefetch_condition_limit()" in src
+    assert "priority_direct_clob_service_conditions" in src
 
 
 def test_priority_direct_clob_uses_selected_priority_subset():
-    """A broad priority universe must not disable a small selected recapture batch."""
+    """A broad priority universe must be serviced by a bounded selected subset."""
 
     src = inspect.getsource(market_scanner.refresh_executable_market_substrate_snapshots)
 
-    assert "selected_priority_conditions = {" in src
-    assert "len(selected_priority_conditions) <= priority_direct_clob_condition_limit" in src
+    assert "ordered_selected_priority_conditions" in src
+    assert "priority_direct_clob_service_conditions = set(" in src
+    assert "ordered_selected_priority_conditions[:priority_direct_clob_condition_limit]" in src
     assert "len(priority_conditions) <= priority_direct_clob_condition_limit" not in src
 
 

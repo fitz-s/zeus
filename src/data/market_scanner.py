@@ -285,13 +285,14 @@ def _full_family_direct_clob_prefetch_candidate_threshold() -> int:
 
 
 def _priority_direct_clob_prefetch_condition_limit() -> int:
-    """Return max priority conditions allowed to use synchronous CLOB fill.
+    """Return max priority conditions to service with synchronous CLOB fill.
 
     A small held/rest family recapture may need direct CLOB books to complete
-    both sides in the same tick.  A broad entry/redecision confirmation scope is
-    different: dozens of priority conditions mean the price-channel witness is
-    the live substrate source for this tick, and missing books must be deferred
-    instead of turning the warm path into a synchronous HTTP sweep.
+    both sides in the same tick.  A broad entry/redecision confirmation scope
+    can contain dozens of priority conditions; serving all of them synchronously
+    turns the warm path into a venue HTTP sweep.  Serving none of them is worse:
+    the money path sees perpetual EXECUTABLE_SNAPSHOT_BLOCKED/STALE.  The limit
+    is therefore a per-tick service cap, not an all-or-nothing admission gate.
     """
 
     try:
@@ -4804,20 +4805,28 @@ def refresh_executable_market_substrate_snapshots(
         if full_family_capture
         else 0
     )
-    selected_priority_conditions = {
-        str(condition_id or "").strip()
-        for _recency, _priority, _ordinal, _market, _outcome, condition_id, _direction in selected_candidates
-        if str(condition_id or "").strip() in priority_conditions
-    }
+    ordered_selected_priority_conditions: list[str] = []
+    seen_selected_priority_conditions: set[str] = set()
+    for _recency, _priority, _ordinal, _market, _outcome, condition_id, _direction in selected_candidates:
+        cid = str(condition_id or "").strip()
+        if cid in priority_conditions and cid not in seen_selected_priority_conditions:
+            ordered_selected_priority_conditions.append(cid)
+            seen_selected_priority_conditions.add(cid)
+    selected_priority_conditions = set(ordered_selected_priority_conditions)
     priority_direct_clob_condition_limit = (
         _priority_direct_clob_prefetch_condition_limit()
         if full_family_capture and priority_conditions
         else 0
     )
-    priority_direct_clob_scope_allowed = bool(
-        selected_priority_conditions
-        and priority_direct_clob_condition_limit > 0
-        and len(selected_priority_conditions) <= priority_direct_clob_condition_limit
+    priority_direct_clob_service_conditions = set(
+        ordered_selected_priority_conditions[:priority_direct_clob_condition_limit]
+        if priority_direct_clob_condition_limit > 0
+        else []
+    )
+    priority_direct_clob_scope_allowed = bool(priority_direct_clob_service_conditions)
+    priority_direct_clob_deferred_condition_count = max(
+        0,
+        len(ordered_selected_priority_conditions) - len(priority_direct_clob_service_conditions),
     )
     if batch_orderbook_supported:
         # Money-path redecision confirm refresh already has a live price-channel
@@ -4845,7 +4854,7 @@ def refresh_executable_market_substrate_snapshots(
         full_family_capture
         and candidates_needing_network_books
         and priority_conditions
-        and priority_direct_clob_scope_allowed
+        and priority_direct_clob_service_conditions
         and full_family_direct_clob_candidate_threshold > 0
     )
     small_full_family_direct_clob_prefetch = bool(
@@ -4872,7 +4881,7 @@ def refresh_executable_market_substrate_snapshots(
         network_book_candidates = [
             candidate
             for candidate in candidates_needing_network_books
-            if str(candidate[5] or "").strip() in priority_conditions
+            if str(candidate[5] or "").strip() in priority_direct_clob_service_conditions
         ]
         if not network_book_candidates:
             direct_clob_prefetch_skipped = True
@@ -4931,10 +4940,13 @@ def refresh_executable_market_substrate_snapshots(
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         priority_candidate = str(condition_id or "").strip() in priority_conditions
+        priority_candidate_serviced = (
+            str(condition_id or "").strip() in priority_direct_clob_service_conditions
+        )
         if full_family_capture and batch_orderbook_supported and selected_token and prefetched_book is None:
             if (
                 priority_candidate
-                and priority_direct_clob_scope_allowed
+                and priority_candidate_serviced
                 and selected_token not in failed_prefetch_tokens
             ):
                 prefetched_book = _empty_orderbook_identity_book(selected_token)
@@ -5069,6 +5081,12 @@ def refresh_executable_market_substrate_snapshots(
         "direct_clob_prefetch_candidate_threshold": full_family_direct_clob_candidate_threshold,
         "direct_clob_prefetch_priority_condition_limit": priority_direct_clob_condition_limit,
         "direct_clob_prefetch_selected_priority_condition_count": len(selected_priority_conditions),
+        "direct_clob_prefetch_priority_serviced_condition_count": len(
+            priority_direct_clob_service_conditions
+        ),
+        "direct_clob_prefetch_priority_deferred_condition_count": (
+            priority_direct_clob_deferred_condition_count
+        ),
         "direct_clob_prefetch_priority_scope_allowed": int(priority_direct_clob_scope_allowed),
         "direct_clob_prefetch_small_family_enabled": int(small_full_family_direct_clob_prefetch),
         "direct_clob_prefetch_priority_enabled": int(priority_full_family_direct_clob_prefetch),

@@ -2399,8 +2399,8 @@ def test_full_family_nonpriority_batch_failure_defers_without_singular_storm(mon
     assert summary["prefetch_missing_skipped"] == 2
 
 
-def test_broad_priority_refresh_writes_price_channel_books_before_deferring_missing(monkeypatch):
-    """Broad entry/redecision scopes must not let synchronous /books starve writes."""
+def test_broad_priority_refresh_services_bounded_direct_books(monkeypatch):
+    """Broad priority scopes service a bounded direct-CLOB subset instead of starving all."""
 
     monkeypatch.setenv(
         "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
@@ -2465,6 +2465,8 @@ def test_broad_priority_refresh_writes_price_channel_books_before_deferring_miss
         )
     conn.commit()
 
+    missing_outcome = missing_market["outcomes"][0]
+    missing_tokens = [missing_outcome["token_id"], missing_outcome["no_token_id"]]
     network_calls: list[list[str]] = []
 
     class _Clob:
@@ -2501,13 +2503,19 @@ def test_broad_priority_refresh_writes_price_channel_books_before_deferring_miss
             },
         )
 
-    assert network_calls == []
-    assert captured_books == [yes_token, no_token]
-    assert summary["attempted"] == 2
-    assert summary["inserted"] == 2
-    assert summary["prefetch_missing_skipped"] == 2
-    assert summary["direct_clob_prefetch_priority_scope_allowed"] == 0
-    assert summary["direct_clob_prefetch_priority_enabled"] == 0
+    assert len(network_calls) == 1
+    assert len(network_calls[0]) == 2
+    assert set(network_calls[0]).issubset({yes_token, no_token, *missing_tokens})
+    assert set(captured_books) == {yes_token, no_token, *missing_tokens}
+    assert len(captured_books) == 4
+    assert summary["attempted"] == 4
+    assert summary["inserted"] == 4
+    assert summary["prefetch_missing_skipped"] == 0
+    assert summary["direct_clob_prefetch_selected_priority_condition_count"] == 2
+    assert summary["direct_clob_prefetch_priority_serviced_condition_count"] == 1
+    assert summary["direct_clob_prefetch_priority_deferred_condition_count"] == 1
+    assert summary["direct_clob_prefetch_priority_scope_allowed"] == 1
+    assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
 def test_capture_busy_timeout_denominator_uses_attemptable_prefetched_candidates():
