@@ -380,6 +380,39 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
     )
 
 
+def test_substrate_snapshot_write_lease_covers_sqlite_busy_floor(monkeypatch):
+    """The outer writer lease must not expire before row-level SQLite lock waiting."""
+
+    monkeypatch.delenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS", raising=False)
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000")
+
+    busy_floor = substrate_observer._substrate_snapshot_sqlite_busy_floor_ms()
+    assert busy_floor == 4000
+    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 5000
+
+    monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", "1000")
+    lease_deadline = substrate_observer._substrate_snapshot_write_lease_ms(
+        "substrate_snapshot_db_write_lease_deadline_ms",
+        substrate_observer._substrate_snapshot_write_lease_deadline_default_ms(),
+        minimum=busy_floor,
+        maximum=30000,
+    )
+    assert lease_deadline >= busy_floor
+
+    monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS", "1000")
+    max_hold = substrate_observer._substrate_snapshot_write_lease_ms(
+        "substrate_snapshot_db_write_max_hold_ms",
+        substrate_observer.SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+        minimum=busy_floor,
+        maximum=10000,
+    )
+    assert max_hold >= busy_floor
+
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "7000")
+    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 8000
+
+
 def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
     """Stale event requeues must trigger the same targeted family recapture path."""
 
