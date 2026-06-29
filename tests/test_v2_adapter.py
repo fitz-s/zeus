@@ -625,6 +625,46 @@ def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
     ]
 
 
+def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    class FakeClientWithTargetCtf(FakeBalanceAllowanceClient):
+        def get_positions(self):
+            raise AssertionError("target exit CTF proof must not enumerate every position")
+
+        def get_balance_allowance(self, params):
+            self.calls.append(("get_balance_allowance", params))
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                assert getattr(params, "token_id") == "exit-token"
+                return {"balance": "21427700"}
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    fake = FakeClientWithTargetCtf()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=["exit-token"])
+
+    assert payload["ctf_token_scope"] == "targeted"
+    assert payload["ctf_token_balances_units"] == {"exit-token": 21427700}
+    assert payload["ctf_token_allowances_units"] == {"exit-token": 21427700}
+    call_asset_types = [
+        str(getattr(call[1], "asset_type", "")).upper()
+        for call in fake.calls
+        if call[0] == "get_balance_allowance"
+    ]
+    assert any("COLLATERAL" in asset for asset in call_asset_types)
+    assert any("CONDITIONAL" in asset for asset in call_asset_types)
+
+
 def test_pusd_collateral_payload_can_skip_allowance_update_for_heartbeat(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 

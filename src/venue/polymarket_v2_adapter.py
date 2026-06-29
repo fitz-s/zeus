@@ -222,6 +222,8 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def get_collateral_payload(self) -> dict[str, Any]: ...
 
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]: ...
+
     def get_balance(self, conn=None) -> Any: ...
 
     def redeem(
@@ -860,6 +862,46 @@ class PolymarketV2Adapter:
 
         payload["ctf_token_balances_units"] = balances
         payload["ctf_token_allowances_units"] = allowances
+        return payload
+
+    def get_ctf_collateral_payload(self, *, token_ids: list[str]) -> dict[str, Any]:
+        """Return pUSD facts plus CTF balance/allowance only for requested tokens.
+
+        Exit submit needs inventory proof for the token being sold, not a full
+        wallet fanout across every weather position. Full enumeration can exceed
+        the submit deadline and then leave the sell path reading a pUSD-only
+        snapshot. This targeted surface keeps sell preflight exact while making
+        its runtime proportional to the order being submitted.
+        """
+
+        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
+        payload = self._pusd_collateral_payload_from_raw(raw)
+        balances: dict[str, int] = {}
+        allowances: dict[str, int] = {}
+        for token_id in dict.fromkeys(str(t or "").strip() for t in token_ids):
+            if not token_id:
+                continue
+            conditional_raw = self._conditional_balance_allowance_raw(token_id)
+            conditional_balance_units = _micro_int_or_none(conditional_raw.get("balance"))
+            balance_units = conditional_balance_units if conditional_balance_units is not None else 0
+            balances[token_id] = balance_units
+            allowance_raw = conditional_raw.get("allowance")
+            allowance_units: int
+            if allowance_raw is not None:
+                allowance_micro = _micro_int_or_none(allowance_raw)
+                allowance_units = (
+                    allowance_micro
+                    if allowance_micro is not None
+                    else _ctf_balance_units(allowance_raw)
+                )
+            elif conditional_balance_units is not None:
+                allowance_units = conditional_balance_units
+            else:
+                allowance_units = 0
+            allowances[token_id] = allowance_units
+        payload["ctf_token_balances_units"] = balances
+        payload["ctf_token_allowances_units"] = allowances
+        payload["ctf_token_scope"] = "targeted"
         return payload
 
     def _collateral_balance_allowance_raw(self, *, refresh_allowance: bool = True) -> dict[str, Any]:

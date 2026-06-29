@@ -53,7 +53,7 @@ def _cutover_guard_live_enabled(monkeypatch):
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
 
-    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+    def _seed_submit_collateral(conn: sqlite3.Connection, **_kwargs) -> dict:
         ctf_units = 1_000_000_000
         ctf_tokens = {
             "tok-" + "1" * 36: ctf_units,

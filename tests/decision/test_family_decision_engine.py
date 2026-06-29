@@ -823,6 +823,40 @@ def test_select_prefers_roi_frontier_by_default(monkeypatch):
     assert selected is low_cost
 
 
+def test_select_roi_frontier_keeps_small_stake_high_confidence_yes(monkeypatch):
+    """A high-confidence cheap YES is not rejected just because its raw stake is small."""
+    case = _case()
+    space = _outcome_space(case)
+    high_confidence_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.01),
+        edge_lcb=0.06967772345617505,
+        optimal_delta_u=0.0037257573362340303,
+        delta_u_at_min=0.00031653668040189115,
+        robust_trade_score=0.06967772345617505,
+        optimal_stake_usd=Decimal("2.197675453300476"),
+    )
+    larger_notional_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.80),
+        edge_lcb=0.08,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.08,
+        optimal_stake_usd=Decimal("100"),
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([larger_notional_no, high_confidence_yes])
+
+    assert high_confidence_yes.economics.optimal_stake_usd < Decimal("5")
+    assert engine._roi_frontier_useful(high_confidence_yes) is True
+    assert reason is None
+    assert selected is high_confidence_yes
+
+
 def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):
     """High raw edge/price is not enough when Kelly lower-bound confidence is tiny."""
     case = _case()
@@ -860,7 +894,7 @@ def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypa
 
 
 def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
-    """A tiny high-ratio candidate must not become a filler live order."""
+    """A tiny high-ratio but low-confidence candidate must not become a filler live order."""
     case = _case()
     space = _outcome_space(case)
     dust_route = _hand_route(space, side="YES", bin_id="b25", cost=0.005)

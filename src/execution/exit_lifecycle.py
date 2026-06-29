@@ -1799,7 +1799,11 @@ def _execute_live_exit(
 
     if conn is not None:
         try:
-            _refresh_exit_collateral_snapshot_for_submit(conn)
+            _refresh_exit_collateral_snapshot_for_submit(
+                conn,
+                token_id=token_id,
+                shares=position.effective_shares,
+            )
         except CollateralInsufficient as exc:
             collateral_reason = str(exc)
             retry_reason = f"{exit_context.exit_reason} [COLLATERAL_REFRESH: {collateral_reason}]"

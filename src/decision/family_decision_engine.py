@@ -237,7 +237,7 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
     }
 )
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
-_ROI_FRONTIER_MIN_STAKE_USD = 5.0
+_ROI_FRONTIER_MIN_GROWTH_DENSITY = 0.01
 
 
 class FamilyDecisionError(ValueError):
@@ -1089,12 +1089,19 @@ class FamilyDecisionEngine:
     def _roi_frontier_useful(self, d: CandidateDecision) -> bool:
         try:
             stake = float(d.economics.optimal_stake_usd)
+            delta_u_at_min = float(d.economics.delta_u_at_min)
         except Exception:  # noqa: BLE001
             stake = 0.0
+            delta_u_at_min = 0.0
+        growth_density = self._robust_kelly_growth_density(d)
         return (
             np.isfinite(stake)
-            and stake >= _ROI_FRONTIER_MIN_STAKE_USD
+            and stake > 0.0
+            and np.isfinite(delta_u_at_min)
+            and delta_u_at_min > 0.0
             and self._profit_lcb_usd(d) >= _ROI_FRONTIER_MIN_PROFIT_LCB_USD
+            and np.isfinite(growth_density)
+            and growth_density >= _ROI_FRONTIER_MIN_GROWTH_DENSITY
         )
 
     def _robust_kelly_growth_density(self, d: CandidateDecision) -> float:
@@ -1780,9 +1787,12 @@ class FamilyDecisionEngine:
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
         # SELECT: live defaults to an ROI frontier so capital-efficient YES can beat a
-        # larger but lower-return NO without banning either side. Dust candidates that
-        # cannot clear a small absolute lower-bound profit/stake floor do not win by
-        # ratio alone. Research callers can explicitly request total utility or density.
+        # larger but lower-return NO without banning either side. There is deliberately
+        # no selector-level fixed-dollar stake floor: venue minimum handling belongs to
+        # ``delta_u_at_min`` and the submit-time min-order bump. Low-confidence tails are
+        # rejected by confidence-weighted Kelly growth density plus lower-bound profit,
+        # not by their raw notional size. Research callers can explicitly request total
+        # utility or density.
         # The scalar trade score is NOT a key in any objective.
         if self._selection_objective == "roi_frontier":
             roi_frontier = self._roi_frontier_candidates(survivors)

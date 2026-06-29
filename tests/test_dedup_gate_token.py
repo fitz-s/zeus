@@ -548,7 +548,7 @@ def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position
     assert result["existing_position_id"] == "active-position"
 
 
-def test_terminal_no_fill_no_exposure_allows_immediate_redecision(mem_db):
+def test_terminal_no_fill_no_exposure_cools_down_same_terms_redecision(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -584,11 +584,12 @@ def test_terminal_no_fill_no_exposure_allows_immediate_redecision(mem_db):
         now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
     )
 
-    assert result["allowed"] is True
-    assert result["reason"] == "allowed_terminal_no_fill_redecision"
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_cooling_down"
+    assert result["remaining_seconds"] == _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - 60
 
 
-def test_terminal_no_fill_redecision_does_not_require_price_change(mem_db):
+def test_terminal_no_fill_redecision_requires_material_price_or_size_change(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -619,13 +620,14 @@ def test_terminal_no_fill_redecision_does_not_require_price_change(mem_db):
         mem_db,
         token_id=TOKEN_X,
         candidate_position_id="fresh-candidate",
-        limit_price=0.73,
+        limit_price=0.74,
         shares=12.7,
         now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
     )
 
     assert result["allowed"] is True
-    assert result["reason"] == "allowed_terminal_no_fill_redecision"
+    assert result["reason"] == "allowed_terminal_no_fill_redecision_material_change"
+    assert result["price_delta"] == "0.01"
 
 
 def test_cancelled_entry_without_zero_fill_fact_still_blocks_redecision(mem_db):

@@ -2287,8 +2287,9 @@ def test_live_exit_refreshes_collateral_before_sell_preflight(conn, monkeypatch)
 
     monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context", lambda *args, **kwargs: {})
 
-    def fake_refresh(active_conn):
+    def fake_refresh(active_conn, **kwargs):
         assert active_conn is conn
+        assert kwargs["token_id"] == "yes-token-001"
         calls.append("refresh")
         return {"component": "collateral_snapshot_refresh", "allowed": True}
 

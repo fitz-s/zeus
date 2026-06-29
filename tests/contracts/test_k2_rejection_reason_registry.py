@@ -115,6 +115,10 @@ def test_registry_lookup_strips_detail_suffix():
         ("EVENT_TYPE_OUT_OF_LIVE_SCOPE", RejectionCategory.DESIGNED_GATE),
         ("entry_cooldown:same_token_entry_cooling_down", RejectionCategory.DESIGNED_GATE),
         (
+            "entry_cooldown:same_token_terminal_no_fill_cooling_down",
+            RejectionCategory.DESIGNED_GATE,
+        ),
+        (
             "SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
             "PreSubmitRevalidated entry price below strategy floor",
             RejectionCategory.DESIGNED_GATE,

@@ -179,7 +179,7 @@ def conn(monkeypatch):
         },
     )
 
-    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+    def _seed_submit_collateral(conn: sqlite3.Connection, **_kwargs) -> dict:
         CollateralLedger(conn).set_snapshot(
             CollateralSnapshot(
                 pusd_balance_micro=1_000_000_000,

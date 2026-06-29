@@ -59,11 +59,28 @@ class _DeadlineCollateralAdapter:
             raise
 
 
+class _TargetCtfCollateralAdapter:
+    def __init__(self, adapter, *, token_ids: list[str]) -> None:
+        self._adapter = adapter
+        self._token_ids = [
+            str(token_id)
+            for token_id in token_ids
+            if str(token_id or "").strip()
+        ]
+
+    def get_collateral_payload(self) -> dict:
+        target_payload = getattr(self._adapter, "get_ctf_collateral_payload", None)
+        if callable(target_payload):
+            return dict(target_payload(token_ids=self._token_ids) or {})
+        return dict(self._adapter.get_collateral_payload() or {})
+
+
 def refresh_collateral_snapshot_for_submit(
     conn: sqlite3.Connection,
     *,
     action: str,
     reuse_fresh_snapshot: bool = False,
+    token_id: str | None = None,
 ) -> dict:
     """Ensure collateral truth is fresh synchronously on a submit path.
 
@@ -113,8 +130,11 @@ def refresh_collateral_snapshot_for_submit(
     client = PolymarketClient()
     ensure_adapter = getattr(client, "_ensure_v2_adapter", None)
     raw_adapter = ensure_adapter() if callable(ensure_adapter) else client
+    refresh_adapter = raw_adapter
+    if action == "exit_submit" and token_id:
+        refresh_adapter = _TargetCtfCollateralAdapter(raw_adapter, token_ids=[token_id])
     adapter = _DeadlineCollateralAdapter(
-        raw_adapter,
+        refresh_adapter,
         timeout_seconds=SUBMIT_COLLATERAL_REFRESH_TIMEOUT_SECONDS,
     )
     snapshot = None
