@@ -5,6 +5,16 @@ cities. It ingests weather forecasts, calibrates them into a settlement probabil
 bin of every market, trades the bins it prices differently from the book, manages the orders
 through to settlement, and feeds graded outcomes back into calibration.
 
+## Operation
+
+The engine runs a repeating cycle, not a one-shot pass. Each cycle it reconciles its positions
+against the chain, refreshes forecasts, observations, and prices, re-evaluates every held
+position and resting order against the new data, and scans for new entries. Orders are not
+fire-and-forget: a resting order whose edge has faded or whose limit the market has moved away
+from is pulled and decided again, and a fresh forecast cycle on a market already held is itself
+new information. Held positions are monitored each cycle and exited when their edge reverses, a
+profit is takeable, or settlement is near. The sections below describe one pass of that loop.
+
 ## Markets
 
 A market is a set of yes/no bins over a city's daily high or low (`50–51°F`, `75°F or higher`,
