@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-06-29
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
@@ -41,6 +41,15 @@ def _policy_conn() -> sqlite3.Connection:
     from src.state.db import apply_architecture_kernel_schema
 
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_architecture_kernel_schema(conn)
+    return conn
+
+
+def _policy_file_conn(db_path) -> sqlite3.Connection:
+    from src.state.db import apply_architecture_kernel_schema
+
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
     return conn
@@ -1927,6 +1936,70 @@ class TestStrategyPolicyResolver:
         assert policy.threshold_multiplier == pytest.approx(1.1)
         assert "manual_override:threshold_multiplier" in policy.sources
         conn.close()
+
+    def test_trade_control_override_ghost_is_not_strategy_policy_authority(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        now = datetime(2026, 6, 29, 2, 25, tzinfo=timezone.utc)
+        trade_path = tmp_path / "zeus_trades.db"
+        world_path = tmp_path / "zeus-world.db"
+        trade_conn = _policy_file_conn(trade_path)
+        world_conn = _policy_file_conn(world_path)
+        _insert_control_override(
+            trade_conn,
+            override_id="ghost-trade-gate",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+        trade_conn.commit()
+        world_conn.commit()
+        world_conn.close()
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+        policy = policy_module.resolve_strategy_policy(trade_conn, "center_buy", now)
+
+        assert policy.gated is False
+        assert "manual_override:gate" not in policy.sources
+        trade_conn.close()
+
+    def test_strategy_policy_reads_attached_world_control_authority(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        now = datetime(2026, 6, 29, 2, 30, tzinfo=timezone.utc)
+        trade_path = tmp_path / "zeus_trades.db"
+        world_path = tmp_path / "zeus-world.db"
+        trade_conn = _policy_file_conn(trade_path)
+        world_conn = _policy_file_conn(world_path)
+        _insert_control_override(
+            world_conn,
+            override_id="world-center-buy-gate",
+            target_type="strategy",
+            target_key="center_buy",
+            action_type="gate",
+            value="true",
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+        trade_conn.commit()
+        world_conn.commit()
+        world_conn.close()
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+        policy = policy_module.resolve_strategy_policy(trade_conn, "center_buy", now)
+
+        assert policy.gated is True
+        assert "manual_override:gate" in policy.sources
+        trade_conn.close()
 
     def test_resolve_strategy_policy_expired_override_restores_automatic_policy(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)

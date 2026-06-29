@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-29
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-06-29
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -126,17 +126,17 @@ def test_zeus_status_screen_edges_filters_temperature_metric(tmp_path):
     fc.commit()
     tr = sqlite3.connect(str(tdb))
     tr.execute(
-        "CREATE TABLE executable_market_snapshots (condition_id TEXT, "
+        "CREATE TABLE executable_market_snapshot_latest (condition_id TEXT, "
         "outcome_label TEXT, orderbook_top_ask REAL, captured_at TEXT)"
     )
     # Only the LOW market has a cheap ask — a metric-blind join would count
     # phantom edge here. The HIGH market's ask leaves no edge.
     tr.execute(
-        "INSERT INTO executable_market_snapshots VALUES "
+        "INSERT INTO executable_market_snapshot_latest VALUES "
         "('cond-low', 'YES', 0.10, '2026-06-12T00:00:00')"
     )
     tr.execute(
-        "INSERT INTO executable_market_snapshots VALUES "
+        "INSERT INTO executable_market_snapshot_latest VALUES "
         "('cond-high', 'YES', 0.95, '2026-06-12T00:00:00')"
     )
     tr.commit()
@@ -183,14 +183,14 @@ def test_zeus_status_price_holes_fresh_city(tmp_path):
 
     tr = sqlite3.connect(str(tdb))
     tr.execute(
-        "CREATE TABLE executable_market_snapshots "
+        "CREATE TABLE executable_market_snapshot_latest "
         "(condition_id TEXT, outcome_label TEXT, "
         "orderbook_top_ask REAL, captured_at TEXT)"
     )
     # Fresh snapshot (just now).
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     tr.execute(
-        "INSERT INTO executable_market_snapshots VALUES ('cond-tok', 'YES', 0.55, ?)",
+        "INSERT INTO executable_market_snapshot_latest VALUES ('cond-tok', 'YES', 0.55, ?)",
         (now_iso,),
     )
     tr.commit()
@@ -230,14 +230,14 @@ def test_zeus_status_price_holes_stale_city(tmp_path):
 
     tr = sqlite3.connect(str(tdb))
     tr.execute(
-        "CREATE TABLE executable_market_snapshots "
+        "CREATE TABLE executable_market_snapshot_latest "
         "(condition_id TEXT, outcome_label TEXT, "
         "orderbook_top_ask REAL, captured_at TEXT)"
     )
     # Stale snapshot (4h ago).
     stale_iso = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S")
     tr.execute(
-        "INSERT INTO executable_market_snapshots VALUES ('cond-seo', 'YES', 0.55, ?)",
+        "INSERT INTO executable_market_snapshot_latest VALUES ('cond-seo', 'YES', 0.55, ?)",
         (stale_iso,),
     )
     tr.commit()
@@ -277,7 +277,7 @@ def test_zeus_status_price_holes_no_snapshot(tmp_path):
 
     tr = sqlite3.connect(str(tdb))
     tr.execute(
-        "CREATE TABLE executable_market_snapshots "
+        "CREATE TABLE executable_market_snapshot_latest "
         "(condition_id TEXT, outcome_label TEXT, "
         "orderbook_top_ask REAL, captured_at TEXT)"
     )
