@@ -1666,9 +1666,17 @@ def _candidate_qkernel_execution_economics_payload(
         if selected is None:
             return None
     try:
-        cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
-        edge_lcb = float(selected.edge_lcb)
-        point_ev = float(selected.point_ev)
+        route_cost_value = float(getattr(selected.cost, "value", 0.0) or 0.0)
+        chosen_cost = getattr(selected, "chosen_stake_cost", None)
+        cost_value = (
+            float(getattr(chosen_cost, "value", 0.0) or 0.0)
+            if chosen_cost is not None
+            else route_cost_value
+        )
+        edge_lcb_raw = getattr(selected, "chosen_stake_edge_lcb", None)
+        point_ev_raw = getattr(selected, "chosen_stake_point_ev", None)
+        edge_lcb = float(edge_lcb_raw) if edge_lcb_raw is not None else float(selected.edge_lcb)
+        point_ev = float(point_ev_raw) if point_ev_raw is not None else float(selected.point_ev)
         delta_u_at_min = float(selected.delta_u_at_min)
         optimal_delta_u = float(selected.optimal_delta_u)
         q_dot_payoff = float(selected.q_dot_payoff)
@@ -1707,7 +1715,13 @@ def _candidate_qkernel_execution_economics_payload(
             "optimal_delta_u": optimal_delta_u,
             "q_dot_payoff": q_dot_payoff,
             "cost": cost_value,
+            "cost_basis": "chosen_stake" if chosen_cost is not None else "route",
+            "route_cost": route_cost_value,
+            "route_edge_lcb": float(selected.edge_lcb),
+            "route_point_ev": float(selected.point_ev),
         }
+        if chosen_cost is not None:
+            payload["chosen_stake_cost"] = cost_value
         if route is not None and candidate_decision is not None:
             payload.update(
                 {
@@ -1818,7 +1832,9 @@ def _qkernel_false_edge_rate(
     try:
         samples = np.asarray(decision.band.samples, dtype=float)
         payoff = np.asarray(selected_decision.route.payoff_vector, dtype=float)
-        cost = float(selected_decision.economics.cost.value)
+        chosen_cost = getattr(selected_decision.economics, "chosen_stake_cost", None)
+        cost_obj = chosen_cost if chosen_cost is not None else selected_decision.economics.cost
+        cost = float(cost_obj.value)
     except Exception:  # noqa: BLE001
         return None
     if samples.ndim != 2 or payoff.ndim != 1 or samples.shape[1] != payoff.shape[0]:

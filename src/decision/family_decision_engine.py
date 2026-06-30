@@ -795,7 +795,7 @@ class FamilyDecisionEngine:
             for d in guarded
             if d.direction_law_ok
             and self._has_side_aware_oof_reliability_evidence(d)
-            and d.economics.edge_lcb > 0.0
+            and self._selection_edge_lcb(d) > 0.0
             and d.economics.optimal_delta_u > 0.0
         )
 
@@ -1069,14 +1069,47 @@ class FamilyDecisionEngine:
         stake = max(stake, 1e-9)
         return float(d.economics.optimal_delta_u) / stake
 
-    def _edge_roi_lcb(self, d: CandidateDecision) -> float:
+    def _selection_cost(self, d: CandidateDecision) -> float:
+        cost_obj = (
+            d.economics.chosen_stake_cost
+            if d.economics.chosen_stake_cost is not None
+            else d.economics.cost
+        )
         try:
-            cost = float(d.economics.cost.value)
+            cost = float(cost_obj.value)
+        except Exception:  # noqa: BLE001
+            return float("inf")
+        if not (np.isfinite(cost) and cost > 0.0):
+            return float("inf")
+        return cost
+
+    def _selection_edge_lcb(self, d: CandidateDecision) -> float:
+        edge = (
+            d.economics.chosen_stake_edge_lcb
+            if d.economics.chosen_stake_edge_lcb is not None
+            else d.economics.edge_lcb
+        )
+        try:
+            return float(edge)
         except Exception:  # noqa: BLE001
             return float("-inf")
+
+    def _selection_point_ev(self, d: CandidateDecision) -> float:
+        point = (
+            d.economics.chosen_stake_point_ev
+            if d.economics.chosen_stake_point_ev is not None
+            else d.economics.point_ev
+        )
+        try:
+            return float(point)
+        except Exception:  # noqa: BLE001
+            return float("-inf")
+
+    def _edge_roi_lcb(self, d: CandidateDecision) -> float:
+        cost = self._selection_cost(d)
         if not (np.isfinite(cost) and cost > 0.0):
             return float("-inf")
-        return float(d.economics.edge_lcb) / cost
+        return self._selection_edge_lcb(d) / cost
 
     def _profit_lcb_usd(self, d: CandidateDecision) -> float:
         try:
@@ -1119,12 +1152,12 @@ class FamilyDecisionEngine:
 
     def _payoff_q_lcb(self, d: CandidateDecision) -> float:
         try:
-            cost = float(d.economics.cost.value)
+            cost = self._selection_cost(d)
             payoff_q_lcb = d.economics.payoff_q_lcb
             q_lcb = (
                 float(payoff_q_lcb)
                 if payoff_q_lcb is not None
-                else float(d.economics.edge_lcb) + cost
+                else self._selection_edge_lcb(d) + cost
             )
         except Exception:  # noqa: BLE001
             return float("-inf")
@@ -1140,10 +1173,7 @@ class FamilyDecisionEngine:
         low-confidence tails beat a high-confidence lower-ROI leg.
         """
         roi = self._edge_roi_lcb(d)
-        try:
-            cost = float(d.economics.cost.value)
-        except Exception:  # noqa: BLE001
-            return float("-inf")
+        cost = self._selection_cost(d)
         q_lcb = self._payoff_q_lcb(d)
         if not (
             np.isfinite(roi)
@@ -1162,7 +1192,7 @@ class FamilyDecisionEngine:
             self._profit_lcb_usd(d),
             self._utility_density(d),
             float(d.economics.optimal_delta_u),
-            -float(d.economics.cost.value),
+            -self._selection_cost(d),
         )
 
     def _roi_frontier_candidates(
@@ -1208,7 +1238,7 @@ class FamilyDecisionEngine:
             d.route.route_cost.executable
             and self._direction_admitted(d)
             and d.coherence_allows
-            and d.economics.edge_lcb > 0.0
+            and self._selection_edge_lcb(d) > 0.0
             and d.economics.optimal_delta_u > 0.0
             and live_candidate_passes(
                 d.economics,
@@ -1251,8 +1281,8 @@ class FamilyDecisionEngine:
         )
         if center_yes is None:
             return selected_decision
-        selected_cost = float(selected_decision.economics.cost.value)
-        center_cost = float(center_yes.economics.cost.value)
+        selected_cost = self._selection_cost(selected_decision)
+        center_cost = self._selection_cost(center_yes)
         if not (
             np.isfinite(selected_cost)
             and selected_cost > 0.0
@@ -1260,10 +1290,10 @@ class FamilyDecisionEngine:
             and center_cost > 0.0
         ):
             return selected_decision
-        selected_edge_density = selected_decision.economics.edge_lcb / selected_cost
-        center_edge_density = center_yes.economics.edge_lcb / center_cost
-        selected_point_density = selected_decision.economics.point_ev / selected_cost
-        center_point_density = center_yes.economics.point_ev / center_cost
+        selected_edge_density = self._selection_edge_lcb(selected_decision) / selected_cost
+        center_edge_density = self._selection_edge_lcb(center_yes) / center_cost
+        selected_point_density = self._selection_point_ev(selected_decision) / selected_cost
+        center_point_density = self._selection_point_ev(center_yes) / center_cost
         if (
             self._utility_density(center_yes) > self._utility_density(selected_decision)
             and center_edge_density > selected_edge_density
@@ -1292,7 +1322,7 @@ class FamilyDecisionEngine:
         pair_upside = pair_payoff - float(np.min(pair_payoff))
         if not np.all(pair_upside + 1e-9 >= center_payoff):
             return selected_decision
-        pair_cost = float(left.economics.cost.value) + float(right.economics.cost.value)
+        pair_cost = self._selection_cost(left) + self._selection_cost(right)
         if not (np.isfinite(pair_cost) and pair_cost > 0.0):
             return selected_decision
         try:
@@ -1300,8 +1330,8 @@ class FamilyDecisionEngine:
             # proxy. This is enough for canonicalization: center YES must be no
             # worse than the NO expression on both lower-bound and point edge
             # density, while tying up strictly less capital.
-            pair_edge = float(left.economics.edge_lcb) + float(right.economics.edge_lcb)
-            pair_point = float(left.economics.point_ev) + float(right.economics.point_ev)
+            pair_edge = self._selection_edge_lcb(left) + self._selection_edge_lcb(right)
+            pair_point = self._selection_point_ev(left) + self._selection_point_ev(right)
         except Exception:  # noqa: BLE001
             return selected_decision
         eps = 1e-9
@@ -1345,7 +1375,7 @@ class FamilyDecisionEngine:
             if (
                 not leg.route.route_cost.executable
                 or not leg.coherence_allows
-                or leg.economics.edge_lcb <= 0.0
+                or self._selection_edge_lcb(leg) <= 0.0
                 or leg.economics.optimal_delta_u <= 0.0
             ):
                 return None
@@ -1392,27 +1422,27 @@ class FamilyDecisionEngine:
             or not right.route.route_cost.executable
             or not left.coherence_allows
             or not right.coherence_allows
-            or left.economics.edge_lcb <= 0.0
-            or right.economics.edge_lcb <= 0.0
+            or self._selection_edge_lcb(left) <= 0.0
+            or self._selection_edge_lcb(right) <= 0.0
         ):
             return ()
 
         payoff = np.asarray(left.route.payoff_vector, dtype=float) + np.asarray(
             right.route.payoff_vector, dtype=float
         )
-        cost_sum = float(left.economics.cost.value) + float(right.economics.cost.value)
+        cost_sum = self._selection_cost(left) + self._selection_cost(right)
         if not (np.isfinite(cost_sum) and cost_sum > 0.0):
             return ()
         q_dot = float(np.asarray(joint_q.q, dtype=float) @ payoff)
         point_ev = q_dot - cost_sum
         edge_lcb = float(np.quantile(np.asarray(band.samples, dtype=float) @ payoff - cost_sum, band.alpha))
-        selected_cost = float(selected_decision.economics.cost.value)
+        selected_cost = self._selection_cost(selected_decision)
         if not (np.isfinite(selected_cost) and selected_cost > 0.0):
             return ()
         edge_density = edge_lcb / cost_sum
         point_density = point_ev / cost_sum
-        selected_edge_density = selected_decision.economics.edge_lcb / selected_cost
-        selected_point_density = selected_decision.economics.point_ev / selected_cost
+        selected_edge_density = self._selection_edge_lcb(selected_decision) / selected_cost
+        selected_point_density = self._selection_point_ev(selected_decision) / selected_cost
         dominates = (
             edge_lcb > 0.0
             and point_ev > 0.0
@@ -1498,6 +1528,7 @@ class FamilyDecisionEngine:
             return replace(
                 econ,
                 edge_lcb=float(edge_lcb),
+                chosen_stake_edge_lcb=float(edge_lcb),
                 delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
                 optimal_stake_usd=Decimal("0"),
                 optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
@@ -1512,7 +1543,7 @@ class FamilyDecisionEngine:
             if sizing is None or not sizing.is_tradeable:
                 return _blocked_economics(
                     d.economics,
-                    edge_lcb=float(q_safe) - float(d.economics.cost.value),
+                    edge_lcb=float(q_safe) - self._selection_cost(d),
                 )
             return compute_candidate_economics(
                 d.route,
@@ -1529,8 +1560,8 @@ class FamilyDecisionEngine:
         for d in scored:
             try:
                 econ = d.economics
-                cost = float(econ.cost.value)
-                edge_lcb = float(econ.edge_lcb)
+                cost = self._selection_cost(d)
+                edge_lcb = self._selection_edge_lcb(d)
                 q_lcb_route = float(econ.payoff_q_lcb)
                 if not math.isfinite(q_lcb_route) or not (0.0 <= q_lcb_route <= 1.0):
                     raise FamilyDecisionError("QKERNEL_PAYOFF_Q_LCB_MISSING")
@@ -1574,7 +1605,7 @@ class FamilyDecisionEngine:
             except Exception:  # noqa: BLE001 — guard failures are live-money abstains.
                 econ = d.economics
                 try:
-                    cost = float(econ.cost.value)
+                    cost = self._selection_cost(d)
                 except Exception:  # noqa: BLE001
                     cost = 1.0
                 new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
@@ -1622,6 +1653,7 @@ class FamilyDecisionEngine:
             return replace(
                 econ,
                 edge_lcb=float(edge_lcb),
+                chosen_stake_edge_lcb=float(edge_lcb),
                 delta_u_at_min=min(float(getattr(econ, "delta_u_at_min", 0.0) or 0.0), 0.0),
                 optimal_stake_usd=Decimal("0"),
                 optimal_delta_u=min(float(getattr(econ, "optimal_delta_u", 0.0) or 0.0), 0.0),
@@ -1636,7 +1668,7 @@ class FamilyDecisionEngine:
             if sizing is None or not sizing.is_tradeable:
                 return _blocked_economics(
                     d.economics,
-                    edge_lcb=float(q_safe) - float(d.economics.cost.value),
+                    edge_lcb=float(q_safe) - self._selection_cost(d),
                 )
             return compute_candidate_economics(
                 d.route,
@@ -1653,11 +1685,11 @@ class FamilyDecisionEngine:
         for d in scored:
             try:
                 econ = d.economics
-                cost = float(econ.cost.value)
+                cost = self._selection_cost(d)
                 prior_lcb = (
                     float(econ.payoff_q_lcb)
                     if econ.payoff_q_lcb is not None
-                    else float(econ.edge_lcb) + cost
+                    else self._selection_edge_lcb(d) + cost
                 )
                 raw_side_prob = float(econ.q_dot_payoff)
                 if not (
@@ -1694,7 +1726,7 @@ class FamilyDecisionEngine:
                     out.append(replace(d, economics=new_econ, **guard_fields))
                     continue
                 guarded_edge = q_safe - cost
-                if guarded_edge < float(econ.edge_lcb):
+                if guarded_edge < self._selection_edge_lcb(d):
                     new_econ = _recomputed_guarded_economics(d, q_safe=q_safe)
                     out.append(replace(d, economics=new_econ, **guard_fields))
                 else:
@@ -1702,7 +1734,7 @@ class FamilyDecisionEngine:
             except Exception:  # noqa: BLE001 — active selection guard faults fail closed.
                 econ = d.economics
                 try:
-                    cost = float(econ.cost.value)
+                    cost = self._selection_cost(d)
                 except Exception:  # noqa: BLE001
                     cost = 1.0
                 new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
@@ -1763,7 +1795,7 @@ class FamilyDecisionEngine:
         edge_survivors = [
             d
             for d in after_coherence
-            if d.economics.edge_lcb > 0.0 and d.economics.optimal_delta_u > 0.0
+            if self._selection_edge_lcb(d) > 0.0 and d.economics.optimal_delta_u > 0.0
         ]
         # The live pass is a final structural re-proof (executable route, native-side
         # proof present, coherence accepted, vector edge/DeltaU).
@@ -1784,18 +1816,14 @@ class FamilyDecisionEngine:
 
                 _tops = sorted(
                     scored,
-                    key=lambda d: (
-                        d.economics.edge_lcb
-                        if d.economics.edge_lcb is not None
-                        else float("-inf")
-                    ),
+                    key=self._selection_edge_lcb,
                     reverse=True,
                 )[:4]
                 _rows = "; ".join(
                     f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
                     f"adm={int(self._direction_admitted(d))} coh={int(d.coherence_allows)} "
                     f"exec={int(d.route.route_cost.executable)} "
-                    f"e={d.economics.edge_lcb:+.4f} dU={d.economics.optimal_delta_u:+.5f} "
+                    f"e={self._selection_edge_lcb(d):+.4f} dU={d.economics.optimal_delta_u:+.5f} "
                     f"dUmin={d.economics.delta_u_at_min:+.5f}"
                     for d in _tops
                 )
@@ -1833,8 +1861,8 @@ class FamilyDecisionEngine:
                     d.economics.optimal_delta_u,
                     self._edge_roi_lcb(d),
                     self._utility_density(d),
-                    d.economics.edge_lcb,
-                    -float(d.economics.cost.value),
+                    self._selection_edge_lcb(d),
+                    -self._selection_cost(d),
                 ),
             )
         else:
@@ -1843,8 +1871,8 @@ class FamilyDecisionEngine:
                 key=lambda d: (
                     self._utility_density(d),
                     d.economics.optimal_delta_u,
-                    d.economics.edge_lcb,
-                    -float(d.economics.cost.value),
+                    self._selection_edge_lcb(d),
+                    -self._selection_cost(d),
                 ),
             )
         return selected, None

@@ -1573,6 +1573,8 @@ def _write_heartbeat() -> None:
             "alive": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": get_mode(),
+            "pid": os.getpid(),
+            "process": "src.main",
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))

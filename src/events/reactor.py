@@ -2264,8 +2264,36 @@ class OpportunityEventReactor:
             # _transient_horizon_terminal).
             self._transient_requeue_reasons[event.event_id] = str(reason)
             return _EXECUTABLE_SNAPSHOT_RETRY
+        self._persist_terminal_no_submit_receipt(
+            receipt,
+            decision_time=decision_time,
+        )
         self._reject_event(event, stage, reason, result, receipt=receipt, decision_time=decision_time)
         return None
+
+    def _persist_terminal_no_submit_receipt(
+        self,
+        receipt: EventSubmissionReceipt | None,
+        *,
+        decision_time: datetime,
+    ) -> None:
+        """Materialize terminal no-submit decisions before rejection bookkeeping.
+
+        ``decision_certificates`` still distinguish VERIFIED no-submit certificates from
+        rejected terminal decisions. The receipt ledger is the per-event decision trace that
+        live observability, attribution, and redecision audits query; terminal economic
+        no-submits must not disappear just because the money-path blocker later writes a
+        compile failure/regret row. Transient blockers are filtered by the caller and remain
+        pending with no terminal receipt.
+        """
+        if receipt is None:
+            return
+        if receipt.side_effect_status != "NO_SUBMIT" or receipt.proof_accepted is not True:
+            return
+        self._no_submit_receipt_ledger.insert_idempotent(
+            receipt,
+            decision_time=decision_time,
+        )
 
     def _reject_event(
         self,

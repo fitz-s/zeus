@@ -1721,6 +1721,73 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
     assert status == "processed"
 
 
+def test_terminal_trade_score_no_submit_receipt_is_persisted_before_rejection():
+    conn, store = _store()
+    event = _forecast_event(target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    payload = json.loads(event.payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1",
+            family_id="family-1",
+            bin_label="80F",
+            direction="buy_yes",
+            q_live=0.51,
+            q_lcb_5pct=0.47,
+            c_fee_adjusted=0.56,
+            c_cost_95pct=0.56,
+            p_fill_lcb=1.0,
+            trade_score=-0.09,
+            trade_score_positive=False,
+            reason="TRADE_SCORE_NON_POSITIVE",
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.rejected == 1
+    assert _processing_status(conn, event.event_id) == "processed"
+    receipt_row = conn.execute(
+        """
+        SELECT side_effect_status, receipt_json, trade_score
+        FROM edli_no_submit_receipts
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert receipt_row is not None
+    assert receipt_row[0] == "NO_SUBMIT"
+    assert '"reason":"TRADE_SCORE_NON_POSITIVE"' in receipt_row[1]
+    assert receipt_row[2] == -0.09
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 1,
+        "regret": 1,
+        "dead_letter": 0,
+    }
+
+
 def test_submit_disabled_live_receipt_bridges_to_no_submit_receipt_table():
     conn, store = _store()
     event = _forecast_event()

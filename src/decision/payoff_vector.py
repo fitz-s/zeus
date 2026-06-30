@@ -249,6 +249,9 @@ class CandidateEconomics:
       the empirical qLCB guard), not reverse-derived downstream from ``edge_lcb``.
     * ``cost`` — the route's all-in cost as a typed ``ExecutionPrice`` (spec line 756).
     * ``route_id`` — the route this economics priced against (provenance).
+    * ``chosen_stake_cost`` — the same executable curve priced at ``optimal_stake_usd``.
+      When present, live selection must use this cost/edge pair because it is the
+      exact price boundary the submit path will carry.
     """
 
     candidate_id: str
@@ -261,6 +264,9 @@ class CandidateEconomics:
     cost: ExecutionPrice
     route_id: str
     payoff_q_lcb: float | None = None
+    chosen_stake_cost: ExecutionPrice | None = None
+    chosen_stake_point_ev: float | None = None
+    chosen_stake_edge_lcb: float | None = None
 
 
 # ===========================================================================
@@ -837,6 +843,32 @@ def compute_candidate_economics(
         guarded_payoff_q_lcb=q_guard,
     )
 
+    chosen_stake_cost = None
+    chosen_stake_point_ev = None
+    chosen_stake_edge_lcb = None
+    if (
+        optimal_stake > Decimal("0")
+        and optimal_delta_u > 0.0
+        and sizing_candidate.executable_cost_curve is not None
+    ):
+        try:
+            chosen_stake_cost = sizing_candidate.executable_cost_curve.avg_cost(
+                optimal_stake
+            )
+            if chosen_stake_cost.currency != "probability_units":
+                raise PayoffVectorError(
+                    "CHOSEN_STAKE_COST_NOT_PROBABILITY_UNITS: "
+                    f"route {candidate_route.route_cost.route_id!r} chosen-stake cost "
+                    f"currency is {chosen_stake_cost.currency!r}"
+                )
+            chosen_cost = float(chosen_stake_cost.value)
+            chosen_stake_point_ev = q_dot - chosen_cost
+            chosen_stake_edge_lcb = payoff_q_lcb - chosen_cost
+        except Exception:  # noqa: BLE001 - computed live economics must not trade unpriced stake.
+            chosen_stake_cost = None
+            chosen_stake_point_ev = None
+            chosen_stake_edge_lcb = float("-inf")
+
     return CandidateEconomics(
         candidate_id=candidate_route.candidate_id,
         point_ev=point_ev,
@@ -848,6 +880,9 @@ def compute_candidate_economics(
         cost=candidate_route.route_cost.avg_cost,
         route_id=candidate_route.route_cost.route_id,
         payoff_q_lcb=payoff_q_lcb,
+        chosen_stake_cost=chosen_stake_cost,
+        chosen_stake_point_ev=chosen_stake_point_ev,
+        chosen_stake_edge_lcb=chosen_stake_edge_lcb,
     )
 
 
@@ -882,8 +917,13 @@ def live_candidate_passes(
     the vector DeltaU at min and at s*, the route's executability, the native-side proof,
     and the coherence report.
     """
+    edge_lcb = (
+        economics.chosen_stake_edge_lcb
+        if economics.chosen_stake_edge_lcb is not None
+        else economics.edge_lcb
+    )
     return (
-        economics.edge_lcb > 0.0
+        edge_lcb > 0.0
         and economics.delta_u_at_min > 0.0
         and economics.optimal_delta_u > 0.0
         and candidate_route.route_cost.executable

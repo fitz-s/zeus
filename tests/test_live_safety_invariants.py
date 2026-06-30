@@ -3622,6 +3622,106 @@ def test_monitor_entry_selection_guard_does_not_force_exit_over_fresh_positive_e
     assert summary["entry_selection_guard_invalid_current_ev_holds"] == 1
 
 
+def test_monitor_entry_selection_guard_does_not_force_exit_on_immature_day0():
+    """Historical entry-guard invalidity cannot override an immature Day0 authority block."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, decision_id, intent_kind, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ENTRY', ?, ?)
+        """,
+        (
+            "cmd-unarmed-day0",
+            "pos-unarmed-day0",
+            "edli_exec_cmd:agg-unarmed-day0:edli_intent:agg-unarmed-day0:tok:tok:buy_yes",
+            "2026-06-29T12:00:00+00:00",
+            "2026-06-29T12:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, occurred_at, payload_json
+        ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            "agg-unarmed-day0",
+            "2026-06-29T12:00:00+00:00",
+            json.dumps(
+                {
+                    "direction": "buy_yes",
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "selection_guard_basis": "SIDE_NOT_ARMED",
+                        "selection_guard_abstained": False,
+                        "selection_guard_q_safe": 0.0,
+                        "selection_guard_cell_key": "YES|tail|nonmodal|pb2",
+                        "payoff_q_lcb": 0.0,
+                        "cost": 0.07,
+                        "edge_lcb": 0.0,
+                    },
+                }
+            ),
+        ),
+    )
+    pos = _make_position(
+        trade_id="pos-unarmed-day0",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+        shares=85.17,
+        chain_shares=85.17,
+        entry_method="qkernel_spine",
+        selected_method="day0_observation_remaining_window",
+    )
+    pos.applied_validations = [
+        "day0_observation_remaining_window",
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.012",
+    ]
+    pos.last_monitor_prob = 0.0
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = -0.031
+    pos.last_monitor_market_price = 0.031
+    pos.last_monitor_market_price_is_fresh = True
+    summary = {}
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=conn,
+        pos=pos,
+        exit_context=SimpleNamespace(best_bid=0.031),
+        summary=summary,
+    )
+
+    assert decision is not None
+    assert decision.should_exit is False
+    assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_HOLD_DAY0_IMMATURE"
+    assert "day0_high_extreme_not_mature:" in decision.reason
+    assert summary["entry_selection_guard_invalid_day0_immature_holds"] == 1
+
+
 def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_posterior():
     """Entry must not trade a stale posterior after live raw inputs have advanced."""
     from src.engine import event_reactor_adapter as adapter

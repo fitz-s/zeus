@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,136 @@ def _read_json(path: Path) -> Optional[dict]:
         return None
     except (OSError, json.JSONDecodeError, ValueError):
         return None
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _current_git_head() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_repo_root()),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    head = proc.stdout.strip()
+    return head or None
+
+
+def _runtime_code_surface(state_dir: Path) -> dict:
+    payload = _read_json(state_dir / "loaded_sha.json")
+    if payload is None:
+        return {"ok": False, "issue": "LOADED_SHA_MISSING"}
+    loaded_sha = str(
+        payload.get("loaded_sha")
+        or payload.get("boot_sha")
+        or payload.get("current_sha")
+        or ""
+    ).strip()
+    if not loaded_sha:
+        return {"ok": False, "issue": "LOADED_SHA_EMPTY", "loaded_sha": loaded_sha}
+    current_sha = _current_git_head()
+    if not current_sha:
+        return {
+            "ok": False,
+            "issue": "CURRENT_GIT_HEAD_UNAVAILABLE",
+            "loaded_sha": loaded_sha,
+        }
+    if loaded_sha != current_sha:
+        return {
+            "ok": False,
+            "issue": f"LOADED_SHA_MISMATCH:loaded={loaded_sha}:current={current_sha}",
+            "loaded_sha": loaded_sha,
+            "current_sha": current_sha,
+        }
+    return {
+        "ok": True,
+        "issue": None,
+        "loaded_sha": loaded_sha,
+        "current_sha": current_sha,
+    }
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _process_command_line(pid: int) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    command = proc.stdout.strip()
+    return command or None
+
+
+def _looks_like_live_main_command(command: str) -> bool:
+    normalized = command.replace("\\", "/")
+    return " -m src.main" in normalized or normalized.endswith(" -m src.main") or "src/main.py" in normalized
+
+
+def _main_daemon_surface(status_summary: Optional[dict], heartbeat: Optional[dict]) -> dict:
+    """Attest the main live daemon process when current surfaces cite a PID."""
+
+    status_process = status_summary.get("process") if isinstance(status_summary, dict) else None
+    status_pid = (
+        _int_or_none(status_process.get("pid"))
+        if isinstance(status_process, dict)
+        else None
+    )
+    heartbeat_pid = _int_or_none(heartbeat.get("pid")) if isinstance(heartbeat, dict) else None
+    if status_pid is None and heartbeat_pid is None:
+        return {"ok": True, "issue": None, "attested": False, "pid": None}
+    if status_pid is not None and heartbeat_pid is not None and status_pid != heartbeat_pid:
+        return {
+            "ok": False,
+            "issue": "MAIN_DAEMON_PID_MISMATCH",
+            "status_pid": status_pid,
+            "heartbeat_pid": heartbeat_pid,
+        }
+    pid = status_pid or heartbeat_pid
+    assert pid is not None
+    command = _process_command_line(pid)
+    if command is None:
+        return {
+            "ok": False,
+            "issue": "MAIN_DAEMON_PROCESS_NOT_FOUND",
+            "pid": pid,
+        }
+    if not _looks_like_live_main_command(command):
+        return {
+            "ok": False,
+            "issue": "MAIN_DAEMON_COMMAND_MISMATCH",
+            "pid": pid,
+            "command": command,
+        }
+    return {
+        "ok": True,
+        "issue": None,
+        "attested": True,
+        "pid": pid,
+        "command": command,
+    }
 
 
 def _age_seconds(ts_str: str, now: datetime) -> Optional[float]:
@@ -464,13 +595,15 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults six surfaces:
+    Consults eight surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
-      3. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
-      4. forecast_pipeline — current replacement/BPF scheduler health
-      5. status_summary — status_summary.json top-level timestamp freshness
-      6. execution_capability — entry/exit side-effect gate
+      3. runtime_code — loaded_sha.json vs current git HEAD
+      4. main_daemon — status/heartbeat PID still points at src.main
+      5. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
+      6. forecast_pipeline — current replacement/BPF scheduler health
+      7. status_summary — status_summary.json top-level timestamp freshness
+      8. execution_capability — entry/exit side-effect gate
 
     Writes state/live_health_composite.json atomically.
 
@@ -521,6 +654,16 @@ def compute_composite_live_health(
             hb_issue,
         )
 
+    runtime_code_surface = _runtime_code_surface(sd)
+    surfaces["runtime_code"] = runtime_code_surface
+    if not runtime_code_surface["ok"]:
+        failing.append("runtime_code")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "runtime_code",
+            runtime_code_surface["issue"],
+        )
+
     venue_surface = _venue_heartbeat_surface(sd, now)
     surfaces["venue_heartbeat"] = venue_surface
     if not venue_surface["ok"]:
@@ -529,6 +672,18 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "venue_heartbeat",
             venue_surface["issue"],
+        )
+
+    ss_path = sd / "status_summary.json"
+    ss_data = _read_json(ss_path)
+    main_daemon_surface = _main_daemon_surface(ss_data, hb_data)
+    surfaces["main_daemon"] = main_daemon_surface
+    if not main_daemon_surface["ok"]:
+        failing.append("main_daemon")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "main_daemon",
+            main_daemon_surface["issue"],
         )
 
     # ------------------------------------------------------------------ #
@@ -590,8 +745,6 @@ def compute_composite_live_health(
 
     # Surface 4: status_summary freshness                                 #
     # ------------------------------------------------------------------ #
-    ss_path = sd / "status_summary.json"
-    ss_data = _read_json(ss_path)
     if ss_data is None:
         ss_issue = "STATUS_SUMMARY_MISSING"
         ss_ok = False

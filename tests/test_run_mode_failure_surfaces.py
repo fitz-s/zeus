@@ -80,6 +80,9 @@ def _healthy_execution_capability() -> dict:
 def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
     """Write all composite surfaces in a healthy / fresh state."""
     cycle_time = _now_iso(offset_seconds)
+    current_head = live_health._current_git_head()
+    assert current_head, "test requires a git checkout with HEAD available"
+    _write(sd / "loaded_sha.json", {"loaded_sha": current_head, "generated_at": cycle_time})
     _write(
         sd / "daemon-heartbeat.json",
         {"alive": True, "timestamp": cycle_time, "mode": "live"},
@@ -311,6 +314,8 @@ def test_all_healthy_surfaces_yield_healthy(tmp_path: Path) -> None:
     assert result["failing_surfaces"] == []
     for surface in (
         "heartbeat",
+        "runtime_code",
+        "main_daemon",
         "venue_heartbeat",
         "run_mode",
         "status_summary",
@@ -734,6 +739,51 @@ def test_venue_heartbeat_lost_yields_degraded_even_when_daemon_heartbeat_is_fres
     assert result["surfaces"]["heartbeat"]["ok"] is True
     assert "venue_heartbeat" in result["failing_surfaces"]
     assert result["surfaces"]["venue_heartbeat"]["issue"] == "VENUE_HEARTBEAT_LOST"
+
+
+def test_loaded_sha_mismatch_yields_degraded_even_when_heartbeat_is_fresh(tmp_path: Path) -> None:
+    """A fresh heartbeat from an old checkout is not current live authority."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "loaded_sha.json",
+        {"loaded_sha": "0" * 40, "generated_at": _now_iso(-10)},
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert "runtime_code" in result["failing_surfaces"]
+    assert result["surfaces"]["runtime_code"]["ok"] is False
+    assert result["surfaces"]["runtime_code"]["issue"].startswith("LOADED_SHA_MISMATCH")
+
+
+def test_status_summary_dead_main_pid_yields_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale status_summary PID cannot certify the live daemon is still running."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    status_path = sd / "status_summary.json"
+    status = json.loads(status_path.read_text())
+    status["process"] = {
+        "pid": 999999,
+        "mode": "live",
+        "version": "zeus_v2",
+        "pulse_only": False,
+    }
+    _write(status_path, status)
+    monkeypatch.setattr(live_health, "_process_command_line", lambda pid: None)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["status"] == "DEGRADED"
+    assert "main_daemon" in result["failing_surfaces"]
+    assert result["surfaces"]["main_daemon"]["issue"] == "MAIN_DAEMON_PROCESS_NOT_FOUND"
 
 
 def test_command_recovery_mutation_summary_requires_allocator_refresh() -> None:

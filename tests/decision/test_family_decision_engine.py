@@ -152,10 +152,10 @@ def _selection_calibrator_identity(monkeypatch):
             q_safe=raw,
             trade=True,
             abstained=False,
-            cell_key="test|SIDE_NOT_ARMED",
+            cell_key="test|IDENTITY",
             L_g=float("nan"),
             n_g=0,
-            basis="SIDE_NOT_ARMED",
+            basis="TEST_IDENTITY",
         )
 
     monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _identity)
@@ -582,6 +582,9 @@ def _hand_decision(
     q_lcb_guard_abstained: bool = False,
     q_lcb_guard_cell_key: str = "",
     payoff_q_lcb: Optional[float] = None,
+    chosen_stake_cost: Optional[float] = None,
+    chosen_stake_edge_lcb: Optional[float] = None,
+    chosen_stake_point_ev: Optional[float] = None,
 ) -> CandidateDecision:
     """A hand-built CandidateDecision (direction-law-legal + coherent) for the _select test."""
     economics = CandidateEconomics(
@@ -595,6 +598,18 @@ def _hand_decision(
         cost=route.route_cost.avg_cost,
         route_id=route.route_cost.route_id,
         payoff_q_lcb=payoff_q_lcb,
+        chosen_stake_cost=(
+            ExecutionPrice(
+                chosen_stake_cost,
+                price_type="fee_adjusted",
+                fee_deducted=True,
+                currency="probability_units",
+            )
+            if chosen_stake_cost is not None
+            else None
+        ),
+        chosen_stake_edge_lcb=chosen_stake_edge_lcb,
+        chosen_stake_point_ev=chosen_stake_point_ev,
     )
     return CandidateDecision(
         route=route,
@@ -957,6 +972,45 @@ def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
 
     assert selected is None
     assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+
+
+def test_select_roi_frontier_uses_chosen_stake_cost_not_route_cost(monkeypatch):
+    """A route that is cheap only at scalar admission cannot survive live selection."""
+
+    case = _case()
+    space = _outcome_space(case)
+    stale_top_of_book = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.01),
+        edge_lcb=0.20,
+        optimal_delta_u=0.20,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("25"),
+        chosen_stake_cost=0.50,
+        chosen_stake_edge_lcb=-0.29,
+        chosen_stake_point_ev=-0.10,
+        payoff_q_lcb=0.21,
+    )
+    honest_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.35),
+        edge_lcb=0.08,
+        optimal_delta_u=0.06,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.08,
+        optimal_stake_usd=Decimal("25"),
+        payoff_q_lcb=0.43,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([stale_top_of_book, honest_no])
+
+    assert engine._selection_edge_lcb(stale_top_of_book) < 0.0
+    assert selected is honest_no
+    assert reason is None
 
 
 def test_select_roi_frontier_allows_direct_roi_candidate_below_growth_density(monkeypatch):
