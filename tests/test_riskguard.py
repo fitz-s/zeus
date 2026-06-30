@@ -638,6 +638,34 @@ class TestMetrics:
         assert [row["id"] for row in selected] == ["learning-ready-1", "learning-ready-2"]
 
 
+def _settlement_row(
+    *,
+    trade_id: str,
+    strategy: str,
+    p_posterior: float,
+    outcome: int,
+    pnl: float = 0.0,
+) -> dict:
+    return {
+        "trade_id": trade_id,
+        "strategy": strategy,
+        "p_posterior": p_posterior,
+        "outcome": outcome,
+        "source": "position_events",
+        "authority_level": "VERIFIED",
+        "metric_ready": True,
+        "learning_snapshot_ready": True,
+        "canonical_payload_complete": True,
+        "is_degraded": False,
+        "pnl": pnl,
+        "city": "NYC",
+        "range_label": "29C",
+        "target_date": "2026-04-01",
+        "direction": "buy_yes",
+        "settled_at": "2026-04-02T00:00:00+00:00",
+    }
+
+
 
 class TestRiskEvaluation:
     def test_brier_green(self):
@@ -1349,7 +1377,15 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.7, "outcome": 1, "source": "position_events"}],
+            lambda conn, limit=50, **kwargs: [
+                {
+                    "p_posterior": 0.7,
+                    "outcome": 1,
+                    "source": "position_events",
+                    "metric_ready": True,
+                    "learning_snapshot_ready": True,
+                }
+            ],
         )
 
         riskguard_module.tick()
@@ -1378,7 +1414,15 @@ class TestRiskGuardSettlementSource:
         monkeypatch.setattr(
             riskguard_module,
             "query_authoritative_settlement_rows",
-            lambda conn, limit=50, **kwargs: [{"p_posterior": 0.4, "outcome": 0, "source": "decision_log"}],
+            lambda conn, limit=50, **kwargs: [
+                {
+                    "p_posterior": 0.4,
+                    "outcome": 0,
+                    "source": "decision_log",
+                    "metric_ready": True,
+                    "learning_snapshot_ready": True,
+                }
+            ],
         )
 
         riskguard_module.tick()
@@ -2337,6 +2381,151 @@ class TestStrategyPolicyResolver:
         assert details["durable_risk_action_emission_status"] == "skipped_missing_table"
         assert details["durable_risk_action_emitted_count"] == 0
         assert details["durable_risk_action_expired_count"] == 0
+
+    def test_tick_localizes_yellow_brier_to_durable_strategy_gate(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.53,
+                outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        from src.runtime import bankroll_provider as _bp
+
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=211.37,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, brier, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+        gate_row = get_connection(zeus_db).execute(
+            """
+            SELECT strategy_key, action_type, value, source, status, reason
+            FROM risk_actions
+            WHERE action_id = 'riskguard:gate:opening_inertia'
+            """
+        ).fetchone()
+
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert risk_row["brier"] > 0.25
+        assert details["portfolio_brier_level"] == "YELLOW"
+        assert details["brier_level"] == "GREEN"
+        assert details["brier_strategy_localization"]["status"] == "localized_to_durable_strategy_gates"
+        assert details["recommended_strategy_gates"] == ["opening_inertia"]
+        assert details["recommended_strategy_gate_reasons"]["opening_inertia"] == [
+            "brier_degraded(level=YELLOW,brier=0.2809,sample=45)"
+        ]
+        assert details["brier_strategy_breakdown"]["by_strategy"]["center_buy"]["level"] == "GREEN"
+        assert dict(gate_row) == {
+            "strategy_key": "opening_inertia",
+            "action_type": "gate",
+            "value": "true",
+            "source": "riskguard",
+            "status": "active",
+            "reason": "brier_degraded(level=YELLOW,brier=0.2809,sample=45)",
+        }
+
+    def test_tick_keeps_global_yellow_when_brier_strategy_gate_cannot_persist(self, monkeypatch, tmp_path):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        rows = [
+            _settlement_row(
+                trade_id=f"opening-{i}",
+                strategy="opening_inertia",
+                p_posterior=0.53,
+                outcome=0,
+            )
+            for i in range(45)
+        ] + [
+            _settlement_row(
+                trade_id=f"center-{i}",
+                strategy="center_buy",
+                p_posterior=0.80,
+                outcome=1,
+            )
+            for i in range(5)
+        ]
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db, drop_risk_actions=True)
+        from src.runtime import bankroll_provider as _bp
+
+        monkeypatch.setattr(
+            _bp,
+            "current",
+            lambda **_kw: _bp.BankrollOfRecord(
+                value_usd=211.37,
+                fetched_at="2026-04-01T00:00:00+00:00",
+                source="polymarket_wallet",
+                authority="canonical",
+                staleness_seconds=0.0,
+                cached=False,
+            ),
+        )
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(riskguard_module, "load_portfolio", lambda: PortfolioState(bankroll=211.37))
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: strategy_tracker_module.StrategyTracker())
+        monkeypatch.setattr(riskguard_module, "query_authoritative_settlement_rows", lambda *_, **__: rows)
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, brier, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
+        assert risk_row["brier"] > 0.25
+        assert details["portfolio_brier_level"] == "YELLOW"
+        assert details["brier_level"] == "YELLOW"
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unavailable_global_yellow"
+        )
+        assert details["durable_risk_action_emission_status"] == "skipped_missing_table"
+        assert details["recommended_strategy_gates"] == ["opening_inertia"]
 
     def test_tick_turns_yellow_when_strategy_tracker_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"

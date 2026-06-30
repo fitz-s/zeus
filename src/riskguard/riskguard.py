@@ -42,6 +42,7 @@ from src.riskguard.risk_level import RiskLevel, overall_level
 from src.runtime import bankroll_provider
 from src.runtime.bankroll_provider import BankrollOfRecord
 from src.state.db import (
+    CANONICAL_STRATEGY_KEYS,
     RISK_DB_PATH,
     get_connection,
     get_trade_connection_with_world_required,
@@ -1104,6 +1105,51 @@ def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SET
     return metric_rows
 
 
+def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
+    """Per-strategy probability-quality attribution for localized protection.
+
+    Portfolio-level Brier still protects the system. When the breach is only
+    YELLOW and every learning-ready row carries a canonical strategy key, the
+    bad strategy can be halted through durable ``risk_actions`` instead of
+    freezing every other strategy. Unknown/unclassified rows keep the global
+    YELLOW because there is no safe strategy-local enforcement target.
+    """
+
+    buckets: dict[str, dict[str, object]] = {}
+    unclassified_count = 0
+    for row in rows:
+        strategy = str(row.get("strategy") or "unclassified")
+        if strategy not in CANONICAL_STRATEGY_KEYS:
+            unclassified_count += 1
+            continue
+        bucket = buckets.setdefault(strategy, {"p": [], "o": []})
+        bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
+        bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+
+    by_strategy: dict[str, dict[str, object]] = {}
+    degraded: dict[str, dict[str, object]] = {}
+    for strategy, bucket in sorted(buckets.items()):
+        p_values = list(bucket["p"])  # type: ignore[index]
+        outcomes = list(bucket["o"])  # type: ignore[index]
+        score = brier_score(p_values, outcomes)
+        level = evaluate_brier(score, thresholds)
+        payload = {
+            "sample_size": len(p_values),
+            "brier": round(float(score), 6),
+            "level": level.value,
+        }
+        by_strategy[strategy] = payload
+        if level != RiskLevel.GREEN:
+            degraded[strategy] = payload
+
+    return {
+        "by_strategy": by_strategy,
+        "degraded_strategies": degraded,
+        "unclassified_count": unclassified_count,
+        "classified_count": sum(int(row["sample_size"]) for row in by_strategy.values()),
+    }
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
@@ -1712,8 +1758,22 @@ def _tick_once() -> RiskLevel:
         b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
         d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
 
-        # Evaluate levels
-        brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        # Evaluate levels. Portfolio Brier is the headline quality metric, but
+        # a YELLOW breach that is fully attributable to canonical strategies can
+        # be enforced through durable strategy gates. Stronger ORANGE/RED
+        # breaches remain global fail-closed.
+        portfolio_brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        brier_level = portfolio_brier_level
+        brier_strategy_breakdown = _strategy_brier_breakdown(brier_metric_rows, thresholds) if p_forecasts else {
+            "by_strategy": {},
+            "degraded_strategies": {},
+            "unclassified_count": 0,
+            "classified_count": 0,
+        }
+        brier_strategy_localization: dict[str, object] = {
+            "status": "not_applicable",
+            "reason": "portfolio_brier_green",
+        }
         settlement_quality_level = RiskLevel.GREEN
         if settlement_rows and not settlement_metric_ready_rows:
             settlement_quality_level = RiskLevel.RED
@@ -1724,6 +1784,43 @@ def _tick_once() -> RiskLevel:
         execution_observed = execution_overall["filled"] + execution_overall["rejected"]
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
+        if (
+            portfolio_brier_level == RiskLevel.YELLOW
+            and isinstance(degraded_brier_strategies, dict)
+            and degraded_brier_strategies
+            and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
+        ):
+            brier_strategy_localization = {
+                "status": "pending_durable_strategy_gate",
+                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
+            }
+            for strategy, payload in sorted(degraded_brier_strategies.items()):
+                if not isinstance(payload, dict):
+                    continue
+                _append_reason(
+                    recommended_strategy_gate_reasons,
+                    str(strategy),
+                    (
+                        "brier_degraded("
+                        f"level={payload.get('level')},"
+                        f"brier={payload.get('brier')},"
+                        f"sample={payload.get('sample_size')}"
+                        ")"
+                    ),
+                )
+        elif portfolio_brier_level != RiskLevel.GREEN:
+            brier_strategy_localization = {
+                "status": "not_localized",
+                "reason": "portfolio_brier_requires_global_level",
+                "portfolio_brier_level": portfolio_brier_level.value,
+                "unclassified_count": int(brier_strategy_breakdown.get("unclassified_count", 0) or 0),
+                "degraded_strategy_count": (
+                    len(degraded_brier_strategies)
+                    if isinstance(degraded_brier_strategies, dict)
+                    else 0
+                ),
+            }
         if execution_overall["fill_rate"] is not None and execution_observed >= 10 and execution_overall["fill_rate"] < 0.3:
             execution_quality_level = RiskLevel.YELLOW
             _append_reason(
@@ -1776,6 +1873,21 @@ def _tick_once() -> RiskLevel:
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
             now=now,
         )
+        if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
+            if durable_action_status.get("status") == "emitted":
+                brier_level = RiskLevel.GREEN
+                brier_strategy_localization = {
+                    **brier_strategy_localization,
+                    "status": "localized_to_durable_strategy_gates",
+                    "durable_risk_action_status": durable_action_status.get("status"),
+                }
+            else:
+                brier_level = portfolio_brier_level
+                brier_strategy_localization = {
+                    **brier_strategy_localization,
+                    "status": "durable_strategy_gate_unavailable_global_yellow",
+                    "durable_risk_action_status": durable_action_status.get("status"),
+                }
 
         total_realized_pnl = sum(bucket.get("realized_pnl_30d", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
         total_unrealized_pnl = sum(bucket.get("unrealized_pnl", 0.0) for bucket in strategy_health_snapshot.get("by_strategy", {}).values())
@@ -1858,6 +1970,9 @@ def _tick_once() -> RiskLevel:
             level.value, b_score, d_accuracy, None,
             json.dumps({
                 "brier_level": brier_level.value,
+                "portfolio_brier_level": portfolio_brier_level.value,
+                "brier_strategy_breakdown": brier_strategy_breakdown,
+                "brier_strategy_localization": brier_strategy_localization,
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
                 "strategy_signal_level": strategy_signal_level.value,
