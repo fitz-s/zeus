@@ -14168,6 +14168,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             repair_confirmed_chain_absence_positive_projections,
             "confirmed_chain_absence_projection_repair",
         )
+        from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+        _boot_db_pass(
+            "recorded_exit_fill_projection",
+            reconcile_recorded_exit_fill_projections,
+            "recorded_exit_fill_projection",
+            advanced_key="projected",
+            fold_stayed=False,
+            observed_at=started_at,
+        )
         _boot_db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
@@ -14288,6 +14298,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "confirmed_chain_absence_projection_repair",
             repair_confirmed_chain_absence_positive_projections,
             "confirmed_chain_absence_projection_repair",
+        )
+        from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+        _db_pass(
+            "recorded_exit_fill_projection",
+            reconcile_recorded_exit_fill_projections,
+            "recorded_exit_fill_projection",
+            advanced_key="projected",
+            fold_stayed=False,
+            observed_at=started_at,
         )
         summary["scope"] = scope
         summary["restart_preflight_narrow"] = True

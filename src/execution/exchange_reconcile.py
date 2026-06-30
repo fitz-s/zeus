@@ -2180,6 +2180,16 @@ def _reconcile_recorded_exit_fill_projections(
     return summary
 
 
+def reconcile_recorded_exit_fill_projections(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime | str | None = None,
+) -> dict[str, int]:
+    """Repair confirmed EXIT sell fills without running entry maker-fill scans."""
+
+    return _reconcile_recorded_exit_fill_projections(conn, observed_at=_coerce_dt(observed_at))
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",

@@ -583,6 +583,100 @@ def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path
     assert "recorded_maker_fill_economics" not in summary
 
 
+def test_boot_fast_scope_projects_confirmed_exit_fill_without_full_maker_scan(monkeypatch, tmp_path):
+    """Boot-fast may repair closed exit projection debt without running full maker-fill maintenance."""
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-boot-fast-exit-fill.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    token = "boot-fast-exit-fill-token"
+    h.seed_position_baseline(
+        seed_conn,
+        position_id="pos-boot-fast-exit-fill",
+        order_id="ord-boot-fast-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed',
+               chain_state = 'synced',
+               token_id = ?,
+               shares = 21.42,
+               chain_shares = 21.42,
+               cost_basis_usd = 12.85,
+               chain_cost_basis_usd = 12.85,
+               entry_price = 0.60,
+               order_status = 'sell_filled',
+               exit_price = 0.57,
+               updated_at = ?
+         WHERE position_id = 'pos-boot-fast-exit-fill'
+        """,
+        (token, h.NOW.isoformat()),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id="cmd-boot-fast-exit-fill",
+        venue_order_id="ord-boot-fast-exit-fill",
+        position_id="pos-boot-fast-exit-fill",
+        token_id=token,
+        side="SELL",
+        size=21.42,
+        price=0.57,
+        state="FILLED",
+    )
+    h.append_trade_fact(
+        seed_conn,
+        command_id="cmd-boot-fast-exit-fill",
+        venue_order_id="ord-boot-fast-exit-fill",
+        token_id=token,
+        trade_id="trade-boot-fast-exit-fill",
+        size="21.42",
+        fill_price="0.57",
+        state="CONFIRMED",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(recorder)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="boot_fast",
+    )
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["recorded_exit_fill_projection"]["projected"] == 1
+    assert "recorded_maker_fill_economics" not in summary
+    assert recorder.client_calls == []
+    check_conn = sqlite3.connect(str(db_path))
+    check_conn.row_factory = sqlite3.Row
+    projection = check_conn.execute(
+        """
+        SELECT phase, order_status, shares, chain_shares, chain_avg_price,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-boot-fast-exit-fill'
+        """
+    ).fetchone()
+    check_conn.close()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+        "shares": 21.42,
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
+    }
+
+
 def test_live_tick_scope_projects_live_order_positive_matched_size(monkeypatch, tmp_path):
     """Boot/live cadence must ingest partial maker fills before redecision."""
     import tests.test_command_recovery as h
@@ -853,6 +947,99 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
         "abort_reason": "SHIFT_BIN_OLD_LEG_ECONOMICALLY_CLOSED_BY_COMMAND_RECOVERY",
     }
     check_conn.close()
+
+
+def test_restart_preflight_scope_projects_confirmed_exit_fills_before_preflight(monkeypatch, tmp_path):
+    """Deploy restart recovery must clear closed sell projection debt before read-only preflight."""
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-restart-exit-fill.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    init_schema(seed_conn)
+    token = "restart-exit-fill-token"
+    h.seed_position_baseline(
+        seed_conn,
+        position_id="pos-restart-exit-fill",
+        order_id="ord-restart-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed',
+               chain_state = 'synced',
+               token_id = ?,
+               shares = 33.15,
+               chain_shares = 33.15,
+               cost_basis_usd = 19.89,
+               chain_cost_basis_usd = 19.89,
+               entry_price = 0.60,
+               order_status = 'sell_filled',
+               exit_price = 0.55,
+               updated_at = ?
+         WHERE position_id = 'pos-restart-exit-fill'
+        """,
+        (token, h.NOW.isoformat()),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id="cmd-restart-exit-fill",
+        venue_order_id="ord-restart-exit-fill",
+        position_id="pos-restart-exit-fill",
+        token_id=token,
+        side="SELL",
+        size=33.15,
+        price=0.55,
+        state="FILLED",
+    )
+    h.append_trade_fact(
+        seed_conn,
+        command_id="cmd-restart-exit-fill",
+        venue_order_id="ord-restart-exit-fill",
+        token_id=token,
+        trade_id="trade-restart-exit-fill",
+        size="33.15",
+        fill_price="0.55",
+        state="CONFIRMED",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(recorder)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="restart_preflight",
+    )
+
+    assert summary["scope"] == "restart_preflight"
+    assert summary["restart_preflight_narrow"] is True
+    assert summary["recorded_exit_fill_projection"]["projected"] == 1
+    check_conn = sqlite3.connect(str(db_path))
+    check_conn.row_factory = sqlite3.Row
+    projection = check_conn.execute(
+        """
+        SELECT phase, order_status, shares, chain_shares, chain_avg_price,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-restart-exit-fill'
+        """
+    ).fetchone()
+    check_conn.close()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+        "shares": 33.15,
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
+    }
 
 
 def test_closed_shift_bin_release_reads_attached_world_table(tmp_path):
