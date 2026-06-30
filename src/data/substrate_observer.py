@@ -66,6 +66,7 @@ from src.data.substrate_priority import (
     money_path_substrate_priority_request,
     record_money_path_substrate_priority_receipt,
 )
+from src.contracts.canonical_lifecycle import VenueOrderStatus
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
 logger = logging.getLogger("zeus.substrate_observer")
@@ -592,7 +593,7 @@ def _open_rest_scope_rows_for_refresh(
                     continue
             except ValueError:
                 continue
-        if str(fact[0] or "") == "PARTIALLY_MATCHED" and not raw_remaining:
+        if str(fact[0] or "") == VenueOrderStatus.PARTIALLY_MATCHED and not raw_remaining:
             continue
         position_id = str(row[1] or "")
         if not position_id:

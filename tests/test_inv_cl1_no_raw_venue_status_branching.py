@@ -45,7 +45,6 @@ def _is_exempt(path: Path) -> bool:
 # Migration baseline (2026-06-29): files that still branch on raw venue status.
 # This set may only SHRINK. Each cutover step removes entries; none may be added.
 _BASELINE_OFFENDERS = frozenset({
-    "src/data/substrate_observer.py",
     "src/execution/command_recovery.py",
     "src/execution/executor.py",
     "src/execution/exit_lifecycle.py",
