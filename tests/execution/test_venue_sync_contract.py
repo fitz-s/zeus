@@ -1042,6 +1042,100 @@ def test_restart_preflight_scope_projects_confirmed_exit_fills_before_preflight(
     }
 
 
+def test_restart_preflight_projects_matched_exit_fills_before_preflight(monkeypatch, tmp_path):
+    """Matched full exit fills are terminal enough to clear stale local exposure."""
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-restart-matched-exit-fill.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+
+    init_schema(seed_conn)
+    token = "restart-matched-exit-fill-token"
+    h.seed_position_baseline(
+        seed_conn,
+        position_id="pos-restart-matched-exit-fill",
+        order_id="ord-restart-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed',
+               chain_state = 'synced',
+               token_id = ?,
+               shares = 33.15,
+               chain_shares = 33.15,
+               cost_basis_usd = 19.89,
+               chain_cost_basis_usd = 19.89,
+               entry_price = 0.60,
+               order_status = 'sell_filled',
+               exit_price = 0.55,
+               updated_at = ?
+         WHERE position_id = 'pos-restart-matched-exit-fill'
+        """,
+        (token, h.NOW.isoformat()),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id="cmd-restart-matched-exit-fill",
+        venue_order_id="ord-restart-matched-exit-fill",
+        position_id="pos-restart-matched-exit-fill",
+        token_id=token,
+        side="SELL",
+        size=33.15,
+        price=0.55,
+        state="FILLED",
+    )
+    h.append_trade_fact(
+        seed_conn,
+        command_id="cmd-restart-matched-exit-fill",
+        venue_order_id="ord-restart-matched-exit-fill",
+        token_id=token,
+        trade_id="trade-restart-matched-exit-fill",
+        size="33.15",
+        fill_price="0.55",
+        state="MATCHED",
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    client = _RecordingClient(recorder)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="restart_preflight",
+    )
+
+    assert summary["scope"] == "restart_preflight"
+    assert summary["restart_preflight_narrow"] is True
+    assert summary["recorded_exit_fill_projection"]["projected"] == 1
+    check_conn = sqlite3.connect(str(db_path))
+    check_conn.row_factory = sqlite3.Row
+    projection = check_conn.execute(
+        """
+        SELECT phase, order_status, shares, chain_shares, chain_avg_price,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-restart-matched-exit-fill'
+        """
+    ).fetchone()
+    check_conn.close()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "order_status": "sell_filled",
+        "shares": 33.15,
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
+    }
+
+
 def test_closed_shift_bin_release_reads_attached_world_table(tmp_path):
     """Production keeps the rebalance lease in world.db attached to the trade conn."""
     from src.execution.command_recovery import release_closed_shift_bin_exit_leases

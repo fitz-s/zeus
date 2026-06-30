@@ -2094,12 +2094,15 @@ def _reconcile_recorded_exit_fill_projections(
     *,
     observed_at: datetime,
 ) -> dict[str, int]:
-    """Project already-recorded confirmed exit fills into lifecycle state.
+    """Project recorded exit fills into lifecycle state.
 
     command_recovery calls reconcile_recorded_maker_fill_economics every cycle
     as the local recorded-trade repair hook.  This keeps confirmed exit
     self-healing local: the daemon needs only the command, trade fact, and
     position projection already in SQLite, not a fresh full venue resweep.
+    Matched/mined trade facts are admitted only for already economically closed
+    sell projections so restart repair can clear stale local exposure without
+    bypassing finality waits for active/pending exits.
     """
 
     summary = {"scanned": 0, "projected": 0, "stayed": 0, "errors": 0}
@@ -2128,7 +2131,14 @@ def _reconcile_recorded_exit_fill_projections(
             ON cmd.command_id = tf.command_id
           JOIN position_current pc
             ON pc.position_id = cmd.position_id
-         WHERE tf.state = 'CONFIRMED'
+         WHERE (
+               UPPER(COALESCE(tf.state, '')) = 'CONFIRMED'
+               OR (
+                    UPPER(COALESCE(tf.state, '')) IN ('MATCHED', 'MINED')
+                    AND pc.phase = 'economically_closed'
+                    AND pc.order_status = 'sell_filled'
+                  )
+           )
            AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
            AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed', 'quarantined')
