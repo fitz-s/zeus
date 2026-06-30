@@ -259,24 +259,36 @@ def test_canonical_a9_matches_live_exit_price_outcome(settled: bool, direction: 
     assert canonical_win == live_win
 
 
-def test_no_scoring_file_reads_event_outcome_type() -> None:
-    # INV ratchet: the corrupt event-level settlement_outcomes.outcome_type must NEVER be
-    # a Brier/calibration/learning TARGET. The scoring organs grade from
-    # outcome_fact.outcome / settlement_attribution.won / winning_bin (A8/A9). Locks the
-    # verified-clean state (2026-06-29: zero offenders) so a regression fails loudly.
+def test_event_outcome_type_confined_to_sanctioned_modules() -> None:
+    # Broadened ratchet (consult 6a42bc3d): the corrupt event-level settlement_outcomes.
+    # outcome_type may appear ONLY in the settlement-storage / legacy-bridge / schema /
+    # migration / backfill modules — NEVER in a scoring / learning / ARM / calibration path
+    # as a target (those grade A9 from outcome_fact.outcome / attribution.won / winning_bin).
+    # Any new src/ or scripts/ file referencing it fails until explicitly classified here.
     import pathlib
     repo = pathlib.Path(__file__).resolve().parents[1]
-    scoring_files = (
-        "src/riskguard/riskguard.py",
-        "src/analysis/settlement_skill_attribution.py",
-        "src/engine/replay_selection_coverage.py",
-    )
+    allow = {
+        "src/contracts/settlement_outcome.py",
+        "src/contracts/settlement_axes.py",
+        "src/contracts/settlement_resolution.py",
+        "src/state/db.py",
+        "src/state/db_writer_lock.py",
+        "scripts/backfill_settlement_outcome_type.py",
+    }
     offenders = []
-    for rel in scoring_files:
-        for i, line in enumerate(repo.joinpath(rel).read_text().splitlines(), 1):
-            if "outcome_type" in line and "outcome_type_raw" not in line and not line.lstrip().startswith("#"):
-                offenders.append(f"{rel}:{i}: {line.strip()}")
-    assert not offenders, "scoring code references event-level outcome_type: " + " | ".join(offenders)
+    for base in ("src", "scripts"):
+        for py in (repo / base).rglob("*.py"):
+            rel = py.relative_to(repo).as_posix()
+            if rel in allow or "/schema/" in rel or "migration" in rel or "backfill" in rel:
+                continue
+            for i, line in enumerate(py.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                if "outcome_type" in line and "outcome_type_raw" not in line and not line.lstrip().startswith("#"):
+                    offenders.append(f"{rel}:{i}: {line.strip()}")
+    assert not offenders, (
+        "settlement_outcomes.outcome_type referenced outside the sanctioned storage/legacy "
+        "modules — it must never become a scoring/learning target (derive A9 from "
+        "outcome_fact.outcome / attribution.won). Classify or remove: " + " | ".join(offenders[:10])
+    )
 
 
 # --- A10 redemption-accounting axis (consult 6a42bc3d: a distinct third axis) ---- #
@@ -321,3 +333,21 @@ def test_redemption_phase_covers_every_live_settlement_state() -> None:
     for st in SettlementState:
         phase = redemption_accounting_phase(st.value)
         assert phase is not RedemptionAccountingPhase.NOT_RECORDED, f"{st.value} unmapped"
+
+
+# --- review hardening (consult 6a42bc3d [S2]): unknown non-null outcome_type fails closed --- #
+
+def test_unknown_nonnull_outcome_type_fails_closed_to_unresolved() -> None:
+    # A non-null UNKNOWN integer (writer/schema bug or a future enum value) must NOT be
+    # promoted via the authority+winning_bin fallback; it fails closed to UNRESOLVED. The
+    # authority fallback applies ONLY when outcome_type IS NULL.
+    assert legacy_outcome_type_to_resolution_state(
+        999, authority="VERIFIED", winning_bin="21-22C"
+    ) is SettlementResolutionState.UNRESOLVED
+
+
+def test_known_outcome_type_ignores_authority_fallback() -> None:
+    # A known non-null value is authoritative regardless of authority/winning_bin.
+    assert legacy_outcome_type_to_resolution_state(
+        0, authority="VERIFIED", winning_bin="21-22C"
+    ) is SettlementResolutionState.UNRESOLVED  # ot=0 -> UNRESOLVED, not VENUE_RESOLVED

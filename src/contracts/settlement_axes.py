@@ -166,12 +166,15 @@ def legacy_outcome_type_to_resolution_state(
     winning_bin: object = None,
 ) -> SettlementResolutionState:
     """Map a legacy settlement_outcomes row to its event lifecycle state — LIFECYCLE
-    ONLY, never side/economics. An explicit outcome_type wins; a NULL/unknown one falls
-    back to authority + winning_bin presence (the consult's safe historical backfill)."""
+    ONLY, never side/economics. A NON-NULL outcome_type is authoritative: known legacy
+    values map; an UNKNOWN non-null integer (writer/schema bug or a future enum value this
+    code predates) FAILS CLOSED to UNRESOLVED rather than being promoted by the authority
+    fallback (consult 6a42bc3d [S2]). The authority + winning_bin fallback applies ONLY
+    when outcome_type IS NULL (the safe historical backfill for un-typed rows)."""
     if outcome_type is not None:
-        mapped = _LEGACY_OUTCOME_TYPE_LIFECYCLE.get(int(outcome_type))
-        if mapped is not None:
-            return mapped
+        return _LEGACY_OUTCOME_TYPE_LIFECYCLE.get(
+            int(outcome_type), SettlementResolutionState.UNRESOLVED
+        )
     auth = str(authority or "").strip().upper()
     if auth == "VERIFIED" and winning_bin:
         return SettlementResolutionState.VENUE_RESOLVED
