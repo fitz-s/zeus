@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Literal, Mapping, Optional
 
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.control.cutover_guard import CutoverPending, gate_for_intent
 from src.execution.command_bus import IntentKind
 
@@ -411,7 +412,7 @@ def parse_cancel_response(raw: Any) -> CancelOutcome:
     if _nonempty(canceled):
         return CancelOutcome("CANCELED", None, response)
     status = str(response.get("status") or "").upper()
-    if status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"}:
+    if is_cancel_confirmed_status(status):
         return CancelOutcome("CANCELED", None, response)
     if response.get("success") is True and status in {"", "OK", "SUCCESS"}:
         return CancelOutcome("CANCELED", None, response)
@@ -582,7 +583,7 @@ def request_cancel_for_command(
             f"post_cancel_exception_possible_side_effect: {exc}",
             {"exception_type": type(exc).__name__, "exception_message": str(exc)},
         )
-    if outcome.status == "CANCELED":
+    if is_cancel_confirmed_status(outcome.status):
         append_event(
             conn,
             command_id=command_id,
