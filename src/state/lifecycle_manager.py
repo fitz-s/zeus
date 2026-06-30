@@ -137,12 +137,20 @@ def coerce_lifecycle_phase(value: LifecyclePhase | str | None) -> LifecyclePhase
     return LifecyclePhase(normalized)
 
 
-def phase_for_runtime_position(
+def _legacy_runtime_phase_dispatch(
     *,
     state: object,
     exit_state: object = "",
     chain_state: object = "",
 ) -> LifecyclePhase:
+    """FROZEN behavioral oracle — the original single-state-string phase dispatcher.
+
+    Retained ONLY as the equivalence reference that pins the authority-aware reducer
+    (derive_runtime_position_phase) to the battle-tested live phase semantics
+    (tests/test_a5_phase_equivalence.py). NOT called at runtime — the runtime authority
+    is phase_for_runtime_position, which now delegates to the reducer. Do not edit this
+    body: if phase semantics must change, change the reducer and update both together so
+    the antibody keeps proving they agree."""
     normalized_state = _normalized_state(state)
     normalized_exit_state = _normalized_state(exit_state)
     normalized_chain_state = _normalized_state(chain_state)
@@ -172,11 +180,33 @@ def phase_for_runtime_position(
         return LifecyclePhase.DAY0_WINDOW
     if normalized_state in {"entered", "holding"}:
         return LifecyclePhase.ACTIVE
-    logger.warning(
-        "unmapped runtime position state %r — returning UNKNOWN phase",
-        normalized_state,
-    )
     return LifecyclePhase.UNKNOWN
+
+
+def phase_for_runtime_position(
+    *,
+    state: object,
+    exit_state: object = "",
+    chain_state: object = "",
+) -> LifecyclePhase:
+    """Canonical runtime phase projection (A5).
+
+    A5 CUTOVER (consult 6a42bc3d): delegates to the authority-aware reducer
+    (derive_position_phase via derive_runtime_position_phase), proven byte-identical to
+    the frozen legacy dispatcher over the full runtime domain
+    (tests/test_a5_phase_equivalence.py). The authority-aware reducer is now the single
+    phase-decision authority; a chain-quarantine fallback no longer re-quarantines an
+    economically_closed / pending_exit position. The legacy elif dispatcher survives only
+    as the equivalence oracle in _legacy_runtime_phase_dispatch."""
+    phase = derive_runtime_position_phase(
+        state=state, exit_state=exit_state, chain_state=chain_state
+    )
+    if phase is LifecyclePhase.UNKNOWN:
+        logger.warning(
+            "unmapped runtime position state %r — returning UNKNOWN phase",
+            _normalized_state(state),
+        )
+    return phase
 
 
 def derive_runtime_position_phase(

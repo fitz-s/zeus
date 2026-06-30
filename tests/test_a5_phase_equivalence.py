@@ -32,6 +32,7 @@ from src.contracts.canonical_lifecycle import PositionPhase
 from src.state.canonical_projections import derive_position_phase
 from src.state.lifecycle_manager import (
     PENDING_EXIT_RUNTIME_STATES,
+    _legacy_runtime_phase_dispatch,
     derive_runtime_position_phase,
     phase_for_runtime_position,
 )
@@ -121,17 +122,22 @@ def test_exit_fallback_with_chain_quarantine_is_quarantined() -> None:
 
 # --- full-domain antibody: EXACT equivalence (zero divergence) post-ruling ------- #
 
-def test_derive_phase_exactly_equivalent_to_live_owner_full_domain() -> None:
+def test_reducer_byte_identical_to_legacy_oracle_full_domain() -> None:
+    # The authority-aware reducer must reproduce the FROZEN legacy dispatcher (the
+    # battle-tested live phase semantics) exactly across the whole input domain.
     for s, es, cs in product(_RUNTIME_STATES, _EXIT_STATES, _CHAIN_STATES):
-        live = phase_for_runtime_position(state=s, exit_state=es, chain_state=cs)
+        oracle = _legacy_runtime_phase_dispatch(state=s, exit_state=es, chain_state=cs)
         derived = derive_position_phase(**_runtime_state_to_phase_facts(s, es, cs))
-        assert derived is live, f"divergence at {(s, es, cs)}: live={live.value} derived={derived.value}"
+        assert derived is oracle, f"divergence at {(s, es, cs)}: oracle={oracle.value} derived={derived.value}"
 
 
-def test_runtime_adapter_byte_identical_to_live_owner_full_domain() -> None:
-    # The production runtime adapter (lifecycle_manager.derive_runtime_position_phase)
-    # must reproduce phase_for_runtime_position exactly across the whole domain.
+def test_a5_cutover_public_and_adapter_match_legacy_oracle_full_domain() -> None:
+    # A5 CUTOVER proof: the runtime adapter AND the now-delegating public
+    # phase_for_runtime_position both reproduce the frozen oracle exactly across the
+    # whole domain — the cutover is behavior-preserving (no live row changes phase).
     for s, es, cs in product(_RUNTIME_STATES, _EXIT_STATES, _CHAIN_STATES):
-        live = phase_for_runtime_position(state=s, exit_state=es, chain_state=cs)
+        oracle = _legacy_runtime_phase_dispatch(state=s, exit_state=es, chain_state=cs)
         bridged = derive_runtime_position_phase(state=s, exit_state=es, chain_state=cs)
-        assert bridged is live, f"adapter divergence at {(s, es, cs)}: live={live.value} bridged={bridged.value}"
+        public = phase_for_runtime_position(state=s, exit_state=es, chain_state=cs)
+        assert bridged is oracle, f"adapter divergence at {(s, es, cs)}: oracle={oracle.value} bridged={bridged.value}"
+        assert public is oracle, f"cutover divergence at {(s, es, cs)}: oracle={oracle.value} public={public.value}"
