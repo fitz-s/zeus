@@ -384,16 +384,40 @@ class PolymarketClient:
         self.close()
         return False
 
-    def _public_get(self, path: str, *, params: dict[str, Any] | None = None):
+    def _public_get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: "float | httpx.Timeout | None" = None,
+    ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
-            return httpx.get(url, params=params, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+            return httpx.get(
+                url,
+                params=params,
+                timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+            )
+        if timeout is not None:
+            return self._public_http().get(url, params=params, timeout=timeout)
         return self._public_http().get(url, params=params)
 
-    def _public_post(self, path: str, *, json_body: Any):
+    def _public_post(
+        self,
+        path: str,
+        *,
+        json_body: Any,
+        timeout: "float | httpx.Timeout | None" = None,
+    ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
-            return httpx.post(url, json=json_body, timeout=PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+            return httpx.post(
+                url,
+                json=json_body,
+                timeout=timeout or PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS,
+            )
+        if timeout is not None:
+            return self._public_http().post(url, json=json_body, timeout=timeout)
         return self._public_http().post(url, json=json_body)
 
     def _ensure_client(self):
@@ -509,7 +533,12 @@ class PolymarketClient:
 
         return data
 
-    def get_orderbook_snapshot(self, token_id: str) -> dict:
+    def get_orderbook_snapshot(
+        self,
+        token_id: str,
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict:
         """Fetch raw CLOB orderbook facts for executable snapshot capture.
 
         LOCK DISCIPLINE (2026-06-04): this method performs blocking HTTP I/O
@@ -521,14 +550,26 @@ class PolymarketClient:
         from src.state.db import assert_no_world_mutex_held_for_io
         assert_no_world_mutex_held_for_io("get_orderbook_snapshot")
 
-        resp = self._public_get("/book", params={"token_id": token_id})
+        if timeout is None:
+            resp = self._public_get("/book", params={"token_id": token_id})
+        else:
+            resp = self._public_get(
+                "/book",
+                params={"token_id": token_id},
+                timeout=timeout,
+            )
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
             raise RuntimeError(f"CLOB orderbook response for {token_id} is not an object")
         return data
 
-    def get_orderbook_snapshots(self, token_ids: list[str]) -> dict[str, dict]:
+    def get_orderbook_snapshots(
+        self,
+        token_ids: list[str],
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict[str, dict]:
         """Batch-fetch raw CLOB orderbook facts for many tokens in ONE request.
 
         Uses the public ``POST /books`` endpoint (rate limit 500 req/10s, vs the
@@ -568,7 +609,10 @@ class PolymarketClient:
             seen.add(tok)
             body.append({"token_id": tok})
 
-        resp = self._public_post("/books", json_body=body)
+        if timeout is None:
+            resp = self._public_post("/books", json_body=body)
+        else:
+            resp = self._public_post("/books", json_body=body, timeout=timeout)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):

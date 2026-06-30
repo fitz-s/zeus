@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import inspect
 import sqlite3
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -110,6 +111,78 @@ def test_price_channel_daemon_scheduler_health_uses_business_result(monkeypatch)
             "extra": result,
         }
     ]
+
+
+def test_price_channel_daemon_records_max_instance_skip(monkeypatch) -> None:
+    import src.ingest.price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+
+    daemon._scheduler_skip_listener(
+        types.SimpleNamespace(
+            job_id="edli_held_quote_refresh",
+            scheduled_run_times=[datetime(2026, 6, 30, tzinfo=timezone.utc)],
+        )
+    )
+
+    assert writes == [
+        {
+            "job_name": "edli_held_quote_refresh",
+            "failed": False,
+            "skipped": True,
+            "skip_reason": "max_instances_reached",
+            "extra": {
+                "scheduler_skip_reason": "max_instances_reached",
+                "scheduled_run_times": ["2026-06-30T00:00:00+00:00"],
+            },
+        }
+    ]
+
+
+def test_price_channel_clob_fetchers_are_budget_bound(monkeypatch) -> None:
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane.time, "monotonic", lambda: 100.0)
+    seen: dict[str, object] = {}
+
+    class FakeClob:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
+            seen["single_timeout"] = timeout
+            return {"asset_id": token_id}
+
+        def get_orderbook_snapshots(self, token_ids: list[str], *, timeout=None) -> dict:  # noqa: ANN001
+            seen["batch_timeout"] = timeout
+            return {token_id: {"asset_id": token_id} for token_id in token_ids}
+
+    fetch_one, fetch_many = lane._budgeted_orderbook_fetchers(
+        FakeClob(),
+        deadline_monotonic=103.0,
+    )
+
+    assert fetch_one("tok-a") == {"asset_id": "tok-a"}
+    assert fetch_many is not None
+    assert fetch_many(["tok-b"]) == {"tok-b": {"asset_id": "tok-b"}}
+    assert seen["single_timeout"] is not None
+    assert seen["batch_timeout"] is not None
+
+
+def test_price_channel_clob_timeout_fails_when_deadline_exhausted(monkeypatch) -> None:
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane.time, "monotonic", lambda: 100.0)
+
+    try:
+        lane._price_channel_clob_timeout(100.1)
+    except TimeoutError as exc:
+        assert "budget exhausted before CLOB fetch" in str(exc)
+    else:  # pragma: no cover - explicit regression assertion
+        raise AssertionError("expected exhausted price-channel CLOB budget to raise")
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +720,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
-        def get_orderbook_snapshot(self, token_id: str) -> dict:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
             return {
                 "asset_id": token_id,
                 "market": "0xcondition",
@@ -814,7 +887,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
-        def get_orderbook_snapshot(self, token_id: str) -> dict:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
             return {
                 "asset_id": token_id,
                 "market": "0xcondition",
@@ -1041,7 +1114,7 @@ def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkey
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
-        def get_orderbook_snapshot(self, token_id: str) -> dict:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
             return {
                 "asset_id": token_id,
                 "market": "0xcondition",
@@ -1158,7 +1231,7 @@ def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(mon
         def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
             return False
 
-        def get_orderbook_snapshot(self, token_id: str) -> dict:
+        def get_orderbook_snapshot(self, token_id: str, *, timeout=None) -> dict:  # noqa: ANN001
             fetch_order.append(token_id)
             market = {
                 "zz-new-token": "0xnew",

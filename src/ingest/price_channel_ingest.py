@@ -106,6 +106,53 @@ MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_HELD_ACTIVE_BUDGET_SECONDS = 10.0
 MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT = 4
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
+PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
+PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
+
+
+def _price_channel_clob_timeout(deadline_monotonic: float):
+    """Return a per-request CLOB timeout bounded by the refresh wall-clock budget."""
+
+    remaining = float(deadline_monotonic) - time.monotonic()
+    reserve = PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS
+    if remaining <= reserve:
+        raise TimeoutError(
+            f"price-channel quote refresh budget exhausted before CLOB fetch: "
+            f"remaining_seconds={remaining:.3f}"
+        )
+    budget = max(0.1, remaining - reserve)
+    phase = min(PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS, budget)
+
+    import httpx
+
+    return httpx.Timeout(
+        connect=min(2.0, phase),
+        read=phase,
+        write=min(1.0, phase),
+        pool=min(0.5, phase),
+    )
+
+
+def _budgeted_orderbook_fetchers(clob, *, deadline_monotonic: float):
+    """Wrap CLOB book fetchers so every REST call consumes the caller's budget."""
+
+    def _fetch_orderbook(token_id: str) -> dict:
+        return clob.get_orderbook_snapshot(
+            token_id,
+            timeout=_price_channel_clob_timeout(deadline_monotonic),
+        )
+
+    fetch_many = getattr(clob, "get_orderbook_snapshots", None)
+    if fetch_many is None:
+        return _fetch_orderbook, None
+
+    def _fetch_orderbooks(token_ids: list[str]) -> dict[str, dict]:
+        return fetch_many(
+            token_ids,
+            timeout=_price_channel_clob_timeout(deadline_monotonic),
+        )
+
+    return _fetch_orderbook, _fetch_orderbooks
 
 
 class _PriceChannelWorldTradeWriteGate:
@@ -1572,12 +1619,20 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
         if "chain_shares" in columns and "chain_state" in columns:
             exposure_clause = (
                 f"({open_phase_clause} OR ("
-                "phase = 'quarantined' "
+                "phase IN ('quarantined','voided') "
                 f"AND COALESCE(chain_state, '') IN ({chain_placeholders}) "
                 "AND COALESCE(chain_shares, 0) > ?"
                 "))"
             )
             params = (*chain_state_values, 0.000001)
+        elif "chain_shares" in columns:
+            exposure_clause = (
+                f"({open_phase_clause} OR ("
+                "phase IN ('quarantined','voided') "
+                "AND COALESCE(chain_shares, 0) > ?"
+                "))"
+            )
+            params = (0.000001,)
         rows = trade_conn.execute(
             f"""
             SELECT token_id, no_token_id
@@ -2283,6 +2338,10 @@ def _edli_refresh_held_position_quote_evidence(
             conn.commit()
 
         with PolymarketClient() as clob:
+            fetch_orderbook, fetch_orderbooks = _budgeted_orderbook_fetchers(
+                clob,
+                deadline_monotonic=deadline,
+            )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
                     EventWriter(conn),
@@ -2293,8 +2352,8 @@ def _edli_refresh_held_position_quote_evidence(
                     coalescer=EventCoalescer(max_market_keys=1000),
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
-                fetch_orderbook=clob.get_orderbook_snapshot,
-                fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
+                fetch_orderbook=fetch_orderbook,
+                fetch_orderbooks=fetch_orderbooks,
             )
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
@@ -2445,6 +2504,10 @@ def _edli_refresh_candidate_priority_quote_evidence(
             conn.commit()
 
         with PolymarketClient() as clob:
+            fetch_orderbook, fetch_orderbooks = _budgeted_orderbook_fetchers(
+                clob,
+                deadline_monotonic=deadline,
+            )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
                     EventWriter(conn),
@@ -2455,8 +2518,8 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     coalescer=EventCoalescer(max_market_keys=1000),
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
                 ),
-                fetch_orderbook=clob.get_orderbook_snapshot,
-                fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),
+                fetch_orderbook=fetch_orderbook,
+                fetch_orderbooks=fetch_orderbooks,
             )
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,

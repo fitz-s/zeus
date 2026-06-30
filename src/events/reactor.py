@@ -1173,7 +1173,11 @@ class OpportunityEventReactor:
                     # the event processed and counts it. ``_finalize_disposition`` runs
                     # inside this open savepoint.
                     self._finalize_disposition(
-                        event, post_disposition, decision_time=decision_time, result=result
+                        event,
+                        post_disposition,
+                        decision_time=decision_time,
+                        result=result,
+                        proof_emitted=result.proof_accepted > _accepted_before,
                     )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                     self._commit_event_unit()
@@ -1666,6 +1670,7 @@ class OpportunityEventReactor:
         *,
         decision_time: datetime,
         result: ReactorResult,
+        proof_emitted: bool = False,
     ) -> None:
         """Apply the terminal/retry book-keeping for a window disposition.
 
@@ -1746,8 +1751,32 @@ class OpportunityEventReactor:
         # ``processed`` (the event is consumed, not retried). Preserve that exactly.
         self._transient_requeue_reasons.pop(event.event_id, None)
         self._transient_requeue_counts.pop(event.event_id, None)
+        if not proof_emitted and not self._terminal_rejection_evidence_exists(event.event_id):
+            self._reject_event(
+                event,
+                "UNKNOWN_REVIEW_REQUIRED",
+                "UNKNOWN_REVIEW_REQUIRED:PROCESSED_WITHOUT_DECISION_EVIDENCE",
+                result,
+                decision_time=decision_time,
+            )
         self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
         result.processed += 1
+
+    def _terminal_rejection_evidence_exists(self, event_id: str) -> bool:
+        for table in (
+            "edli_no_submit_receipts",
+            "decision_compile_failures",
+            "no_trade_regret_events",
+        ):
+            try:
+                if self._store.conn.execute(
+                    f"SELECT 1 FROM {table} WHERE event_id = ? LIMIT 1",
+                    (event_id,),
+                ).fetchone():
+                    return True
+            except sqlite3.Error:
+                continue
+        return False
 
     def _dead_letter_unknown(
         self,

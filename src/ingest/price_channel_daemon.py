@@ -174,6 +174,33 @@ def _scheduler_job(job_name: str):
     return _decorator
 
 
+def _scheduler_skip_listener(event: Any) -> None:
+    """Persist APScheduler max-instance skips as business liveness failures."""
+
+    job_name = str(getattr(event, "job_id", "") or "")
+    if not job_name:
+        return
+    try:
+        from src.observability.scheduler_health import _write_scheduler_health
+
+        scheduled = [
+            ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+            for ts in (getattr(event, "scheduled_run_times", None) or [])
+        ]
+        _write_scheduler_health(
+            job_name,
+            failed=False,
+            skipped=True,
+            skip_reason="max_instances_reached",
+            extra={
+                "scheduler_skip_reason": "max_instances_reached",
+                "scheduled_run_times": scheduled,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to write scheduler skip health", exc_info=True)
+
+
 def _write_price_channel_heartbeat() -> None:
     """Write daemon-heartbeat-price-channel-ingest.json every 60s (liveness for the sensor)."""
     global _heartbeat_fails
@@ -198,6 +225,7 @@ def _write_price_channel_heartbeat() -> None:
 
 def main() -> None:
     global _scheduler
+    from apscheduler.events import EVENT_JOB_MAX_INSTANCES
     from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
     from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -270,6 +298,7 @@ def main() -> None:
             "heartbeat": APSchedulerThreadPoolExecutor(max_workers=1),
         },
     )
+    _scheduler.add_listener(_scheduler_skip_listener, EVENT_JOB_MAX_INSTANCES)
 
     # PRODUCER 1: start the persistent user-channel WS ingestor THREAD. This is the
     # ws_gap_guard latch WRITER — running it HERE (not in the order daemon) is the

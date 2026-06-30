@@ -930,12 +930,25 @@ class MarketChannelOnlineService:
                     )
                 break
             chunk = ordered[offset: offset + size]
-            pre_captured_books = self._fetch_rest_seed_books(
-                chunk,
-                deadline_monotonic=deadline_monotonic,
-                logger=logger,
-                log_prefix="market_channel: REST seed",
-            )
+            try:
+                pre_captured_books = self._fetch_rest_seed_books(
+                    chunk,
+                    deadline_monotonic=deadline_monotonic,
+                    logger=logger,
+                    log_prefix="market_channel: REST seed",
+                )
+            except TimeoutError as exc:
+                self.rest_seed_backpressure_count += 1
+                self.rest_seed_backpressure_reason = str(exc)
+                if logger is not None:
+                    logger.warning(
+                        "EDLI market-channel REST seed fetch budget exhausted: "
+                        "written=%d remaining=%d reason=%s",
+                        written,
+                        max(0, len(ordered) - offset),
+                        exc,
+                    )
+                break
             if not pre_captured_books:
                 continue
             with self.ingestor.defer_market_event_sink():
@@ -984,6 +997,8 @@ class MarketChannelOnlineService:
         if self.fetch_orderbooks is not None:
             try:
                 books = self.fetch_orderbooks(token_ids)
+            except TimeoutError:
+                raise
             except Exception as exc:
                 _logger.warning(
                     "%s batch pre-fetch failed for %d tokens: %s: %s",
@@ -1014,6 +1029,8 @@ class MarketChannelOnlineService:
                 break
             try:
                 pre_captured_books[token_id] = self.fetch_orderbook(token_id)
+            except TimeoutError:
+                raise
             except Exception as exc:
                 _logger.warning(
                     "%s pre-fetch failed for token %s (will skip seed for this token): %s: %s",

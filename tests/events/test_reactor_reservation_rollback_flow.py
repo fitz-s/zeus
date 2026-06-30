@@ -25,7 +25,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
+from src.events.reactor import (
+    EventSubmissionReceipt,
+    OpportunityEventReactor,
+    ReactorConfig,
+    ReactorResult,
+)
 from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
@@ -157,6 +162,58 @@ def test_emitted_candidate_reservation_committed_and_netted_by_next_event():
         assert any(
             usd == pytest.approx(12.0) for _, usd in observed_at_event2["entries"]
         )
+
+
+def test_terminal_finalize_writes_missing_decision_evidence_before_processed():
+    conn, store = _store()
+    event = _forecast_event("missing-evidence")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reservation(store, lambda *_a: None)
+    result = ReactorResult()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    reactor._finalize_disposition(  # noqa: SLF001 - relationship regression for the guard
+        event,
+        None,
+        decision_time=decision_time,
+        result=result,
+        proof_emitted=False,
+    )
+
+    failure = conn.execute(
+        """
+        SELECT stage, reason_code
+          FROM decision_compile_failures
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    regret = conn.execute(
+        """
+        SELECT rejection_stage, rejection_reason
+          FROM no_trade_regret_events
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    processing = conn.execute(
+        """
+        SELECT processing_status
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+
+    assert failure is not None
+    assert failure[0] == "UNKNOWN_REVIEW_REQUIRED"
+    assert failure[1] == "UNKNOWN_REVIEW_REQUIRED:PROCESSED_WITHOUT_DECISION_EVIDENCE"
+    assert regret is not None
+    assert regret[0] == "UNKNOWN_REVIEW_REQUIRED"
+    assert regret[1] == "UNKNOWN_REVIEW_REQUIRED:PROCESSED_WITHOUT_DECISION_EVIDENCE"
+    assert processing[0] == "processed"
+    assert result.rejected == 1
+    assert result.processed == 1
 
 
 # ───────────────────────────────────────────────────────────────────────────
