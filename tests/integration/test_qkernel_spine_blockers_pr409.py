@@ -1524,6 +1524,66 @@ def test_qkernel_receipt_annotation_uses_direct_no_qkernel_probability():
     )
 
 
+def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_candidate():
+    """Receipt annotation must not preserve the removed 5% direct-ROI hard hurdle.
+
+    Regression: live 2026-06-30 produced NO_ROI_FRONTIER_USEFUL_CANDIDATE for a candidate
+    with positive edge_lcb, positive DeltaU, positive min-order DeltaU, q_lcb around 0.779,
+    and about $2.13 lower-bound profit. The selected-spine engine now admits this shape into
+    the ROI frontier, so the non-selected receipt annotation must use the same predicate.
+    """
+
+    row = _row(
+        condition_id="cond-qk-live-profit-no",
+        yes_token="yes-qk-live-profit-no",
+        no_token="no-qk-live-profit-no",
+        yes_ask=0.25,
+        no_ask=0.76,
+        snapshot_id="snap-qk-live-profit-no",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-qk-live-profit-no",
+        q_posterior=0.85972,
+        q_lcb_5pct=0.77877,
+        bin_obj=Bin(low=25.0, high=25.0, unit="C", label="25C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-live-profit-no",
+        "receipt_hash": "receipt-qk-live-profit-no",
+        "candidate_id": "NO:b25:DIRECT_NO:b25@proof",
+        "route_id": "DIRECT_NO:b25@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.85972,
+        "payoff_q_lcb": 0.77877,
+        "edge_lcb": 0.01877,
+        "point_ev": 0.09972,
+        "delta_u_at_min": 0.000083,
+        "optimal_stake_usd": "86.2839573930664062500",
+        "optimal_delta_u": 0.000983,
+        "q_dot_payoff": 0.85972,
+        "cost": 0.76,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb7|coarse_global",
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "NO"): cert},
+    )
+
+    assert annotated.passed_prefilter is True
+    assert annotated.missing_reason is None
+    assert annotated.trade_score == pytest.approx(0.01877)
+    assert annotated.q_lcb_5pct == pytest.approx(0.77877)
+
+
 def test_overlay_rejects_qkernel_selected_yes_without_direction_law():
     """A non-native YES cannot become live through qkernel overlay without direction law."""
 
@@ -2123,9 +2183,8 @@ def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence
     """Old rounded-mu direction vetoes may enter qkernel, then fail on real gates.
 
     The old ``DIRECTION_LAW_BIN_FORECAST_MISMATCH`` reason is not structural authority.
-    It must not delete a proof before qkernel can score the family. In this fixture the
-    candidate remains visible, but market coherence blocks the family, proving the live
-    refusal comes from current payoff/market evidence instead of the stale heuristic.
+    It must not delete a proof before qkernel can score the family. Market coherence must
+    still block the offending bins, while non-offending live-selectable bins remain eligible.
     """
     from dataclasses import replace
 
@@ -2195,11 +2254,16 @@ def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence
         for decision in res.decision.candidate_decisions
         if decision.route.bin_id in res.decision.market_coherence.offending_bins
     )
-    assert res.selected_proof is None
-    assert res.no_trade_reason in {
-        "MARKET_INCOHERENT_BLOCK_LIVE",
-        "NO_ROI_FRONTIER_USEFUL_CANDIDATE",
-    }
+    assert res.selected_proof is not None
+    assert res.no_trade_reason is None
+    assert era._candidate_bin_id(res.selected_proof) not in res.decision.market_coherence.offending_bins
+    selected_decision = next(
+        decision
+        for decision in res.decision.candidate_decisions
+        if decision.route.bin_id == era._candidate_bin_id(res.selected_proof)
+        and decision.route.side == ("YES" if res.selected_proof.direction == "buy_yes" else "NO")
+    )
+    assert selected_decision.coherence_allows is True
 
 
 def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_normal():

@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-29
+# Last reused or audited: 2026-06-30
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
@@ -972,6 +972,7 @@ def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
     )
     selected, reason = engine._select([dust])
 
+    assert engine._payoff_q_lcb(dust) < fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
     assert selected is None
     assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 
@@ -1015,8 +1016,8 @@ def test_select_roi_frontier_uses_chosen_stake_cost_not_route_cost(monkeypatch):
     assert reason is None
 
 
-def test_select_roi_frontier_allows_direct_roi_candidate_below_growth_density(monkeypatch):
-    """Karachi/Shenzhen shape: a real lower-bound profit + ROI edge is not dust."""
+def test_select_roi_frontier_allows_positive_utility_candidate_below_old_roi_hurdle(monkeypatch):
+    """Karachi/Shenzhen shape: real lower-bound profit + min-order utility is not dust."""
     case = _case()
     space = _outcome_space(case)
     route = _hand_route(space, side="YES", bin_id="b25", cost=0.14)
@@ -1037,9 +1038,43 @@ def test_select_roi_frontier_allows_direct_roi_candidate_below_growth_density(mo
     )
     selected, reason = engine._select([candidate])
 
-    assert engine._robust_kelly_growth_density(candidate) < 0.0025
     assert engine._profit_lcb_usd(candidate) >= 0.25
-    assert engine._edge_roi_lcb(candidate) >= 0.05
+    assert engine._payoff_q_lcb(candidate) >= fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
+    assert selected is candidate
+    assert reason is None
+
+
+def test_select_roi_frontier_allows_live_positive_profit_candidate_below_old_direct_roi_hurdle(monkeypatch):
+    """Live 2026-06-30 shape: positive LCB profit must reach the ROI frontier.
+
+    Regression: the selector returned NO_ROI_FRONTIER_USEFUL_CANDIDATE for a candidate with
+    positive edge_lcb, positive DeltaU, positive min-order DeltaU, q_lcb around 0.779, and
+    about $2.13 lower-bound profit solely because an extra 5% direct-ROI hard hurdle failed.
+    ROI/growth density rank the frontier; they must not be a second arbitrary no-order gate.
+    """
+    case = _case()
+    space = _outcome_space(case)
+    route = _hand_route(space, side="NO", bin_id="b25", cost=0.76)
+    candidate = _hand_decision(
+        route,
+        edge_lcb=0.01877,
+        optimal_delta_u=0.000983,
+        delta_u_at_min=0.000083,
+        robust_trade_score=0.01877,
+        optimal_stake_usd=Decimal("86.2839573930664062500"),
+        payoff_q_lcb=0.77877,
+    )
+
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    selected, reason = engine._select([candidate])
+
+    assert 0.0 < engine._edge_roi_lcb(candidate) < 0.05
+    assert engine._profit_lcb_usd(candidate) >= 2.0
+    assert engine._payoff_q_lcb(candidate) >= fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
     assert selected is candidate
     assert reason is None
 
@@ -1497,7 +1532,7 @@ def test_no_trade_reason_present_when_no_candidate_passes(monkeypatch):
     q25 = jq.q_by_bin_id["b25"]
 
     # Coherent deep market (YES mids at model q) so coherence does NOT block — the no-trade
-    # is purely the empty positive-edge set. Prices snap to the 0.001 tick grid.
+    # is purely the empty positive-utility set. Prices snap to the 0.001 tick grid.
     def factory(bin_id: str) -> MarketBook:
         qm = jq.q_by_bin_id.get(bin_id, 0.0)
         mid = min(max(qm, 0.02), 0.98)
@@ -1526,7 +1561,7 @@ def test_no_trade_reason_present_when_no_candidate_passes(monkeypatch):
     assert isinstance(decision, FamilyDecision)
     assert decision.selected is None
     assert decision.no_trade_reason is not None
-    assert decision.no_trade_reason == NO_TRADE_NO_POSITIVE_EDGE, decision.no_trade_reason
+    assert decision.no_trade_reason == NO_TRADE_NO_POSITIVE_UTILITY, decision.no_trade_reason
     assert decision.receipt_hash and len(decision.receipt_hash) == 64
     # The candidates are still recorded (the no-trade is auditable), and none was selected.
     assert len(decision.candidates) > 0
