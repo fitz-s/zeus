@@ -1607,7 +1607,6 @@ def _write_heartbeat() -> None:
 
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
-            import os
             os._exit(1)
 
 

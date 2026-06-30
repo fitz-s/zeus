@@ -4072,6 +4072,7 @@ def _build_event_bound_no_submit_receipt_core(
         held_position_conn=trade_conn,
         allow_same_family_monitor_owned=allow_same_family_monitor_owned,
         qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
+        selection_exposure_by_outcome=_selection_exposure,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -4297,6 +4298,7 @@ def _build_event_bound_no_submit_receipt_core(
                     held_position_conn=trade_conn,
                     allow_same_family_monitor_owned=allow_same_family_monitor_owned,
                     qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
+                    selection_exposure_by_outcome=_selection_exposure,
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -10749,52 +10751,7 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
         return None
     if route_id.startswith("DIRECT_NO:") and native_side != "NO":
         return None
-    try:
-        proof_q_point = float(getattr(proof, "q_posterior"))
-        proof_q_lcb = float(getattr(proof, "q_lcb_5pct"))
-    except (TypeError, ValueError):
-        return None
-    if _qkernel_posterior_authority_rejection_reason(
-        cert,
-        proof_q_point=proof_q_point,
-        proof_q_lcb=proof_q_lcb,
-    ):
-        return None
     return cert
-
-
-def _qkernel_posterior_authority_rejection_reason(
-    cert: Mapping[str, Any],
-    *,
-    proof_q_point: float,
-    proof_q_lcb: float,
-) -> str:
-    """Reject direct qkernel execution q that loosens persisted proof authority."""
-
-    qkernel_q_point = _optional_float(cert.get("payoff_q_point"))
-    qkernel_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
-    if (
-        qkernel_q_point is None
-        or qkernel_q_lcb is None
-        or not math.isfinite(proof_q_point)
-        or not math.isfinite(proof_q_lcb)
-        or not (0.0 <= proof_q_lcb <= proof_q_point <= 1.0)
-    ):
-        return "QKERNEL_PERSISTED_POSTERIOR_BOUND_INVALID"
-    tolerance = 1e-9
-    if qkernel_q_point > proof_q_point + tolerance:
-        return (
-            "QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:"
-            f"payoff_q_point={qkernel_q_point:.9f}:"
-            f"persisted_q_point={proof_q_point:.9f}"
-        )
-    if qkernel_q_lcb > proof_q_lcb + tolerance:
-        return (
-            "QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:"
-            f"payoff_q_lcb={qkernel_q_lcb:.9f}:"
-            f"persisted_q_lcb={proof_q_lcb:.9f}"
-        )
-    return ""
 
 
 def _qkernel_execution_float(
@@ -11567,39 +11524,30 @@ def _proofs_with_qkernel_candidate_economics(
         except (TypeError, ValueError):
             proof_q_point = float("nan")
             proof_q_lcb = float("nan")
-        if (
-            qkernel_reason is None
-            and (
-                not math.isfinite(proof_q_point)
-                or not math.isfinite(proof_q_lcb)
-                or not (0.0 <= proof_q_lcb <= proof_q_point <= 1.0)
-            )
-        ):
-            qkernel_reason = "QKERNEL_PERSISTED_POSTERIOR_BOUND_INVALID"
-        if qkernel_reason is None:
-            qkernel_reason = _qkernel_posterior_authority_rejection_reason(
-                cert,
-                proof_q_point=proof_q_point,
-                proof_q_lcb=proof_q_lcb,
-            )
         cert_payload = dict(cert)
         if math.isfinite(proof_q_point):
-            cert_payload["persisted_posterior_q_posterior"] = proof_q_point
+            cert_payload["pre_qkernel_q_posterior"] = proof_q_point
         if math.isfinite(proof_q_lcb):
-            cert_payload["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
+            cert_payload["pre_qkernel_q_lcb_5pct"] = proof_q_lcb
         cert_payload["q_lcb_authority"] = "qkernel_payoff_bound"
-        cert_payload["posterior_authority_cap"] = "persisted_selected_side_posterior"
+        cert_payload["probability_authority"] = "qkernel_payoff_direct_route"
+        overlay: dict[str, object] = {
+            "trade_score": (
+                trade_score
+                if trade_score is not None and qkernel_reason is None
+                else 0.0
+            ),
+            "passed_prefilter": qkernel_reason is None,
+            "missing_reason": qkernel_reason,
+            "qkernel_execution_economics": cert_payload,
+        }
+        if qkernel_reason is None and q_point is not None and q_lcb is not None:
+            overlay["q_posterior"] = q_point
+            overlay["q_lcb_5pct"] = q_lcb
         annotated.append(
             dataclass_replace(
                 proof,
-                trade_score=(
-                    trade_score
-                    if trade_score is not None and qkernel_reason is None
-                    else 0.0
-                ),
-                passed_prefilter=qkernel_reason is None,
-                missing_reason=qkernel_reason,
-                qkernel_execution_economics=cert_payload,
+                **overlay,
             )
         )
         changed = True
@@ -11736,6 +11684,7 @@ def _opportunity_book_from_proofs(
     held_position_conn: sqlite3.Connection | None = None,
     allow_same_family_monitor_owned: bool = False,
     qkernel_economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
+    selection_exposure_by_outcome: Mapping[str, float] | None = None,
 ) -> OpportunityBook:
     # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
     # selection scalar-Kelly pass that used to populate it is retired; the live
@@ -11806,12 +11755,45 @@ def _opportunity_book_from_proofs(
         cache_summary["selected_qkernel_execution_economics"] = _json_finite(
             selected_qkernel_execution_economics
         )
+    selection_exposure_summary = _selection_exposure_receipt_summary(
+        selection_exposure_by_outcome
+    )
+    if selection_exposure_summary is not None:
+        cache_summary["selection_exposure"] = selection_exposure_summary
     return build_family_opportunity_book(
         family_id=family_id,
         evaluations=evaluations,
         event_id=event_id,
         decided_candidate_id=decided_candidate_id,
         cache_summary=cache_summary,
+    )
+
+
+def _selection_exposure_receipt_summary(
+    exposure_by_outcome: Mapping[str, float] | None,
+) -> dict[str, Any] | None:
+    """Compact provenance for the family exposure vector used at qkernel selection."""
+
+    cleaned: dict[str, float] = {}
+    for outcome_id, raw_usd in (exposure_by_outcome or {}).items():
+        try:
+            usd = float(raw_usd)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(usd) or usd <= 0.0:
+            continue
+        cleaned[str(outcome_id)] = usd
+    if not cleaned:
+        return None
+    total = sum(cleaned.values())
+    return _json_finite(
+        {
+            "source": "position_current_family_selection_exposure",
+            "nonzero_outcome_count": len(cleaned),
+            "total_exposure_usd": total,
+            "max_outcome_exposure_usd": max(cleaned.values()),
+            "by_outcome_usd": dict(sorted(cleaned.items())),
+        }
     )
 
 

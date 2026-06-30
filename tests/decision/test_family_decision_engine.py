@@ -61,7 +61,9 @@ from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import (
     NO_TRADE_NO_DIRECTION_LAW,
+    NO_TRADE_NO_MIN_ORDER_UTILITY,
     NO_TRADE_NO_POSITIVE_EDGE,
+    NO_TRADE_NO_POSITIVE_UTILITY,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
     NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE,
     CandidateDecision,
@@ -1040,6 +1042,56 @@ def test_select_roi_frontier_allows_direct_roi_candidate_below_growth_density(mo
     assert engine._edge_roi_lcb(candidate) >= 0.05
     assert selected is candidate
     assert reason is None
+
+
+def test_select_reports_positive_edge_but_no_positive_utility():
+    """Positive edge with zero robust DeltaU is not a no-edge market."""
+    case = _case()
+    space = _outcome_space(case)
+    candidate = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.12),
+        edge_lcb=0.04,
+        optimal_delta_u=0.0,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.04,
+        optimal_stake_usd=Decimal("0"),
+        payoff_q_lcb=0.16,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([candidate])
+
+    assert selected is None
+    assert reason == NO_TRADE_NO_POSITIVE_UTILITY
+
+
+def test_select_reports_positive_utility_but_min_order_not_viable():
+    """A theoretical utility winner that fails min-order DeltaU is its own gate."""
+    case = _case()
+    space = _outcome_space(case)
+    candidate = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.12),
+        edge_lcb=0.04,
+        optimal_delta_u=0.02,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.04,
+        optimal_stake_usd=Decimal("10"),
+        payoff_q_lcb=0.16,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._select([candidate])
+
+    assert selected is None
+    assert reason == NO_TRADE_NO_MIN_ORDER_UTILITY
 
 
 def test_abstained_oof_guard_blocks_nonmodal_yes_on_economics(monkeypatch):

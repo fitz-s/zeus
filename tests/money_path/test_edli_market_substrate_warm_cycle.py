@@ -1429,6 +1429,7 @@ def test_money_path_priority_cycle_resolves_condition_marker_without_pending_bac
     assert calls[0]["extra_priority_families"] == [("Shanghai", "2026-06-29", "high")]
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
+    assert calls[0]["include_money_risk_families"] is False
 
 
 def test_money_path_priority_cycle_claim_read_failure_does_not_sweep_backlog(
@@ -1667,7 +1668,7 @@ def test_money_path_priority_cycle_records_empty_scope_as_noop(monkeypatch):
 
 
 def test_priority_conditions_deferred_when_refresh_inserted_substrate():
-    """A useful substrate refresh is not scheduler-failed just because priority budget deferred."""
+    """Stale exact priority conditions are failed if the sidecar refreshes other books."""
 
     result = substrate_observer._substrate_warm_business_summary(
         {
@@ -1676,6 +1677,7 @@ def test_priority_conditions_deferred_when_refresh_inserted_substrate():
             "inserted": 8,
             "failed": 0,
             "direct_clob_prefetch_selected_priority_condition_count": 0,
+            "stale_condition_submitted": 2,
         },
         priority_request={
             "request_id": "req-priority-budget",
@@ -1685,14 +1687,13 @@ def test_priority_conditions_deferred_when_refresh_inserted_substrate():
         priority_marker_active=True,
     )
 
-    assert result["scheduler_failed"] is False
-    assert result["priority_conditions_deferred"] is True
-    assert result["scheduler_degraded_reason"] == "priority_conditions_deferred"
+    assert result["scheduler_failed"] is True
+    assert result["scheduler_failure_reason"] == "priority_conditions_not_serviced"
     assert result["priority_marker_condition_ids"] == 1
 
 
 def test_money_path_priority_cycle_services_blocked_family_priority_marker(monkeypatch):
-    """A reactor-blocked family marker must be serviced before broad pending backlog."""
+    """A concrete reactor-blocked condition marker owns the first service window."""
 
     calls: list[dict] = []
     marker_families = [("Shanghai", "2026-06-28", "high")]
@@ -1750,11 +1751,11 @@ def test_money_path_priority_cycle_services_blocked_family_priority_marker(monke
 
     assert calls
     assert calls[0]["extra_priority_families"] == [
-        ("Tokyo", "2026-06-28", "low"),
         ("Shanghai", "2026-06-28", "high"),
     ]
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
+    assert calls[0]["include_money_risk_families"] is False
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
 
 

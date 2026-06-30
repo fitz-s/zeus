@@ -6344,6 +6344,9 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 continue
             tx_hash = next(iter(_point_order_transaction_hashes(point_order)), None)
             event_type = _matched_event_type(row, matched_size, venue_status=venue_status)
+            command_already_terminal = (
+                str(row.get("state") or "").upper() in _TERMINAL_POSITIVE_MATCH_COMMAND_STATES
+            )
             remaining_size = _matched_remaining_size(row, matched_size, venue_status=venue_status)
             order_fact_state = _matched_order_fact_state(
                 event_type=event_type,
@@ -6412,7 +6415,12 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                         raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
                         raw_payload_json=payload,
                     )
-                if not terminal_positive_fact:
+                # A terminal command (for example CANCELLED after cancel ack) can
+                # later be contradicted by order/trade facts proving a match. Keep
+                # that venue truth by writing facts/projections, but do not append
+                # an impossible command-event transition such as
+                # CANCELLED -> FILL_CONFIRMED.
+                if not (terminal_positive_fact or command_already_terminal):
                     append_event(
                         conn,
                         command_id=command_id,
@@ -13450,12 +13458,12 @@ def _reconcile_passes_inline(
     summary: dict,
     started_at: str,
 ) -> None:
-    """Legacy caller-owned-connection pass sequence (BYTE-IDENTICAL to pre-2026-06-11).
+    """Legacy caller-owned-connection pass sequence.
 
     The caller (cycle_runner or an INV-31 anchor test) owns ``conn`` and threads
-    it through every pass exactly as before. No behavioural change; extracted
-    verbatim from the old ``reconcile_unresolved_commands`` body so the scheduled
-    lane can take the short-connection path without disturbing this one.
+    it through every pass. Positive matched order facts intentionally run before
+    terminal no-fill projection so late venue fills cannot be voided by an older
+    cancel/expire terminal row.
     """
     if True:  # preserve original indentation of the extracted body verbatim
         edli_confirmed_command_summary = reconcile_edli_confirmed_legacy_command_repairs(conn)
@@ -13516,6 +13524,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += terminal_point_summary["stayed"]
         summary["errors"] += terminal_point_summary["errors"]
 
+        matched_summary = reconcile_matched_order_facts(conn, client)
+        summary["matched_order_facts"] = matched_summary
+        summary["advanced"] += matched_summary["advanced"]
+        summary["stayed"] += matched_summary["stayed"]
+        summary["errors"] += matched_summary["errors"]
+
         cancel_ack_terminal_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
         summary["cancel_ack_terminal_no_fill_facts"] = cancel_ack_terminal_summary
         summary["advanced"] += cancel_ack_terminal_summary["advanced"]
@@ -13533,12 +13547,6 @@ def _reconcile_passes_inline(
         summary["advanced"] += stale_terminal_summary["advanced"]
         summary["stayed"] += stale_terminal_summary["stayed"]
         summary["errors"] += stale_terminal_summary["errors"]
-
-        matched_summary = reconcile_matched_order_facts(conn, client)
-        summary["matched_order_facts"] = matched_summary
-        summary["advanced"] += matched_summary["advanced"]
-        summary["stayed"] += matched_summary["stayed"]
-        summary["errors"] += matched_summary["errors"]
 
         edli_post_submit_absence_summary = _reconcile_edli_post_submit_unknown_absence(
             conn,
@@ -14588,12 +14596,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_local_orphan_no_fill_findings, "local_orphan_no_fill_findings")
     _client_pass("terminal_point_orders",
                  reconcile_terminal_point_orders, "terminal_point_orders")
+    _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
     _db_pass("cancel_ack_terminal_no_fill_facts",
              reconcile_cancel_ack_terminal_no_fill_facts, "cancel_ack_terminal_no_fill_facts")
     _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
     _db_pass("stale_terminal_no_fill_findings",
              reconcile_stale_terminal_no_fill_findings, "stale_terminal_no_fill_findings")
-    _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
     _client_pass(
         "edli_post_submit_unknown_absence",
         _reconcile_edli_post_submit_unknown_absence,

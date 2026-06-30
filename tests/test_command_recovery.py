@@ -4130,6 +4130,102 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["entry_price"])) == Decimal("0.34")
         assert current["order_status"] == "filled"
 
+    def test_cancelled_command_with_late_matched_point_order_projects_without_illegal_event(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A post-cancel matched order fact is venue truth, not a CANCELLED->FILLED command transition."""
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-late-match")
+        _seed_pending_entry_projection(conn, order_id="ord-late-match")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"reason": "maker_redecision_reprice"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-late-match", "venue_status": "CANCELED"},
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-late-match",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="5",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-late-match",
+            "status": "MATCHED",
+            "size_matched": "5",
+            "price": "0.34",
+            "associate_trades": ["trade-late-match"],
+            "transactionsHashes": ["0xhash-late-match"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        event_types = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert event_types[-1] == "CANCEL_ACKED"
+        assert "FILL_CONFIRMED" not in event_types
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size, source
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "MATCHED",
+            "remaining_size": "0",
+            "matched_size": "5",
+            "source": "REST",
+        }
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-late-match",
+            "venue_order_id": "ord-late-match",
+            "state": "MATCHED",
+            "filled_size": "5",
+            "fill_price": "0.34",
+            "tx_hash": "0xhash-late-match",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, entry_price, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("5")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("1.7")
+        assert Decimal(str(current["entry_price"])) == Decimal("0.34")
+        assert current["order_status"] == "filled"
+
     def test_acked_unknown_point_order_recovers_from_maker_trade_facts(
         self,
         conn,

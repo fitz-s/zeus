@@ -1063,7 +1063,8 @@ def _substrate_warm_business_summary(
         if condition_ids:
             selected = int(out.get("direct_clob_prefetch_selected_priority_condition_count") or 0)
             if status == "refreshed" and selected <= 0:
-                if inserted <= 0:
+                stale_conditions = int(out.get("stale_condition_submitted") or 0)
+                if inserted <= 0 or stale_conditions > 0:
                     out["scheduler_failed"] = True
                     out["scheduler_failure_reason"] = "priority_conditions_not_serviced"
                 else:
@@ -2592,6 +2593,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         try:
             open_rest_priority_condition_ids: list[str] = []
             held_position_priority_condition_ids: list[str] = []
+            marker_exact_condition_ids = list(priority_marker_condition_ids)
             trade_ro = None
             try:
                 trade_ro = get_trade_connection_read_only()
@@ -2612,9 +2614,10 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
                     except Exception:  # noqa: BLE001
                         pass
             held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
-            exact_priority_condition_ids = list(priority_marker_condition_ids)
-            exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
-            exact_priority_condition_ids.extend(held_position_priority_condition_ids)
+            exact_priority_condition_ids = list(marker_exact_condition_ids)
+            if not marker_exact_condition_ids:
+                exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
+                exact_priority_condition_ids.extend(held_position_priority_condition_ids)
             condition_priority_families = _condition_priority_families_for_refresh(
                 forecasts_conn,
                 exact_priority_condition_ids,
@@ -2637,11 +2640,17 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
         priority_families: list[tuple[str, str, str]] = []
         priority_family_seen: set[tuple[str, str, str]] = set()
-        for family in (
-            list(condition_priority_families)
-            + list(claim_priority_families)
-            + list(priority_marker_families)
-        ):
+        if marker_exact_condition_ids:
+            priority_family_candidates = list(condition_priority_families) + list(
+                priority_marker_families
+            )
+        else:
+            priority_family_candidates = (
+                list(condition_priority_families)
+                + list(claim_priority_families)
+                + list(priority_marker_families)
+            )
+        for family in priority_family_candidates:
             key = tuple(str(part or "").strip() for part in family)
             if len(key) != 3 or not all(key) or key in priority_family_seen:
                 continue
@@ -2673,7 +2682,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             priority_condition_ids=exact_priority_condition_ids,
             refresh_budget_seconds=priority_budget_s,
             snapshot_reserve_seconds=priority_snapshot_reserve_s,
-            include_money_risk_families=True,
+            include_money_risk_families=not bool(marker_exact_condition_ids),
         )
         summary = {
             **dict(summary or {}),

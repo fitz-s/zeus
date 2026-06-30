@@ -223,6 +223,8 @@ NO_TRADE_NO_EXECUTABLE_ROUTE = "NO_EXECUTABLE_ROUTE_CANDIDATE"
 NO_TRADE_NO_DIRECTION_LAW = "NO_DIRECTION_LAW_CANDIDATE"
 NO_TRADE_MARKET_INCOHERENT = "MARKET_INCOHERENT_BLOCK_LIVE"
 NO_TRADE_NO_POSITIVE_EDGE = "NO_POSITIVE_EDGE_CANDIDATE"
+NO_TRADE_NO_POSITIVE_UTILITY = "NO_POSITIVE_UTILITY_CANDIDATE"
+NO_TRADE_NO_MIN_ORDER_UTILITY = "NO_MIN_ORDER_UTILITY_CANDIDATE"
 NO_TRADE_NO_ROI_FRONTIER_CANDIDATE = "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
 # q_lcb empirical reliability guard (single-serving-rule flow §6): every candidate's
 # served q_lcb was deflated to 0 (abstain) because its reliability cell is thin / below floor.
@@ -1751,6 +1753,51 @@ class FamilyDecisionEngine:
                 )
         return tuple(out)
 
+    def _log_select_gate_diag(
+        self,
+        *,
+        scored: Sequence[CandidateDecision],
+        after_executable: Sequence[CandidateDecision],
+        after_direction: Sequence[CandidateDecision],
+        after_coherence: Sequence[CandidateDecision],
+        positive_edge: Sequence[CandidateDecision],
+        positive_utility: Sequence[CandidateDecision],
+        positive_min_order: Sequence[CandidateDecision],
+        survivors: Sequence[CandidateDecision],
+    ) -> None:
+        """Best-effort live evidence for the first empty selection gate."""
+
+        try:
+            import logging as _gate_diag
+
+            _tops = sorted(
+                scored,
+                key=self._selection_edge_lcb,
+                reverse=True,
+            )[:4]
+            _rows = "; ".join(
+                f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
+                f"adm={int(self._direction_admitted(d))} coh={int(d.coherence_allows)} "
+                f"exec={int(d.route.route_cost.executable)} "
+                f"e={self._selection_edge_lcb(d):+.4f} dU={d.economics.optimal_delta_u:+.5f} "
+                f"dUmin={d.economics.delta_u_at_min:+.5f}"
+                for d in _tops
+            )
+            _gate_diag.getLogger("zeus.spine_edge").info(
+                "SELECT_GATE_DIAG n=%d exec=%d dir=%d coh=%d edge=%d du=%d min=%d live=%d tops=[%s]",
+                len(scored),
+                len(after_executable),
+                len(after_direction),
+                len(after_coherence),
+                len(positive_edge),
+                len(positive_utility),
+                len(positive_min_order),
+                len(survivors),
+                _rows,
+            )
+        except Exception:
+            pass
+
     # --------------------------------------------------------------- selection
     def _select(
         self, scored: Sequence[CandidateDecision]
@@ -1792,16 +1839,65 @@ class FamilyDecisionEngine:
         if not after_coherence:
             return None, NO_TRADE_MARKET_INCOHERENT
 
-        edge_survivors = [
+        positive_edge = [
             d
             for d in after_coherence
-            if self._selection_edge_lcb(d) > 0.0 and d.economics.optimal_delta_u > 0.0
+            if self._selection_edge_lcb(d) > 0.0
         ]
+        if not positive_edge:
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=(),
+                positive_min_order=(),
+                survivors=(),
+            )
+            return None, NO_TRADE_NO_POSITIVE_EDGE
+
+        positive_utility = [
+            d
+            for d in positive_edge
+            if d.economics.optimal_delta_u > 0.0
+        ]
+        if not positive_utility:
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=positive_utility,
+                positive_min_order=(),
+                survivors=(),
+            )
+            return None, NO_TRADE_NO_POSITIVE_UTILITY
+
+        positive_min_order = [
+            d
+            for d in positive_utility
+            if d.economics.delta_u_at_min > 0.0
+        ]
+        if not positive_min_order:
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=positive_utility,
+                positive_min_order=positive_min_order,
+                survivors=(),
+            )
+            return None, NO_TRADE_NO_MIN_ORDER_UTILITY
+
         # The live pass is a final structural re-proof (executable route, native-side
         # proof present, coherence accepted, vector edge/DeltaU).
         survivors = [
             d
-            for d in edge_survivors
+            for d in positive_min_order
             if self._live_selectable_candidate(d)
         ]
         if not survivors:
@@ -1811,34 +1907,16 @@ class FamilyDecisionEngine:
             # harvest. This names, per top candidate, every gate flag + the per-stage
             # survivor counts, so the exact suppressor is auditable. Fail-safe; the diag
             # never raises into the decision path and changes no behavior.
-            try:
-                import logging as _gate_diag
-
-                _tops = sorted(
-                    scored,
-                    key=self._selection_edge_lcb,
-                    reverse=True,
-                )[:4]
-                _rows = "; ".join(
-                    f"{d.route.side}:{d.route.bin_id} dlok={int(d.direction_law_ok)} "
-                    f"adm={int(self._direction_admitted(d))} coh={int(d.coherence_allows)} "
-                    f"exec={int(d.route.route_cost.executable)} "
-                    f"e={self._selection_edge_lcb(d):+.4f} dU={d.economics.optimal_delta_u:+.5f} "
-                    f"dUmin={d.economics.delta_u_at_min:+.5f}"
-                    for d in _tops
-                )
-                _gate_diag.getLogger("zeus.spine_edge").info(
-                    "SELECT_GATE_DIAG n=%d exec=%d dir=%d coh=%d edge=%d live=%d tops=[%s]",
-                    len(scored),
-                    len(after_executable),
-                    len(after_direction),
-                    len(after_coherence),
-                    len(edge_survivors),
-                    len(survivors),
-                    _rows,
-                )
-            except Exception:
-                pass
+            self._log_select_gate_diag(
+                scored=scored,
+                after_executable=after_executable,
+                after_direction=after_direction,
+                after_coherence=after_coherence,
+                positive_edge=positive_edge,
+                positive_utility=positive_utility,
+                positive_min_order=positive_min_order,
+                survivors=survivors,
+            )
             return None, NO_TRADE_NO_POSITIVE_EDGE
 
         # SELECT: live defaults to an ROI frontier so capital-efficient YES can beat a

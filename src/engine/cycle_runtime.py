@@ -2953,6 +2953,7 @@ def _entry_selection_guard_exit_decision(
     pos,
     exit_context,
     summary: dict,
+    exit_decision=None,
 ) -> object | None:
     verdict = _entry_qkernel_selection_guard_verdict(conn, pos)
     if verdict is None:
@@ -2973,7 +2974,13 @@ def _entry_selection_guard_exit_decision(
         }
     )
 
-    day0_immature_reason = _day0_immature_exit_authority_reason(pos, exit_context)
+    if exit_decision is not None and bool(getattr(exit_decision, "should_exit", False)):
+        summary["entry_selection_guard_invalid_existing_exit_preserved"] = (
+            summary.get("entry_selection_guard_invalid_existing_exit_preserved", 0) + 1
+        )
+        return None
+
+    day0_immature_reason = _day0_immature_exit_authority_reason(pos, exit_context, exit_decision)
     if day0_immature_reason:
         summary["entry_selection_guard_invalid_day0_immature_holds"] = (
             summary.get("entry_selection_guard_invalid_day0_immature_holds", 0) + 1
@@ -3101,7 +3108,18 @@ def _family_monitor_positions(portfolio, pos) -> list:
     if key is None or portfolio is None:
         return [pos]
     out: list = []
+    candidates: list = []
+    seen_ids: set[int] = set()
     for other in get_open_positions(portfolio):
+        candidates.append(other)
+        seen_ids.add(id(other))
+    for other in list(getattr(portfolio, "positions", []) or []):
+        if id(other) in seen_ids:
+            continue
+        if _quarantined_position_can_redecision(other):
+            candidates.append(other)
+            seen_ids.add(id(other))
+    for other in candidates:
         if _family_monitor_key(other) != key:
             continue
         if not _family_monitor_position_has_live_risk(other):
@@ -4672,6 +4690,7 @@ def execute_monitoring_phase(
                     pos=pos,
                     exit_context=exit_context,
                     summary=summary,
+                    exit_decision=exit_decision,
                 )
                 if selection_guard_decision is not None:
                     exit_decision = selection_guard_decision

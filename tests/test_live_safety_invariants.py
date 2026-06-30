@@ -3697,15 +3697,21 @@ def test_monitor_entry_selection_guard_does_not_force_exit_on_immature_day0():
         entry_method="qkernel_spine",
         selected_method="day0_observation_remaining_window",
     )
-    pos.applied_validations = [
-        "day0_observation_remaining_window",
-        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.012",
-    ]
     pos.last_monitor_prob = 0.0
     pos.last_monitor_prob_is_fresh = True
     pos.last_monitor_edge = -0.031
     pos.last_monitor_market_price = 0.031
     pos.last_monitor_market_price_is_fresh = True
+    exit_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=[
+            "day0_observation_remaining_window",
+            "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.012",
+        ],
+    )
     summary = {}
 
     decision = cycle_runtime._entry_selection_guard_exit_decision(
@@ -3713,6 +3719,7 @@ def test_monitor_entry_selection_guard_does_not_force_exit_on_immature_day0():
         pos=pos,
         exit_context=SimpleNamespace(best_bid=0.031),
         summary=summary,
+        exit_decision=exit_decision,
     )
 
     assert decision is not None
@@ -3720,6 +3727,104 @@ def test_monitor_entry_selection_guard_does_not_force_exit_on_immature_day0():
     assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_HOLD_DAY0_IMMATURE"
     assert "day0_high_extreme_not_mature:" in decision.reason
     assert summary["entry_selection_guard_invalid_day0_immature_holds"] == 1
+
+
+def test_monitor_entry_selection_guard_preserves_existing_day0_exit_decision():
+    """Entry guard may flag invalid entry proof, but must not rename an existing exit."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, decision_id, intent_kind, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ENTRY', ?, ?)
+        """,
+        (
+            "cmd-unarmed-day0-exit",
+            "pos-unarmed-day0-exit",
+            "edli_exec_cmd:agg-unarmed-day0-exit:edli_intent:agg-unarmed-day0-exit:tok:tok:buy_yes",
+            "2026-06-29T12:00:00+00:00",
+            "2026-06-29T12:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, occurred_at, payload_json
+        ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            "agg-unarmed-day0-exit",
+            "2026-06-29T12:00:00+00:00",
+            json.dumps(
+                {
+                    "direction": "buy_yes",
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "selection_guard_basis": "SIDE_NOT_ARMED",
+                        "selection_guard_abstained": False,
+                        "selection_guard_q_safe": 0.0,
+                        "selection_guard_cell_key": "YES|tail|nonmodal|pb2",
+                        "payoff_q_lcb": 0.0,
+                        "cost": 0.07,
+                        "edge_lcb": 0.0,
+                    },
+                }
+            ),
+        ),
+    )
+    pos = _make_position(
+        trade_id="pos-unarmed-day0-exit",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+        shares=85.17,
+        chain_shares=85.17,
+        entry_method="qkernel_spine",
+        selected_method="day0_observation_remaining_window",
+    )
+    exit_decision = ExitDecision(
+        True,
+        reason="DAY0_HARD_FACT_BIN_DEAD (running_extreme_refutes_bin; source=observation_instants)",
+        urgency="immediate",
+        trigger="DAY0_HARD_FACT_BIN_DEAD",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=["day0_hard_fact_exit_lane"],
+    )
+    summary = {}
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=conn,
+        pos=pos,
+        exit_context=SimpleNamespace(best_bid=0.031),
+        summary=summary,
+        exit_decision=exit_decision,
+    )
+
+    assert decision is None
+    assert summary["entry_selection_guard_invalid_positions"] == 1
+    assert summary["entry_selection_guard_invalid_existing_exit_preserved"] == 1
 
 
 def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_posterior():
@@ -5254,6 +5359,175 @@ def test_family_monitor_overlay_blocks_direct_sell_on_immature_day0_authority():
     assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
 
 
+def test_family_monitor_overlay_replays_munich_0244_receipt_as_immature_day0_hold():
+    """Munich 02:44 receipt shape must not be promoted into a sell."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    validations = [
+        "day0_observation_remaining_window",
+        "belief_source=day0_observation_remaining_window;kind=probabilistic_remaining_window;metric=high;posterior_mode=model_only_v1",
+        "market_quote_prior_excluded:day0_observation_remaining_window",
+        "alpha_blend_inapplicable:day0_observation_remaining_window",
+        "day0_observation",
+        "day0_hourly_vectors",
+        "forecast_source_id:day0_hourly_vectors",
+        "forecast_source_role:day0_remaining_window_live",
+        "day0_extreme_not_absorbing",
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+        "mc_instrument_noise",
+        "day0_remaining_window_raw_vector_normalization",
+        "ci_threshold",
+        "ci_overlap_hold",
+    ]
+    pos = _make_position(
+        trade_id="munich-29-no-0244-receipt",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.8728257780611077,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:44.908942+00:00"
+    pos.last_monitor_prob = 0.15810000000000002
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.57
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.57
+    pos.last_monitor_best_ask = 0.58
+    pos.last_monitor_edge = -0.41189999999999993
+    pos.applied_validations = list(validations)
+
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=list(validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+    trigger = cycle_runtime._effective_exit_trigger(hold_decision, reason)
+
+    assert should_exit is False
+    assert reason == "CI_OVERLAP_HOLD"
+    assert trigger == "CI_OVERLAP_HOLD"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+    assert "family_direct_sell_blocked_day0_immature" in pos.applied_validations
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=27,
+        phase_after=LifecyclePhase.DAY0_WINDOW.value,
+        source_module="tests/test_munich_0244_receipt",
+        exit_decision=hold_decision,
+        final_should_exit=should_exit,
+        final_exit_reason=reason,
+        final_exit_trigger=trigger,
+    )
+    payload = json.loads(events[0]["payload_json"])
+    family = payload["family_redecision"]
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == "CI_OVERLAP_HOLD"
+    assert payload["exit_decision_trigger"] == "CI_OVERLAP_HOLD"
+    assert family["decision"] == "FAMILY_DIRECT_SELL_BLOCKED_DAY0_IMMATURE"
+    assert family["suppressed_exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
+    assert family["day0_maturity_block"].startswith("day0_high_extreme_not_mature:")
+    assert "FAMILY_DIRECT_SELL_DOMINATES_HOLD" not in {
+        payload["exit_decision_reason"],
+        payload["exit_decision_trigger"],
+    }
+
+
+def test_family_monitor_overlay_includes_entry_authority_quarantined_family_exposure():
+    """Chain-backed quarantine is live money risk and must enter family value math."""
+    from src.engine import cycle_runtime
+
+    active = _make_position(
+        trade_id="munich-29-no-active",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.8728257780611077,
+        state="day0_window",
+        last_monitor_prob=0.84,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.57,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=0.57,
+    )
+    quarantined = _make_position(
+        trade_id="munich-30-no-quarantined",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Munich be 30°C on June 30?",
+        direction="buy_no",
+        shares=29.14,
+        chain_shares=29.14,
+        chain_state="entry_authority_quarantined",
+        entry_price=0.73,
+        p_posterior=0.879883784472759,
+        state="quarantined",
+        last_monitor_prob=0.99,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.74,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=0.74,
+    )
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=["ci_overlap_hold"],
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(active, quarantined),
+        pos=active,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_OVERLAP_HOLD"
+    family = active._monitor_family_redecision
+    assert family["position_count"] == 2
+    assert {leg["position_id"] for leg in family["legs"]} == {
+        "munich-29-no-active",
+        "munich-30-no-quarantined",
+    }
+    assert family["family_hold_value_usd"] == pytest.approx(
+        33.15 * 0.84 + 29.14 * 0.99
+    )
+    assert family["family_direct_sell_value_usd"] == pytest.approx(
+        33.15 * 0.57 + 29.14 * 0.74
+    )
+
+
 def test_family_monitor_overlay_holds_munich_buy_no_when_held_side_probability_high():
     """Munich regression: buy_no monitor probability is NO-space, not same-bin YES q."""
     from src.engine import cycle_runtime
@@ -6132,6 +6406,137 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
     assert "day0_observation_remaining_window" in validations
     assert "day0_extreme_not_absorbing" in validations
     assert any(v.startswith("day0_high_extreme_not_mature:") for v in validations)
+
+
+def test_day0_remaining_window_buy_no_returns_held_side_probability(monkeypatch):
+    """Day0 monitor q is a YES-bin vector; buy_no exits must receive 1 - q_yes."""
+    from src.engine import monitor_refresh
+    import src.signal.diurnal as diurnal
+
+    pos = _make_position(
+        trade_id="munich-29-no-day0-side-space",
+        state="day0_window",
+        city="Munich",
+        target_date="2026-06-30",
+        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
+        temperature_metric="high",
+        direction="buy_no",
+        entry_method="qkernel_spine",
+        selected_method="day0_observation_remaining_window",
+        p_posterior=0.872825778061108,
+    )
+    city = SimpleNamespace(
+        name="Munich",
+        timezone="Europe/Berlin",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="EDDM",
+    )
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda *_: {
+            "high_so_far": 28.0,
+            "low_so_far": 18.0,
+            "current_temp": 27.5,
+            "observation_time": "2026-06-30T04:44:00+02:00",
+            "source": "wu_api",
+        },
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_source_rejection_reason",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_quality_rejection_reason",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        diurnal,
+        "build_day0_temporal_context",
+        lambda *a, **k: SimpleNamespace(
+            daypart="pre_sunrise",
+            post_peak_confidence=0.034,
+            current_utc_timestamp=datetime(2026, 6, 30, 2, 44, tzinfo=timezone.utc),
+            solar_day=None,
+            current_local_hour=4.74,
+            daylight_progress=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_read_day0_hourly_vectors",
+        lambda **kw: {
+            "members_hourly": np.zeros((3, 3)),
+            "times": [
+                "2026-06-30T02:00:00+00:00",
+                "2026-06-30T03:00:00+00:00",
+                "2026-06-30T04:00:00+00:00",
+            ],
+            "source_id": "day0_hourly_vectors",
+            "forecast_source_role": "day0_remaining_window_live",
+            "source_models": ["icon_d2", "ecmwf_ifs"],
+            "expected_models": ["icon_d2", "ecmwf_ifs"],
+            "source_model_count": 2,
+            "fetch_time": datetime(2026, 6, 30, 2, 40, tzinfo=timezone.utc),
+        },
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "remaining_member_extrema_for_day0",
+        lambda *a, **k: (
+            SimpleNamespace(maxes=np.array([28.0, 29.0, 30.0]), mins=None),
+            8.0,
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_extreme_authority_rejection_reason",
+        lambda **kwargs: "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observed_extreme_from_canonical_surface",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh.Day0Router,
+        "route",
+        staticmethod(
+            lambda inputs: SimpleNamespace(
+                p_vector=lambda bins, n_mc=None: np.array([0.28, 0.1581, 0.5619])
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *a, **k: (
+            [
+                monitor_refresh.Bin(low=28, high=28, label="28°C", unit="C"),
+                monitor_refresh.Bin(low=29, high=29, label="29°C", unit="C"),
+                monitor_refresh.Bin(low=30, high=30, label="30°C", unit="C"),
+            ],
+            1,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "_maybe_write_day0_nowcast", lambda **kw: None)
+
+    p, validations = monitor_refresh._refresh_day0_observation(
+        position=pos,
+        current_p_market=0.57,
+        conn=None,
+        city=city,
+        target_d=date(2026, 6, 30),
+    )
+
+    assert p == pytest.approx(1.0 - 0.1581)
+    assert getattr(pos, "_monitor_probability_is_fresh") is True
+    assert "day0_observation_remaining_window" in validations
+    assert "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034" in validations
 
 
 def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):

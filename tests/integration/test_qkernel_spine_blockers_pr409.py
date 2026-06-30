@@ -1035,6 +1035,38 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
         assert exposure[bin_id] == pytest.approx(21.27)
 
 
+def test_opportunity_book_receipt_records_selection_exposure():
+    """The live receipt must prove which family exposure shaped qkernel selection."""
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    exposure = {
+        era._candidate_bin_id(proofs[0]): 12.0,
+        utility_ranker.OUTSIDE_OUTCOME: 12.0,
+    }
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt-selection-exposure",
+        family_id=family.family_id,
+        proofs=proofs,
+        selected_proof=proofs[0],
+        selection_exposure_by_outcome=exposure,
+    )
+
+    summary = book.to_receipt_dict()["cache_summary"]["selection_exposure"]
+    assert summary["source"] == "position_current_family_selection_exposure"
+    assert summary["nonzero_outcome_count"] == 2
+    assert summary["total_exposure_usd"] == pytest.approx(24.0)
+    assert summary["max_outcome_exposure_usd"] == pytest.approx(12.0)
+    assert summary["by_outcome_usd"][utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(12.0)
+
+
 def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_topology():
     """Same city/date/metric exposure cannot flatten to zero when topology split hides it.
 
@@ -1258,15 +1290,15 @@ def _overlay_proof(
     return bridge._overlay_spine_economics_onto_proof(proof, decision)
 
 
-def test_overlay_preserves_live_posterior_probability_fields_and_updates_score():
-    """qkernel route economics become execution authority; proof q remains provenance."""
+def test_overlay_uses_qkernel_probability_fields_and_updates_score():
+    """qkernel route economics become the single live execution probability."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
     new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.70, economics=economics)
 
-    assert new_proof.q_posterior == pytest.approx(0.80)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.70)
+    assert new_proof.q_posterior == pytest.approx(0.202)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
     assert new_proof.trade_score == pytest.approx(0.050)
     assert new_proof.q_source != "qkernel_spine"
     assert new_proof.selection_authority_applied == "qkernel_spine"
@@ -1285,20 +1317,20 @@ def test_overlay_preserves_live_posterior_probability_fields_and_updates_score()
     assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
         0.70
     )
-    assert new_proof.qkernel_execution_economics["persisted_posterior_q_posterior"] == pytest.approx(
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
         0.80
     )
-    assert new_proof.qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] == pytest.approx(
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
         0.70
     )
     assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
-    assert new_proof.qkernel_execution_economics["posterior_authority_cap"] == (
-        "persisted_selected_side_posterior"
+    assert new_proof.qkernel_execution_economics["probability_authority"] == (
+        "qkernel_payoff_direct_route"
     )
 
 
-def test_overlay_rejects_qkernel_bound_above_persisted_posterior_authority():
-    """Qkernel direct routes may be stricter than persisted proof q, never looser."""
+def test_overlay_does_not_use_pre_qkernel_probability_as_second_authority():
+    """A valid qkernel direct route replaces stale proof q instead of self-rejecting."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
@@ -1310,11 +1342,14 @@ def test_overlay_rejects_qkernel_bound_above_persisted_posterior_authority():
         economics=economics,
     )
 
-    assert new_proof is None
+    assert new_proof is not None
+    assert new_proof.q_posterior == pytest.approx(0.202)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(0.001)
 
 
-def test_overlay_rejects_live_seoul_class_direct_no_qkernel_loosened_authority():
-    """Seoul/Singapore regression: direct NO cannot size above persisted NO belief."""
+def test_overlay_live_direct_no_uses_qkernel_probability_authority():
+    """Direct NO sizing uses the qkernel payoff pair after identity/selection guards."""
 
     economics = _selected_economics(
         edge_lcb=0.22226499587493073,
@@ -1331,7 +1366,12 @@ def test_overlay_rejects_live_seoul_class_direct_no_qkernel_loosened_authority()
         direction="buy_no",
     )
 
-    assert new_proof is None
+    assert new_proof is not None
+    assert new_proof.q_posterior == pytest.approx(0.9154395759428866)
+    assert new_proof.q_lcb_5pct == pytest.approx(0.8722649958749307)
+    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
+        0.803222
+    )
 
 
 def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
@@ -1398,15 +1438,15 @@ def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
     assert annotated.selection_authority_applied is None
     assert annotated.qkernel_execution_economics == {
         **cert,
-        "persisted_posterior_q_posterior": pytest.approx(0.02),
-        "persisted_posterior_q_lcb_5pct": pytest.approx(0.000001),
+        "pre_qkernel_q_posterior": pytest.approx(0.02),
+        "pre_qkernel_q_lcb_5pct": pytest.approx(0.000001),
         "q_lcb_authority": "qkernel_payoff_bound",
-        "posterior_authority_cap": "persisted_selected_side_posterior",
+        "probability_authority": "qkernel_payoff_direct_route",
     }
 
 
-def test_qkernel_receipt_annotation_rejects_direct_no_posterior_authority_loosening():
-    """Non-selected receipt annotations must not carry loosened qkernel execution q."""
+def test_qkernel_receipt_annotation_uses_direct_no_qkernel_probability():
+    """Non-selected receipt annotations record qkernel economics in the same q-space."""
 
     row = _row(
         condition_id="cond-qk-loosened-no",
@@ -1458,11 +1498,13 @@ def test_qkernel_receipt_annotation_rejects_direct_no_posterior_authority_loosen
         qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "NO"): cert},
     )
 
-    assert annotated.passed_prefilter is False
-    assert annotated.trade_score == 0.0
-    assert annotated.missing_reason.startswith("QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:")
-    assert annotated.qkernel_execution_economics["posterior_authority_cap"] == (
-        "persisted_selected_side_posterior"
+    assert annotated.passed_prefilter is True
+    assert annotated.trade_score == pytest.approx(0.22226499587493073)
+    assert annotated.missing_reason is None
+    assert annotated.q_posterior == pytest.approx(0.9154395759428866)
+    assert annotated.q_lcb_5pct == pytest.approx(0.8722649958749307)
+    assert annotated.qkernel_execution_economics["probability_authority"] == (
+        "qkernel_payoff_direct_route"
     )
 
 
