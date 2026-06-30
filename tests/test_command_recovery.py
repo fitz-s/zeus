@@ -134,6 +134,73 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     assert row["next_exit_retry_at"] is None
 
 
+def test_boot_fast_releases_review_required_exit_mutex_before_scheduler(
+    tmp_path,
+    monkeypatch,
+):
+    """Boot-fast must clear local REVIEW_REQUIRED exit mutex debt without venue reads."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.execution.exit_safety import ExitMutex
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast-review-mutex.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    _insert(
+        seed,
+        command_id="cmd-review-exit",
+        position_id="pos-review",
+        intent_kind="EXIT",
+        token_id="tok-review",
+        side="SELL",
+    )
+    _advance_to_review_required(seed, "cmd-review-exit")
+    mutex = ExitMutex(seed)
+    assert mutex.acquire("pos-review", "tok-review", "cmd-review-exit") is True
+    seed.commit()
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["review_required_exit_mutex_release"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        row = verified.execute(
+            """
+            SELECT m.released_at, m.release_reason, c.state
+              FROM exit_mutex_holdings m
+              JOIN venue_commands c ON c.command_id = m.command_id
+             WHERE m.command_id = 'cmd-review-exit'
+            """
+        ).fetchone()
+    finally:
+        verified.close()
+    assert row["released_at"] is not None
+    assert row["release_reason"] == "REVIEW_REQUIRED_RECOVERY"
+    assert row["state"] == "REVIEW_REQUIRED"
+
+
 def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
     tmp_path,
     monkeypatch,

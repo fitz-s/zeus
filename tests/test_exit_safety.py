@@ -4015,3 +4015,72 @@ def test_mutex_released_on_cancel_confirmed_or_filled_or_expired(conn):
 
     _insert_exit_command(conn, command_id="cmd-b", position_id="pos-1")
     assert mutex.acquire("pos-1", YES_TOKEN, "cmd-b") is True
+
+
+def test_mutex_released_on_review_required_but_replacement_still_blocked(conn):
+    from src.execution.exit_safety import ExitMutex, can_submit_replacement_sell
+    from src.state.venue_command_repo import append_event
+
+    _insert_exit_command(conn, command_id="cmd-review", venue_order_id="ord-review")
+    mutex = ExitMutex(conn)
+    assert mutex.acquire("pos-1", YES_TOKEN, "cmd-review") is True
+
+    append_event(
+        conn,
+        command_id="cmd-review",
+        event_type="REVIEW_REQUIRED",
+        occurred_at=_NOW.isoformat(),
+        payload={
+            "reason": "final_submission_envelope_persistence_failed",
+            "venue_order_id": "ord-review",
+        },
+    )
+
+    row = conn.execute(
+        "SELECT released_at, release_reason FROM exit_mutex_holdings WHERE mutex_key = ?",
+        (f"pos-1:{YES_TOKEN}",),
+    ).fetchone()
+    assert row["released_at"] is not None
+    assert row["release_reason"] == "REVIEW_REQUIRED"
+
+    allowed, reason = can_submit_replacement_sell(conn, "pos-1", YES_TOKEN)
+    assert allowed is False
+    assert reason == "active_prior_exit_sell: state=REVIEW_REQUIRED command_id=cmd-review"
+
+
+def test_review_required_recovery_releases_legacy_exit_mutex_only(conn):
+    from src.execution.exit_safety import (
+        ExitMutex,
+        can_submit_replacement_sell,
+        reconcile_review_required_exit_mutex_releases,
+    )
+    from src.state.venue_command_repo import append_event
+
+    _insert_exit_command(conn, command_id="cmd-legacy-review", venue_order_id="ord-review")
+    append_event(
+        conn,
+        command_id="cmd-legacy-review",
+        event_type="REVIEW_REQUIRED",
+        occurred_at=_NOW.isoformat(),
+        payload={
+            "reason": "matched orders cannot be canceled",
+            "venue_order_id": "ord-review",
+        },
+    )
+
+    mutex = ExitMutex(conn)
+    assert mutex.acquire("pos-1", YES_TOKEN, "cmd-legacy-review") is True
+
+    summary = reconcile_review_required_exit_mutex_releases(conn)
+
+    assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    row = conn.execute(
+        "SELECT released_at, release_reason FROM exit_mutex_holdings WHERE mutex_key = ?",
+        (f"pos-1:{YES_TOKEN}",),
+    ).fetchone()
+    assert row["released_at"] is not None
+    assert row["release_reason"] == "REVIEW_REQUIRED_RECOVERY"
+
+    allowed, reason = can_submit_replacement_sell(conn, "pos-1", YES_TOKEN)
+    assert allowed is False
+    assert reason == "active_prior_exit_sell: state=REVIEW_REQUIRED command_id=cmd-legacy-review"

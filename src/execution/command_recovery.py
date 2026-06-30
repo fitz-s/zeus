@@ -54,6 +54,7 @@ from src.execution.command_bus import (
     IntentKind,
     VenueCommand,
 )
+from src.execution.exit_safety import reconcile_review_required_exit_mutex_releases
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.state.venue_command_repo import (
     find_unresolved_commands,
@@ -13980,6 +13981,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += int(abandoned_ghost_summary.get("stayed", 0))
         summary["errors"] += int(abandoned_ghost_summary.get("errors", 0))
 
+        review_mutex_summary = reconcile_review_required_exit_mutex_releases(conn)
+        summary["review_required_exit_mutex_release"] = review_mutex_summary
+        summary["advanced"] += review_mutex_summary["advanced"]
+        summary["stayed"] += review_mutex_summary["stayed"]
+        summary["errors"] += review_mutex_summary["errors"]
+
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
 
@@ -14805,6 +14812,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             updated_before=started_at,
         )
         _boot_db_pass(
+            "review_required_exit_mutex_release",
+            reconcile_review_required_exit_mutex_releases,
+            "review_required_exit_mutex_release",
+        )
+        _boot_db_pass(
             "cancel_ack_terminal_no_fill_facts",
             reconcile_cancel_ack_terminal_no_fill_facts,
             "cancel_ack_terminal_no_fill_facts",
@@ -14889,6 +14901,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
     if scope == "live_tick":
         _post_submit_unknown_absence_fast_pass()
+
+    _db_pass(
+        "review_required_exit_mutex_release",
+        reconcile_review_required_exit_mutex_releases,
+        "review_required_exit_mutex_release",
+    )
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:

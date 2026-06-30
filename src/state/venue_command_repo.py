@@ -1183,6 +1183,14 @@ def append_event(
 
             release_reservation_for_command_state(conn, command_id, state_after)
             release_exit_mutex_for_command_state(conn, command_id, state_after)
+        elif state_after == "REVIEW_REQUIRED":
+            # REVIEW_REQUIRED remains a durable proof/recovery blocker for new
+            # replacement sells, but it must not keep the short-lived exit
+            # mutex held across restarts. The venue command row itself owns the
+            # unresolved-side-effect guard.
+            from src.execution.exit_safety import release_exit_mutex_for_command_state
+
+            release_exit_mutex_for_command_state(conn, command_id, state_after)
 
     return event_id
 
