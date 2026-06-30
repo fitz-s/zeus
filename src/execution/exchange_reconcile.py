@@ -1805,6 +1805,7 @@ def reconcile_recorded_maker_fill_economics(
         live_tick_filter = f"""
            AND (
                  UPPER(cmd.intent_kind) != 'ENTRY'
+              OR pc.position_id IS NULL
               OR COALESCE(pc.phase, '') IN ({phase_placeholders})
            )
         """

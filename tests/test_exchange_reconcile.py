@@ -1258,6 +1258,122 @@ def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
     ).fetchone()["state"] == "CANCELLED"
 
 
+def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    yes_token = "istanbul-live-tick-yes"
+    no_token = f"{yes_token}-no"
+    seed_command(
+        conn,
+        command_id="cmd-live-tick-missing-projection",
+        venue_order_id="ord-live-tick-missing-projection",
+        position_id="pos-live-tick-missing-projection",
+        token_id=no_token,
+        size=25.91,
+        price=0.54,
+        snapshot_token_id=yes_token,
+        snapshot_no_token_id=no_token,
+        snapshot_selected_token_id=no_token,
+        snapshot_outcome_label="NO",
+        envelope_yes_token_id=yes_token,
+        envelope_no_token_id=no_token,
+    )
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT,
+            city TEXT,
+            target_date TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            outcome TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, condition_id, token_id, range_label, outcome
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "highest-temperature-in-istanbul-on-june-29-2026",
+            "Istanbul",
+            "2026-06-29",
+            "condition-m5",
+            yes_token,
+            "Will the highest temperature in Istanbul be 29°C on June 29?",
+            "Yes",
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET state = 'CANCELLED'
+         WHERE command_id = 'cmd-live-tick-missing-projection'
+        """
+    )
+    raw = {
+        "id": "trade-live-tick-missing-projection",
+        "status": "CONFIRMED",
+        "size": "10.741738",
+        "price": "0.46",
+        "asset_id": yes_token,
+        "maker_orders": [
+            {
+                "order_id": "ord-live-tick-missing-projection",
+                "matched_amount": "10.741738",
+                "price": "0.54",
+                "asset_id": no_token,
+                "side": "BUY",
+                "outcome": "No",
+            }
+        ],
+    }
+    append(
+        conn,
+        trade_id="trade-live-tick-missing-projection",
+        venue_order_id="ord-live-tick-missing-projection",
+        command_id="cmd-live-tick-missing-projection",
+        state="CONFIRMED",
+        filled_size="10.741738",
+        fill_price="0.54",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+        live_tick_scope=True,
+    )
+
+    assert summary["scanned"] == 1
+    assert summary["projected"] == 1
+    projection = conn.execute(
+        """
+        SELECT phase, city, target_date, temperature_metric, direction,
+               shares, entry_price, cost_basis_usd, order_status
+          FROM position_current
+         WHERE position_id = 'pos-live-tick-missing-projection'
+        """
+    ).fetchone()
+    assert projection is not None
+    assert projection["phase"] == "active"
+    assert projection["city"] == "Istanbul"
+    assert projection["temperature_metric"] == "high"
+    assert projection["direction"] == "buy_no"
+    assert Decimal(str(projection["shares"])) == Decimal("10.741738")
+    assert Decimal(str(projection["entry_price"])) == Decimal("0.54")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("5.80053852")
+    assert projection["order_status"] == "partial"
+
+
 def test_maker_fill_economics_repair_uses_canonical_trade_fact_over_later_weaker_fact(conn):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_trade_fact as append
