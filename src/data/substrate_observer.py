@@ -2640,16 +2640,14 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
         priority_families: list[tuple[str, str, str]] = []
         priority_family_seen: set[tuple[str, str, str]] = set()
-        if marker_exact_condition_ids:
-            priority_family_candidates = list(condition_priority_families) + list(
-                priority_marker_families
-            )
-        else:
-            priority_family_candidates = (
-                list(condition_priority_families)
-                + list(claim_priority_families)
-                + list(priority_marker_families)
-            )
+        # Claim-order families are already live-money blocked reactor work, not broad backlog.
+        # Exact condition markers narrow ordinary refresh scope, but they must not hide stale
+        # executable-snapshot events that the reactor has requeued for the priority lane.
+        priority_family_candidates = (
+            list(condition_priority_families)
+            + list(claim_priority_families)
+            + list(priority_marker_families)
+        )
         for family in priority_family_candidates:
             key = tuple(str(part or "").strip() for part in family)
             if len(key) != 3 or not all(key) or key in priority_family_seen:

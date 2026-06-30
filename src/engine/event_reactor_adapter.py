@@ -4264,7 +4264,8 @@ def _build_event_bound_no_submit_receipt_core(
             _spine_result = decide_family_via_spine(
                 family=family,
                 payload=payload,
-                proofs=_spine_entry_proofs,
+                proofs=proofs,
+                selection_proofs=_spine_entry_proofs,
                 decision_time=decision_time,
                 native_side_candidate_from_proof=_native_side_candidate_from_proof,
                 candidate_bin_id=_candidate_bin_id,

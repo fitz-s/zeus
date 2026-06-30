@@ -1692,8 +1692,8 @@ def test_priority_conditions_deferred_when_refresh_inserted_substrate():
     assert result["priority_marker_condition_ids"] == 1
 
 
-def test_money_path_priority_cycle_services_blocked_family_priority_marker(monkeypatch):
-    """A concrete reactor-blocked condition marker owns the first service window."""
+def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(monkeypatch):
+    """A concrete condition marker must not hide requeued reactor families."""
 
     calls: list[dict] = []
     marker_families = [("Shanghai", "2026-06-28", "high")]
@@ -1750,9 +1750,7 @@ def test_money_path_priority_cycle_services_blocked_family_priority_marker(monke
     substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
-    assert calls[0]["extra_priority_families"] == [
-        ("Shanghai", "2026-06-28", "high"),
-    ]
+    assert calls[0]["extra_priority_families"] == claim_families + marker_families
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert calls[0]["include_money_risk_families"] is False

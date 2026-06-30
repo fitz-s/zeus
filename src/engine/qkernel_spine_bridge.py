@@ -1102,6 +1102,7 @@ def decide_family_via_spine(
     family: Any,
     payload: Mapping[str, Any],
     proofs: Sequence[Any],
+    selection_proofs: Optional[Sequence[Any]] = None,
     decision_time: datetime,
     native_side_candidate_from_proof,
     candidate_bin_id,
@@ -1124,8 +1125,11 @@ def decide_family_via_spine(
     import of the giant adapter module):
         family: the reactor ``EventBoundCandidateFamily`` (city/date/metric/candidates).
         payload: the threaded payload (carries the Stage-0 ``_edli_spine_*`` inputs).
-        proofs: the per-candidate ``_CandidateProof`` tuple already materialized for
-            the submission pipeline (carries rows/execution_price/native costs).
+        proofs: the full per-candidate ``_CandidateProof`` tuple already materialized
+            for the submission pipeline. This is the served family belief surface and
+            must stay complete over Omega.
+        selection_proofs: optional executable/admission-scoped subset used only for
+            route/book/sizing construction and selected-proof remap.
         decision_time: the decision instant (tz-aware UTC).
         native_side_candidate_from_proof: the reactor's
             ``_native_side_candidate_from_proof`` (the ONE materialization path).
@@ -1140,6 +1144,8 @@ def decide_family_via_spine(
     ``FamilyDecision`` for the receipt. Never raises into the reactor hot path.
     """
     family_key = str(getattr(family, "family_id", "") or "family")
+    belief_proofs = tuple(proofs)
+    route_proofs = tuple(selection_proofs) if selection_proofs is not None else belief_proofs
     served = _served_predictive_inputs(payload)
     if served is None:
         return SpineDecisionResult(
@@ -1184,7 +1190,7 @@ def decide_family_via_spine(
             served_belief_reason,
         ) = _served_joint_belief_from_proofs(
             omega=omega,
-            proofs=proofs,
+            proofs=belief_proofs,
             candidate_bin_id=candidate_bin_id,
             alpha=_band_alpha,
         )
@@ -1197,7 +1203,7 @@ def decide_family_via_spine(
         models = build_fresh_model_set(case, served)
         sizing_candidates = _sizing_candidates_from_proofs(
             family_key=family_key,
-            proofs=proofs,
+            proofs=route_proofs,
             native_side_candidate_from_proof=native_side_candidate_from_proof,
             candidate_bin_id=candidate_bin_id,
         )
@@ -1242,12 +1248,12 @@ def decide_family_via_spine(
             # Inject a family_book_builder that assembles the FamilyBook DIRECTLY from
             # the reactor proofs' native ladders (the SAME books the reactor priced
             # each proof against) — bypassing ExecutableMarketSnapshot reconstruction.
-            family_book_builder=_family_book_builder_from_proofs(proofs, candidate_bin_id),
+            family_book_builder=_family_book_builder_from_proofs(route_proofs, candidate_bin_id),
             # PROOF-NATIVE direct routes (consult_review_pr409_round2.md §1): each direct
             # YES/NO route is priced at the proof's OWN maker/taker execution_price, not
             # the negrisk ask-ladder. This preserves the maker buy_no edge class (resting
             # bid into an empty NO ask) the ask-ladder taker cost would discard.
-            route_set_builder=_proof_native_direct_route_set_builder(proofs, candidate_bin_id),
+            route_set_builder=_proof_native_direct_route_set_builder(route_proofs, candidate_bin_id),
             # Live money ranks admissible native legs by ROI frontier: lower-bound edge
             # per capital with an absolute usefulness floor, then robust log-utility. This
             # preserves NO when it is truly best, but stops low-ROI large NO legs from
@@ -1261,7 +1267,7 @@ def decide_family_via_spine(
         # default of 1 share would mark every route non-executable on a book whose min
         # order is >1 (the NO_EXECUTABLE_ROUTE_CANDIDATE false no-trade). The min order
         # is read off the proofs' rows (probability units); default to a safe 5.
-        shares_for_routing = _family_min_order_shares(proofs)
+        shares_for_routing = _family_min_order_shares(route_proofs)
         decision = engine.decide(
             case,
             omega,
@@ -1342,7 +1348,7 @@ def decide_family_via_spine(
             decision=decision,
         )
 
-    proof_index = _proof_by_bin_side(proofs, candidate_bin_id)
+    proof_index = _proof_by_bin_side(route_proofs, candidate_bin_id)
     parsed = _parse_candidate_id(decision.selected.candidate_id)
     selected_proof = proof_index.get(parsed) if parsed is not None else None
     if selected_proof is None:

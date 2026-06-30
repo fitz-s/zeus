@@ -332,11 +332,20 @@ def _payload(*, mu, sigma, members, source_cycle=SOURCE_CYCLE_TIME_UTC):
     return p
 
 
-def _drive(family, proofs, payload, *, decision_time=DECISION_TIME, extra_exposure=None):
+def _drive(
+    family,
+    proofs,
+    payload,
+    *,
+    decision_time=DECISION_TIME,
+    extra_exposure=None,
+    selection_proofs=None,
+):
     return bridge.decide_family_via_spine(
         family=family,
         payload=payload,
         proofs=proofs,
+        selection_proofs=selection_proofs,
         decision_time=decision_time,
         native_side_candidate_from_proof=era._native_side_candidate_from_proof,
         candidate_bin_id=era._candidate_bin_id,
@@ -2234,3 +2243,41 @@ def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_norma
         )
         assert decision.economics.q_dot_payoff == pytest.approx(float(proof.q_posterior))
         assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
+
+
+def test_qkernel_belief_rehydration_uses_full_family_not_selection_scoped_subset():
+    """Selection filtering must not delete bins from the served belief vector.
+
+    Live regression: the adapter passed `_selection_scoped_proofs` as the only spine
+    proof input. If selection scoping removed both sides of one family bin (locked,
+    held, limit-untradeable, etc.), `_served_joint_belief_from_proofs` saw an
+    incomplete Omega and blocked the whole family with SERVED_BELIEF_Q_MISSING.
+    The full proof tuple is the probability authority; the scoped tuple is only
+    the executable route surface.
+    """
+
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    served_yes_lcb = [0.08, 0.65, 0.08, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    selection_proofs = tuple(
+        proof for proof in proofs if proof.candidate.bin.label != "22C or above"
+    )
+
+    res = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
+        selection_proofs=selection_proofs,
+    )
+
+    assert res.decision is not None
+    assert list(res.decision.joint_q.q) == pytest.approx(served_yes_q)
+    assert "SERVED_BELIEF_Q_MISSING" not in str(res.no_trade_reason or "")
