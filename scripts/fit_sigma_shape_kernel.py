@@ -441,9 +441,6 @@ def _write_candidate(out_path: str, families: dict, window: str, fitted_at: str)
         "_meta": {
             "authority": AUTHORITY,
             "candidate": True,
-            "promotion": "OPERATOR_GATED — rename to sigma_scale_fit.json only after operator sign-off AND "
-                         "forward-fill validation; the consumer must also be wired for the floor_steps + m "
-                         "fields (see report). Holdout shows the magnitude is non-stationary on 5 days.",
             "created": fitted_at,
             "method": "composite_objective(logloss + lambda*ring_calibration) over regime-aware two-normal scale mixture",
             "model": "sigma_core=max(sigma_impl*k, floor_steps*step); q_adj(bin)=(1-w)*Normal(sigma_core)+w*Normal(sigma_core*m)",
