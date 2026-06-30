@@ -230,6 +230,19 @@ def normalize_venue_order_status(
     return folded
 
 
+def is_cancel_confirmed_status(raw: object) -> bool:
+    """True iff a raw venue order status is a cancel-confirmed synonym
+    (CANCELLED / CANCELED / CANCEL_CONFIRMED).
+
+    A NON-RAISING cancel-detection predicate for venue / exit seams: unlike
+    normalize_venue_order_status (which raises on unmapped input), this tolerates any
+    value and returns False for non-cancel / unknown / garbage. Derived from the single
+    fold map so the synonym set cannot drift; centralizes the cancel-synonym knowledge so
+    consumers stop re-encoding the set inline (INV-CL-1)."""
+    # Inline normalization (NOT _key, which raises on empty/None) keeps this total.
+    return _ORDER_STATUS_FOLD.get(str(raw).strip().upper()) is VenueOrderStatus.CANCEL_CONFIRMED
+
+
 def normalize_venue_trade_status(raw: str | None) -> VenueTradeStatus:
     """Fold a raw trade/on-chain status into VenueTradeStatus.
 

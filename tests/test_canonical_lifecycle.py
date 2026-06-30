@@ -22,6 +22,7 @@ from src.contracts.canonical_lifecycle import (
     VenueOrderStatus,
     VenueStatusIngress,
     VenueTradeStatus,
+    is_cancel_confirmed_status,
     normalize_command_truth_state,
     normalize_venue_order_status,
     normalize_venue_trade_status,
@@ -163,3 +164,18 @@ def test_command_truth_state_committed_membership() -> None:
 @pytest.mark.parametrize("raw", ["INTENT_CREATED", "ACKED", "CANCEL_PENDING", "REVIEW_REQUIRED", "posting"])
 def test_command_truth_passthrough_for_local_states(raw: str) -> None:
     assert normalize_command_truth_state(raw) is CommandTruthState[raw.strip().upper()]
+
+
+# --------------------------------------------------------------------------- #
+# is_cancel_confirmed_status — non-raising cancel predicate (INV-CL-1 cutover) #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("raw", ["CANCELLED", "CANCELED", "CANCEL_CONFIRMED", "cancelled", " canceled "])
+def test_is_cancel_confirmed_status_true_for_synonyms(raw: str) -> None:
+    assert is_cancel_confirmed_status(raw) is True
+
+
+@pytest.mark.parametrize("raw", ["LIVE", "MATCHED", "EXPIRED", "NOT_CANCELED", "", "garbage", None])
+def test_is_cancel_confirmed_status_false_and_never_raises(raw) -> None:
+    # Unlike normalize_venue_order_status, the predicate tolerates ANY input.
+    assert is_cancel_confirmed_status(raw) is False

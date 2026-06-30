@@ -53,7 +53,6 @@ _BASELINE_OFFENDERS = frozenset({
     "src/execution/exit_safety.py",
     "src/execution/maker_rest_escalation.py",
     "src/main.py",
-    "src/venue/polymarket_v2_adapter.py",
 })
 
 

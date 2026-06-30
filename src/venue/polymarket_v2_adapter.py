@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
@@ -3109,7 +3110,7 @@ def _cancel_result_from_response(order_id: str, raw: Any) -> CancelResult:
         )
     canceled = raw_dict.get("canceled", raw_dict.get("cancelled"))
     status = str(raw_dict.get("status") or raw_dict.get("state") or "").upper()
-    if _nonempty(canceled) or status in {"CANCELED", "CANCELLED", "CANCEL_CONFIRMED"} or raw_dict.get("success") is True:
+    if _nonempty(canceled) or is_cancel_confirmed_status(status) or raw_dict.get("success") is True:
         return CancelResult(
             status="CANCELED",
             order_id=_extract_order_id(raw_dict) or order_id,
