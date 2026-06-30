@@ -52,6 +52,41 @@ def test_qkernel_spine_is_registered_live_entry_method():
     assert EntryMethod.from_value(EntryMethod.QKERNEL_SPINE.value) is EntryMethod.QKERNEL_SPINE
 
 
+def test_edli_events_table_prefers_trade_main_when_world_copy_is_stale(tmp_path):
+    from src.events.edli_position_bridge import _edli_events_table
+    from src.state.db import init_schema
+
+    world_path = tmp_path / "zeus-world.db"
+    world_conn = sqlite3.connect(world_path)
+    world_conn.row_factory = sqlite3.Row
+    init_schema(world_conn)
+    _insert_edli_event(
+        world_conn,
+        aggregate_id="stale-world-aggregate",
+        sequence=1,
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "stale-event", "final_intent_id": "stale-intent"},
+        occurred_at="2026-06-28T12:47:09+00:00",
+    )
+    world_conn.commit()
+    world_conn.close()
+
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+    init_schema(trade_conn)
+    trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    _insert_edli_event(
+        trade_conn,
+        aggregate_id="current-trade-aggregate",
+        sequence=1,
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "current-event", "final_intent_id": "current-intent"},
+        occurred_at="2026-06-29T20:01:58+00:00",
+    )
+
+    assert _edli_events_table(trade_conn) == "edli_live_order_events"
+
+
 @pytest.fixture()
 def conn() -> sqlite3.Connection:
     from src.state.db import init_schema
@@ -70,6 +105,7 @@ def _insert_edli_event(
     event_type: str,
     payload: dict,
     source_authority: str = "engine_adapter",
+    occurred_at: str = "2026-06-01T12:00:00+00:00",
 ) -> None:
     """Raw-insert an edli_live_order_events row (mirrors the real producer).
 
@@ -97,7 +133,7 @@ def _insert_edli_event(
             payload_json,
             f"ph:{event_hash}",
             source_authority,
-            "2026-06-01T12:00:00+00:00",
+            occurred_at,
             "2026-06-01T12:00:01+00:00",
         ),
     )

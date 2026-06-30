@@ -407,6 +407,38 @@ def test_entry_proof_rejects_identity_fallback_calibration():
     assert rejection == "EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK"
 
 
+def test_entry_proof_accepts_insufficient_data_empty_calibration_sample():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        receipt_json=json.dumps(
+            {
+                "q_source": "qkernel_spine",
+                "opportunity_book": {
+                    "selected_candidate_id": "c1",
+                    "actual_receipt_selected_candidate_id": "c1",
+                },
+            }
+        ),
+        actionable_payload_json=json.dumps(
+            {
+                "strategy_key": "opening_inertia",
+                "q_source": "qkernel_spine",
+                "opportunity_book": {"selected_candidate_id": "c1"},
+            }
+        ),
+        calibration_payload_json=json.dumps(
+            {
+                "authority": "FUSED_BOOTSTRAP_CALIBRATION",
+                "coverage_status": "INSUFFICIENT_DATA",
+                "n_samples": 0,
+            }
+        ),
+    )
+
+    assert rejection is None
+
+
 def test_invalid_entry_proof_emits_blocking_review_fact_for_repaired_high_position():
     from src.state.portfolio import _invalid_entry_proof_review_fact_from_position
 
@@ -1165,6 +1197,126 @@ def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure
     assert row["chain_shares"] == pytest.approx(85.17)
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
     assert events[0]["details"]["reason"] == "false_phantom_void_positive_exposure"
+
+
+def test_chain_reconciliation_restores_terminal_no_fill_void_when_chain_holds_token(tmp_path):
+    """A terminal no-fill projection is not final if chain later proves exposure."""
+
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import query_position_events
+    from src.state.portfolio import FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+
+    conn = get_connection(tmp_path / "terminal_no_fill_chain_positive.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="terminal-no-fill-positive-chain",
+        state="voided",
+        chain_state="local_only",
+        direction="buy_no",
+        token_id="tok-terminal-yes",
+        no_token_id="tok-terminal-no",
+        shares=10.7,
+        chain_shares=0.0,
+        cost_basis_usd=5.80,
+        size_usd=5.80,
+        entry_price=0.54,
+        entered_at="2026-06-29T18:00:00+00:00",
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        env="live",
+        unit="C",
+        order_id="0xterminalnofill",
+        order_status="canceled",
+        fill_authority="",
+        entry_fill_verified=False,
+        exit_reason="venue_terminal_no_fill",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, trade_id, market_id, city, cluster,
+            target_date, bin_label, direction, unit, size_usd, shares,
+            cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+            entry_method, strategy_key, edge_source, discovery_mode,
+            chain_state, token_id, no_token_id, condition_id, order_id,
+            order_status, updated_at, temperature_metric, fill_authority,
+            chain_shares, chain_seen_at, exit_reason
+        ) VALUES (
+            ?, 'voided', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            pos.trade_id,
+            pos.trade_id,
+            pos.market_id,
+            pos.city,
+            pos.cluster,
+            pos.target_date,
+            pos.bin_label,
+            pos.direction,
+            pos.unit,
+            pos.size_usd,
+            pos.shares,
+            pos.cost_basis_usd,
+            pos.entry_price,
+            pos.p_posterior,
+            "snap-terminal-no-fill",
+            "qkernel_spine",
+            pos.strategy_key,
+            "opening_inertia",
+            "forecast_redecision",
+            pos.chain_state,
+            pos.token_id,
+            pos.no_token_id,
+            "cond-terminal-no-fill",
+            pos.order_id,
+            pos.order_status,
+            pos.entered_at,
+            "high",
+            pos.fill_authority,
+            pos.chain_shares,
+            "",
+            pos.exit_reason,
+        ),
+    )
+    conn.commit()
+
+    stats = reconcile(
+        PortfolioState(positions=[pos]),
+        [
+            ChainPosition(
+                token_id="tok-terminal-no",
+                size=10.7,
+                avg_price=0.54,
+                cost=5.80,
+                condition_id="cond-terminal-no-fill",
+            )
+        ],
+        conn=conn,
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT phase, chain_state, shares, chain_shares, fill_authority, exit_reason
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    events = query_position_events(conn, pos.trade_id)
+    conn.close()
+
+    assert stats["terminal_chain_exposure_restored"] == 1
+    assert row["phase"] == "quarantined"
+    assert row["chain_state"] == "entry_authority_quarantined"
+    assert row["shares"] == pytest.approx(10.7)
+    assert row["chain_shares"] == pytest.approx(10.7)
+    assert row["fill_authority"] == FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+    assert row["exit_reason"] is None
+    assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
+    assert events[0]["details"]["reason"] == "chain_held_after_terminal_projection"
 
 
 def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tmp_path):

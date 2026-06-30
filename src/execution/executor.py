@@ -737,6 +737,8 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
+    elif limit_price + 1e-12 < min_entry_price:
+        reason = "limit_price_below_strategy_entry_floor"
     elif expected_profit + 1e-9 < effective_min_expected_profit:
         reason = "expected_profit_below_floor"
     elif edge_density + 1e-9 < effective_min_edge_density:

@@ -1972,7 +1972,7 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
     )
 
     assert proof is not None
-    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
     assert proof["passed"] is False
     assert float(proof["taker_fee_adjusted_edge"]) < 0.0
 
@@ -2060,24 +2060,18 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         """The happy path is UNCHANGED: stamped + identity-matched cert is consumed."""
         proof = self._proof()
         assert proof is not None
-        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
+        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
         # positive after-cost surplus (0.72 payoff vs 0.50 ask) -> passes
         assert float(proof["taker_fee_adjusted_edge"]) > 0.0
         assert proof["passed"] is True
 
-    def test_matched_stamped_cert_is_not_capped_by_receipt_probability_lcb(self):
-        """Qkernel taker proof consumes the qkernel execution certificate only.
-
-        ``q_lcb_5pct`` remains receipt provenance on a spine-selected proof. A
-        low legacy/provenance qLCB must not overwrite the already validated
-        qkernel payoff qLCB, or center-YES selections disappear at submit time.
-        """
+    def test_matched_stamped_cert_above_receipt_probability_lcb_fails_closed(self):
+        """Qkernel execution economics cannot loosen the live posterior bound."""
         proof = self._proof(q_lcb_5pct=0.01)
         assert proof is not None
-        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
-        assert float(proof["q_exec_lcb"]) == pytest.approx(0.72)
-        assert float(proof["taker_fee_adjusted_edge"]) > 0.0
-        assert proof["passed"] is True
+        assert proof["passed"] is False
+        assert proof["reason"] == "qkernel_payoff_exceeds_live_posterior_bound"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
 
     def test_candidate_identity_mismatch_fails_closed(self):
         """RED-ON-REVERT. Cert.candidate_id (DIRECT_YES:bin-1) != payload.candidate_id
@@ -2088,7 +2082,7 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         assert proof is not None
         assert proof["passed"] is False
         assert proof["reason"] == "qkernel_cert_candidate_identity_mismatch"
-        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
 
     def test_cert_without_authority_stamp_fails_closed(self):
         """RED-ON-REVERT. A qkernel cert present but the payload is NOT under qkernel
@@ -2098,7 +2092,7 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         assert proof is not None
         assert proof["passed"] is False
         assert proof["reason"] == "qkernel_cert_present_without_qkernel_authority_stamp"
-        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
 
     def test_missing_candidate_id_fails_closed(self):
         """A stamped cert with NO payload candidate_id cannot prove identity -> closed."""
@@ -3446,12 +3440,21 @@ def _qkernel_execution_cert(**overrides):
         "delta_u_at_min": 0.01,
         "optimal_stake_usd": "15.39",
         "optimal_delta_u": 0.03,
+        "q_dot_payoff": 0.72,
         "cost": 0.55,
         "false_edge_rate": 0.02,
         "side": "YES",
         "bin_id": "bin-1",
         "direction_law_ok": True,
         "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|YES|modal|qb4|coarse_global",
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "YES|L2_3|modal|pb4",
+        "selection_guard_n": 80,
+        "selection_guard_q_safe": 0.72,
     }
     cert.update(overrides)
     if (
@@ -3464,6 +3467,10 @@ def _qkernel_execution_cert(**overrides):
             float(cert["payoff_q_point"]),
             float(cert["payoff_q_lcb"]),
         )
+    if "payoff_q_point" in overrides and "q_dot_payoff" not in overrides:
+        cert["q_dot_payoff"] = cert["payoff_q_point"]
+    if "payoff_q_lcb" in overrides and "selection_guard_q_safe" not in overrides:
+        cert["selection_guard_q_safe"] = cert["payoff_q_lcb"]
     return cert
 
 

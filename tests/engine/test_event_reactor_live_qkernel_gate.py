@@ -20,6 +20,9 @@ def _qkernel_cert() -> dict:
         "false_edge_rate": 0.01,
         "direction_law_ok": True,
         "coherence_allows": True,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": 0.60,
     }
 
 
@@ -30,6 +33,9 @@ def test_live_entry_qkernel_gate_accepts_stamped_matching_cert():
             "selection_authority_applied": "qkernel_spine",
             "direction": "buy_yes",
             "candidate_bin_id": "bin-1",
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
+            "min_entry_price": 0.05,
             "qkernel_execution_economics": _qkernel_cert(),
         }
     )
@@ -57,6 +63,25 @@ def test_live_entry_qkernel_gate_rejects_bin_mismatch():
                 "direction": "buy_yes",
                 "candidate_bin_id": "other-bin",
                 "qkernel_execution_economics": _qkernel_cert(),
+            }
+        )
+
+
+def test_live_entry_qkernel_gate_rejects_cost_below_strategy_entry_floor():
+    cert = _qkernel_cert()
+    cert.update(cost=0.003, payoff_q_lcb=0.058, payoff_q_point=0.13, edge_lcb=0.055)
+
+    with pytest.raises(ValueError, match="LIVE_ENTRY_QKERNEL_COST_BELOW_STRATEGY_FLOOR"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "candidate_bin_id": "bin-1",
+                "q_live": 0.13,
+                "q_lcb_5pct": 0.058,
+                "min_entry_price": 0.05,
+                "qkernel_execution_economics": cert,
             }
         )
 

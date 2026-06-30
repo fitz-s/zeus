@@ -1257,6 +1257,245 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             condition_id=str(getattr(chain, "condition_id", "") or ""),
         )
 
+    def _held_token_id(position: Position) -> str:
+        direction = getattr(position, "direction", "")
+        direction = getattr(direction, "value", direction)
+        if str(direction) == "buy_no":
+            return str(getattr(position, "no_token_id", "") or "")
+        return str(getattr(position, "token_id", "") or "")
+
+    def _chain_observed_cost(chain: ChainPosition) -> float:
+        try:
+            cost = float(getattr(chain, "cost", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        if cost > 0.0:
+            return cost
+        try:
+            return float(chain.size) * float(chain.avg_price or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _restore_terminal_chain_exposure_if_available(
+        token_id: str,
+        chain: ChainPosition,
+    ) -> bool:
+        candidates: list[Position] = []
+        chain_condition_id = str(getattr(chain, "condition_id", "") or "")
+        for position in portfolio.positions:
+            if _held_token_id(position) != token_id:
+                continue
+            state_value = getattr(position.state, "value", position.state)
+            if str(state_value) == "economically_closed":
+                continue
+            if str(state_value) not in INACTIVE_RUNTIME_STATES:
+                continue
+            if (
+                chain_condition_id
+                and str(getattr(position, "condition_id", "") or "")
+                and str(getattr(position, "condition_id", "") or "") != chain_condition_id
+            ):
+                continue
+            candidates.append(position)
+        if not candidates:
+            return False
+        restored = sorted(
+            candidates,
+            key=lambda p: (
+                str(getattr(p, "entered_at", "") or ""),
+                str(getattr(p, "order_posted_at", "") or ""),
+                str(getattr(p, "trade_id", "") or ""),
+            ),
+            reverse=True,
+        )[0]
+        cost = _chain_observed_cost(chain)
+        restored.state = LifecycleState.QUARANTINED.value
+        restored.chain_state = "entry_authority_quarantined"
+        restored.chain_shares = float(chain.size)
+        restored.chain_avg_price = float(getattr(chain, "avg_price", 0.0) or 0.0)
+        restored.chain_cost_basis_usd = cost
+        restored.chain_verified_at = now
+        restored.quarantined_at = restored.quarantined_at or now
+        restored.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
+        restored.recovery_authority = "balance_only"
+        restored.shares = float(chain.size)
+        restored.cost_basis_usd = cost
+        restored.size_usd = cost
+        if restored.entry_price <= 0.0:
+            restored.entry_price = float(getattr(chain, "avg_price", 0.0) or 0.0)
+        if chain_condition_id and not str(getattr(restored, "condition_id", "") or ""):
+            restored.condition_id = chain_condition_id
+        restored.order_status = "filled"
+        restored.exit_state = ""
+        restored.exit_reason = ""
+        if _append_canonical_review_required(
+            restored,
+            reason="chain_held_after_terminal_projection",
+        ):
+            stats["review_required_persisted"] = (
+                stats.get("review_required_persisted", 0) + 1
+            )
+        stats["terminal_chain_exposure_restored"] = (
+            stats.get("terminal_chain_exposure_restored", 0) + 1
+        )
+        stats["quarantined"] += 1
+        return True
+
+    def _attached_schemas() -> set[str]:
+        if conn is None:
+            return set()
+        try:
+            return {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        except Exception:
+            return {"main"}
+
+    def _table_exists(schema: str, table: str) -> bool:
+        if conn is None:
+            return False
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+        except Exception:
+            return False
+        return row is not None
+
+    def _ensure_forecasts_attached() -> None:
+        if conn is None:
+            return
+        if "forecasts" in _attached_schemas():
+            return
+        try:
+            from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        except Exception:
+            return
+
+    def _chain_market_metadata(token_id: str, chain: ChainPosition) -> dict[str, object] | None:
+        if conn is None:
+            return None
+        _ensure_forecasts_attached()
+        schemas = _attached_schemas()
+        for schema in ("forecasts", "world", "main"):
+            if schema not in schemas or not _table_exists(schema, "market_events"):
+                continue
+            cols = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA {schema}.table_info(market_events)").fetchall()
+            }
+            metric_expr = (
+                "temperature_metric"
+                if "temperature_metric" in cols
+                else (
+                    "CASE WHEN lower(market_slug) LIKE '%lowest-temperature%' "
+                    "THEN 'low' ELSE 'high' END"
+                )
+            )
+            query = f"""
+                SELECT city, target_date, {metric_expr} AS temperature_metric,
+                       market_slug, range_label, token_id, condition_id
+                  FROM {schema}.market_events
+                 WHERE (
+                        NULLIF(condition_id, '') = NULLIF(?, '')
+                     OR NULLIF(token_id, '') = NULLIF(?, '')
+                 )
+                 ORDER BY CASE WHEN token_id = ? THEN 0 ELSE 1 END
+                 LIMIT 1
+            """
+            try:
+                row = conn.execute(
+                    query,
+                    (
+                        str(getattr(chain, "condition_id", "") or ""),
+                        token_id,
+                        token_id,
+                    ),
+                ).fetchone()
+            except Exception:
+                continue
+            if row is None:
+                continue
+            try:
+                row_token = str(row["token_id"] or "")
+            except Exception:
+                row_token = str(row[5] or "")
+            direction = "buy_yes" if row_token == token_id else "buy_no"
+            return {
+                "city": row["city"],
+                "target_date": row["target_date"],
+                "temperature_metric": row["temperature_metric"],
+                "market_slug": row["market_slug"],
+                "bin_label": row["range_label"],
+                "yes_token_id": row_token,
+                "condition_id": row["condition_id"] or getattr(chain, "condition_id", ""),
+                "direction": direction,
+            }
+        return None
+
+    def _materialize_chain_only_position_if_resolvable(
+        token_id: str,
+        chain: ChainPosition,
+    ) -> bool:
+        metadata = _chain_market_metadata(token_id, chain)
+        if metadata is None:
+            return False
+        cost = _chain_observed_cost(chain)
+        direction = str(metadata["direction"])
+        yes_token_id = str(metadata.get("yes_token_id") or "")
+        position = Position(
+            trade_id=f"chain-only-{token_id[-16:]}",
+            market_id=str(metadata.get("condition_id") or getattr(chain, "condition_id", "") or token_id),
+            city=str(metadata.get("city") or "CHAIN_ONLY_UNRESOLVED"),
+            cluster=str(metadata.get("city") or "CHAIN_ONLY_UNRESOLVED"),
+            target_date=str(metadata.get("target_date") or ""),
+            bin_label=str(metadata.get("bin_label") or ""),
+            direction=direction,
+            unit="C" if "°C" in str(metadata.get("bin_label") or "") else "F",
+            temperature_metric=str(metadata.get("temperature_metric") or "high"),
+            env="live",
+            size_usd=cost,
+            entry_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
+            p_posterior=0.0,
+            shares=float(chain.size),
+            cost_basis_usd=cost,
+            entered_at=now,
+            entered_at_authority="reconstructed_from_chain",
+            entry_method="chain_only_reconciliation",
+            strategy_key="chain_only_reconciliation",
+            strategy="chain_only_reconciliation",
+            edge_source="chain_only_quarantine",
+            discovery_mode="chain_reconciliation",
+            state=LifecycleState.QUARANTINED.value,
+            order_status="filled",
+            chain_state="entry_authority_quarantined",
+            chain_shares=float(chain.size),
+            chain_avg_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
+            chain_cost_basis_usd=cost,
+            chain_verified_at=now,
+            token_id=yes_token_id if direction == "buy_no" else token_id,
+            no_token_id=token_id if direction == "buy_no" else "",
+            condition_id=str(metadata.get("condition_id") or getattr(chain, "condition_id", "") or ""),
+            quarantined_at=now,
+            fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+            market_slug=str(metadata.get("market_slug") or ""),
+        )
+        position.recovery_authority = "balance_only"
+        if _append_canonical_review_required(
+            position,
+            reason="chain_only_canonical_quarantine",
+        ):
+            stats["review_required_persisted"] = (
+                stats.get("review_required_persisted", 0) + 1
+            )
+        portfolio.positions.append(position)
+        stats["chain_only_canonical_quarantine_materialized"] = (
+            stats.get("chain_only_canonical_quarantine_materialized", 0) + 1
+        )
+        stats["quarantined"] += 1
+        return True
+
     # DT#4 / INV-18: derive three-state from inputs at the TOP of reconcile().
     # reconcile() is only called when the chain API responded (cycle_runtime.py
     # raises if api_positions is None). Treat the call timestamp as fetched_at.
@@ -1816,6 +2055,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if tid in ignored:
             continue  # Token was explicitly acknowledged/resolved or redeemed/expired — don't resurrect
         if tid not in local_tokens:
+            if _restore_terminal_chain_exposure_if_available(tid, chain):
+                local_tokens.add(tid)
+                continue
+            if _materialize_chain_only_position_if_resolvable(tid, chain):
+                local_tokens.add(tid)
+                continue
             logger.warning(
                 "QUARANTINE EXCLUDED FROM CANONICAL MIGRATION: chain token %s...%s not in portfolio; pending future governance design",
                 tid[:8],

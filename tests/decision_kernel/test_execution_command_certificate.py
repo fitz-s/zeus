@@ -118,6 +118,39 @@ def test_execution_command_rejects_size_below_min_order():
         verify_execution_command(command, parents)
 
 
+def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
+    parents, command = execution_graph(
+        command_payload={
+            "limit_price": 0.003,
+            "q_live": 0.13122880112330723,
+            "q_lcb_5pct": 0.058653389021689366,
+            "expected_edge": 0.049653389021689365,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "min_expected_profit_usd": 1.0,
+            "min_submit_edge_density": 0.05,
+            "qkernel_execution_economics": {
+                "source": "qkernel_spine",
+                "side": "YES",
+                "payoff_q_point": 0.13122880112330723,
+                "payoff_q_lcb": 0.058653389021689366,
+                "cost": 0.003,
+                "edge_lcb": 0.05565338902168936,
+                "optimal_delta_u": 0.005,
+                "false_edge_rate": 0.001,
+                "direction_law_ok": True,
+                "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.058653389021689366,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="below strategy entry floor"):
+        verify_execution_command(command, parents)
+
+
 def test_execution_command_has_no_max_notional_ceiling():
     # 2026-06-08: the tiny_live max_notional cap is DELETED. The execution command
     # verifier no longer rejects a size whose notional exceeds any max_notional —
@@ -177,6 +210,19 @@ def test_execution_command_rejects_missing_pre_submit_qkernel_economics():
     )
 
     with pytest.raises(CertificateVerificationError, match="qkernel_execution_economics"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_rejects_missing_qkernel_selection_guard():
+    economics = dict(_actionable_payload()["qkernel_execution_economics"])
+    economics.pop("selection_guard_basis")
+    economics.pop("selection_guard_abstained")
+    economics.pop("selection_guard_q_safe")
+    parents, command = execution_graph(
+        command_payload={"qkernel_execution_economics": economics},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="selection_guard_basis"):
         verify_execution_command(command, parents)
 
 
@@ -926,6 +972,9 @@ def _actionable_payload() -> dict:
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
         },
         "fdr_family_id": "family-1",
         "kelly_decision_id": "kelly-1",
@@ -1032,6 +1081,9 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
                     "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.6,
                 },
             ),
         ),

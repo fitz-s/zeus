@@ -961,6 +961,14 @@ def mark_market_closed_hold_to_settlement(
         position.order_status = "filled"
     position.exit_reason = ""
     position.last_exit_error = f"{reason}:{error}"[:500]
+    if not bool(getattr(position, "last_monitor_prob_is_fresh", False)):
+        position.last_monitor_prob = None
+        position.last_monitor_edge = None
+        position.last_monitor_market_price = None
+        position.last_monitor_market_price_is_fresh = False
+        position.last_monitor_best_bid = None
+        position.last_monitor_best_ask = None
+        position.last_monitor_market_vig = None
     validations = list(getattr(position, "applied_validations", []) or [])
     if reason not in validations:
         validations.append(reason)
@@ -973,17 +981,70 @@ def mark_market_closed_hold_to_settlement(
     )
 
 
-def _clear_monitor_snapshot_for_closed_hold(position: Position) -> None:
-    """Closed-market hold is not a fresh probability or executable price update."""
+def _restore_last_monitor_snapshot_for_closed_hold(
+    conn: sqlite3.Connection,
+    position: Position,
+) -> None:
+    """Carry the last monitor evidence through a market-closed hold write.
 
-    position.last_monitor_prob = None  # type: ignore[assignment]
-    position.last_monitor_prob_is_fresh = False
-    position.last_monitor_edge = None  # type: ignore[assignment]
-    position.last_monitor_market_price = None
-    position.last_monitor_market_price_is_fresh = False
-    position.last_monitor_best_bid = None
-    position.last_monitor_best_ask = None
-    position.last_monitor_market_vig = None
+    The hold event is not a new executable quote, but erasing the last fresh
+    held-side belief/price makes the continuous redecision overlay blind until
+    settlement. Prefer the durable projection when it is fresh, because the
+    in-memory object may be stale on the closed-market preemption path.
+    """
+
+    columns = (
+        "last_monitor_prob",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_edge",
+        "last_monitor_market_price",
+        "last_monitor_market_price_is_fresh",
+        "last_monitor_best_bid",
+        "last_monitor_best_ask",
+        "last_monitor_market_vig",
+    )
+    try:
+        existing_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        select_exprs = [
+            name if name in existing_columns else f"NULL AS {name}"
+            for name in columns
+        ]
+        row = conn.execute(
+            f"""
+            SELECT {", ".join(select_exprs)}
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+    except sqlite3.Error:
+        return
+    if row is None:
+        return
+
+    def _value(name: str) -> object:
+        try:
+            return row[name]
+        except Exception:
+            try:
+                return row[columns.index(name)]
+            except Exception:
+                return None
+
+    if bool(_value("last_monitor_prob_is_fresh")):
+        position.last_monitor_prob = _value("last_monitor_prob")  # type: ignore[assignment]
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = _value("last_monitor_edge")  # type: ignore[assignment]
+    if bool(_value("last_monitor_market_price_is_fresh")):
+        position.last_monitor_market_price = _value("last_monitor_market_price")
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = _value("last_monitor_best_bid")
+        position.last_monitor_best_ask = _value("last_monitor_best_ask")
+        position.last_monitor_market_vig = _value("last_monitor_market_vig")
 
 
 def _dual_write_market_closed_hold_if_available(
@@ -1006,10 +1067,10 @@ def _dual_write_market_closed_hold_if_available(
 
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
-        _clear_monitor_snapshot_for_closed_hold(position)
+        _restore_last_monitor_snapshot_for_closed_hold(conn, position)
         position.last_monitor_at = occurred_at
-        if "closed_market_monitor_evidence_unavailable" not in position.applied_validations:
-            position.applied_validations.append("closed_market_monitor_evidence_unavailable")
+        if "closed_market_hold_preserved_monitor_evidence" not in position.applied_validations:
+            position.applied_validations.append("closed_market_hold_preserved_monitor_evidence")
         events, projection = build_monitor_refreshed_canonical_write(
             position,
             sequence_no=sequence_no,

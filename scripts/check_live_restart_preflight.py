@@ -121,6 +121,7 @@ LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS = 48.0
 LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT = 25
 PREFLIGHT_VENUE_ORDER_AUDIT_LIMIT = 12
 PREFLIGHT_VENUE_READ_TIMEOUT_SECONDS = 5.0
+PREFLIGHT_FILL_BRIDGE_SAMPLE_LIMIT = 25
 LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
     "ActionableTradeCertificate",
     "FinalIntentCertificate",
@@ -159,7 +160,21 @@ TERMINAL_VENUE_COMMAND_STATES = frozenset(
     {"EXPIRED", "CANCELLED", "CANCELED", "REJECTED", "FAILED", "FILLED"}
 )
 TERMINAL_VENUE_FACT_STATES = frozenset(
-    {"CANCEL_CONFIRMED", "CANCELED", "CANCELLED", "EXPIRED", "MATCHED", "FILLED"}
+    {
+        "CANCEL_CONFIRMED",
+        "CANCELED",
+        "CANCELLED",
+        "EXPIRED",
+        "VENUE_WIPED",
+        "MATCHED",
+        "FILLED",
+    }
+)
+TERMINAL_NO_FILL_VENUE_FACT_STATES = frozenset(
+    {"CANCEL_CONFIRMED", "CANCELED", "CANCELLED", "EXPIRED", "VENUE_WIPED"}
+)
+OPEN_ENTRY_REST_FACT_STATES = frozenset(
+    {"LIVE", "OPEN", "RESTING", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"}
 )
 VENUE_POINT_MATCH_STATUSES = frozenset(
     {"LIVE", "OPEN", "RESTING", "PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED", "MATCHED", "FILLED", "MINED"}
@@ -1049,6 +1064,10 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     risky_count = 0
     historical_risky_count = 0
     quarantined_risky_count = 0
+    auto_recoverable_invalid_pending_entry_count = 0
+    auto_recoverable_invalid_pending_entries: list[dict[str, Any]] = []
+    auto_recoverable_terminal_no_fill_entry_count = 0
+    auto_recoverable_terminal_no_fill_entries: list[dict[str, Any]] = []
     checked = 0
     for row in rows:
         checked += 1
@@ -1100,13 +1119,43 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                     }
                 )
             if restart_relevant:
-                risky_count += 1
-                sample["matched_restart_commands"] = restart_relevant_commands.get(
+                matched_commands = restart_relevant_commands.get(
                     str(payload.get("event_id") or ""),
                     [],
-                )[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
-                if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
-                    risky.append(sample)
+                )
+                sample["matched_restart_commands"] = matched_commands[
+                    :LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT
+                ]
+                auto_recoverable = bool(matched_commands) and all(
+                    bool(command.get("boot_auto_cancelable_invalid_pending_entry"))
+                    for command in matched_commands
+                )
+                terminal_no_fill_recoverable = bool(matched_commands) and all(
+                    bool(command.get("boot_recoverable_terminal_no_fill_entry"))
+                    for command in matched_commands
+                )
+                if auto_recoverable:
+                    auto_recoverable_invalid_pending_entry_count += len(matched_commands)
+                    sample["restart_relevant"] = False
+                    sample["auto_recoverable_invalid_pending_entry"] = True
+                    sample["restart_recovery"] = (
+                        "boot_invalid_pending_entry_authority_cancel_before_reactor"
+                    )
+                    if len(auto_recoverable_invalid_pending_entries) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        auto_recoverable_invalid_pending_entries.append(sample)
+                elif terminal_no_fill_recoverable:
+                    auto_recoverable_terminal_no_fill_entry_count += len(matched_commands)
+                    sample["restart_relevant"] = False
+                    sample["auto_recoverable_terminal_no_fill_entry"] = True
+                    sample["restart_recovery"] = (
+                        "boot_command_recovery_terminal_no_fill_before_reactor"
+                    )
+                    if len(auto_recoverable_terminal_no_fill_entries) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        auto_recoverable_terminal_no_fill_entries.append(sample)
+                else:
+                    risky_count += 1
+                    if len(risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
+                        risky.append(sample)
             else:
                 historical_risky_count += 1
                 if len(historical_risky) < LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT:
@@ -1120,14 +1169,36 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     evidence["risky_count"] = risky_count
     evidence["historical_risky_count"] = historical_risky_count
     evidence["quarantined_risky_count"] = quarantined_risky_count
+    evidence["auto_recoverable_invalid_pending_entry_count"] = (
+        auto_recoverable_invalid_pending_entry_count
+    )
+    evidence["auto_recoverable_invalid_pending_entries"] = auto_recoverable_invalid_pending_entries
+    evidence["auto_recoverable_terminal_no_fill_entry_count"] = (
+        auto_recoverable_terminal_no_fill_entry_count
+    )
+    evidence["auto_recoverable_terminal_no_fill_entries"] = (
+        auto_recoverable_terminal_no_fill_entries
+    )
     evidence["risky"] = risky
     evidence["historical_risky"] = historical_risky
+    if risky:
+        detail = "restart-relevant actionable certificates fail current qkernel money law"
+    elif auto_recoverable_invalid_pending_entry_count:
+        detail = (
+            "restart-relevant invalid pending entry certificates are covered by "
+            "boot auto-cancel before reactor"
+        )
+    elif auto_recoverable_terminal_no_fill_entry_count:
+        detail = (
+            "restart-relevant invalid pending entry certificates are covered by "
+            "boot terminal no-fill recovery before reactor"
+        )
+    else:
+        detail = "restart-relevant actionable certificates verify under current qkernel money law"
     return CheckResult(
         "live_actionable_certificate_semantics",
         not risky,
-        "restart-relevant actionable certificates verify under current qkernel money law"
-        if not risky
-        else "restart-relevant actionable certificates fail current qkernel money law",
+        detail,
         evidence,
     )
 
@@ -1250,16 +1321,74 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
         if not _table_exists(conn, "main", "venue_commands"):
             return {}
         terminal_placeholders = ",".join("?" for _ in TERMINAL_VENUE_COMMAND_STATES)
+        pc_join = ""
+        pc_select = (
+            "NULL AS position_phase, NULL AS position_shares, "
+            "NULL AS position_cost_basis_usd, NULL AS position_chain_shares"
+        )
+        if _table_exists(conn, "main", "position_current"):
+            pc_select = (
+                "pc.phase AS position_phase, pc.shares AS position_shares, "
+                "pc.cost_basis_usd AS position_cost_basis_usd, "
+                "pc.chain_shares AS position_chain_shares"
+            )
+            pc_join = """
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+            """
+        fact_join = ""
+        fact_select = (
+            "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
+            "NULL AS latest_fact_remaining_size"
+        )
+        if _table_exists(conn, "main", "venue_order_facts"):
+            fact_cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA main.table_info(venue_order_facts)").fetchall()
+            }
+            fact_order_terms = []
+            if "local_sequence" in fact_cols:
+                fact_order_terms.append("vof.local_sequence DESC")
+            if "fact_id" in fact_cols:
+                fact_order_terms.append("vof.fact_id DESC")
+            fact_order_terms.append("vof.rowid DESC")
+            fact_order_by = ", ".join(fact_order_terms)
+            fact_select = (
+                "lf.state AS latest_fact_state, "
+                "lf.matched_size AS latest_fact_matched_size, "
+                "lf.remaining_size AS latest_fact_remaining_size"
+            )
+            fact_join = f"""
+              LEFT JOIN (
+                SELECT command_id, venue_order_id, state, matched_size, remaining_size
+                  FROM (
+                    SELECT vof.command_id, vof.venue_order_id, vof.state,
+                           vof.matched_size, vof.remaining_size,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY vof.command_id, vof.venue_order_id
+                               ORDER BY {fact_order_by}
+                           ) AS rn
+                      FROM venue_order_facts vof
+                  )
+                 WHERE rn = 1
+              ) lf
+                ON lf.command_id = cmd.command_id
+               AND lf.venue_order_id = cmd.venue_order_id
+            """
         rows = conn.execute(
             f"""
-            SELECT command_id, position_id, decision_id, token_id, state, venue_order_id,
-                   created_at, updated_at
-              FROM venue_commands
-             WHERE UPPER(COALESCE(intent_kind, '')) = 'ENTRY'
-               AND UPPER(COALESCE(side, '')) = 'BUY'
-               AND UPPER(COALESCE(state, '')) NOT IN ({terminal_placeholders})
-               AND COALESCE(venue_order_id, '') != ''
-             ORDER BY datetime(updated_at) DESC, command_id DESC
+            SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
+                   cmd.state, cmd.venue_order_id, cmd.created_at, cmd.updated_at,
+                   {pc_select},
+                   {fact_select}
+              FROM venue_commands cmd
+              {pc_join}
+              {fact_join}
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+               AND COALESCE(cmd.venue_order_id, '') != ''
+             ORDER BY datetime(cmd.updated_at) DESC, cmd.command_id DESC
             """,
             tuple(sorted(TERMINAL_VENUE_COMMAND_STATES)),
         ).fetchall()
@@ -1277,8 +1406,63 @@ def _restart_relevant_entry_command_index() -> dict[str, list[dict[str, Any]]]:
             continue
         item = dict(row)
         item["event_id"] = event_id
+        item["boot_auto_cancelable_invalid_pending_entry"] = (
+            _restart_relevant_entry_command_boot_auto_cancelable(item)
+        )
+        item["boot_recoverable_terminal_no_fill_entry"] = (
+            _restart_relevant_entry_command_terminal_no_fill_recoverable(item)
+        )
         index.setdefault(event_id, []).append(item)
     return index
+
+
+def _decimal_zero_or_missing(value: Any) -> bool:
+    if value in (None, ""):
+        return True
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _restart_relevant_entry_command_boot_auto_cancelable(command: dict[str, Any]) -> bool:
+    state = str(command.get("state") or "").upper()
+    if state not in {"ACKED", "POST_ACKED"}:
+        return False
+    if str(command.get("position_phase") or "") != "pending_entry":
+        return False
+    if not (
+        _decimal_zero_or_missing(command.get("position_shares"))
+        and _decimal_zero_or_missing(command.get("position_cost_basis_usd"))
+        and _decimal_zero_or_missing(command.get("position_chain_shares"))
+    ):
+        return False
+    fact_state = str(command.get("latest_fact_state") or "").upper()
+    if fact_state not in OPEN_ENTRY_REST_FACT_STATES:
+        return False
+    if not _decimal_zero_or_missing(command.get("latest_fact_matched_size")):
+        return False
+    return bool(str(command.get("venue_order_id") or "").strip())
+
+
+def _restart_relevant_entry_command_terminal_no_fill_recoverable(command: dict[str, Any]) -> bool:
+    state = str(command.get("state") or "").upper()
+    if state in TERMINAL_VENUE_COMMAND_STATES:
+        return False
+    if str(command.get("position_phase") or "") != "pending_entry":
+        return False
+    if not (
+        _decimal_zero_or_missing(command.get("position_shares"))
+        and _decimal_zero_or_missing(command.get("position_cost_basis_usd"))
+        and _decimal_zero_or_missing(command.get("position_chain_shares"))
+    ):
+        return False
+    fact_state = str(command.get("latest_fact_state") or "").upper()
+    if fact_state not in TERMINAL_NO_FILL_VENUE_FACT_STATES:
+        return False
+    if not _decimal_zero_or_missing(command.get("latest_fact_matched_size")):
+        return False
+    return bool(str(command.get("venue_order_id") or "").strip())
 
 
 def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
@@ -1297,6 +1481,31 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
             "NULL AS latest_fact_state, NULL AS latest_fact_matched_size, "
             "NULL AS latest_fact_remaining_size, NULL AS latest_fact_observed_at"
         )
+        position_join = ""
+        position_select = (
+            "NULL AS position_phase, NULL AS position_shares, "
+            "NULL AS position_cost_basis_usd, NULL AS position_chain_shares"
+        )
+        if _table_exists(conn, "main", "position_current"):
+            position_columns = _table_columns(conn, "main", "position_current")
+            phase_expr = "pc.phase" if "phase" in position_columns else "NULL"
+            shares_expr = "pc.shares" if "shares" in position_columns else "NULL"
+            cost_expr = (
+                "pc.cost_basis_usd"
+                if "cost_basis_usd" in position_columns
+                else "NULL"
+            )
+            chain_expr = "pc.chain_shares" if "chain_shares" in position_columns else "NULL"
+            position_select = (
+                f"{phase_expr} AS position_phase, "
+                f"{shares_expr} AS position_shares, "
+                f"{cost_expr} AS position_cost_basis_usd, "
+                f"{chain_expr} AS position_chain_shares"
+            )
+            position_join = """
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+            """
         if _table_exists(conn, "main", "venue_order_facts"):
             fact_select = (
                 "lf.state AS latest_fact_state, lf.matched_size AS latest_fact_matched_size, "
@@ -1324,8 +1533,10 @@ def _restart_relevant_entry_commands_for_venue_audit() -> list[dict[str, Any]]:
             SELECT cmd.command_id, cmd.position_id, cmd.decision_id, cmd.token_id,
                    cmd.state, cmd.venue_order_id, cmd.size, cmd.price,
                    cmd.created_at, cmd.updated_at,
+                   {position_select},
                    {fact_select}
               FROM venue_commands cmd
+              {position_join}
               {fact_join}
              WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
                AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
@@ -1468,9 +1679,51 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             evidence,
         )
 
+    local_terminal_no_fill_recoverable: list[dict[str, Any]] = []
+    venue_read_commands: list[dict[str, Any]] = []
+    for command in commands:
+        if _restart_relevant_entry_command_terminal_no_fill_recoverable(command):
+            local_terminal_no_fill_recoverable.append(
+                {
+                    "command_id": command.get("command_id"),
+                    "position_id": command.get("position_id"),
+                    "command_state": command.get("state"),
+                    "venue_order_id": command.get("venue_order_id"),
+                    "local_fact_state": command.get("latest_fact_state"),
+                    "local_fact_matched_size": command.get("latest_fact_matched_size"),
+                    "local_fact_remaining_size": command.get("latest_fact_remaining_size"),
+                    "local_fact_observed_at": command.get("latest_fact_observed_at"),
+                    "position_phase": command.get("position_phase"),
+                    "position_shares": command.get("position_shares"),
+                    "position_cost_basis_usd": command.get("position_cost_basis_usd"),
+                    "position_chain_shares": command.get("position_chain_shares"),
+                    "risk": "venue_terminal_no_fill_not_projected_locally",
+                    "restart_resolution": "command_recovery.terminal_order_fact_no_fill",
+                }
+            )
+        else:
+            venue_read_commands.append(command)
+    evidence["venue_read_command_count"] = len(venue_read_commands)
+    evidence["local_terminal_no_fill_boot_recoverable_count"] = len(
+        local_terminal_no_fill_recoverable
+    )
     risky: list[dict[str, Any]] = []
-    boot_recoverable: list[dict[str, Any]] = []
+    boot_recoverable: list[dict[str, Any]] = [
+        recoverable
+        for item in local_terminal_no_fill_recoverable
+        if (recoverable := _venue_point_order_boot_recoverable(item)) is not None
+    ]
     covered: list[dict[str, Any]] = []
+    if not venue_read_commands:
+        evidence["covered_count"] = len(covered)
+        evidence["boot_recoverable"] = boot_recoverable
+        evidence["risky"] = risky
+        return CheckResult(
+            "venue_point_order_truth_alignment",
+            True,
+            "local terminal no-fill venue facts are boot-recoverable before live order submission",
+            evidence,
+        )
     try:
         client, adapter = _preflight_venue_adapter()
     except Exception as exc:  # noqa: BLE001
@@ -1482,7 +1735,7 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
             evidence,
         )
     try:
-        for command in commands:
+        for command in venue_read_commands:
             venue_order_id = str(command.get("venue_order_id") or "").strip()
             command_id = str(command.get("command_id") or "").strip()
             try:
@@ -1593,6 +1846,254 @@ def _venue_point_order_truth_alignment_check() -> CheckResult:
         else "authenticated venue point-order truth conflicts with local restart-relevant order facts",
         evidence,
     )
+
+
+def _edli_fill_bridge_events_table(conn: sqlite3.Connection) -> str | None:
+    """Return the freshest readable EDLI event stream for fill bridge coverage."""
+
+    candidates: list[str] = []
+    if _table_exists(conn, "main", "edli_live_order_events"):
+        candidates.append("edli_live_order_events")
+    if _table_exists(conn, "world", "edli_live_order_events"):
+        candidates.append("world.edli_live_order_events")
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def _latest_occurred_at(table: str) -> str:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(occurred_at) AS max_occurred_at FROM {table}"
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        try:
+            value = row["max_occurred_at"] if isinstance(row, sqlite3.Row) else row[0]
+        except (IndexError, KeyError):
+            return ""
+        return str(value or "")
+
+    return max(candidates, key=lambda table: (_latest_occurred_at(table), table))
+
+
+def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
+    """Block restart when confirmed user fills have not become EDLI fill events."""
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "world_db": str(WORLD_DB),
+        "sample_limit": PREFLIGHT_FILL_BRIDGE_SAMPLE_LIMIT,
+    }
+    if not TRADE_DB.exists():
+        evidence["missing_db"] = str(TRADE_DB)
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            True,
+            "trade DB is absent; no confirmed fill bridge surface is inspectable",
+            evidence,
+        )
+    try:
+        conn = _connect_live_ro()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = repr(exc)
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            False,
+            "live DBs are unreadable for confirmed fill bridge coverage",
+            evidence,
+        )
+    try:
+        events_table = _edli_fill_bridge_events_table(conn)
+        evidence["events_table"] = events_table
+        required_tables = {
+            "edli_live_order_events": events_table is not None,
+            "venue_commands": _table_exists(conn, "main", "venue_commands"),
+            "venue_trade_facts": _table_exists(conn, "main", "venue_trade_facts"),
+        }
+        evidence["required_tables"] = required_tables
+        if not all(required_tables.values()) or events_table is None:
+            return CheckResult(
+                "edli_confirmed_fill_bridge_coverage",
+                True,
+                "confirmed fill bridge tables are not all present; no gap detected",
+                evidence,
+            )
+
+        command_columns = _table_columns(conn, "main", "venue_commands")
+        trade_columns = _table_columns(conn, "main", "venue_trade_facts")
+        event_columns = _table_columns(
+            conn,
+            "world" if events_table.startswith("world.") else "main",
+            "edli_live_order_events",
+        )
+        required_columns = {
+            "venue_commands": {
+                "command_id",
+                "decision_id",
+                "position_id",
+            },
+            "venue_trade_facts": {
+                "command_id",
+                "venue_order_id",
+                "trade_id",
+                "source",
+                "state",
+                "filled_size",
+                "fill_price",
+                "observed_at",
+            },
+            "edli_live_order_events": {
+                "aggregate_id",
+                "event_type",
+                "occurred_at",
+                "payload_json",
+            },
+        }
+        missing_columns = {
+            "venue_commands": sorted(required_columns["venue_commands"] - command_columns),
+            "venue_trade_facts": sorted(required_columns["venue_trade_facts"] - trade_columns),
+            "edli_live_order_events": sorted(
+                required_columns["edli_live_order_events"] - event_columns
+            ),
+        }
+        evidence["missing_columns"] = missing_columns
+        if any(missing_columns.values()):
+            return CheckResult(
+                "edli_confirmed_fill_bridge_coverage",
+                True,
+                "confirmed fill bridge schema is incomplete in this DB surface; no gap detected",
+                evidence,
+            )
+
+        position_join = ""
+        position_select = (
+            "NULL AS city, NULL AS target_date, NULL AS temperature_metric, "
+            "NULL AS bin_label, NULL AS direction, NULL AS phase"
+        )
+        if _table_exists(conn, "main", "position_current"):
+            position_columns = _table_columns(conn, "main", "position_current")
+            city_expr = "pc.city" if "city" in position_columns else "NULL"
+            target_expr = "pc.target_date" if "target_date" in position_columns else "NULL"
+            metric_expr = (
+                "pc.temperature_metric" if "temperature_metric" in position_columns else "NULL"
+            )
+            label_expr = "pc.bin_label" if "bin_label" in position_columns else "NULL"
+            direction_expr = "pc.direction" if "direction" in position_columns else "NULL"
+            phase_expr = "pc.phase" if "phase" in position_columns else "NULL"
+            position_select = (
+                f"{city_expr} AS city, {target_expr} AS target_date, "
+                f"{metric_expr} AS temperature_metric, {label_expr} AS bin_label, "
+                f"{direction_expr} AS direction, {phase_expr} AS phase"
+            )
+            position_join = """
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+            """
+
+        missing_cte = f"""
+            WITH execution_commands AS (
+                SELECT aggregate_id,
+                       json_extract(payload_json, '$.event_id') AS event_id,
+                       json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                       json_extract(payload_json, '$.execution_command_id') AS execution_command_id
+                  FROM {events_table}
+                 WHERE event_type = 'ExecutionCommandCreated'
+            ),
+            submit_acks AS (
+                SELECT aggregate_id,
+                       json_extract(payload_json, '$.venue_order_id') AS venue_order_id
+                  FROM {events_table}
+                 WHERE event_type = 'VenueSubmitAcknowledged'
+            ),
+            missing AS (
+                SELECT exec.aggregate_id,
+                       exec.event_id,
+                       exec.final_intent_id,
+                       exec.execution_command_id,
+                       cmd.command_id,
+                       cmd.position_id,
+                       ack.venue_order_id AS acknowledged_venue_order_id,
+                       trade.trade_id,
+                       trade.venue_order_id,
+                       trade.source,
+                       trade.state,
+                       trade.filled_size,
+                       trade.fill_price,
+                       trade.observed_at,
+                       {position_select}
+                  FROM execution_commands exec
+                  JOIN submit_acks ack
+                    ON ack.aggregate_id = exec.aggregate_id
+                  JOIN venue_commands cmd
+                    ON cmd.decision_id = exec.execution_command_id
+                  {position_join}
+                  JOIN venue_trade_facts trade
+                    ON trade.command_id = cmd.command_id
+                   AND trade.venue_order_id = ack.venue_order_id
+                 WHERE UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
+                   AND trade.source = 'WS_USER'
+                   AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                   AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+                   AND NOT EXISTS (
+                         SELECT 1
+                           FROM {events_table} existing
+                          WHERE existing.aggregate_id = exec.aggregate_id
+                            AND existing.event_type = 'UserTradeObserved'
+                            AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
+                            AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+                       )
+            )
+        """
+        count_row = conn.execute(f"{missing_cte} SELECT COUNT(*) AS count FROM missing").fetchone()
+        missing_count = int(count_row["count"] if count_row is not None else 0)
+        samples = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                {missing_cte}
+                SELECT *
+                  FROM missing
+                 ORDER BY datetime(observed_at) DESC, trade_id DESC
+                 LIMIT ?
+                """,
+                (PREFLIGHT_FILL_BRIDGE_SAMPLE_LIMIT,),
+            ).fetchall()
+        ]
+        evidence.update(
+            {
+                "missing_confirmed_fill_count": missing_count,
+                "samples": samples,
+                "repair_owner": (
+                    "src.ingest.price_channel_ingest._edli_user_channel_reconcile_cycle/"
+                    "src.events.edli_trade_fact_bridge.append_confirmed_trade_facts_to_edli"
+                ),
+                "restart_requirement": (
+                    "run the current price-channel ingest fill bridge and materialize "
+                    "UserTradeObserved(FILL_CONFIRMED) before live-trading restart"
+                ),
+            }
+        )
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            missing_count == 0,
+            "confirmed venue fills are bridged into EDLI UserTradeObserved events"
+            if missing_count == 0
+            else "confirmed venue fills are missing EDLI UserTradeObserved bridge events",
+            evidence,
+        )
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "edli_confirmed_fill_bridge_coverage",
+            False,
+            "confirmed fill bridge coverage query failed",
+            evidence,
+        )
+    finally:
+        conn.close()
 
 
 def _payload_matches_restart_relevant_entry_command(
@@ -2086,6 +2587,17 @@ def _resting_venue_command_boot_recoverable(
             "risk": risk,
             "restart_resolution": "command_recovery.exit_lifecycle_alignment_repair",
             "repair_action": "restore_position_pending_exit_for_live_exit_order",
+        }
+    if (
+        risk == "command_projection_stale_after_terminal_venue_fact"
+        and intent_kind == "ENTRY"
+        and _restart_relevant_entry_command_terminal_no_fill_recoverable(item)
+    ):
+        return {
+            **item,
+            "risk": risk,
+            "restart_resolution": "command_recovery.terminal_order_fact_no_fill",
+            "repair_action": "reconcile_terminal_order_facts",
         }
     if (
         risk == "command_projection_stale_after_terminal_venue_fact"
@@ -4093,6 +4605,7 @@ def evaluate() -> dict[str, Any]:
         _live_actionable_certificate_semantics_check(),
         _live_money_certificate_parent_mode_check(),
         _venue_point_order_truth_alignment_check(),
+        _edli_confirmed_fill_bridge_coverage_check(),
         _position_current_projection_integrity_check(projection_rows),
         _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),

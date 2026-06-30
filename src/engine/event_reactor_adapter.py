@@ -2069,6 +2069,10 @@ def _assert_receipt_qkernel_execution_economics(
     selected_candidate = _selected_opportunity_book_candidate(book, selected_candidate_id)
     if selected_candidate is None:
         raise ValueError("EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_MISSING")
+    if selected_candidate.get("live_decision_selected") is not True:
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_LIVE_DECISION")
+    if selected_candidate.get("admitted") is not True:
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_NOT_ADMITTED")
     book_cert = _valid_qkernel_execution_economics_payload(
         selected_candidate.get("qkernel_execution_economics"),
         direction=receipt.direction,
@@ -14031,68 +14035,72 @@ def _family_existing_exposure_for_selection_by_bin_id(
     if held_position_conn is not None:
         try:
             columns = _position_current_columns(held_position_conn)
-            if "condition_id" in columns:
-                phase_sql, phase_params = _position_phase_or_positive_chain_clause(
-                    columns,
-                    _ENTRY_HELD_POSITION_BLOCKING_PHASES,
+            if "condition_id" not in columns:
+                raise RuntimeError("position_current.condition_id missing")
+            phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+                columns,
+                _ENTRY_HELD_POSITION_BLOCKING_PHASES,
+            )
+            positive_terms = [
+                f"COALESCE({name}, 0) > 0"
+                for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+                if name in columns
+            ]
+            if not positive_terms:
+                raise RuntimeError("position_current exposure columns missing")
+            condition_placeholders = ",".join("?" for _ in bin_id_by_condition)
+            direction_select = "direction" if "direction" in columns else "NULL AS direction"
+            chain_cost_select = (
+                "chain_cost_basis_usd"
+                if "chain_cost_basis_usd" in columns
+                else "NULL AS chain_cost_basis_usd"
+            )
+            cost_select = (
+                "cost_basis_usd" if "cost_basis_usd" in columns else "NULL AS cost_basis_usd"
+            )
+            size_select = "size_usd" if "size_usd" in columns else "NULL AS size_usd"
+            rows = held_position_conn.execute(
+                f"""
+                SELECT condition_id, {direction_select},
+                       {chain_cost_select}, {cost_select}, {size_select}
+                  FROM position_current
+                 WHERE {phase_sql}
+                   AND condition_id IN ({condition_placeholders})
+                   AND ({" OR ".join(positive_terms)})
+                """,
+                (*phase_params, *bin_id_by_condition.keys()),
+            ).fetchall()
+            for row in rows:
+                try:
+                    condition_id = str(row["condition_id"] or "")
+                    direction_raw = row["direction"]
+                    committed = (
+                        _optional_float(row["chain_cost_basis_usd"])
+                        or _optional_float(row["cost_basis_usd"])
+                        or _optional_float(row["size_usd"])
+                        or 0.0
+                    )
+                except Exception:
+                    condition_id = str(row[0] or "")
+                    direction_raw = row[1]
+                    committed = (
+                        _optional_float(row[2])
+                        or _optional_float(row[3])
+                        or _optional_float(row[4])
+                        or 0.0
+                    )
+                direction = str(getattr(direction_raw, "value", direction_raw) or "").strip().lower()
+                _add_exposure(
+                    condition_id=condition_id,
+                    direction=direction,
+                    committed=float(committed),
                 )
-                positive_terms = [
-                    f"COALESCE({name}, 0) > 0"
-                    for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd", "size_usd")
-                    if name in columns
-                ]
-                if positive_terms:
-                    condition_placeholders = ",".join("?" for _ in bin_id_by_condition)
-                    direction_select = "direction" if "direction" in columns else "NULL AS direction"
-                    chain_cost_select = (
-                        "chain_cost_basis_usd"
-                        if "chain_cost_basis_usd" in columns
-                        else "NULL AS chain_cost_basis_usd"
-                    )
-                    cost_select = (
-                        "cost_basis_usd" if "cost_basis_usd" in columns else "NULL AS cost_basis_usd"
-                    )
-                    size_select = "size_usd" if "size_usd" in columns else "NULL AS size_usd"
-                    rows = held_position_conn.execute(
-                        f"""
-                        SELECT condition_id, {direction_select},
-                               {chain_cost_select}, {cost_select}, {size_select}
-                          FROM position_current
-                         WHERE {phase_sql}
-                           AND condition_id IN ({condition_placeholders})
-                           AND ({" OR ".join(positive_terms)})
-                        """,
-                        (*phase_params, *bin_id_by_condition.keys()),
-                    ).fetchall()
-                    for row in rows:
-                        try:
-                            condition_id = str(row["condition_id"] or "")
-                            direction_raw = row["direction"]
-                            committed = (
-                                _optional_float(row["chain_cost_basis_usd"])
-                                or _optional_float(row["cost_basis_usd"])
-                                or _optional_float(row["size_usd"])
-                                or 0.0
-                            )
-                        except Exception:
-                            condition_id = str(row[0] or "")
-                            direction_raw = row[1]
-                            committed = (
-                                _optional_float(row[2])
-                                or _optional_float(row[3])
-                                or _optional_float(row[4])
-                                or 0.0
-                            )
-                        direction = str(getattr(direction_raw, "value", direction_raw) or "").strip().lower()
-                        _add_exposure(
-                            condition_id=condition_id,
-                            direction=direction,
-                            committed=float(committed),
-                        )
-                    if exposure_by_bin:
-                        return exposure_by_bin
-        except (TypeError, ValueError, sqlite3.Error):
-            exposure_by_bin = {}
+            if exposure_by_bin:
+                return exposure_by_bin
+        except Exception as exc:  # noqa: BLE001 - exposure ambiguity must not flatten live risk.
+            raise RuntimeError(
+                f"EDLI_SELECTION_EXPOSURE_UNAVAILABLE:{type(exc).__name__}:{exc}"
+            ) from exc
 
     if portfolio_state_provider is None:
         return {}

@@ -434,6 +434,7 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"expected_edge": 0.25}, "expected_edge exceeds"),
         ({"size": 0.0}, "positive size"),
         ({"min_entry_price": -0.01}, "min_entry_price"),
+        ({"limit_price": 0.01, "min_entry_price": 0.05}, "entry price below strategy floor"),
         ({"min_expected_profit_usd": 10.0}, "expected profit below"),
         ({"min_submit_edge_density": 0.75}, "submit edge density below"),
         ({"expected_edge_source_certificate_hash": ""}, "expected_edge_source_certificate_hash"),
@@ -480,7 +481,30 @@ def test_pre_submit_rejects_lucknow_negative_submit_edge():
                 q_lcb_5pct=0.003,
                 limit_price=0.006,
                 expected_edge=0.04049776073684555,
+                min_entry_price=0.0,
             ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_weak_qkernel_without_selection_guard():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    weak_economics = dict(_pre_submit_payload()["qkernel_execution_economics"])
+    weak_economics.pop("selection_guard_basis")
+
+    with pytest.raises(LiveOrderAggregateError, match="selection_guard_basis"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(qkernel_execution_economics=weak_economics),
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
@@ -510,23 +534,26 @@ def test_pre_submit_allows_low_price_yes_when_qkernel_economics_clear_floors():
             min_submit_edge_density=0.02,
             current_best_bid=0.06,
             current_best_ask=0.08,
-            qkernel_execution_economics={
-                "source": "qkernel_spine",
-                "route_id": "DIRECT_YES:b23@proof",
-                "route_type": "direct",
-                "side": "YES",
+                qkernel_execution_economics={
+                    "source": "qkernel_spine",
+                    "route_id": "DIRECT_YES:b23@proof",
+                    "route_type": "direct",
+                    "side": "YES",
                 "payoff_q_point": 0.118809820736935,
                 "payoff_q_lcb": 0.100708440505795,
                 "cost": 0.07,
                 "edge_lcb": 0.0307084405057945,
                 "optimal_delta_u": 0.000411243383550307,
-                "false_edge_rate": 0.01,
-                "direction_law_ok": True,
-                "coherence_allows": True,
-            },
-        ),
-        occurred_at=NOW,
-        source_authority="engine_adapter",
+                    "false_edge_rate": 0.01,
+                    "direction_law_ok": True,
+                    "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.100708440505795,
+                },
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
     )
 
     pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
@@ -555,17 +582,27 @@ def test_pre_submit_rejects_jeddah_qkernel_payoff_above_submit_lcb():
                 q_lcb_5pct=0.986261171798223,
                 limit_price=0.98,
                 expected_edge=0.005,
-                min_submit_edge_density=0.0,
-                qkernel_execution_economics={
-                    "route_id": "DIRECT_NO:b24@proof",
-                    "side": "NO",
-                    "payoff_q_point": 0.986261171798223,
-                    "payoff_q_lcb": 0.998678563135879,
-                },
-            ),
-            occurred_at=NOW,
-            source_authority="engine_adapter",
-        )
+                    min_submit_edge_density=0.0,
+                    qkernel_execution_economics={
+                        "source": "qkernel_spine",
+                        "route_id": "DIRECT_NO:b24@proof",
+                        "side": "NO",
+                        "payoff_q_point": 0.986261171798223,
+                        "payoff_q_lcb": 0.998678563135879,
+                        "cost": 0.98,
+                        "edge_lcb": 0.018678563135879,
+                        "optimal_delta_u": 0.001,
+                        "false_edge_rate": 0.01,
+                        "direction_law_ok": True,
+                        "coherence_allows": True,
+                        "selection_guard_basis": "SELECTION_BETA_95",
+                        "selection_guard_abstained": False,
+                        "selection_guard_q_safe": 0.998678563135879,
+                    },
+                ),
+                occurred_at=NOW,
+                source_authority="engine_adapter",
+            )
 
 
 def test_pre_submit_rejects_jeddah_micro_edge_density_even_when_positive_edge():
@@ -748,6 +785,15 @@ def _pre_submit_payload(**overrides):
             "side": "YES",
             "payoff_q_point": 0.70,
             "payoff_q_lcb": 0.60,
+            "cost": 0.40,
+            "edge_lcb": 0.20,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.60,
         },
     }
     payload.update(overrides)

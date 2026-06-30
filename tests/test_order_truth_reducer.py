@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from src.contracts.canonical_lifecycle import OrderProofClass
 from src.execution.order_truth_reducer import (
     PARTIAL_WITH_REMAINDER,
     TERMINAL_FILLED,
@@ -15,6 +16,21 @@ from src.execution.order_truth_reducer import (
     TERMINAL_PARTIAL,
     VenueOrderTruthReducer,
 )
+
+
+def test_reduce_returns_typed_order_proof_class() -> None:
+    # The reducer's proof_class is the typed canonical OrderProofClass (still
+    # str-comparable for legacy consumers, but now type-enforced).
+    reduced = VenueOrderTruthReducer.reduce(
+        order_facts=[{"state": "MATCHED", "remaining_size": "0", "matched_size": "5"}],
+        trade_filled_size="5",
+        command_size="5",
+    )
+    assert isinstance(reduced.proof_class, OrderProofClass)
+    assert reduced.proof_class is OrderProofClass.TERMINAL_FILLED
+    # Backward-compat: still equals the legacy string and module constant.
+    assert reduced.proof_class == "TERMINAL_FILLED"
+    assert reduced.proof_class == TERMINAL_FILLED
 from src.state.db import get_connection, init_schema
 from src.state.venue_command_repo import append_order_fact
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -770,6 +771,8 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     min_submit_edge_density = _non_negative_number(
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
+    if limit_price + 1e-12 < min_entry_price:
+        raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
     if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
@@ -819,10 +822,31 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel_execution_economics")
     if not isinstance(economics, dict):
         raise LiveOrderAggregateError("PreSubmitRevalidated requires object qkernel_execution_economics")
+    if str(economics.get("source") or "").strip() != "qkernel_spine":
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel source must be qkernel_spine")
     route_id = str(economics.get("route_id") or "").upper()
     route_type = str(economics.get("route_type") or "").lower()
     if route_type != "direct" and not route_id.startswith("DIRECT_"):
         return
+    if economics.get("direction_law_ok") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel direction_law_ok must be true")
+    if economics.get("coherence_allows") is not True:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel coherence_allows must be true")
+    selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
+    if not selection_guard_basis:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_basis missing")
+    if selection_guard_basis == "SIDE_NOT_ARMED":
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_basis blocks side")
+    if economics.get("selection_guard_abstained") is not False:
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel selection_guard_abstained must be false")
+    selection_guard_q_safe = _positive_number(
+        economics.get("selection_guard_q_safe"),
+        "qkernel_execution_economics.selection_guard_q_safe",
+    )
+    if selection_guard_q_safe > 1.0:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel selection_guard_q_safe requires probability"
+        )
     route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
     native_side = _native_curve_side_for_direction(str(payload.get("direction") or ""))
     qkernel_side = str(route.get("side") or economics.get("side") or "").upper()
@@ -834,6 +858,29 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_point exceeds submit q_live")
     if payoff_q_lcb > q_lcb + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb exceeds submit q_lcb_5pct")
+    cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
+    edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
+    optimal_delta_u = _positive_number(
+        economics.get("optimal_delta_u"),
+        "qkernel_execution_economics.optimal_delta_u",
+    )
+    _ = optimal_delta_u
+    false_edge_rate = _positive_number(
+        economics.get("false_edge_rate"),
+        "qkernel_execution_economics.false_edge_rate",
+    )
+    if false_edge_rate > 1.0:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated qkernel false_edge_rate requires probability"
+        )
+    if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff edge inconsistent")
+    limit_price = _positive_number(payload.get("limit_price"), "limit_price")
+    if limit_price > cost + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated submit price worse than qkernel cost")
+    expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
+    if expected_edge > edge_lcb + 1e-6:
+        raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
 
 
 def _native_curve_side_for_direction(direction: str) -> str | None:

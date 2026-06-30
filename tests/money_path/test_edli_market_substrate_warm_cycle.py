@@ -2026,6 +2026,7 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
     assert "families=[family]" in refresh_src
     assert "condition_ids=condition_ids" in refresh_src
+    assert "merge_existing=True" in refresh_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
     assert "families=clean_families" in confirm_src

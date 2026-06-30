@@ -63,6 +63,9 @@ def _qkernel_economics_for(payload: dict) -> dict:
         "payoff_q_lcb": payload.get("q_lcb_5pct", 0.60),
         "direction_law_ok": True,
         "coherence_allows": True,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": payload.get("q_lcb_5pct", 0.60),
     }
 
 
@@ -335,6 +338,9 @@ class TestLayer2VerifyPreSubmitForCommand:
                 "side": "NO",
                 "payoff_q_point": 0.986261171798223,
                 "payoff_q_lcb": 0.998678563135879,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.986261171798223,
             },
         )
         with pytest.raises(CertificateVerificationError, match="payoff_q_lcb exceeds"):

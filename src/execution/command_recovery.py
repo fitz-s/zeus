@@ -44,7 +44,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 from src.execution.command_bus import (
     CommandState,
@@ -4327,6 +4327,211 @@ def reconcile_edli_entry_posterior_projection_repairs(
 _INVALID_ENTRY_AUTHORITY_OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
 _ENTRY_AUTHORITY_REVIEW_PHASES = (*_INVALID_ENTRY_AUTHORITY_OPEN_PHASES, "quarantined")
 INVALID_ENTRY_AUTHORITY_REVIEW_REASON = "invalid_entry_actionable_certificate_authority"
+INVALID_PENDING_ENTRY_AUTHORITY_CANCEL_REASON = "INVALID_PENDING_ENTRY_ACTIONABLE_CERTIFICATE_AUTHORITY"
+
+
+def _invalid_pending_entry_authority_rows(conn: sqlite3.Connection) -> list[dict]:
+    if not all(_table_exists(conn, table) for table in ("position_current", "venue_commands")):
+        return []
+    if _decision_certificates_ref(conn) is None:
+        return []
+    fact_join = ""
+    fact_select = (
+        "NULL AS latest_order_fact_state, NULL AS latest_order_fact_matched_size, "
+        "NULL AS latest_order_fact_remaining_size"
+    )
+    if _table_exists(conn, "venue_order_facts"):
+        fact_join = "WITH " + _canonical_order_truth_cte(cte_name="canonical_order_truth") + """
+        """
+        fact_select = (
+            "fact.state AS latest_order_fact_state, "
+            "fact.matched_size AS latest_order_fact_matched_size, "
+            "fact.remaining_size AS latest_order_fact_remaining_size"
+        )
+    rows = conn.execute(
+        f"""
+        {fact_join}
+        SELECT
+            pc.position_id,
+            pc.phase,
+            pc.city,
+            pc.target_date,
+            pc.temperature_metric,
+            pc.bin_label,
+            pc.direction,
+            pc.condition_id AS position_condition_id,
+            pc.shares,
+            pc.cost_basis_usd,
+            pc.chain_shares,
+            cmd.command_id,
+            cmd.decision_id,
+            cmd.token_id,
+            cmd.market_id,
+            cmd.venue_order_id,
+            cmd.state,
+            cmd.size,
+            cmd.price,
+            cmd.created_at,
+            {fact_select}
+          FROM position_current pc
+          JOIN venue_commands cmd
+            ON cmd.position_id = pc.position_id
+          {"LEFT JOIN canonical_order_truth fact ON fact.command_id = cmd.command_id AND fact.venue_order_id = cmd.venue_order_id" if _table_exists(conn, "venue_order_facts") else ""}
+         WHERE pc.phase = 'pending_entry'
+           AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+           AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+           AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) = 0
+           AND cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state IN ('ACKED', 'POST_ACKED')
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts trade
+                 WHERE trade.command_id = cmd.command_id
+                   AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+           )
+         ORDER BY datetime(cmd.created_at), cmd.command_id
+        """
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        item = _dict_row(row)
+        fact_state = str(item.get("latest_order_fact_state") or "").upper()
+        if fact_state and fact_state not in _EXIT_LIVE_ORDER_FACT_STATES:
+            continue
+        if item.get("latest_order_fact_matched_size") not in (None, "") and not _decimal_is_zero(
+            item.get("latest_order_fact_matched_size")
+        ):
+            continue
+        event_id = _edli_event_id_from_decision_id(str(item.get("decision_id") or ""))
+        if not event_id:
+            continue
+        payload = _verified_edli_actionable_payload(
+            conn,
+            event_id=event_id,
+            token_id=str(item.get("token_id") or ""),
+        )
+        if payload:
+            continue
+        item["entry_event_id"] = event_id
+        out.append(item)
+    return out
+
+
+def find_invalid_pending_entry_authority_cancels(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return zero-exposure pending ENTRY rests whose EDLI entry authority is invalid.
+
+    This is a cancel-only recovery surface. Filled or partially filled commands
+    are deliberately excluded: real exposure must stay in monitoring and exit
+    lanes, with the authority problem recorded separately by
+    ``reconcile_invalid_open_entry_authority_reviews``.
+    """
+
+    entries: list[dict[str, Any]] = []
+    for row in _invalid_pending_entry_authority_rows(conn):
+        metric = str(row.get("temperature_metric") or "").strip().lower()
+        if metric not in {"high", "low"}:
+            continue
+        entries.append(
+            {
+                "command_id": str(row.get("command_id") or ""),
+                "venue_order_id": str(row.get("venue_order_id") or ""),
+                "token_id": str(row.get("token_id") or ""),
+                "market_id": str(row.get("market_id") or ""),
+                "created_at": str(row.get("created_at") or ""),
+                "fact_state": str(row.get("latest_order_fact_state") or "ACKED_NO_OPEN_FACT"),
+                "matched_size": row.get("latest_order_fact_matched_size") or "0",
+                "position_id": str(row.get("position_id") or ""),
+                "condition_id": str(row.get("position_condition_id") or row.get("market_id") or ""),
+                "city": str(row.get("city") or ""),
+                "target_date": str(row.get("target_date") or ""),
+                "temperature_metric": metric,
+                "metric": metric,
+                "direction": str(row.get("direction") or ""),
+                "bin_label": str(row.get("bin_label") or ""),
+                "cancel_reason": INVALID_PENDING_ENTRY_AUTHORITY_CANCEL_REASON,
+                "cancel_action": "CANCEL_REDECIDE",
+                "cancel_detail": {
+                    "trigger": "invalid_pending_entry_authority",
+                    "entry_event_id": str(row.get("entry_event_id") or ""),
+                    "command_state": str(row.get("state") or ""),
+                    "latest_order_fact_state": row.get("latest_order_fact_state"),
+                    "latest_order_fact_matched_size": row.get("latest_order_fact_matched_size"),
+                    "authority_guard": "current_actionable_certificate_verifier",
+                },
+            }
+        )
+    return entries
+
+
+def _invalid_pending_entry_continuation(entry: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "command_id": str(entry.get("command_id") or ""),
+        "position_id": str(entry.get("position_id") or ""),
+        "venue_order_id": str(entry.get("venue_order_id") or ""),
+        "condition_id": str(entry.get("condition_id") or entry.get("market_id") or ""),
+        "token_id": str(entry.get("token_id") or ""),
+        "city": str(entry.get("city") or ""),
+        "target_date": str(entry.get("target_date") or ""),
+        "temperature_metric": str(entry.get("temperature_metric") or entry.get("metric") or ""),
+        "metric": str(entry.get("metric") or entry.get("temperature_metric") or ""),
+        "reason": "invalid_pending_entry_authority_cancel",
+    }
+
+
+def reconcile_invalid_pending_entry_authority_cancels(
+    conn: sqlite3.Connection,
+    clob: Any,
+    *,
+    conn_factory=None,
+    close_connections: bool = False,
+) -> dict[str, Any]:
+    """Cancel zero-fill pending ENTRY rests whose actionable authority is invalid."""
+
+    entries = find_invalid_pending_entry_authority_cancels(conn)
+    summary: dict[str, Any] = {
+        "scanned": len(entries),
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+        "cancelled": 0,
+        "cancel_failed": 0,
+        "cancel_journal_failed": 0,
+        "continuations": [],
+    }
+    if not entries:
+        return summary
+    from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+
+    cancelled_entries: list[dict[str, Any]] = []
+    factory = conn_factory or (lambda: conn)
+    stats = run_persisted_cancels_for_expired_rests(
+        entries,
+        clob,
+        conn_factory=factory,
+        close_connections=close_connections,
+        collect_cancelled=cancelled_entries,
+    )
+    cancelled = int(stats.get("cancelled", 0) or 0)
+    cancel_failed = int(stats.get("cancel_failed", 0) or 0)
+    cancel_journal_failed = int(stats.get("cancel_journal_failed", 0) or 0)
+    errors = cancel_failed + cancel_journal_failed
+    summary.update(
+        {
+            "advanced": cancelled,
+            "cancelled": cancelled,
+            "cancel_failed": cancel_failed,
+            "cancel_journal_failed": cancel_journal_failed,
+            "errors": errors,
+            "stayed": max(0, len(entries) - cancelled - errors),
+            "continuations": [
+                _invalid_pending_entry_continuation(entry)
+                for entry in cancelled_entries
+            ],
+        }
+    )
+    return summary
 
 
 def _invalid_open_entry_authority_candidates(conn: sqlite3.Connection) -> list[dict]:

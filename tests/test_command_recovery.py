@@ -935,6 +935,9 @@ def _insert_actionable_certificate_for_recovery(
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": payoff_q_lcb,
         },
         "final_intent_id": f"intent:{event_id}:{token_id}",
     }
@@ -4975,6 +4978,9 @@ class TestRecoveryResolutionTable:
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
                     "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.76,
                 },
             },
             "2026-06-07T00:00:00Z",
@@ -5301,6 +5307,9 @@ class TestRecoveryResolutionTable:
                     "false_edge_rate": 0.01,
                     "direction_law_ok": True,
                     "coherence_allows": True,
+                    "selection_guard_basis": "SELECTION_BETA_95",
+                    "selection_guard_abstained": False,
+                    "selection_guard_q_safe": 0.77,
                 },
             },
             "2026-06-07T00:00:00Z",
@@ -5658,6 +5667,93 @@ class TestRecoveryResolutionTable:
         assert conn.execute(
             "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone() is None
+
+    def test_invalid_pending_entry_authority_cancel_voids_zero_fill_rest_and_continues_redecision(
+        self,
+        conn,
+        mock_client,
+    ):
+        event_id = "evt-edli-invalid-pending-authority"
+        decision_id = f"edli_exec_cmd:{event_id}:intent:tok-001:tok-001:buy_yes"
+        _insert(conn, decision_id=decision_id, size=13.45, price=0.40)
+        _advance_to_acked(conn, venue_order_id="ord-invalid-pending")
+        _seed_pending_entry_projection(conn, order_id="ord-invalid-pending")
+        _append_order_fact(
+            conn,
+            order_id="ord-invalid-pending",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001",
+            q_live=0.06,
+            direction="buy_yes",
+            payoff_q_point=0.20,
+        )
+
+        class FakeClob:
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+
+            def cancel_order(self, order_id: str):
+                self.cancelled.append(order_id)
+                return {"canceled": [order_id], "not_canceled": []}
+
+        from src.execution.command_recovery import (
+            reconcile_invalid_pending_entry_authority_cancels,
+        )
+
+        clob = FakeClob()
+        summary = reconcile_invalid_pending_entry_authority_cancels(conn, clob)
+
+        assert clob.cancelled == ["ord-invalid-pending"]
+        assert summary["scanned"] == 1
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert summary["continuations"] == [
+            {
+                "command_id": "cmd-001",
+                "position_id": "pos-001",
+                "venue_order_id": "ord-invalid-pending",
+                "condition_id": "condition-test",
+                "token_id": "tok-001",
+                "city": "Karachi",
+                "target_date": "2026-05-17",
+                "temperature_metric": "high",
+                "metric": "high",
+                "reason": "invalid_pending_entry_authority_cancel",
+            }
+        ]
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        position = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "canceled",
+        }
+        events = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert events[-1] == "ENTRY_ORDER_VOIDED"
 
     def test_edli_entry_posterior_projection_repair_backfills_existing_zero(
         self,

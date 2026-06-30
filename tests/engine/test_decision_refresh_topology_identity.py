@@ -344,6 +344,7 @@ def test_reactor_refresher_marks_sidecar_priority_family(monkeypatch) -> None:
             "ttl_seconds": 45.0,
             "families": [("Auckland", "2026-06-20", "low")],
             "condition_ids": (),
+            "merge_existing": True,
         }
     ]
 

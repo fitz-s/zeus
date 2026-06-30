@@ -852,6 +852,201 @@ def test_live_actionable_certificate_semantics_blocks_restart_relevant_qkernel_p
     assert "exceeds forecast parent posterior" in result.evidence["risky"][0]["reason"]
 
 
+def test_live_actionable_certificate_semantics_allows_boot_auto_cancelable_invalid_pending_entry(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    bin_label = "Will the highest temperature in Istanbul be 29°C on June 29?"
+    payload = {
+        **_valid_actionable_payload(),
+        "event_id": "event-1",
+        "city": "Istanbul",
+        "target_date": "2026-06-29",
+        "temperature_metric": "high",
+        "bin_label": bin_label,
+        "direction": "buy_no",
+        "token_id": "no-1",
+        "q_live": 0.8768631118304586,
+        "q_lcb_5pct": 0.8198679378026374,
+        "c_fee_adjusted": 0.56,
+        "trade_score": 0.2598679378026374,
+        "action_score": 0.2598679378026374,
+        "qkernel_execution_economics": {
+            **_valid_actionable_payload()["qkernel_execution_economics"],
+            "side": "NO",
+            "payoff_q_point": 0.8768631118304586,
+            "payoff_q_lcb": 0.8198679378026374,
+            "cost": 0.56,
+            "edge_lcb": 0.2598679378026374,
+            "selection_guard_q_safe": 0.8198679378026374,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    _attach_forecast_parent(world_db)
+    _init_parent_posterior_forecast_db(forecast_db, bin_label=bin_label)
+    _init_entry_command_trade_db(trade_db, event_id="event-1", token_id="no-1")
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, cost_basis_usd, chain_shares
+        ) VALUES ('pos-1', 'pending_entry', 0.0, 0.0, 0.0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY,
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            local_sequence INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            fact_id, command_id, venue_order_id, state,
+            matched_size, remaining_size, local_sequence
+        ) VALUES (1, 'cmd-1', 'venue-1', 'LIVE', '0', '1.0', 1)
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["historical_risky_count"] == 0
+    assert result.evidence["auto_recoverable_invalid_pending_entry_count"] == 1
+    assert (
+        result.evidence["auto_recoverable_invalid_pending_entries"][0]
+        ["matched_restart_commands"][0]
+        ["boot_auto_cancelable_invalid_pending_entry"]
+        is True
+    )
+    assert "boot auto-cancel" in result.detail
+
+
+def test_live_actionable_certificate_semantics_allows_boot_terminal_no_fill_entry(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    bin_label = "Will the highest temperature in Tokyo be 28°C on July 1?"
+    payload = {
+        **_valid_actionable_payload(),
+        "event_id": "event-terminal-no-fill",
+        "city": "Tokyo",
+        "target_date": "2026-07-01",
+        "temperature_metric": "high",
+        "bin_label": bin_label,
+        "direction": "buy_no",
+        "token_id": "no-1",
+        "q_live": 0.9045439679836288,
+        "q_lcb_5pct": 0.8605040159563566,
+        "c_fee_adjusted": 0.66,
+        "trade_score": 0.2005040159563566,
+        "action_score": 0.2005040159563566,
+        "qkernel_execution_economics": {
+            **_valid_actionable_payload()["qkernel_execution_economics"],
+            "side": "NO",
+            "payoff_q_point": 0.9045439679836288,
+            "payoff_q_lcb": 0.8605040159563566,
+            "cost": 0.66,
+            "edge_lcb": 0.2005040159563566,
+            "selection_guard_q_safe": 0.8605040159563566,
+        },
+    }
+    _init_actionable_world_db(world_db, payload)
+    _attach_forecast_parent(world_db)
+    _init_parent_posterior_forecast_db(forecast_db, bin_label=bin_label)
+    _init_entry_command_trade_db(
+        trade_db,
+        event_id="event-terminal-no-fill",
+        token_id="no-1",
+    )
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, cost_basis_usd, chain_shares
+        ) VALUES ('pos-1', 'pending_entry', 0.0, 0.0, 0.0)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY,
+            command_id TEXT,
+            venue_order_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            local_sequence INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            fact_id, command_id, venue_order_id, state,
+            matched_size, remaining_size, local_sequence
+        ) VALUES (1, 'cmd-1', 'venue-1', 'CANCEL_CONFIRMED', '0', '30.76', 1)
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["historical_risky_count"] == 0
+    assert result.evidence["auto_recoverable_terminal_no_fill_entry_count"] == 1
+    recovered = result.evidence["auto_recoverable_terminal_no_fill_entries"][0]
+    assert recovered["restart_recovery"] == (
+        "boot_command_recovery_terminal_no_fill_before_reactor"
+    )
+    assert recovered["matched_restart_commands"][0]["boot_recoverable_terminal_no_fill_entry"] is True
+    assert "terminal no-fill recovery" in result.detail
+
+
 def test_live_money_certificate_parent_modes_blocks_no_submit_parent(
     monkeypatch, tmp_path
 ):
@@ -2113,6 +2308,57 @@ def test_resting_entry_order_is_boot_recoverable_when_projection_repair_can_hydr
     assert recoverable["repair_action"] == "project_partial_or_filled_entry_order_into_active_position"
 
 
+def test_resting_entry_terminal_no_fill_fact_is_boot_recoverable(monkeypatch, tmp_path):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_resting_command_trade_db(
+        trade_db,
+        phase="pending_entry",
+        intent_kind="ENTRY",
+    )
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET shares = 0.0,
+               chain_shares = 0.0,
+               order_status = 'acked'
+         WHERE position_id = 'pos-1'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE venue_order_facts
+           SET state = 'CANCEL_CONFIRMED',
+               matched_size = '0',
+               remaining_size = '26.18'
+         WHERE command_id = 'cmd-1'
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    result = preflight._resting_venue_command_lifecycle_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["boot_recoverable"][0]["risk"] == (
+        "command_projection_stale_after_terminal_venue_fact"
+    )
+    assert result.evidence["boot_recoverable"][0]["restart_resolution"] == (
+        "command_recovery.terminal_order_fact_no_fill"
+    )
+    assert result.evidence["boot_recoverable"][0]["repair_action"] == (
+        "reconcile_terminal_order_facts"
+    )
+
+
 def test_resting_exit_order_allows_pending_exit(monkeypatch, tmp_path):
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
@@ -2209,6 +2455,61 @@ def _init_entry_venue_audit_db(path, *, command_state="ACKED", fact_state="LIVE"
     )
     conn.commit()
     conn.close()
+
+
+def test_venue_point_order_truth_alignment_uses_local_terminal_no_fill_fact_without_venue_read(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(
+        trade_db,
+        fact_state="CANCEL_CONFIRMED",
+        matched_size="0",
+    )
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            chain_shares REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, cost_basis_usd, chain_shares
+        ) VALUES ('pos-venue-audit', 'pending_entry', 0.0, 0.0, 0.0)
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    def _unexpected_venue_reader():
+        raise AssertionError("local terminal no-fill fact must not require venue read")
+
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", _unexpected_venue_reader)
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["risky"] == []
+    assert result.evidence["venue_read_command_count"] == 0
+    assert result.evidence["local_terminal_no_fill_boot_recoverable_count"] == 1
+    assert result.evidence["boot_recoverable"][0]["risk"] == (
+        "venue_terminal_no_fill_not_projected_locally"
+    )
+    assert result.evidence["boot_recoverable"][0]["repair_action"] == (
+        "edli_boot_command_recovery_live_tick_terminal_no_fill"
+    )
+    assert result.evidence["boot_recoverable"][0]["restart_resolution"] == (
+        "command_recovery.terminal_order_fact_no_fill"
+    )
 
 
 def test_venue_point_order_truth_alignment_marks_live_positive_match_boot_recoverable(
@@ -3174,6 +3475,127 @@ def test_preflight_tolerates_pending_exit_with_full_exit_fill_repair_evidence(mo
     tolerated = pending["evidence"]["tolerated"][0]
     assert tolerated["restart_resolution"] == "command_recovery_full_exit_fill_close"
     assert tolerated["repair_evidence"]["filled_size"] == 15.5
+
+
+def _init_confirmed_fill_bridge_gap_db(path):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            position_id TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL,
+            trade_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            state TEXT NOT NULL,
+            filled_size TEXT NOT NULL,
+            fill_price TEXT NOT NULL,
+            observed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events VALUES (
+            'agg-1', 'ExecutionCommandCreated', ?, '2026-06-29T20:00:00+00:00'
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "event_id": "event-1",
+                    "final_intent_id": "intent-1",
+                    "execution_command_id": "exec-1",
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events VALUES (
+            'agg-1', 'VenueSubmitAcknowledged', ?, '2026-06-29T20:00:05+00:00'
+        )
+        """,
+        (json.dumps({"venue_order_id": "ord-1"}),),
+    )
+    conn.execute("INSERT INTO venue_commands VALUES ('cmd-1', 'exec-1', 'pos-1')")
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', 'ord-1', 'trade-1', 'WS_USER', 'CONFIRMED',
+            '10.5', '0.54', '2026-06-29T20:00:10+00:00'
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def test_confirmed_fill_bridge_coverage_blocks_unbridged_ws_confirmed_fill(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    conn = _init_confirmed_fill_bridge_gap_db(trade_db)
+    conn.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is False
+    assert check.name == "edli_confirmed_fill_bridge_coverage"
+    assert check.evidence["missing_confirmed_fill_count"] == 1
+    assert check.evidence["samples"][0]["trade_id"] == "trade-1"
+    assert check.evidence["samples"][0]["command_id"] == "cmd-1"
+
+
+def test_confirmed_fill_bridge_coverage_accepts_already_bridged_trade(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    conn = _init_confirmed_fill_bridge_gap_db(trade_db)
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events VALUES (
+            'agg-1', 'UserTradeObserved', ?, '2026-06-29T20:00:11+00:00'
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "trade_id": "trade-1",
+                    "fill_authority_state": "FILL_CONFIRMED",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is True
+    assert check.evidence["missing_confirmed_fill_count"] == 0
 
 
 def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatch, tmp_path):

@@ -4970,6 +4970,84 @@ def _edli_boot_command_recovery_once() -> None:
     _emit_command_recovery_redecision_continuations(summary, log_context="edli_boot_command_recovery")
 
 
+def _edli_boot_invalid_pending_entry_authority_cancel_once() -> None:
+    """Cancel invalid zero-fill pending ENTRY rests before the first reactor tick."""
+
+    edli_cfg = _settings_section("edli", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.command_recovery import find_invalid_pending_entry_authority_cancels
+    from src.execution.maker_rest_escalation import run_persisted_cancels_for_expired_rests
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection,
+        get_trade_connection_read_only,
+    )
+
+    trade_ro = get_trade_connection_read_only()
+    try:
+        entries = find_invalid_pending_entry_authority_cancels(trade_ro)
+    finally:
+        trade_ro.close()
+    if not entries:
+        return
+
+    cancelled_entries: list[dict] = []
+    stats = run_persisted_cancels_for_expired_rests(
+        entries,
+        PolymarketClient(),
+        conn_factory=lambda: get_trade_connection(write_class="live"),
+        collect_cancelled=cancelled_entries,
+    )
+    logger.warning(
+        "edli_boot_invalid_pending_entry_authority_cancel: entries=%d stats=%s",
+        len(entries),
+        stats,
+    )
+    if cancelled_entries and edli_cfg.get("event_writer_enabled"):
+        trade_post = get_trade_connection_read_only()
+        forecasts_ro = get_forecasts_connection_read_only()
+        try:
+            families = _escalation_families_from_cancelled(
+                cancelled_entries,
+                trade_post,
+                forecasts_ro,
+            )
+        finally:
+            try:
+                trade_post.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                forecasts_ro.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if families:
+            cleared = _clear_redecision_acted_state_for_families(families)
+            now = datetime.now(timezone.utc)
+            emitted = _emit_live_redecision_events_for_families(
+                families,
+                decision_time=now,
+                received_at=now.isoformat(),
+                origin="invalid_pending_entry_authority_cancel",
+            )
+            logger.warning(
+                "edli_boot_invalid_pending_entry_authority_cancel: "
+                "families=%d acted_state_cleared=%d events_emitted=%d",
+                len(families),
+                cleared,
+                emitted,
+            )
+    if int(stats.get("cancelled", 0) or 0) != len(entries):
+        raise RuntimeError(
+            "EDLI_INVALID_PENDING_ENTRY_AUTHORITY_CANCEL_INCOMPLETE:"
+            f"entries={len(entries)} stats={stats}"
+        )
+
+
 def _escalation_families_from_cancelled(
     cancelled: list[dict],
     trade_conn,
@@ -4992,6 +5070,18 @@ def _escalation_families_from_cancelled(
     resolved (no snapshot, no market_events) is SKIPPED (the standard round-robin
     still reaches it eventually) rather than crashing the cancel job.
     """
+    direct_families: set[tuple[str, str, str]] = set()
+    for entry in cancelled:
+        metric = _substrate_refresh_canonical_metric(
+            entry.get("metric") or entry.get("temperature_metric") or ""
+        )
+        key = (
+            str(entry.get("city") or "").strip(),
+            str(entry.get("target_date") or "").strip(),
+            metric,
+        )
+        if all(key) and key[2] in {"high", "low"}:
+            direct_families.add(key)
     direct_condition_ids = {
         str(e.get("condition_id") or "").strip()
         for e in cancelled
@@ -5034,8 +5124,8 @@ def _escalation_families_from_cancelled(
                 cond_by_token = {}
     cond_ids = {c for c in cond_by_token.values() if c} | direct_condition_ids
     if not cond_ids:
-        return set()
-    families: set[tuple[str, str, str]] = set()
+        return direct_families
+    families: set[tuple[str, str, str]] = set(direct_families)
     try:
         cph = ",".join("?" for _ in cond_ids)
         for fr in forecasts_conn.execute(
@@ -5052,7 +5142,7 @@ def _escalation_families_from_cancelled(
             if city and target_date and metric:
                 families.add((city, target_date, metric))
     except Exception:  # noqa: BLE001 — condition->family map is best-effort
-        return set()
+        return families
     return families
 
 
@@ -5284,6 +5374,7 @@ def _maker_rest_escalation_cycle() -> None:
     if _defer_for_held_position_monitor("maker_rest_escalation"):
         return
     from src.data.polymarket_client import PolymarketClient
+    from src.execution.command_recovery import find_invalid_pending_entry_authority_cancels
     from src.execution.maker_rest_escalation import (
         find_expired_resting_entries,
         run_persisted_cancels_for_expired_rests,
@@ -5300,6 +5391,7 @@ def _maker_rest_escalation_cycle() -> None:
     conn = get_trade_connection_read_only()
     try:
         expired = find_expired_resting_entries(conn, now=datetime.now(timezone.utc))
+        invalid_authority_pending = find_invalid_pending_entry_authority_cancels(conn)
     finally:
         conn.close()
 
@@ -5312,13 +5404,18 @@ def _maker_rest_escalation_cycle() -> None:
     # the venue side effect so a successfully pulled rest cannot remain a local ACK ghost.
     cancelled_entries: list[dict] = []
     stats = run_persisted_cancels_for_expired_rests(
-        expired,
+        [*expired, *invalid_authority_pending],
         clob,
         conn_factory=lambda: get_trade_connection(write_class="live"),
         collect_cancelled=cancelled_entries,
     )
     if stats["scanned"]:
-        logger.info("maker_rest_escalation: %s", stats)
+        logger.info(
+            "maker_rest_escalation: %s expired_rests=%d invalid_authority_pending=%d",
+            stats,
+            len(expired),
+            len(invalid_authority_pending),
+        )
 
     # FAIL-CLOSED on the re-decision emit: any error here must NOT crash the cancel
     # job (the cancels already succeeded; the worst case without the re-decision is
@@ -8856,6 +8953,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 ttl_seconds=45.0,
                 families=[family],
                 condition_ids=condition_ids,
+                merge_existing=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("decision family refresh: priority marker write failed: %r", exc)
@@ -8919,6 +9017,7 @@ def _edli_reactor_family_snapshot_refresher():
                 ttl_seconds=45.0,
                 families=[family],
                 condition_ids=condition_ids,
+                merge_existing=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("reactor family refresh priority marker write failed: %r", exc)
@@ -10238,6 +10337,7 @@ def main():
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
     _edli_boot_command_recovery_once()
+    _edli_boot_invalid_pending_entry_authority_cancel_once()
     # SINGLE TRUTH (bias-maze strip 2026-06-17): the EMOS-CI license boot guard is REMOVED
     # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract
     # is now an unconditional logged no-op (not applicable under single-truth).

@@ -3426,7 +3426,7 @@ class TestForwardMarketSubstrateProducer:
         assert transition["prev_hash"] != transition["new_hash"]
         assert transition["delta_ms"] >= 0
 
-    def test_snapshot_refresh_budget_skips_expired_child_markets(self):
+    def test_snapshot_refresh_budget_skips_closed_elapsed_child_markets(self):
         conn = _make_persisted_substrate_conn()
         captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
 
@@ -3456,7 +3456,15 @@ class TestForwardMarketSubstrateProducer:
             def get_fee_rate(self, token_id: str) -> float:
                 return 0
 
-        def outcome(condition_id: str, market_end_at: str) -> dict:
+        def outcome(
+            condition_id: str,
+            market_end_at: str,
+            *,
+            active: bool = True,
+            closed: bool = False,
+            accepting_orders: bool = True,
+            enable_orderbook: bool = True,
+        ) -> dict:
             return {
                 "title": f"{condition_id} bin",
                 "token_id": f"{condition_id}-yes",
@@ -3468,10 +3476,10 @@ class TestForwardMarketSubstrateProducer:
                 "range_low": 1,
                 "range_high": 2,
                 "executable": True,
-                "active": True,
-                "closed": False,
-                "accepting_orders": True,
-                "enable_orderbook": True,
+                "active": active,
+                "closed": closed,
+                "accepting_orders": accepting_orders,
+                "enable_orderbook": enable_orderbook,
                 "market_end_at": market_end_at,
                 "raw_gamma_payload_hash": "a" * 64,
                 "token_map_raw": {
@@ -3482,10 +3490,10 @@ class TestForwardMarketSubstrateProducer:
                     "id": f"{condition_id}-gamma",
                     "conditionId": condition_id,
                     "questionID": f"{condition_id}-question",
-                    "active": True,
-                    "closed": False,
-                    "acceptingOrders": True,
-                    "enableOrderBook": True,
+                    "active": active,
+                    "closed": closed,
+                    "acceptingOrders": accepting_orders,
+                    "enableOrderBook": enable_orderbook,
                     "clobTokenIds": [f"{condition_id}-yes", f"{condition_id}-no"],
                 },
             }
@@ -3494,7 +3502,13 @@ class TestForwardMarketSubstrateProducer:
             "event_id": "expired-event",
             "slug": "highest-temperature-in-expired-on-may-20-2026",
             "outcomes": [
-                outcome(f"expired-{index}", "2026-05-20T12:00:00+00:00")
+                outcome(
+                    f"expired-{index}",
+                    "2026-05-20T12:00:00+00:00",
+                    active=False,
+                    closed=True,
+                    accepting_orders=False,
+                )
                 for index in range(3)
             ],
         }
@@ -3519,6 +3533,101 @@ class TestForwardMarketSubstrateProducer:
         ).fetchall()
         assert [(row["event_slug"], row["condition_id"]) for row in rows] == [
             ("highest-temperature-in-future-on-may-21-2026", "future-0")
+        ]
+        assert summary["executable_snapshot_candidate_rejection_counts"] == {
+            "market_end_at_elapsed": 3,
+        }
+
+    def test_snapshot_refresh_keeps_live_tradeable_child_after_parent_enddate(self):
+        conn = _make_persisted_substrate_conn()
+        captured_at = datetime(2026, 5, 20, 12, 2, tzinfo=timezone.utc)
+
+        class AnyConditionClob:
+            def get_clob_market_info(self, condition_id: str) -> dict:
+                return {
+                    "condition_id": condition_id,
+                    "archived": False,
+                    "enable_order_book": True,
+                    "tokens": [
+                        {"token_id": f"{condition_id}-yes"},
+                        {"token_id": f"{condition_id}-no"},
+                    ],
+                    "feesEnabled": True,
+                }
+
+            def get_orderbook_snapshot(self, token_id: str) -> dict:
+                return {
+                    "asset_id": token_id,
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "neg_risk": True,
+                    "bids": [],
+                    "asks": [{"price": "0.42", "size": "100"}],
+                }
+
+            def get_fee_rate(self, token_id: str) -> float:
+                return 0
+
+        market = {
+            "event_id": "day0-event",
+            "slug": "highest-temperature-in-day0-on-may-20-2026",
+            "market_end_at": "2026-05-20T12:00:00+00:00",
+            "market_close_at": "2026-05-20T12:00:00+00:00",
+            "outcomes": [
+                {
+                    "title": "day0 bin",
+                    "token_id": "day0-0-yes",
+                    "no_token_id": "day0-0-no",
+                    "market_id": "day0-0",
+                    "condition_id": "day0-0",
+                    "question_id": "day0-0-question",
+                    "gamma_market_id": "day0-0-gamma",
+                    "range_low": 1,
+                    "range_high": 2,
+                    "executable": True,
+                    "active": True,
+                    "closed": False,
+                    "accepting_orders": True,
+                    "enable_orderbook": True,
+                    "market_end_at": "2026-05-20T12:00:00+00:00",
+                    "raw_gamma_payload_hash": "d" * 64,
+                    "token_map_raw": {
+                        "clobTokenIds": ["day0-0-yes", "day0-0-no"],
+                        "outcomes": ["Yes", "No"],
+                    },
+                    "gamma_market_raw": {
+                        "id": "day0-0-gamma",
+                        "conditionId": "day0-0",
+                        "questionID": "day0-0-question",
+                        "active": True,
+                        "closed": False,
+                        "acceptingOrders": True,
+                        "enableOrderBook": True,
+                        "clobTokenIds": ["day0-0-yes", "day0-0-no"],
+                    },
+                }
+            ],
+        }
+
+        summary = ms.refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=AnyConditionClob(),
+            captured_at=captured_at,
+            max_outcomes=1,
+        )
+
+        assert summary["attempted"] == 1
+        assert summary["inserted"] == 1
+        assert "market_end_at_elapsed" not in summary["executable_snapshot_candidate_rejection_counts"]
+        assert summary["executable_snapshot_candidate_override_counts"] == {
+            "market_end_at_elapsed_live_tradeability": 1,
+        }
+        rows = conn.execute(
+            "SELECT event_slug, condition_id FROM executable_market_snapshots"
+        ).fetchall()
+        assert [(row["event_slug"], row["condition_id"]) for row in rows] == [
+            ("highest-temperature-in-day0-on-may-20-2026", "day0-0")
         ]
 
     def test_tag_discovery_does_not_early_break_on_parent_enddate(self):

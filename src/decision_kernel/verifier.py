@@ -384,6 +384,7 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel_execution_economics missing")
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
+    _verify_qkernel_selection_guard(economics, label="actionable qkernel")
     native_side = _native_curve_side_for_direction(payload.get("direction"))
     qkernel_side = str(economics.get("side") or "").upper()
     if native_side is not None and qkernel_side != native_side:
@@ -681,6 +682,8 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
     if expected_edge > submit_edge + 1e-6:
         raise CertificateVerificationError("pre-submit revalidation expected_edge exceeds submit edge")
+    if limit_price + 1e-12 < min_entry_price:
+        raise CertificateVerificationError("pre-submit revalidation limit_price below strategy entry floor")
     if size <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation size must be positive")
     if submit_edge * size + 1e-9 < min_expected_profit_usd:
@@ -1292,6 +1295,22 @@ def _qkernel_direction_admitted(economics: dict, *, direction: object) -> bool:
     return True
 
 
+def _verify_qkernel_selection_guard(economics: dict, *, label: str) -> None:
+    basis = str(economics.get("selection_guard_basis") or "").strip()
+    if not basis:
+        raise CertificateVerificationError(f"{label} selection_guard_basis missing")
+    if economics.get("selection_guard_abstained") is not False:
+        raise CertificateVerificationError(f"{label} selection_guard_abstained must be false")
+    if basis == "SIDE_NOT_ARMED":
+        raise CertificateVerificationError(f"{label} selection_guard_basis blocks side")
+    q_safe = _finite_float(
+        economics.get("selection_guard_q_safe"),
+        f"{label} selection_guard_q_safe",
+    )
+    if not (0.0 < q_safe <= 1.0):
+        raise CertificateVerificationError(f"{label} selection_guard_q_safe must be in (0, 1]")
+
+
 def _verify_pre_submit_qkernel_economics(
     pre_submit: dict,
     *,
@@ -1305,8 +1324,15 @@ def _verify_pre_submit_qkernel_economics(
         raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
     route_id = str(economics.get("route_id") or "").upper()
     route_type = str(economics.get("route_type") or "").lower()
-    if route_type != "direct" and not route_id.startswith("DIRECT_"):
+    explicit_non_direct = (
+        route_type
+        and route_type != "direct"
+        and route_id
+        and not route_id.startswith("DIRECT_")
+    )
+    if explicit_non_direct:
         return
+    _verify_qkernel_selection_guard(economics, label="pre-submit qkernel")
     route = economics.get("route") if isinstance(economics.get("route"), dict) else {}
     native_side = _native_curve_side_for_direction(pre_submit.get("direction"))
     qkernel_side = str(route.get("side") or economics.get("side") or "").upper()

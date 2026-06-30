@@ -75,6 +75,20 @@ def test_actionable_requires_qkernel_spine_selection_authority():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_requires_qkernel_selection_guard():
+    payload = _action_payload()
+    economics = dict(payload["qkernel_execution_economics"])
+    economics.pop("selection_guard_basis")
+    economics.pop("selection_guard_abstained")
+    economics.pop("selection_guard_q_safe")
+    parents, action = actionable_graph(
+        action_payload={"qkernel_execution_economics": economics}
+    )
+
+    with pytest.raises(CertificateVerificationError, match="selection_guard_basis"):
+        verify_actionable_trade(action, parents)
+
+
 def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
     parents, action = actionable_graph(
         action_payload={
@@ -96,6 +110,9 @@ def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
                 "false_edge_rate": 0.02599350162459385,
                 "direction_law_ok": False,
                 "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.003,
             },
         }
     )
@@ -121,6 +138,9 @@ def test_actionable_rejects_oof_reliability_direction_override_for_yes():
                 "q_lcb_guard_abstained": False,
                 "q_lcb_guard_cell_key": "high|L2_3|YES|nonmodal|qb2|coarse_global",
                 "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.6,
             },
         }
     )
@@ -152,6 +172,9 @@ def test_actionable_rejects_wrong_cost_source_for_buy_no():
                 "false_edge_rate": 0.01,
                 "direction_law_ok": True,
                 "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.6,
             },
         },
         parent_overrides={
@@ -352,6 +375,9 @@ def _action_payload() -> dict:
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
         },
         "fdr_family_id": "family-1",
         "kelly_decision_id": "kelly-1",

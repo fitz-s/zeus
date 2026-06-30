@@ -45,6 +45,7 @@ from src.contracts.position_truth import (
     CHAIN_ONLY_REVIEW_WINDOW_HOURS,
     ChainOnlyFact,
     ChainOnlyReviewState,
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
 )
 from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
@@ -2065,6 +2066,7 @@ def _calibration_entry_authority_rejection(payload_json: str | None) -> str | No
     except (TypeError, json.JSONDecodeError):
         return "EDLI_ENTRY_CALIBRATION_CERT_JSON_INVALID"
     authority = str(payload.get("authority") or "").strip().upper()
+    coverage_status = str(payload.get("coverage_status") or "").strip()
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         return "EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK"
     n_samples_raw = payload.get("n_samples")
@@ -2072,7 +2074,11 @@ def _calibration_entry_authority_rejection(payload_json: str | None) -> str | No
         n_samples = int(n_samples_raw) if n_samples_raw is not None else None
     except (TypeError, ValueError):
         n_samples = None
-    if n_samples is not None and n_samples <= 0:
+    if (
+        n_samples is not None
+        and n_samples <= 0
+        and coverage_status != "INSUFFICIENT_DATA"
+    ):
         return "EDLI_ENTRY_CALIBRATION_EMPTY_SAMPLE"
     return None
 
@@ -2923,6 +2929,17 @@ NO_EXPOSURE_CHAIN_STATES = frozenset(
         "quarantine_expired",
     }
 )
+_POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
+
+
+def _positive_chain_exposure_shares(pos: "Position") -> float:
+    try:
+        value = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value <= _POSITIVE_CHAIN_EXPOSURE_EPS:
+        return 0.0
+    return value
 
 
 def _semantic_value(value: object) -> str:
@@ -2934,7 +2951,15 @@ def _semantic_value(value: object) -> str:
 def _is_runtime_open_position(pos: Position) -> bool:
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
-    chain_shares = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    chain_shares = _positive_chain_exposure_shares(pos)
+    if (
+        chain_shares > 0.0
+        and (
+            state in {"quarantined", "voided"}
+            or (not state and chain_state in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES)
+        )
+    ):
+        return True
     no_exposure_chain_state = chain_state in NO_EXPOSURE_CHAIN_STATES
     if state == "pending_exit" and chain_shares > 0.0:
         no_exposure_chain_state = False
@@ -3493,12 +3518,35 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
     SQL site is registered in scripts/check_dynamic_sql.py baseline.
     """
     placeholders = ",".join("?" * len(_NON_OPEN_PHASES))
+    columns = {
+        str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+    }
+    if "chain_shares" in columns:
+        if "phase" in columns:
+            chain_truth_sql = "phase IN ('quarantined', 'voided')"
+        elif "chain_state" in columns:
+            chain_truth_sql = (
+                "chain_state IN ('entry_authority_quarantined', "
+                "'chain_absent_confirmed_position_unattributed')"
+            )
+        else:
+            chain_truth_sql = "0"
+        positive_chain_clause = (
+            " OR (COALESCE(chain_shares, 0) > ? "
+            f"AND ({chain_truth_sql}))"
+        )
+    else:
+        positive_chain_clause = ""
+    params: list[object] = [token_id, token_id, *_NON_OPEN_PHASES]
+    if positive_chain_clause:
+        params.append(_POSITIVE_CHAIN_EXPOSURE_EPS)
     row = conn.execute(
         f"""SELECT 1 FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
-            AND phase NOT IN ({placeholders})
+            AND (phase NOT IN ({placeholders}){positive_chain_clause})
             LIMIT 1""",
-        (token_id, token_id, *_NON_OPEN_PHASES),
+        tuple(params),
     ).fetchone()
     return row is not None
 

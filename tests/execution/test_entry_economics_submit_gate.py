@@ -72,7 +72,7 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     assert verdict["reason"] == "expected_edge_non_positive"
 
 
-def test_entry_economics_allows_low_price_when_qkernel_economics_clear_floors():
+def test_entry_economics_blocks_low_price_below_strategy_entry_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -80,6 +80,32 @@ def test_entry_economics_allows_low_price_when_qkernel_economics_clear_floors():
             q_lcb_5pct=0.72,
             expected_edge=0.714,
             min_entry_price=0.05,
+            min_expected_profit_usd=1.0,
+            min_submit_edge_density=0.05,
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.82,
+                payoff_q_lcb=0.72,
+                cost=0.006,
+                edge_lcb=0.714,
+                selection_guard_q_safe=0.72,
+            ),
+        ),
+        shares=1497.78,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["min_entry_price"] == 0.05
+
+
+def test_entry_economics_allows_low_price_only_when_strategy_floor_allows_it():
+    verdict = _entry_economics_component(
+        _intent(
+            limit_price=0.006,
+            q_live=0.82,
+            q_lcb_5pct=0.72,
+            expected_edge=0.714,
+            min_entry_price=0.005,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
             qkernel_execution_economics=_econ(

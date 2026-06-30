@@ -3947,6 +3947,73 @@ def _outcome_market_end_at(market: dict[str, Any], outcome: dict[str, Any]) -> d
     )
 
 
+def _outcome_has_explicit_live_tradeability_after_end_anchor(
+    market: dict[str, Any],
+    outcome: dict[str, Any],
+) -> bool:
+    """Return True when child-market live facts outrank a stale end-time anchor.
+
+    Polymarket weather parent ``endDate`` values are phase/time anchors, not
+    final visibility authority for neg-risk child markets.  Day0/redecision must
+    be able to refresh a child that the venue still reports as active,
+    accepting orders, and orderbook-enabled.  This does not make the market
+    executable by itself: snapshot capture still fetches CLOB market/book facts,
+    and submit runs assert_snapshot_executable.
+    """
+
+    gamma_market_raw = outcome.get("gamma_market_raw")
+    if not isinstance(gamma_market_raw, dict):
+        gamma_market_raw = {}
+
+    active = _boolish_market_field(outcome, "active", "isActive")
+    if active is None:
+        active = _boolish_market_field(gamma_market_raw, "active", "isActive")
+    if active is not True:
+        return False
+
+    child_closed = _boolish_market_field(outcome, "closed", "isClosed")
+    if child_closed is None:
+        child_closed = _boolish_market_field(gamma_market_raw, "closed", "isClosed")
+    if child_closed is True:
+        return False
+
+    accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
+    if accepting_orders is None:
+        accepting_orders = _boolish_market_field(
+            gamma_market_raw,
+            "acceptingOrders",
+            "accepting_orders",
+        )
+    if accepting_orders is not True:
+        return False
+
+    enable_orderbook = _boolish_market_field(
+        outcome,
+        "enable_orderbook",
+        "enableOrderBook",
+        "orderbookEnabled",
+    )
+    if enable_orderbook is None:
+        enable_orderbook = _boolish_market_field(
+            gamma_market_raw,
+            "enable_orderbook",
+            "enableOrderBook",
+            "orderbookEnabled",
+        )
+    if enable_orderbook is not True:
+        return False
+
+    parent_closed = _boolish_market_field(market, "closed", "isClosed")
+    parent_accepting = _boolish_market_field(market, "acceptingOrders", "accepting_orders")
+    # Parent closure labels on weather neg-risk families can lag/lead child
+    # tradability.  Only a parent-level explicit accepting=false is strong enough
+    # to suppress the child override; parent closed=true alone is not.
+    if parent_closed is True and parent_accepting is False:
+        return False
+
+    return True
+
+
 def _float_or_none(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -4563,9 +4630,13 @@ def refresh_executable_market_substrate_snapshots(
     candidate_cities: set[str] = set()
     candidate_count = 0
     candidate_rejection_counts: dict[str, int] = {}
+    candidate_override_counts: dict[str, int] = {}
 
     def _reject_candidate(reason: str) -> None:
         candidate_rejection_counts[reason] = candidate_rejection_counts.get(reason, 0) + 1
+
+    def _override_candidate(reason: str) -> None:
+        candidate_override_counts[reason] = candidate_override_counts.get(reason, 0) + 1
 
     # Group candidates by city for breadth-first interleaving, except the
     # max_outcomes=0 pending-family path, where the group key is one market
@@ -4622,9 +4693,11 @@ def refresh_executable_market_substrate_snapshots(
                 continue
             end_at = _outcome_market_end_at(market, outcome)
             if end_at is not None and end_at <= captured:
-                _reject_candidate("market_end_at_elapsed")
-                skipped += 1
-                continue
+                if not _outcome_has_explicit_live_tradeability_after_end_anchor(market, outcome):
+                    _reject_candidate("market_end_at_elapsed")
+                    skipped += 1
+                    continue
+                _override_candidate("market_end_at_elapsed_live_tradeability")
             refresh_key, fresh_selected_tokens = _snapshot_condition_refresh_state(
                 conn,
                 condition_id,
@@ -5057,6 +5130,7 @@ def refresh_executable_market_substrate_snapshots(
         "discovered_event_count": len(markets or []),
         "executable_snapshot_candidate_count": candidate_count,
         "executable_snapshot_candidate_rejection_counts": candidate_rejection_counts,
+        "executable_snapshot_candidate_override_counts": candidate_override_counts,
         "selected_executable_snapshot_count": len(selected_candidates),
         "executable_candidate_city_count": len(candidate_cities),
         "selected_executable_city_count": len(selected_cities),
