@@ -55,6 +55,7 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
     BlockingScheduler = None
 
 from src.config import cities_by_name, get_mode, settings
+from src.contracts.canonical_lifecycle import VenueOrderStatus
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
 from src.runtime import bankroll_provider
@@ -2726,7 +2727,7 @@ def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]
                     continue
             except ValueError:
                 continue
-        if str(fact[0] or "") == "PARTIALLY_MATCHED" and not raw_remaining:
+        if str(fact[0] or "") == VenueOrderStatus.PARTIALLY_MATCHED and not raw_remaining:
             continue
         position_id = str(row[1] or "")
         family: tuple[str, str, str] | None = None

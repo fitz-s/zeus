@@ -48,7 +48,6 @@ _BASELINE_OFFENDERS = frozenset({
     "src/execution/command_recovery.py",
     "src/execution/executor.py",
     "src/execution/exit_lifecycle.py",
-    "src/main.py",
 })
 
 
