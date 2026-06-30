@@ -1035,6 +1035,67 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
         assert exposure[bin_id] == pytest.approx(21.27)
 
 
+def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_topology():
+    """Same city/date/metric exposure cannot flatten to zero when topology split hides it.
+
+    Munich-style adjacent-NO losses can happen when an already-held sibling
+    position belongs to the same weather family but its condition_id is absent
+    from the current bound topology/proof set. That is not an empty portfolio;
+    it is missing family-risk evidence, so live selection must fail closed.
+    """
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+            CREATE TABLE position_current (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                condition_id TEXT,
+                direction TEXT,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_cost_basis_usd REAL
+            )
+        """
+    )
+    conn.execute(
+        """
+            INSERT INTO position_current (
+                city, target_date, temperature_metric, condition_id, direction,
+                phase, chain_state, chain_shares, chain_cost_basis_usd
+            ) VALUES (?, ?, ?, 'foreign-cond', 'buy_no', 'active', 'synced', 29.14, 21.27)
+        """,
+        (family.city, family.target_date, family.metric),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "EDLI_SELECTION_EXPOSURE_UNAVAILABLE:RuntimeError:"
+            "SAME_FAMILY_POSITION_NOT_IN_TOPOLOGY"
+        ),
+    ):
+        era._family_existing_exposure_for_selection_by_bin_id(
+            proofs=proofs,
+            portfolio_state_provider=None,
+            held_position_conn=conn,
+            family=family,
+        )
+
+
 def test_selection_exposure_excludes_chain_absent_quarantine():
     """Confirmed chain absence must not be reintroduced as live family exposure."""
     from types import SimpleNamespace

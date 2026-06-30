@@ -133,11 +133,21 @@ def _model_only_native_posterior(p_native: float) -> float:
     return p
 
 
-def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: str) -> float:
+def _normalize_monitor_direction(direction: object) -> str:
+    """Normalize entry direction before converting YES-bin belief to held side."""
+    direction_value = getattr(direction, "value", direction)
+    text = str(direction_value or "").strip().lower()
+    if text in {"buy_yes", "yes", "direction.yes"}:
+        return "buy_yes"
+    if text in {"buy_no", "no", "direction.no"}:
+        return "buy_no"
+    raise ValueError(f"unsupported monitor direction {direction!r}")
+
+
+def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction: object) -> float:
     """Convert a YES-bin point probability into the held-side outcome space."""
     p_yes = _model_only_native_posterior(p_yes_bin)
-    direction_value = getattr(direction, "value", direction)
-    if str(direction_value) == "buy_no":
+    if _normalize_monitor_direction(direction) == "buy_no":
         return _model_only_native_posterior(one_minus(p_yes))
     return p_yes
 

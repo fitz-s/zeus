@@ -688,26 +688,12 @@ def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
     assert "family_snapshot_refresher=_reactor_family_snapshot_refresher" in cycle_src
 
 
-def test_decision_refresher_runs_scoped_priority_cycle(monkeypatch):
-    """Selected-row stale handling must refresh synchronously through the shared priority cycle.
-
-    The adapter can only re-elect fresh prices when the refresher returns after snapshot
-    insertion. A marker-only refresher returns False and lets the stale selection deadline
-    terminalize otherwise-refreshable live work.
-    """
-
-    import src.data.substrate_observer as substrate_observer
-
-    calls: list[dict] = []
-    monkeypatch.setattr(
-        substrate_observer,
-        "_edli_money_path_substrate_priority_cycle",
-        lambda: calls.append({"called": True}) or {"status": "refreshed", "inserted": 2},
-    )
+def test_decision_refresher_delegates_scoped_priority_to_sidecar(monkeypatch):
+    """Selected-row stale handling must not run substrate producer I/O inline."""
 
     refresh_src = inspect.getsource(main_module._edli_decision_family_snapshot_refresher)
     assert "mark_money_path_substrate_priority(" in refresh_src
-    assert "_edli_money_path_substrate_priority_cycle()" in refresh_src
+    assert "_edli_money_path_substrate_priority_cycle()" not in refresh_src
     assert "refresh_executable_market_substrate_snapshots(" not in refresh_src
     assert "get_trade_connection" not in refresh_src
     assert "PolymarketClient" not in refresh_src
@@ -719,8 +705,7 @@ def test_decision_refresher_runs_scoped_priority_cycle(monkeypatch):
         target_date="2026-06-20",
         metric="low",
         condition_ids=("cond-1",),
-    ) is True
-    assert calls == [{"called": True}]
+    ) is False
 
 
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():

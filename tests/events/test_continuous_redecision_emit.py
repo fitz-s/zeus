@@ -2039,6 +2039,7 @@ def test_decision_triggered_refresh_delegates_to_substrate_sidecar():
     src = inspect.getsource(main._edli_decision_family_snapshot_refresher)
     assert "mark_money_path_substrate_priority(" in src
     assert 'reason="decision_triggered_targeted_refresh"' in src
+    assert "_edli_money_path_substrate_priority_cycle()" not in src
     assert "refresh_executable_market_substrate_snapshots(" not in src
     assert "get_trade_connection" not in src
     assert "PolymarketClient" not in src

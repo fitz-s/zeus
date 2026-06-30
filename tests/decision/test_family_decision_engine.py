@@ -1359,13 +1359,14 @@ def test_adjacent_no_pair_dominance_is_visible_as_non_executable_superior_route(
     assert comparison.leg_candidate_ids == (no24.economics.candidate_id, no26.economics.candidate_id)
 
 
-def test_adjacent_no_pair_dominance_does_not_veto_executable_center_yes():
-    """Shanghai correction: non-executable portfolio superiority is telemetry, not veto."""
+def test_adjacent_no_pair_dominance_vetoes_until_portfolio_executor_exists():
+    """Shanghai correction: do not submit an inferior single leg as optimal."""
 
     source = inspect.getsource(FamilyDecisionEngine.decide)
 
     assert "portfolio_comparisons = self._portfolio_comparisons" in source
-    assert "NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" not in source
+    assert "NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE" in source
+    assert "selected_decision = None" in source
 
 
 # ===========================================================================

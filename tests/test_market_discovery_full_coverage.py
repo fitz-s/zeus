@@ -2919,6 +2919,98 @@ def test_illiquid_identity_capture_skips_fee_rate_http():
     assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
 
 
+def test_substrate_identity_capture_persists_non_accepting_clob_state():
+    """Priority substrate refresh must record current non-executable CLOB state."""
+
+    condition_id = "0x" + "3" * 64
+    yes_token = "0x" + "4" * 64
+    no_token = "0x" + "5" * 64
+    market = {
+        "event_id": "evt-non-accepting",
+        "slug": "highest-temperature-in-chicago-on-june-7-2026",
+        "city": ms.cities_by_name.get("Chicago", "Chicago"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "conditionId": condition_id,
+                    "questionID": condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [yes_token, no_token],
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class NonAcceptingClob:
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": yes_token}, {"token_id": no_token}],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": False,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
+
+        def get_orderbook_snapshot(self, _token_id: str) -> dict:
+            return {
+                "asset_id": yes_token,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate_details(self, _token_id: str) -> dict:
+            raise AssertionError("non-executable substrate identity must not fetch fee-rate")
+
+    captured = []
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        ms.capture_executable_market_snapshot(
+            _make_in_memory_trade_db(),
+            market=market,
+            decision=decision,
+            clob=NonAcceptingClob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            tolerate_missing_book=True,
+        )
+
+    assert len(captured) == 1
+    assert captured[0].tradeability_status.executable_allowed is False
+    assert captured[0].tradeability_status.reason == "accepting_orders_not_true"
+    assert (
+        captured[0].fee_details["source"]
+        == "not_applicable_non_executable_identity:accepting_orders_not_true"
+    )
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
+
+
 def test_substrate_identity_capture_requires_real_clob_market_info(monkeypatch):
     """Background substrate identity rows must be backed by real CLOB metadata."""
 

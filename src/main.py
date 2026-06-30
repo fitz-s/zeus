@@ -8939,10 +8939,9 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
 
     The live daemon normally consumes sidecar-produced executable snapshots.  When the
     selected row is already stale inside the money path, waiting for a later sidecar tick
-    makes the adapter emit ``EXECUTABLE_SNAPSHOT_STALE`` and the reactor can terminalize
-    the event before fresh prices arrive.  For that selected family, run the SAME
-    substrate priority cycle synchronously and return True only when it inserted fresh
-    snapshot rows; lock-busy or failed refresh falls back to the normal fail-closed retry.
+    marks an exact sidecar priority scope.  The order daemon remains a consumer: it
+    does not run the substrate producer inline, so it cannot fight the sidecar for
+    the shared market_substrate_refresh lock or block the reactor on venue I/O.
     """
 
     def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
@@ -8966,35 +8965,12 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         except Exception as exc:  # noqa: BLE001
             logger.debug("decision family refresh: priority marker write failed: %r", exc)
         logger.info(
-            "decision family refresh marked priority substrate scope: %s/%s/%s",
+            "decision family refresh delegated to substrate-observer sidecar: %s/%s/%s",
             family[0],
             family[1],
             family[2],
         )
-        try:
-            from src.data import substrate_observer as _substrate_observer
-
-            summary = _substrate_observer._edli_money_path_substrate_priority_cycle()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "decision family refresh synchronous priority cycle failed; "
-                "falling back to stale retry: %r",
-                exc,
-            )
-            return False
-        if not isinstance(summary, dict):
-            return False
-        inserted = int(summary.get("inserted") or 0)
-        status = str(summary.get("status") or "")
-        logger.info(
-            "decision family refresh priority cycle summary status=%s inserted=%s scope=%s/%s/%s",
-            status,
-            inserted,
-            family[0],
-            family[1],
-            family[2],
-        )
-        return status == "refreshed" and inserted > 0
+        return False
 
     return _refresh
 

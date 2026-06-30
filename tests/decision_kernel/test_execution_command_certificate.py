@@ -112,7 +112,11 @@ def test_execution_command_rejects_wrong_direction():
 
 
 def test_execution_command_rejects_size_below_min_order():
-    parents, command = execution_graph(command_payload={"size": 0.01, "min_order_size": 1.0})
+    parents, command = execution_graph(
+        actionable_payload={"strategy_key": "unit_test_entry_floor"},
+        final_payload={"size": 0.5, "notional_usd": 0.2},
+        command_payload={"size": 0.5, "min_order_size": 1.0},
+    )
 
     with pytest.raises(CertificateVerificationError, match="min_order_size"):
         verify_execution_command(command, parents)
@@ -120,6 +124,12 @@ def test_execution_command_rejects_size_below_min_order():
 
 def test_execution_command_rejects_presubmit_price_below_strategy_entry_floor():
     parents, command = execution_graph(
+        final_payload={
+            "limit_price": 0.003,
+            "size": 384.79,
+            "min_entry_price": 0.05,
+            "notional_usd": 1.15437,
+        },
         command_payload={
             "limit_price": 0.003,
             "q_live": 0.13122880112330723,
@@ -156,7 +166,10 @@ def test_execution_command_has_no_max_notional_ceiling():
     # verifier no longer rejects a size whose notional exceeds any max_notional —
     # order size is governed solely by structural fractional-Kelly sizing upstream.
     # A size that the old cap would have rejected (20 * 0.40 = 8.0) now verifies.
-    parents, command = execution_graph(command_payload={"size": 20.0, "limit_price": 0.40})
+    parents, command = execution_graph(
+        final_payload={"size": 20.0, "notional_usd": 8.0},
+        command_payload={"size": 20.0, "limit_price": 0.40},
+    )
 
     verify_execution_command(command, parents)
 
@@ -241,6 +254,7 @@ def test_execution_command_verifies_without_cap_flag():
     # The cap-enabled flag is gone from both the live_cap and actionable payloads;
     # verification does not depend on it and still passes.
     parents, command = execution_graph(
+        final_payload={"size": 20.0, "notional_usd": 8.0},
         command_payload={"size": 20.0, "limit_price": 0.40},
     )
 
@@ -248,7 +262,10 @@ def test_execution_command_verifies_without_cap_flag():
 
 
 def test_execution_command_rejects_tick_misaligned_price():
-    parents, command = execution_graph(command_payload={"limit_price": 0.333, "tick_size": 0.01})
+    parents, command = execution_graph(
+        final_payload={"limit_price": 0.333, "notional_usd": 3.33},
+        command_payload={"limit_price": 0.333, "tick_size": 0.01},
+    )
 
     with pytest.raises(CertificateVerificationError, match="tick-aligned"):
         verify_execution_command(command, parents)
@@ -320,6 +337,19 @@ def test_final_intent_rejects_venue_order_id_before_submit():
     parents, final_intent = final_intent_graph(final_payload={"venue_order_id": "venue-1"})
 
     with pytest.raises(CertificateVerificationError, match="venue_order_id"):
+        verify_final_intent(final_intent, parents)
+
+
+def test_final_intent_rejects_price_below_current_live_entry_floor():
+    parents, final_intent = final_intent_graph(
+        final_payload={
+            "limit_price": 0.07,
+            "min_entry_price": 0.05,
+            "notional_usd": 0.70,
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="limit_price below strategy entry floor"):
         verify_final_intent(final_intent, parents)
 
 
@@ -434,16 +464,35 @@ def test_executor_expressibility_requires_can_express_true():
 
 
 def test_executor_expressibility_rejects_tick_misaligned_price():
-    parents, expressibility = executor_expressibility_graph(express_payload={"limit_price": 0.333})
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={"limit_price": 0.333, "notional_usd": 3.33},
+        express_payload={"limit_price": 0.333},
+    )
 
     with pytest.raises(CertificateVerificationError, match="tick-aligned"):
         verify_executor_expressibility(expressibility, parents)
 
 
 def test_executor_expressibility_rejects_size_below_min_order():
-    parents, expressibility = executor_expressibility_graph(express_payload={"size": 0.1, "min_order_size": 1.0})
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={"size": 0.1, "notional_usd": 0.04},
+        express_payload={"size": 0.1, "min_order_size": 1.0},
+    )
 
     with pytest.raises(CertificateVerificationError, match="min_order_size"):
+        verify_executor_expressibility(expressibility, parents)
+
+
+def test_executor_expressibility_rejects_price_below_final_intent_live_floor():
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={
+            "limit_price": 0.07,
+            "min_entry_price": 0.05,
+            "notional_usd": 0.70,
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="limit_price below strategy entry floor"):
         verify_executor_expressibility(expressibility, parents)
 
 
@@ -458,7 +507,10 @@ def test_executor_expressibility_rejects_neg_risk_mismatch():
 
 
 def test_executor_expressibility_rejects_taker_order_when_executor_law_requires_maker():
-    parents, expressibility = executor_expressibility_graph(express_payload={"post_only": False})
+    parents, expressibility = executor_expressibility_graph(
+        final_payload={"post_only": False},
+        express_payload={"post_only": False},
+    )
 
     with pytest.raises(CertificateVerificationError, match="passive maker"):
         verify_executor_expressibility(expressibility, parents)
@@ -484,9 +536,46 @@ def test_execution_command_builder_preserves_event_token_condition_direction():
     verify_execution_command(command, (actionable, final_intent, expressibility, live_cap, pre_submit))
 
 
+def test_execution_command_rejects_command_price_drift_from_final_intent():
+    parents, command = execution_graph(
+        command_payload={
+            "limit_price": 0.39,
+            "expected_edge": 0.21,
+            "q_lcb_5pct": 0.60,
+            "qkernel_execution_economics": {
+                **_actionable_payload()["qkernel_execution_economics"],
+                "cost": 0.39,
+                "edge_lcb": 0.21,
+            },
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="final_intent.limit_price"):
+        verify_execution_command(command, parents)
+
+
 def test_final_intent_builder_rejects_no_submit_parent_certificate():
     with pytest.raises(ValueError, match="requires LIVE parent certificates"):
         builder_chain(parent_modes={claims.QUOTE_FEASIBILITY: "NO_SUBMIT"})
+
+
+def test_final_intent_builder_rejects_entry_price_below_current_live_floor():
+    with pytest.raises(ValueError, match="CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR"):
+        builder_chain(
+            actionable_payload={
+                "c_fee_adjusted": 0.07,
+                "c_cost_95pct": 0.07,
+                "q_lcb_5pct": 0.30,
+                "trade_score": 0.23,
+                "action_score": 0.23,
+                "min_entry_price": 0.05,
+                "qkernel_execution_economics": {
+                    **_actionable_payload()["qkernel_execution_economics"],
+                    "cost": 0.07,
+                    "edge_lcb": 0.23,
+                },
+            }
+        )
 
 
 def test_execution_command_builder_rejects_no_submit_parent_certificate():
@@ -720,6 +809,7 @@ def execution_graph(
     parent_modes: dict[str, str] | None = None,
     actionable_payload: dict | None = None,
     live_cap_payload: dict | None = None,
+    final_payload: dict | None = None,
     command_payload: dict | None = None,
     drop_parent: str | None = None,
 ):
@@ -733,20 +823,16 @@ def execution_graph(
     final_intent = _cert(
         claims.FINAL_INTENT,
         "final-intent:intent-1",
-        {
-            "event_type": "FORECAST_SNAPSHOT_READY",
-            "final_intent_id": "intent-1",
-            "strategy_key": "center_buy",
-            "token_id": "yes-1",
-            "condition_id": "condition-1",
-        },
+        {**_final_intent_payload(actionable), **(final_payload or {})},
         mode=parent_modes.get(claims.FINAL_INTENT, "LIVE"),
+        parents=(actionable,),
     )
     expressibility = _cert(
         claims.EXECUTOR_EXPRESSIBILITY,
         "executor-expressibility:intent-1",
-        {"passed": True, "strategy_key": "center_buy"},
+        _expressibility_payload(final_intent),
         mode=parent_modes.get(claims.EXECUTOR_EXPRESSIBILITY, "LIVE"),
+        parents=(final_intent,),
     )
     live_cap = _cert(
         claims.LIVE_CAP,
@@ -801,10 +887,11 @@ def final_intent_graph(
 def executor_expressibility_graph(
     *,
     express_payload: dict | None = None,
+    final_payload: dict | None = None,
     executable_payload: dict | None = None,
     drop_parent: str | None = None,
 ):
-    final_parents, final_intent = final_intent_graph()
+    final_parents, final_intent = final_intent_graph(final_payload=final_payload)
     executable = _cert(
         claims.EXECUTABLE_SNAPSHOT,
         "executable:exec-1",

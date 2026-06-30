@@ -3118,9 +3118,13 @@ def capture_executable_market_snapshot(
         require_explicit_clob_tradeability=True,
     )
     if not tradeability_status.executable_allowed:
-        raise ExecutableSnapshotCaptureError(
-            f"Gamma/CLOB market is not executable: {tradeability_status.reason}"
-        )
+        if not tolerate_missing_book:
+            raise ExecutableSnapshotCaptureError(
+                f"Gamma/CLOB market is not executable: {tradeability_status.reason}"
+            )
+        non_executable_identity_reason = tradeability_status.reason
+    else:
+        non_executable_identity_reason = None
 
     min_tick_size = _required_decimal_fact(
         (raw_orderbook, raw_clob_market),
@@ -3160,7 +3164,13 @@ def capture_executable_market_snapshot(
     # with the identity facts and an explicitly NON-executable tradeability status
     # so it is never selectable as a trade target and assert_snapshot_executable
     # rejects it at submission.
-    if tolerate_missing_book and selected_side_top is None:
+    if tolerate_missing_book and non_executable_identity_reason is not None:
+        fee_details = canonicalize_fee_details(
+            {"feesEnabled": False},
+            source=f"not_applicable_non_executable_identity:{non_executable_identity_reason}",
+            token_id=selected_token,
+        )
+    elif tolerate_missing_book and selected_side_top is None:
         tradeability_status = replace(
             tradeability_status,
             executable_allowed=False,

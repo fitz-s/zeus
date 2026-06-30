@@ -103,6 +103,9 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
+_LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
+_LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
 
 
 def verify_certificate(
@@ -569,6 +572,29 @@ def _verify_execution_command_payload(
     _require_equal("final_intent.strategy_key", final_intent.get("strategy_key"), "actionable.strategy_key", actionable.get("strategy_key"))
     _require_equal("expressibility.strategy_key", expressibility.get("strategy_key"), "final_intent.strategy_key", final_intent.get("strategy_key"))
     _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", actionable.get("live_cap_usage_id"))
+    for field in (
+        "side",
+        "direction",
+        "order_type",
+        "time_in_force",
+        "post_only",
+        "limit_price",
+        "size",
+        "min_order_size",
+        "neg_risk",
+    ):
+        _require_equal(
+            f"execution_command.{field}",
+            payload.get(field),
+            f"final_intent.{field}",
+            final_intent.get(field),
+        )
+        _require_equal(
+            f"execution_command.{field}",
+            payload.get(field),
+            f"executor_expressibility.{field}",
+            expressibility.get(field),
+        )
     _verify_pre_submit_revalidation_for_command(payload, pre_submit, final_intent, live_cap)
     size = _finite_float(payload.get("size"), "execution command size")
     min_order_size = _finite_float(payload.get("min_order_size"), "execution command min_order_size")
@@ -713,13 +739,23 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation submit q_lcb-minus-limit must be positive")
     if expected_edge > submit_edge + 1e-6:
         raise CertificateVerificationError("pre-submit revalidation expected_edge exceeds submit edge")
-    if limit_price + 1e-12 < min_entry_price:
+    floors = _effective_live_entry_quality_floors(pre_submit)
+    effective_min_entry_price = max(min_entry_price, floors["min_entry_price"])
+    effective_min_expected_profit_usd = max(
+        min_expected_profit_usd,
+        floors["min_expected_profit_usd"],
+    )
+    effective_min_submit_edge_density = max(
+        min_submit_edge_density,
+        floors["min_submit_edge_density"],
+    )
+    if _entry_floor_applies(pre_submit) and limit_price <= effective_min_entry_price + 1e-12:
         raise CertificateVerificationError("pre-submit revalidation limit_price below strategy entry floor")
     if size <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation size must be positive")
-    if submit_edge * size + 1e-9 < min_expected_profit_usd:
+    if submit_edge * size + 1e-9 < effective_min_expected_profit_usd:
         raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
-    if submit_edge / limit_price + 1e-9 < min_submit_edge_density:
+    if submit_edge / limit_price + 1e-9 < effective_min_submit_edge_density:
         raise CertificateVerificationError("pre-submit revalidation submit edge density below strategy floor")
     _verify_pre_submit_qkernel_economics(pre_submit, q_live=q_live, q_lcb=q_lcb)
 
@@ -772,6 +808,16 @@ def _verify_final_intent_payload(
         raise CertificateVerificationError("final intent limit_price must be in (0, 1)")
     if notional <= 0:
         raise CertificateVerificationError("final intent notional_usd must be positive")
+    if _entry_floor_applies(payload):
+        min_entry_price = _finite_float(
+            payload.get("min_entry_price"), "final intent min_entry_price"
+        )
+        if min_entry_price < 0.0:
+            raise CertificateVerificationError("final intent min_entry_price must be non-negative")
+        floors = _effective_live_entry_quality_floors(payload)
+        effective_min_entry_price = max(min_entry_price, floors["min_entry_price"])
+        if limit_price <= effective_min_entry_price + 1e-12:
+            raise CertificateVerificationError("final intent limit_price below strategy entry floor")
     # Integrity guard (NOT a cap): the order notional must not exceed the
     # Kelly-sized notional that was reserved for this event. This runs
     # unconditionally now that the tiny_live cap-enabled flag is deleted — it is a
@@ -838,7 +884,19 @@ def _verify_executor_expressibility_payload(
         raise CertificateVerificationError("executor expressibility reason_code must be empty or OK")
     if payload.get("executor_native_intent_hash") in (None, ""):
         raise CertificateVerificationError("executor expressibility requires executor_native_intent_hash")
-    for field in ("final_intent_id", "token_id", "condition_id", "direction", "order_type", "time_in_force"):
+    for field in (
+        "final_intent_id",
+        "token_id",
+        "condition_id",
+        "direction",
+        "order_type",
+        "time_in_force",
+        "side",
+        "limit_price",
+        "size",
+        "post_only",
+        "maker_intent",
+    ):
         _require_equal(f"executor_expressibility.{field}", payload.get(field), f"final_intent.{field}", final_intent.get(field))
     if executable.get("condition_id") not in (None, ""):
         _require_equal("executor_expressibility.condition_id", payload.get("condition_id"), "executable.condition_id", executable.get("condition_id"))
@@ -857,6 +915,15 @@ def _verify_executor_expressibility_payload(
         raise CertificateVerificationError("executor expressibility tick_size must be positive")
     if not _is_tick_aligned(limit_price, tick_size):
         raise CertificateVerificationError("executor expressibility limit_price not tick-aligned")
+    if _entry_floor_applies(final_intent):
+        min_entry_price = _finite_float(
+            final_intent.get("min_entry_price"),
+            "final intent min_entry_price",
+        )
+        floors = _effective_live_entry_quality_floors(final_intent)
+        effective_min_entry_price = max(min_entry_price, floors["min_entry_price"])
+        if limit_price <= effective_min_entry_price + 1e-12:
+            raise CertificateVerificationError("executor expressibility limit_price below strategy entry floor")
     if size < min_order_size:
         raise CertificateVerificationError("executor expressibility size below min_order_size")
     _assert_order_type_tuple_coherent(
@@ -1296,6 +1363,45 @@ def _finite_float(value: object, field_name: str) -> float:
     if not math.isfinite(parsed):
         raise CertificateVerificationError(f"{field_name} must be finite")
     return parsed
+
+
+def _entry_floor_applies(payload: dict) -> bool:
+    direction = str(payload.get("direction") or "").strip().lower()
+    return direction in {"buy_yes", "buy_no"}
+
+
+def _effective_live_entry_quality_floors(payload: dict) -> dict[str, float]:
+    """Current entry floors for certificate verification.
+
+    Older durable payloads may carry stale strategy floors. Verification must
+    consume the current live registry/hard floor and can only strengthen, never
+    weaken, from payload values.
+    """
+
+    floors = {
+        "min_entry_price": _LIVE_ENTRY_MIN_ENTRY_PRICE,
+        "min_expected_profit_usd": _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
+        "min_submit_edge_density": _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
+    }
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    if not strategy_key:
+        return floors
+    try:
+        from src.strategy.strategy_profile import try_get
+
+        profile = try_get(strategy_key)
+    except Exception:  # noqa: BLE001 - registry failure cannot lower live floors.
+        profile = None
+    if profile is None:
+        return floors
+    for field in tuple(floors):
+        try:
+            value = float(getattr(profile, field))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            floors[field] = max(floors[field], value)
+    return floors
 
 
 def _probability_float(value: object, field_name: str) -> float:

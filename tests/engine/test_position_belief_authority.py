@@ -530,6 +530,7 @@ class TestMonitorPrimaryAuthority:
 
     def test_day0_yes_bin_probability_converts_to_held_side_for_buy_no(self):
         import src.engine.monitor_refresh as mr
+        from src.contracts import Direction
 
         assert mr._held_side_probability_from_yes_bin_probability(
             0.23,
@@ -539,6 +540,16 @@ class TestMonitorPrimaryAuthority:
             0.23,
             "buy_no",
         ) == pytest.approx(0.77)
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            Direction.NO,
+        ) == pytest.approx(0.77)
+        assert mr._held_side_probability_from_yes_bin_probability(
+            0.23,
+            "Direction.NO",
+        ) == pytest.approx(0.77)
+        with pytest.raises(ValueError, match="unsupported monitor direction"):
+            mr._held_side_probability_from_yes_bin_probability(0.23, "")
 
     def test_fresh_belief_attests_without_legacy_chain(self, monkeypatch):
         import src.engine.monitor_refresh as mr

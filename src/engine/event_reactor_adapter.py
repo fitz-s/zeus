@@ -14127,6 +14127,28 @@ def _family_existing_exposure_for_selection_by_bin_id(
         utility_ranker.OUTSIDE_OUTCOME,
     )
     exposure_by_bin: dict[str, float] = {}
+    family_city = str(getattr(family, "city", "") or "").strip()
+    family_target_date = str(getattr(family, "target_date", "") or "").strip()
+    family_metric = str(
+        getattr(family, "metric", "")
+        or getattr(family, "temperature_metric", "")
+        or ""
+    ).strip()
+
+    def _is_same_weather_family(*, city: object, target_date: object, metric: object) -> bool:
+        return (
+            bool(family_city and family_target_date and family_metric)
+            and str(city or "").strip() == family_city
+            and str(target_date or "").strip() == family_target_date
+            and str(metric or "").strip() == family_metric
+        )
+
+    def _raise_unknown_family_position(condition_id: object) -> None:
+        raise RuntimeError(
+            "SAME_FAMILY_POSITION_NOT_IN_TOPOLOGY:"
+            f"condition_id={condition_id or '<missing>'}:"
+            f"city={family_city}:target_date={family_target_date}:metric={family_metric}"
+        )
 
     def _add_exposure(*, condition_id: str, direction: str, committed: float) -> None:
         bin_id = bin_id_by_condition.get(condition_id)
@@ -14168,21 +14190,55 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 "cost_basis_usd" if "cost_basis_usd" in columns else "NULL AS cost_basis_usd"
             )
             size_select = "size_usd" if "size_usd" in columns else "NULL AS size_usd"
+            city_select = "city" if "city" in columns else "NULL AS city"
+            target_date_select = (
+                "target_date" if "target_date" in columns else "NULL AS target_date"
+            )
+            metric_column = (
+                "temperature_metric"
+                if "temperature_metric" in columns
+                else "metric"
+                if "metric" in columns
+                else ""
+            )
+            metric_select = (
+                f"{metric_column} AS temperature_metric"
+                if metric_column
+                else "NULL AS temperature_metric"
+            )
+            same_family_scope_available = (
+                bool(family_city and family_target_date and family_metric)
+                and "city" in columns
+                and "target_date" in columns
+                and bool(metric_column)
+            )
+            scope_sql = f"condition_id IN ({condition_placeholders})"
+            scope_params: list[object] = list(bin_id_by_condition.keys())
+            if same_family_scope_available:
+                scope_sql = (
+                    f"({scope_sql} OR "
+                    f"(city = ? AND target_date = ? AND {metric_column} = ?))"
+                )
+                scope_params.extend([family_city, family_target_date, family_metric])
             rows = held_position_conn.execute(
                 f"""
                 SELECT condition_id, {direction_select},
-                       {chain_cost_select}, {cost_select}, {size_select}
+                       {chain_cost_select}, {cost_select}, {size_select},
+                       {city_select}, {target_date_select}, {metric_select}
                   FROM position_current
                  WHERE {phase_sql}
-                   AND condition_id IN ({condition_placeholders})
+                   AND {scope_sql}
                    AND ({" OR ".join(positive_terms)})
                 """,
-                (*phase_params, *bin_id_by_condition.keys()),
+                (*phase_params, *scope_params),
             ).fetchall()
             for row in rows:
                 try:
                     condition_id = str(row["condition_id"] or "")
                     direction_raw = row["direction"]
+                    row_city = row["city"]
+                    row_target_date = row["target_date"]
+                    row_metric = row["temperature_metric"]
                     committed = (
                         _optional_float(row["chain_cost_basis_usd"])
                         or _optional_float(row["cost_basis_usd"])
@@ -14192,12 +14248,21 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 except Exception:
                     condition_id = str(row[0] or "")
                     direction_raw = row[1]
+                    row_city = row[5] if len(row) > 5 else None
+                    row_target_date = row[6] if len(row) > 6 else None
+                    row_metric = row[7] if len(row) > 7 else None
                     committed = (
                         _optional_float(row[2])
                         or _optional_float(row[3])
                         or _optional_float(row[4])
                         or 0.0
                     )
+                if condition_id not in bin_id_by_condition and _is_same_weather_family(
+                    city=row_city,
+                    target_date=row_target_date,
+                    metric=row_metric,
+                ):
+                    _raise_unknown_family_position(condition_id)
                 direction = str(getattr(direction_raw, "value", direction_raw) or "").strip().lower()
                 _add_exposure(
                     condition_id=condition_id,
@@ -14227,6 +14292,15 @@ def _family_existing_exposure_for_selection_by_bin_id(
             committed = float(_runtime_open_exposure_usd(pos))
             if committed <= 0.0:
                 continue
+            if cond not in bin_id_by_condition and _is_same_weather_family(
+                city=getattr(pos, "city", None),
+                target_date=getattr(pos, "target_date", None),
+                metric=(
+                    getattr(pos, "temperature_metric", None)
+                    or getattr(pos, "metric", None)
+                ),
+            ):
+                _raise_unknown_family_position(cond)
             direction_raw = getattr(pos, "direction", "")
             direction = str(getattr(direction_raw, "value", direction_raw) or "").strip().lower()
             _add_exposure(condition_id=cond, direction=direction, committed=committed)
@@ -18744,7 +18818,7 @@ def _latest_snapshot_rows_for_event_family(
     fresh_at: datetime | None = None,
     require_fresh: bool = True,
 ) -> list[dict[str, Any]]:
-    """Latest executable snapshot row per family condition_id.
+    """Latest market snapshot row per family condition_id.
 
     ``require_fresh`` controls whether the 30s PRICE-freshness window
     (``freshness_deadline``) is applied. The entry/FDR family-completeness gate proves
@@ -18774,31 +18848,12 @@ def _latest_snapshot_rows_for_event_family(
     placeholders = ",".join("?" for _ in clean_condition_ids)
     predicates.append(f"condition_id IN ({placeholders})")
     params.extend(clean_condition_ids)
-    # TRADEABILITY PREDICATE — WRONG-FIELD WALL (fill-drought root, 2026-06-12). The Gamma child
-    # ``active`` flag is a venue ROUTING LABEL, NOT a tradeability indicator: on negRisk
-    # multi-outcome weather families the fully-tradeable highest-temperature child carries
-    # active=False / accepting=True / enableOrderBook=True / closed=False (verified 2026-05-19 Gamma
-    # probe — market_scanner._market_child_is_tradable; ExecutableMarketSnapshot contract docstring:
-    # "Gamma parent/child active and closed fields are venue routing labels … executable_allowed is
-    # the authority"). This entry gate used to filter ``COALESCE(active,0)=1`` and so DROPPED every
-    # tradeable negRisk row: a minutes-fresh warm-lane book existed for the family but the gate
-    # returned empty → EXECUTABLE_SNAPSHOT_BLOCKED indefinitely (Qingdao 2026-06-13 high: q=0.679 vs
-    # cached ask 0.30, 6-min-old row, blocked all day).
-    #
-    # SINGLE AUTHORITY: the submit-time gate (assert_snapshot_executable) admits iff
-    # ``tradeability_status.executable_allowed`` = (enable_orderbook AND NOT closed AND
-    # accepting_orders is not False). There is no ``executable_allowed`` COLUMN — the authority is
-    # persisted DECOMPOSED into the queryable columns enable_orderbook / closed / accepting_orders
-    # (snapshot_repo schema). We express that SAME formula here so entry and submit share ONE
-    # tradeability authority and ``active`` (the routing label) never gates entry again.
-    if "enable_orderbook" in columns:
-        predicates.append("enable_orderbook = 1")
-    if "closed" in columns:
-        predicates.append("COALESCE(closed, 0) = 0")
-    if "accepting_orders" in columns:
-        # accepting_orders is the only nullable leg; executable_allowed treats NULL as admissible
-        # (only an explicit False blocks), matching assert_snapshot_executable's "is not False".
-        predicates.append("COALESCE(accepting_orders, 1) = 1")
+    # Do not filter on tradeability here. This reader is the family identity/current
+    # venue-state surface; executable authority lives in _execution_price_from_snapshot
+    # and assert_snapshot_executable. Filtering out closed/not-accepting rows makes a
+    # fresh venue fact look absent, which requeues Day0/redecision as
+    # EXECUTABLE_SNAPSHOT_STALE/BLOCKED instead of producing the precise
+    # non-executable no-submit reason.
     cur = trade_conn.execute(
         f"""
         SELECT *

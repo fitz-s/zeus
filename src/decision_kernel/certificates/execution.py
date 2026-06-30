@@ -17,6 +17,8 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
 from src.decision_kernel.verifier import (
+    _effective_live_entry_quality_floors,
+    _entry_floor_applies,
     verify_execution_command,
     verify_execution_receipt,
     verify_executor_expressibility,
@@ -95,6 +97,22 @@ def build_final_intent_certificate_from_actionable(
             f"(c_fee_adjusted={reservation!r}, tick_size={float(tick_size)!r}); "
             "candidate reservation below minimum tradeable price — skip"
         )
+    if _entry_floor_applies(action):
+        effective_entry_floor = _effective_live_entry_quality_floors(action)["min_entry_price"]
+        declared_entry_floor = action.get("min_entry_price")
+        try:
+            if declared_entry_floor is not None:
+                effective_entry_floor = max(effective_entry_floor, float(declared_entry_floor))
+        except (TypeError, ValueError):
+            pass
+        if limit_price <= effective_entry_floor + 1e-12:
+            raise ValueError(
+                "CERT_BUILD_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+                f" limit_price={limit_price!r}"
+                f" min_entry_price={effective_entry_floor!r}"
+                f" strategy_key={action.get('strategy_key')!r}"
+                f" direction={action.get('direction')!r}"
+            )
     size = desired_shares_for_reserved_notional(min_order_size, reserved_notional, limit_price)
     # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
     # requested size to the crossable book depth so the FOK can fully fill on a thin
