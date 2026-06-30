@@ -161,6 +161,7 @@ from typing import Any, Callable, get_args
 
 import numpy as np
 
+from src.contracts.day0_observation_context import BoundClassification, classify_bound
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.executable_cost_curve import (
@@ -5016,6 +5017,36 @@ def _build_event_bound_no_submit_receipt_core(
                     "EXIT_PARTIAL",
                 }:
                     if _old_leg_live:
+                        _day0_shift_block = _day0_shift_old_leg_exit_block_reason(
+                            event=event,
+                            payload=payload,
+                            proof=proof,
+                        )
+                        if _day0_shift_block is not None:
+                            return _with_shrink(EventSubmissionReceipt(
+                                False,
+                                event.event_id,
+                                event.causal_snapshot_id,
+                                reason=f"SHIFT_BIN_NO_SUBMIT:{_day0_shift_block}",
+                                city=family.city,
+                                target_date=family.target_date,
+                                metric=family.metric,
+                                condition_id=str(candidate.condition_id or ""),
+                                token_id=selected_token_id,
+                                executable_snapshot_id=proof.executable_snapshot_id,
+                                family_id=family.family_id,
+                                bin_label=candidate.bin.label,
+                                direction=direction,
+                                q_live=receipt_q_live,
+                                q_lcb_5pct=receipt_q_lcb,
+                                c_fee_adjusted=execution_price.value,
+                                c_cost_95pct=proof.c_cost_95pct,
+                                p_fill_lcb=proof.p_fill_lcb,
+                                trade_score=trade_score,
+                                native_quote_available=True,
+                                source_status="MATCH",
+                                family_complete=True,
+                            ))
                         return _with_shrink(EventSubmissionReceipt(
                             False,
                             event.event_id,
@@ -5291,6 +5322,37 @@ def _build_event_bound_no_submit_receipt_core(
                         token_id=_held_sibling.token_id,
                         trade_conn=trade_conn,
                     )
+                    if float(_old_leg_residual) > float(_dust_floor_usd):
+                        _day0_shift_block = _day0_shift_old_leg_exit_block_reason(
+                            event=event,
+                            payload=payload,
+                            proof=proof,
+                        )
+                        if _day0_shift_block is not None:
+                            return _with_shrink(EventSubmissionReceipt(
+                                False,
+                                event.event_id,
+                                event.causal_snapshot_id,
+                                reason=f"SHIFT_BIN_NO_SUBMIT:{_day0_shift_block}",
+                                city=family.city,
+                                target_date=family.target_date,
+                                metric=family.metric,
+                                condition_id=str(candidate.condition_id or ""),
+                                token_id=selected_token_id,
+                                executable_snapshot_id=proof.executable_snapshot_id,
+                                family_id=family.family_id,
+                                bin_label=candidate.bin.label,
+                                direction=direction,
+                                q_live=receipt_q_live,
+                                q_lcb_5pct=receipt_q_lcb,
+                                c_fee_adjusted=execution_price.value,
+                                c_cost_95pct=proof.c_cost_95pct,
+                                p_fill_lcb=proof.p_fill_lcb,
+                                trade_score=trade_score,
+                                native_quote_available=True,
+                                source_status="MATCH",
+                                family_complete=True,
+                            ))
                     _shift_plan = _shift_bin_wiring.plan_shift_bin(
                         trade_conn,
                         is_redecision_event=True,
@@ -18798,6 +18860,142 @@ def _day0_observation_age_minutes(
     return max(0.0, age)
 
 
+_DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
+
+
+def _observed_day0_extreme_native(payload: dict[str, object], metric: str) -> float | None:
+    raw = payload.get("high_so_far") if metric == "high" else payload.get("low_so_far")
+    value = _optional_float(raw)
+    if value is not None:
+        return value
+    return _optional_float(payload.get("rounded_value"))
+
+
+def _record_day0_remaining_day_exit_authority(
+    *,
+    payload: dict[str, object],
+    family,
+    metric: str,
+    remaining_extremes_native: "np.ndarray",
+    decision_time: "datetime | None",
+) -> None:
+    """Stamp whether Day0 remaining-window q may authorize live exits.
+
+    Remaining-window q is a live belief input, but a non-deterministic running
+    extreme before the high peak, or long before the low terminal window, is not
+    sell/shift authority for an already-held leg. The monitor path enforces the
+    same maturity law; this stamp lets the event-reactor shift-bin path consume
+    the authority result without re-reading hourly vectors.
+    """
+
+    status_key = "_edli_day0_exit_authority_status"
+    reason_key = "_edli_day0_exit_authority_reason"
+    payload[status_key] = "unavailable"
+    payload[reason_key] = "day0_extreme_maturity_unavailable:not_evaluated"
+
+    try:
+        if metric not in {"high", "low"}:
+            payload[reason_key] = f"day0_extreme_maturity_unavailable:unsupported_metric={metric}"
+            return
+        observed_extreme = _observed_day0_extreme_native(payload, metric)
+        remaining = [float(v) for v in np.asarray(remaining_extremes_native, dtype=float).tolist()]
+        classification = classify_bound(
+            observed_extreme_so_far=observed_extreme,
+            member_extremes_remaining=remaining,
+            is_high_market=(metric == "high"),
+        )
+        payload["_edli_day0_bound_classification"] = str(classification.value)
+        if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
+            payload[status_key] = "immature"
+            payload[reason_key] = "day0_extreme_maturity_unavailable:no_intraday_extreme"
+            return
+        if classification == BoundClassification.DETERMINISTIC:
+            payload[status_key] = "mature"
+            payload[reason_key] = "day0_extreme_deterministic"
+            return
+
+        city_obj = runtime_cities_by_name().get(str(family.city))
+        timezone_name = str(getattr(city_obj, "timezone", "") or "")
+        if not timezone_name:
+            payload[status_key] = "unavailable"
+            payload[reason_key] = "day0_extreme_maturity_unavailable:city_timezone_missing"
+            return
+        target = date.fromisoformat(str(family.target_date)[:10])
+        try:
+            from src.signal.diurnal import build_day0_temporal_context
+
+            temporal_context = build_day0_temporal_context(
+                str(family.city),
+                target,
+                timezone_name,
+                observation_time=payload.get("observation_time")
+                or payload.get("observation_available_at"),
+                observation_source="day0_extreme_updated_event",
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed with reason evidence.
+            temporal_context = None
+            payload["_edli_day0_temporal_context_error"] = f"{type(exc).__name__}:{exc}"
+        if temporal_context is None:
+            payload[status_key] = "unavailable"
+            payload[reason_key] = "day0_extreme_maturity_unavailable:temporal_context_missing"
+            return
+
+        if metric == "high":
+            daypart = str(getattr(temporal_context, "daypart", "") or "")
+            post_peak_confidence = float(
+                getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0
+            )
+            payload["_edli_day0_daypart"] = daypart
+            payload["_edli_day0_post_peak_confidence"] = post_peak_confidence
+            if daypart == "post_peak" and post_peak_confidence >= 0.5:
+                payload[status_key] = "mature"
+                payload[reason_key] = "day0_high_extreme_post_peak"
+                return
+            payload[status_key] = "immature"
+            payload[reason_key] = (
+                "day0_high_extreme_not_mature:"
+                f"daypart={daypart or 'unknown'},post_peak_confidence={post_peak_confidence:.3f}"
+            )
+            return
+
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(timezone_name)
+        local_now = temporal_context.current_local_timestamp
+        local_end = datetime.combine(target + timedelta(days=1), time.min, tzinfo=tz)
+        hours_remaining = max(0.0, (local_end - local_now).total_seconds() / 3600.0)
+        payload["_edli_day0_hours_remaining"] = hours_remaining
+        if hours_remaining <= _DAY0_LOW_EXTREME_AUTHORITY_HOURS:
+            payload[status_key] = "mature"
+            payload[reason_key] = "day0_low_extreme_terminal_window"
+            return
+        payload[status_key] = "immature"
+        payload[reason_key] = f"day0_low_extreme_not_terminal:hours_remaining={hours_remaining:.1f}"
+    except Exception as exc:  # noqa: BLE001 - live exit authority fails closed.
+        payload[status_key] = "unavailable"
+        payload[reason_key] = f"day0_extreme_maturity_unavailable:{type(exc).__name__}:{exc}"
+
+
+def _day0_shift_old_leg_exit_block_reason(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    proof: object,
+) -> str | None:
+    """Return a no-submit reason when Day0 cannot sponsor SHIFT_BIN old-leg sell."""
+
+    if str(getattr(event, "event_type", "") or "") != "DAY0_EXTREME_UPDATED":
+        return None
+    q_source = str(getattr(proof, "q_source", "") or payload.get("_edli_q_source") or "")
+    if q_source != "day0_remaining_day":
+        return None
+    status = str(payload.get("_edli_day0_exit_authority_status") or "").strip().lower()
+    if status == "mature":
+        return None
+    reason = str(payload.get("_edli_day0_exit_authority_reason") or "missing_day0_exit_authority")
+    return f"DAY0_IMMATURE_SHIFT_EXIT_AUTHORITY:{reason}"
+
+
 def _day0_stale_obs_boundary_guard_enabled() -> bool:
     """STALE-OBS BOUNDARY GUARD flag (day0 first-principles review 2026-06-10).
 
@@ -18890,6 +19088,14 @@ def _day0_remaining_day_members(
         values = np.asarray(extremes_c, dtype=float)
         if str(unit).upper() == "F":
             values = values * 9.0 / 5.0 + 32.0
+        maturity_values = np.asarray(values, dtype=float).copy()
+        _record_day0_remaining_day_exit_authority(
+            payload=payload,
+            family=family,
+            metric=metric,
+            remaining_extremes_native=maturity_values,
+            decision_time=decision_time,
+        )
         rounded = _optional_float(payload.get("rounded_value"))
         if rounded is not None:
             values = (

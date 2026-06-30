@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-06-30
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from src.engine import event_reactor_adapter as era
@@ -170,6 +172,56 @@ def test_sibling_live_old_leg_is_exit_old_leg_no_entry():
     assert plan.kind == "EXIT_OLD_LEG"
     assert plan.allow_entry is False  # NO new-bin entry while old leg live
     assert plan.old_token_id == "tok-A"
+
+
+def test_day0_remaining_day_exit_authority_stamps_deterministic_mature():
+    payload = {
+        "metric": "high",
+        "rounded_value": 31,
+        "high_so_far": 31.0,
+        "observation_time": "2026-06-30T14:00:00+02:00",
+    }
+    family = SimpleNamespace(city="Munich", target_date="2026-06-30")
+
+    era._record_day0_remaining_day_exit_authority(
+        payload=payload,
+        family=family,
+        metric="high",
+        remaining_extremes_native=np.array([28.0, 29.0, 30.0]),
+        decision_time=datetime(2026, 6, 30, 12, tzinfo=timezone.utc),
+    )
+
+    assert payload["_edli_day0_exit_authority_status"] == "mature"
+    assert payload["_edli_day0_exit_authority_reason"] == "day0_extreme_deterministic"
+    assert payload["_edli_day0_bound_classification"] == "DETERMINISTIC"
+
+
+def test_day0_immature_remaining_day_blocks_shift_exit_before_lease():
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_exit_authority_status": "immature",
+        "_edli_day0_exit_authority_reason": (
+            "day0_high_extreme_not_mature:"
+            "daypart=pre_sunrise,post_peak_confidence=0.034"
+        ),
+    }
+    reason = era._day0_shift_old_leg_exit_block_reason(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        payload=payload,
+        proof=SimpleNamespace(q_source="day0_remaining_day"),
+    )
+
+    assert reason == (
+        "DAY0_IMMATURE_SHIFT_EXIT_AUTHORITY:"
+        "day0_high_extreme_not_mature:"
+        "daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+
+    src = inspect.getsource(era)
+    sibling_read = src.index("_shift_bin_wiring.read_held_sibling_exposure(")
+    block = src.index("_day0_shift_old_leg_exit_block_reason(", sibling_read)
+    plan = src.index("_shift_bin_wiring.plan_shift_bin(", sibling_read)
+    assert block < plan
 
 
 def test_sibling_after_old_leg_closed_admits_one_entry():
