@@ -3347,12 +3347,17 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
 # cure is re-materializing the posterior onto a fresher model cycle (the cycle-advance reseed
 # lane), NOT requeueing against the same unchanging posterior. Explicit closed set (segment
 # membership, never substring soup): the adapter raises these from its readiness/bundle gate
-# (event_reactor_adapter.py ~9609-9622). A reason CHAIN that nests one of these ANYWHERE
+# or live-input lag gate. A reason CHAIN that nests one of these ANYWHERE
 # (e.g. wrapped in a stage prefix) still counts — the belief substrate is the root cause.
 _POSTERIOR_STALENESS_REASON_BASES = frozenset(
     {
         "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
         "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
+        "REPLACEMENT_0_1_LIVE_INPUT_LAG",
+        # Older replacement gate path in event_reactor_adapter.py. If it reaches
+        # the live reactor, the cure is still the same posterior cycle-advance
+        # reseed; this is read-boundary handling, not a producer alias.
+        "REPLACEMENT_LIVE_INPUT_LAG",
         # Pre-cutover queued/durable reason bases. These are read-boundary
         # compatibility only; producers now emit the LIVE_READINESS/BUNDLE names
         # above. Old rows still need the same single-family reseed cure.
