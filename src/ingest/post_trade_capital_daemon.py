@@ -62,6 +62,7 @@ import logging
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -76,6 +77,21 @@ _scheduler: Any | None = None
 # SIGTERM-unif (WAVE-4 parity): captured at module load so the forensic elapsed emitted in
 # _graceful_shutdown matches src/main.py / src/ingest_main.py / src/riskguard/riskguard.py.
 _PROCESS_START = time.monotonic()
+
+
+def _git_head_at_boot() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_PROCESS_GIT_HEAD = _git_head_at_boot()
 
 _heartbeat_fails = 0
 
@@ -204,6 +220,7 @@ def _write_post_trade_capital_heartbeat() -> None:
             "daemon": "post-trade-capital",
             "alive_at": datetime.now(timezone.utc).isoformat(),
             "pid": os.getpid(),
+            "git_head": _PROCESS_GIT_HEAD,
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))

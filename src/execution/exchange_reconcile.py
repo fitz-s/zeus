@@ -4523,6 +4523,9 @@ def _ensure_exit_fill_position_event(
             "exit_price": _decimal_text(exit_price_dec),
             "exit_reason": "M5_EXCHANGE_RECONCILE",
             "shares": current.get("shares") or _decimal_text(shares_dec),
+            "chain_shares": 0.0,
+            "chain_avg_price": 0.0,
+            "chain_cost_basis_usd": 0.0,
             "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
             "unit": current.get("unit") or "F",
         }

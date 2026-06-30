@@ -2063,6 +2063,46 @@ def test_preflight_open_positions_exclude_economically_closed_stale_chain_projec
     monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
 
     assert preflight._open_positions() == []
+    result = preflight._economically_closed_sell_projection_exposure_check()
+    assert result.ok is True
+
+
+def test_preflight_blocks_sell_filled_closed_projection_with_positive_chain_exposure(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    _init_entry_provenance_trade_db(
+        trade_db,
+        submit_payload={"execution_capability": {"components": []}},
+    )
+    trade = sqlite3.connect(trade_db)
+    trade.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed',
+               order_status = 'sell_filled',
+               shares = 10.7,
+               chain_shares = 10.7
+         WHERE position_id = 'pos-1'
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+
+    assert preflight._open_positions() == []
+    result = preflight._economically_closed_sell_projection_exposure_check()
+    assert result.ok is False
+    assert result.detail == (
+        "economically closed sell-filled projections still carry positive chain exposure"
+    )
+    assert result.evidence["risky"][0]["position_id"] == "pos-1"
 
 
 def test_preflight_open_positions_exclude_settled_stale_quarantine_chain_state(
@@ -3097,7 +3137,9 @@ def _insert_collateral_snapshot(conn, *, now: datetime):
 
 def _write_fresh_sidecar_heartbeats(state_dir, *, now: datetime):
     for _, filename in preflight.SIDECAR_HEARTBEATS:
-        (state_dir / filename).write_text(json.dumps({"alive_at": now.isoformat(), "pid": 123}))
+        (state_dir / filename).write_text(
+            json.dumps({"alive_at": now.isoformat(), "pid": 123, "git_head": "testsha"})
+        )
 
 
 def _add_identity_columns(trade):
@@ -5027,6 +5069,68 @@ def test_preflight_blocks_missing_sidecar_heartbeat(monkeypatch, tmp_path):
     heartbeat = next(c for c in result["checks"] if c["name"] == "price_channel_daemon_heartbeat")
     assert heartbeat["ok"] is False
     assert heartbeat["detail"] == "sidecar heartbeat file is missing"
+
+
+def test_preflight_blocks_sidecar_heartbeat_without_code_identity(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    (state_dir / "daemon-heartbeat-substrate-observer.json").write_text(
+        json.dumps({"alive_at": now.isoformat(), "pid": 123})
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    heartbeat = next(c for c in result["checks"] if c["name"] == "substrate_observer_daemon_heartbeat")
+    assert heartbeat["ok"] is False
+    assert heartbeat["detail"] == "sidecar heartbeat git head is missing"
+
+
+def test_preflight_blocks_sidecar_heartbeat_on_stale_code_identity(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    forecasts = _init_forecast_db(forecast_db)
+    now = datetime.now(timezone.utc)
+    _init_sidecar_surfaces(trade, now=now)
+    _write_fresh_sidecar_heartbeats(state_dir, now=now)
+    (state_dir / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps({"alive_at": now.isoformat(), "pid": 123, "git_head": "oldsha"})
+    )
+    forecasts.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            posterior_id, city, target_date, temperature_metric,
+            source_cycle_time, computed_at, q_json, runtime_layer
+        ) VALUES (1, 'Seattle', '2026-06-19', 'high', ?, ?, '{}', 'live')
+        """,
+        (now.isoformat(), now.isoformat()),
+    )
+    forecasts.commit()
+    trade.close()
+    forecasts.close()
+
+    result = preflight.evaluate()
+
+    assert result["ok"] is False
+    heartbeat = next(c for c in result["checks"] if c["name"] == "price_channel_daemon_heartbeat")
+    assert heartbeat["ok"] is False
+    assert heartbeat["detail"] == "sidecar heartbeat git head does not match current code"
 
 
 # --- B1: submit_authority_config fail-closed tests ---

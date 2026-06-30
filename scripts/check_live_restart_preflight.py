@@ -691,6 +691,24 @@ def _sidecar_heartbeat_check(name: str, filename: str) -> CheckResult:
         )
     age = (datetime.now(timezone.utc) - alive_at).total_seconds()
     evidence["age_seconds"] = age
+    current_git_head = _git_head()
+    heartbeat_git_head = str(payload.get("git_head") or "").strip()
+    evidence["heartbeat_git_head"] = heartbeat_git_head or None
+    evidence["current_git_head"] = current_git_head or None
+    if not heartbeat_git_head:
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat git head is missing",
+            evidence,
+        )
+    if heartbeat_git_head != current_git_head:
+        return CheckResult(
+            f"{name}_heartbeat",
+            False,
+            "sidecar heartbeat git head does not match current code",
+            evidence,
+        )
     ok = 0.0 <= age <= SIDECAR_HEARTBEAT_MAX_AGE_SECONDS
     return CheckResult(
         f"{name}_heartbeat",
@@ -3254,7 +3272,7 @@ _RESTART_REDECISION_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
 )
 _RESTART_REDECISION_CHAIN_EXPOSURE_PHASES = frozenset(
-    {"quarantined"}
+    {"quarantined", "voided"}
 )
 
 
@@ -3628,6 +3646,81 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
         "open position projections align with terminal and EDLI authority"
         if not risky
         else "open position projections contradict terminal events or EDLI authority",
+        evidence,
+    )
+
+
+def _economically_closed_sell_projection_exposure_check() -> CheckResult:
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "sample_limit": LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT,
+    }
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "position_current"):
+                return CheckResult(
+                    "economically_closed_sell_projection_exposure",
+                    True,
+                    "position_current table is absent",
+                    evidence,
+                )
+            columns = _table_columns(conn, "main", "position_current")
+            required = {"position_id", "phase", "order_status", "chain_shares"}
+            missing = sorted(required - columns)
+            if missing:
+                evidence["missing_columns"] = missing
+                return CheckResult(
+                    "economically_closed_sell_projection_exposure",
+                    False,
+                    "position_current is missing closed-exposure projection columns",
+                    evidence,
+                )
+            optional_selects = []
+            for column in (
+                "city",
+                "target_date",
+                "temperature_metric",
+                "bin_label",
+                "direction",
+                "chain_state",
+                "shares",
+                "exit_price",
+                "exit_reason",
+                "updated_at",
+            ):
+                optional_selects.append(column if column in columns else f"NULL AS {column}")
+            rows = conn.execute(
+                f"""
+                SELECT position_id, phase, order_status, chain_shares,
+                       {", ".join(optional_selects)}
+                  FROM position_current
+                 WHERE LOWER(COALESCE(phase, '')) = 'economically_closed'
+                   AND LOWER(COALESCE(order_status, '')) = 'sell_filled'
+                   AND COALESCE(chain_shares, 0) > ?
+                 ORDER BY updated_at DESC
+                 LIMIT ?
+                """,
+                (_POSITIVE_CHAIN_EXPOSURE_EPS, LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT),
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "economically_closed_sell_projection_exposure",
+            False,
+            "closed sell projection exposure check failed",
+            evidence,
+        )
+    risky = [dict(row) for row in rows]
+    evidence["risky"] = risky
+    evidence["risky_count"] = len(risky)
+    return CheckResult(
+        "economically_closed_sell_projection_exposure",
+        not risky,
+        (
+            "economically closed sell-filled projections carry no current chain exposure"
+            if not risky
+            else "economically closed sell-filled projections still carry positive chain exposure"
+        ),
         evidence,
     )
 
@@ -4605,6 +4698,7 @@ def evaluate() -> dict[str, Any]:
         _venue_point_order_truth_alignment_check(),
         _edli_confirmed_fill_bridge_coverage_check(),
         _position_current_projection_integrity_check(projection_rows),
+        _economically_closed_sell_projection_exposure_check(),
         _resting_venue_command_lifecycle_alignment_check(),
         _full_family_executable_substrate_redecision_check(quote_rows),
         _execution_feasibility_evidence_check(quote_rows),

@@ -2290,6 +2290,9 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
                order_id = 'ord-entry-exit-confirmed',
                order_status = 'filled',
                shares = 35.6,
+               chain_shares = 35.6,
+               chain_avg_price = 0.15,
+               chain_cost_basis_usd = 5.34,
                cost_basis_usd = 5.34,
                entry_price = 0.15,
                updated_at = ?
@@ -2333,7 +2336,8 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
     ).fetchone()["state"] == "FILLED"
     projection = conn.execute(
         """
-        SELECT phase, order_id, order_status
+        SELECT phase, order_id, order_status, shares, chain_shares,
+               chain_avg_price, chain_cost_basis_usd
           FROM position_current
          WHERE position_id = 'pos-exit-confirmed'
         """
@@ -2342,6 +2346,10 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
         "phase": "economically_closed",
         "order_id": "ord-entry-exit-confirmed",
         "order_status": "sell_filled",
+        "shares": 35.6,
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
     }
     event = conn.execute(
         """
@@ -2387,6 +2395,9 @@ def test_existing_confirmed_exit_trade_repairs_missing_economic_close_projection
                order_id = 'ord-entry-existing-exit',
                order_status = 'filled',
                shares = 35.6,
+               chain_shares = 35.6,
+               chain_avg_price = 0.15,
+               chain_cost_basis_usd = 5.34,
                cost_basis_usd = 5.34,
                entry_price = 0.15,
                updated_at = ?
@@ -2498,7 +2509,8 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     assert summary["exit_projected"] == 1
     current = conn.execute(
         """
-        SELECT phase, order_status
+        SELECT phase, order_status, shares, chain_shares,
+               chain_avg_price, chain_cost_basis_usd
           FROM position_current
          WHERE position_id = 'pos-exit-recorded-confirmed'
         """
@@ -2506,6 +2518,10 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     assert dict(current) == {
         "phase": "economically_closed",
         "order_status": "sell_filled",
+        "shares": 35.6,
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
     }
     fact = conn.execute(
         """
@@ -2574,7 +2590,8 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
     assert summary["exit_projected"] == 1
     projection = conn.execute(
         """
-        SELECT phase, order_status, exit_reason
+        SELECT phase, order_status, exit_reason, shares, chain_shares,
+               chain_avg_price, chain_cost_basis_usd
           FROM position_current
          WHERE position_id = 'pos-exit-quarantined-confirmed'
         """
@@ -2583,6 +2600,10 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
         "phase": "economically_closed",
         "order_status": "sell_filled",
         "exit_reason": "M5_EXCHANGE_RECONCILE",
+        "shares": 11.09,
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
     }
     event = conn.execute(
         """
