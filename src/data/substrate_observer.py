@@ -211,7 +211,7 @@ def _background_warm_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
 def _priority_refresh_interval_seconds() -> float:
     return max(
         5.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_REFRESH_INTERVAL_SECONDS", "10.0")),
+        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_REFRESH_INTERVAL_SECONDS", "20.0")),
     )
 
 
@@ -219,7 +219,7 @@ def _priority_refresh_budget_seconds() -> float:
     interval_s = _priority_refresh_interval_seconds()
     configured = max(
         2.0,
-        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_REFRESH_BUDGET_SECONDS", "8.0")),
+        float(os.environ.get("ZEUS_SUBSTRATE_PRIORITY_REFRESH_BUDGET_SECONDS", "18.0")),
     )
     return min(configured, max(1.0, interval_s - 0.5))
 
@@ -2369,12 +2369,17 @@ def _edli_market_substrate_warm_cycle() -> None:
     )
     priority_marker_has_scope = bool(priority_marker_families or priority_marker_condition_ids)
     if priority_marker_has_scope:
-        summary = _edli_money_path_substrate_priority_cycle()
-        if isinstance(summary, dict):
-            summary = {**summary, "serviced_by": "edli_market_substrate_warm_cycle"}
-            logger.info("EDLI market-substrate warm serviced priority marker: %s", summary)
-        else:
-            logger.info("EDLI market-substrate warm priority marker produced no summary")
+        summary = {
+            "status": "priority_deferred_to_priority_lane",
+            "priority_marker_active": True,
+            "scheduler_failed": False,
+            "priority_marker_families": len(priority_marker_families),
+            "priority_marker_condition_ids": len(priority_marker_condition_ids),
+            "serviced_by": "money_path_substrate_priority",
+        }
+        if isinstance(priority_marker_request, dict):
+            summary["priority_request_id"] = str(priority_marker_request.get("request_id") or "")
+        logger.info("EDLI market-substrate warm deferred to priority lane: %s", summary)
         return summary
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,

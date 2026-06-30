@@ -780,6 +780,16 @@ def test_claim_order_priority_default_is_live_tick_window(monkeypatch):
     assert substrate_observer._claim_order_priority_family_limit() == 4
 
 
+def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monkeypatch):
+    """The priority lane needs a real CLOB/topology window, not the old 8s churn loop."""
+
+    monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_REFRESH_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_SUBSTRATE_PRIORITY_REFRESH_BUDGET_SECONDS", raising=False)
+
+    assert substrate_observer._priority_refresh_interval_seconds() == pytest.approx(20.0)
+    assert substrate_observer._priority_refresh_budget_seconds() == pytest.approx(18.0)
+
+
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
     belief = SimpleNamespace(
         family_id="family-1",
@@ -1546,8 +1556,8 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     assert calls == [1]
 
 
-def test_market_substrate_warm_cycle_services_money_path_priority_marker(monkeypatch):
-    """The sidecar warm tick must service the hot money-path marker, not starve it."""
+def test_market_substrate_warm_cycle_defers_nonempty_priority_marker(monkeypatch):
+    """The background warm tick must not compete with the dedicated priority lane."""
 
     calls: list[str] = []
     monkeypatch.setattr(
@@ -1571,9 +1581,10 @@ def test_market_substrate_warm_cycle_services_money_path_priority_marker(monkeyp
 
     result = substrate_observer._edli_market_substrate_warm_cycle()
 
-    assert calls == ["priority"]
-    assert result["status"] == "refreshed"
-    assert result["serviced_by"] == "edli_market_substrate_warm_cycle"
+    assert calls == []
+    assert result["status"] == "priority_deferred_to_priority_lane"
+    assert result["scheduler_failed"] is False
+    assert result["serviced_by"] == "money_path_substrate_priority"
 
 
 def test_market_substrate_warm_cycle_ignores_empty_priority_marker(monkeypatch):
