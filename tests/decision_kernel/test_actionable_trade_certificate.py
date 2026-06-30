@@ -253,6 +253,50 @@ def test_actionable_rejects_risk_not_passed():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_rejects_fused_bootstrap_insufficient_calibration_parent():
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.CALIBRATION: {
+                "authority": "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE",
+                "coverage_status": "INSUFFICIENT_DATA",
+                "n_samples": 0,
+            },
+        },
+    )
+
+    with pytest.raises(CertificateVerificationError, match="coverage insufficient"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_fused_bootstrap_below_live_sample_floor():
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.CALIBRATION: {
+                "authority": "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE",
+                "coverage_status": "LICENSED",
+                "n_samples": 3,
+            },
+        },
+    )
+
+    with pytest.raises(CertificateVerificationError, match="sample floor"):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_accepts_fused_bootstrap_with_sampled_license():
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.CALIBRATION: {
+                "authority": "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE",
+                "coverage_status": "LICENSED",
+                "n_samples": 60,
+            },
+        },
+    )
+
+    verify_actionable_trade(action, parents)
+
+
 def test_actionable_rejects_unreserved_live_cap():
     parents, action = actionable_graph(parent_overrides={claims.LIVE_CAP: {"reservation_status": "RELEASED"}})
 

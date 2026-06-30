@@ -225,8 +225,7 @@ def settlement_backward_coverage_check(
 
     Returns:
         A ``CoverageVerdict``. INSUFFICIENT_DATA when n < min_n (q_lcb unchanged + WARN,
-        LICENSED-by-default: never shrink, never block arming — proven-overconfidence is
-        the only thing this gate refuses, and thin data is not proof). UNLICENSED ONLY on
+        non-refuting for ARM/shrink only; not a live-submit credential). UNLICENSED ONLY on
         PROVEN overconfidence (n >= min_n AND realized < claimed - tol -> shrink to
         realized-1pp). LICENSED when realized >= claimed - tol (calibrated or conservative;
         q_lcb unchanged).
@@ -235,9 +234,9 @@ def settlement_backward_coverage_check(
     n = len(obs)
     if n < min_n:
         logger.warning(
-            "settlement coverage INSUFFICIENT_DATA (LICENSED-by-default; q_lcb unchanged, "
-            "ARM not blocked) city=%s metric=%s season=%s q_lcb=%.4f: n=%d < min_n=%d — "
-            "MC LCB stands; this gate is a proven-overconfidence catch, not a default-deny",
+            "settlement coverage INSUFFICIENT_DATA (non-refuting for ARM only; "
+            "not a live-submit credential) city=%s metric=%s season=%s q_lcb=%.4f: "
+            "n=%d < min_n=%d — MC LCB stands for shrink math only",
             city, metric, season, float(q_lcb), n, min_n,
         )
         return CoverageVerdict(

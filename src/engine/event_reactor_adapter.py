@@ -1877,27 +1877,30 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         n_samples = None
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         raise ValueError("EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:IDENTITY_FALLBACK_NO_PLATT_BUCKET")
-    # CERT BRIDGE (2026-06-10, funnel #1 unlock; corrected 2026-06-29) — the
-    # replacement credential without a typed coverage VERDICT is fail-closed. A real
-    # INSUFFICIENT_DATA verdict means the coverage authority ran and found thin history;
-    # it is not a live-submit quality license by itself, but it also is not a structural
-    # authority failure. Let the downstream economic/selection/buy-NO gates decide.
+    # CERT BRIDGE (2026-06-10, funnel #1 unlock; corrected 2026-06-30) — the
+    # replacement credential without a typed, sufficiently-sampled coverage verdict is
+    # fail-closed for live submit. INSUFFICIENT_DATA is non-refuting for the
+    # settlement-coverage ARM/shrink predicate, but it is not a live-money confidence
+    # credential.
     if authority == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY:
         raise ValueError(
             "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
         )
     if authority == DAY0_OBSERVATION_CALIBRATION_AUTHORITY:
         return
-    if (
-        n_samples is not None
-        and n_samples <= 0
-        and coverage_status != "INSUFFICIENT_DATA"
-    ):
-        raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
     if authority == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY:
-        if n_samples is None:
+        if coverage_status == "INSUFFICIENT_DATA":
             raise ValueError(
-                f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}"
+                "EDLI_LIVE_CALIBRATION_COVERAGE_INSUFFICIENT:"
+                f"n_samples={n_samples if n_samples is not None else 'missing'}:"
+                f"min_samples={_FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES}"
+            )
+        if n_samples is None or n_samples < _FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES:
+            raise ValueError(
+                "EDLI_LIVE_CALIBRATION_SAMPLE_FLOOR_BLOCKED:"
+                f"authority={authority or 'missing'}:"
+                f"n_samples={n_samples if n_samples is not None else 'missing'}:"
+                f"min_samples={_FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES}"
             )
         if coverage_status not in _FUSED_BOOTSTRAP_CERT_COVERAGE_STATUSES:
             raise ValueError(
@@ -12161,13 +12164,10 @@ def _generate_candidate_proofs(
                 if missing_reason is None:
                     missing_reason = direction_law_reason
             # TELEMETRY-ONLY — COVERAGE_UNLICENSED_TAIL (pr408 review C1+C2 #2 CRITICAL,
-            # 2026-06-14): the old fail-CLOSED tail guard zeroed score / failed prefilter
-            # on cheap-tail (price<0.05, q_lcb>2x price) unlicensed candidates. That is a
-            # forbidden ONE-SIDED gate (operator law 3) — the explicit fail-closed dual of
-            # K3's fail-open — and it killed +edge cheap trades under INSUFFICIENT_DATA.
-            # REMOVED from the live score / prefilter / no-trade-reason / size path. The
-            # concern is preserved ONLY as decision telemetry on the proof; it NEVER
-            # score-zeros, NEVER becomes a live reason, NEVER alters size.
+            # 2026-06-14): tail-shape evidence can describe a candidate, but it cannot
+            # override the live credential boundary. INSUFFICIENT_DATA now remains
+            # provenance/NO_SUBMIT evidence until a sufficiently-sampled calibration
+            # license exists; this telemetry still never score-zeros or alters size.
             unlicensed_tail_coverage_telemetry = _coverage_unlicensed_tail_telemetry(
                 q_lcb=q_lcb,
                 execution_price=execution_price.value if execution_price is not None else None,
@@ -14526,15 +14526,16 @@ def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bo
 #       credential here → fall through to the legacy Platt path → IDENTITY_FALLBACK reject
 #       exactly as today.
 #   (c) bounds present but coverage NEVER evaluated the scope, or produced an unknown
-#       status, → authority is FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED, which the gate
-#       REJECTS with a distinct reason. A typed INSUFFICIENT_DATA verdict is an evaluated
-#       thin-history state, not an authority failure; downstream live gates still own
-#       trade-quality admission.
+#       status, or produced INSUFFICIENT_DATA, → authority is
+#       FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED, which the gate REJECTS with a distinct
+#       reason. A typed INSUFFICIENT_DATA verdict is preserved as provenance, but it
+#       is not a live-money confidence credential.
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
 FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY = "FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
 _FUSED_BOOTSTRAP_CERT_COVERAGE_STATUSES = frozenset(
-    {"LICENSED", "UNLICENSED", "INSUFFICIENT_DATA"}
+    {"LICENSED", "UNLICENSED"}
 )
+_FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
 # The only q_lcb_basis marker the materializer writes for certified fused-center bootstrap
 # bounds; the credential's bounds leg requires an EXACT match (basis-pinned, no aliasing).
 _FUSED_BOOTSTRAP_QLCB_BASIS = "fused_center_bootstrap_p05"
@@ -14634,8 +14635,8 @@ def _build_replacement_calibration_credential(
     → IDENTITY_FALLBACK reject, strictness (b)). The bounds leg requires: a live-eligible
     fused-Normal q_mode, a non-empty bundle q_lcb map, AND provenance q_lcb_basis EXACTLY
     equal to the fused-center bootstrap marker. Coverage verdict is carried as-is (may be
-    None → UNEVALUATED and blocked downstream; typed INSUFFICIENT_DATA is preserved as an
-    evaluated thin-history verdict.
+    None / INSUFFICIENT_DATA → UNEVALUATED and blocked downstream; typed
+    INSUFFICIENT_DATA is preserved as an evaluated thin-history verdict.
     """
     if q_mode not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE:
         return None
@@ -14705,10 +14706,10 @@ def _replacement_calibration_payload_from_credential(
     """Turn the stamped credential facts into the certificate calibration payload.
 
     AUTHORITY:
-      * LICENSED or INSUFFICIENT_DATA → admit with
-        authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE. INSUFFICIENT_DATA means the
-        coverage check ran and found thin history; it is not a structural authority
-        failure and must not stall every new family before trade-quality gates run.
+      * LICENSED → admit with authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE.
+      * INSUFFICIENT_DATA → do NOT mint a live-submit credential. Thin settled
+        history is non-refuting for ARM/shrink, but it is not confidence evidence
+        for live-money entry.
       * UNLICENSED (``settlement_coverage_refutes_claim``) → admit ONLY when the selected
         leg's q_lcb was ACTUALLY shrunk (coverage gate flag ON and q_lcb_out < q_lcb_in,
         recorded as ``coverage.shrink_applied``). An UNLICENSED verdict whose shrink was
@@ -14725,7 +14726,7 @@ def _replacement_calibration_payload_from_credential(
     coverage = credential.get("coverage") or {}
     status = coverage.get("status")
     status_str = status if isinstance(status, str) else ""
-    if settlement_coverage_allows_arm(status_str):
+    if status_str == "LICENSED":
         licensed = True
     elif settlement_coverage_refutes_claim(status_str):
         # UNLICENSED: admit ONLY if the shrink was actually applied to the live leg
