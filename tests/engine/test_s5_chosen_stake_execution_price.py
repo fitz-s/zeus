@@ -370,9 +370,9 @@ def test_kernel_no_trade_returns_no_price():
 def test_qkernel_execution_certificate_bounds_submit_sizing():
     """A qkernel-selected proof sizes from guarded execution economics, not proof q_lcb.
 
-    The qkernel bridge preserves q_posterior/q_lcb_5pct as receipt probability fields.
-    Submit must therefore consume the separate qkernel execution certificate; otherwise a
-    guarded selection can be resized from the stale unguarded proof q_lcb.
+    The qkernel bridge may tighten q_lcb_5pct for execution sizing while keeping
+    the same selected-side point probability; otherwise a guarded selection can be
+    resized from the stale unguarded proof q_lcb.
     """
     from src.types.market import Bin
 
@@ -408,6 +408,9 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
             "q_lcb_guard_basis": "OOF_WILSON_95",
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.30,
         },
     )
 
@@ -434,13 +437,11 @@ def test_qkernel_execution_certificate_bounds_submit_sizing():
     assert guarded_price.value == pytest.approx(0.20)
 
 
-def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
-    """Qkernel submit sizing uses the selected execution cert, not stale receipt q_lcb.
+def test_qkernel_execution_certificate_can_tighten_receipt_probability_lcb():
+    """Qkernel submit sizing uses a stricter selected execution cert.
 
-    ``q_lcb_5pct`` is preserved on qkernel proofs for receipt-facing probability
-    provenance. Once the proof carries the qkernel selection stamp and a valid
-    route/side/bin-bound execution certificate, submit sizing must not apply the
-    old proof lower bound a second time.
+    The cert cannot mint a higher q than the served proof, but it may lower the
+    execution q_lcb after route/selection guards so sizing uses the guarded bound.
     """
 
     from src.types.market import Bin
@@ -452,7 +453,7 @@ def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
         row=row,
         token_id="yes-1",
         q_posterior=0.90,
-        q_lcb_5pct=0.01,
+        q_lcb_5pct=0.50,
         bin_obj=bin_x,
     )
     guarded = replace(
@@ -477,6 +478,9 @@ def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
             "q_lcb_guard_basis": "OOF_WILSON_95",
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.30,
         },
     )
 
@@ -495,7 +499,7 @@ def test_qkernel_execution_certificate_not_capped_by_receipt_probability_lcb():
 
 
 def test_qkernel_native_candidate_uses_certificate_point_with_certificate_lcb():
-    """Submit materialization must not mix qkernel LCB with legacy proof point q."""
+    """Submit materialization consumes a cert that matches the served point q."""
 
     from src.types.market import Bin
 
@@ -505,8 +509,8 @@ def test_qkernel_native_candidate_uses_certificate_point_with_certificate_lcb():
         direction="buy_yes",
         row=row,
         token_id="yes-1",
-        q_posterior=0.80,
-        q_lcb_5pct=0.70,
+        q_posterior=0.99,
+        q_lcb_5pct=0.95,
         bin_obj=bin_x,
     )
     guarded = replace(
@@ -531,6 +535,9 @@ def test_qkernel_native_candidate_uses_certificate_point_with_certificate_lcb():
             "q_lcb_guard_basis": "OOF_WILSON_95",
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.95,
         },
     )
 

@@ -1435,11 +1435,12 @@ def _overlay_spine_economics_onto_proof_with_reason(
     """Overlay the spine decision's economics onto the selected reactor proof.
 
     The submission pipeline reads ``q_posterior`` / ``q_lcb_5pct`` /
-    ``trade_score`` / ``execution_price`` etc. off the proof. Once the qkernel
-    has selected a direct native route and passed the live selection/direction
-    guards, its payoff-space probability pair is the execution probability
-    authority. The pre-spine proof q is carried only as provenance so the live
-    path does not have two competing probability authorities.
+    ``trade_score`` / ``execution_price`` etc. off the proof. Qkernel may rank,
+    size, and tighten the lower bound for the selected direct route, but the
+    direct-route point probability must be the same selected-side probability
+    already served on the proof. If those disagree, the route/payoff identity is
+    not the same belief surface and the live path must no-trade rather than mint
+    a new probability by overlay.
 
     The executable identity (row / token / execution_price /
     native_quote_available) is LEFT UNCHANGED — the spine selected this exact
@@ -1503,6 +1504,14 @@ def _overlay_spine_economics_onto_proof_with_reason(
         qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] = proof_q_lcb
     qkernel_execution_economics["q_lcb_authority"] = "qkernel_payoff_bound"
     qkernel_execution_economics["probability_authority"] = "qkernel_payoff_direct_route"
+    served_belief_reason = _qkernel_served_belief_consistency_rejection_reason(
+        qkernel_q_point=qkernel_q_point,
+        qkernel_q_lcb=qkernel_q_lcb,
+        proof_q_point=proof_q_point,
+        proof_q_lcb=proof_q_lcb,
+    )
+    if served_belief_reason:
+        return _OverlayResult(None, served_belief_reason)
     if not _qkernel_execution_direction_admitted(
         qkernel_execution_economics,
         direction=str(getattr(proof, "direction", "") or ""),
@@ -1612,6 +1621,43 @@ def _qkernel_selection_guard_rejection_reason(
         return "SELECTION_GUARD_Q_SAFE_MISSING"
     if not (math.isfinite(q_safe) and q_safe > 0.0):
         return "SELECTION_GUARD_Q_SAFE_NON_POSITIVE"
+    return ""
+
+
+def _qkernel_served_belief_consistency_rejection_reason(
+    *,
+    qkernel_q_point: float,
+    qkernel_q_lcb: float,
+    proof_q_point: float,
+    proof_q_lcb: float,
+) -> str:
+    """Fail closed when qkernel direct-route q is not the served proof belief.
+
+    For a DIRECT_YES/DIRECT_NO leg, ``q_dot_payoff`` is the selected-side scalar
+    probability of the same settlement outcome the proof already carries. The
+    qkernel can use a tighter lower bound after route/selection guards, but it
+    cannot raise the served point probability or loosen the served lower bound.
+    """
+
+    tolerance = 1e-6
+    if not (
+        math.isfinite(proof_q_point)
+        and math.isfinite(proof_q_lcb)
+        and 0.0 <= proof_q_lcb <= proof_q_point <= 1.0
+    ):
+        return "QKERNEL_SERVED_BELIEF_INVALID"
+    if not math.isclose(qkernel_q_point, proof_q_point, rel_tol=1e-9, abs_tol=tolerance):
+        return (
+            "QKERNEL_SERVED_BELIEF_POINT_MISMATCH:"
+            f"payoff_q_point={qkernel_q_point:.9f}:"
+            f"served_q_point={proof_q_point:.9f}"
+        )
+    if qkernel_q_lcb > proof_q_lcb + tolerance:
+        return (
+            "QKERNEL_SERVED_BELIEF_LCB_LOOSENED:"
+            f"payoff_q_lcb={qkernel_q_lcb:.9f}:"
+            f"served_q_lcb={proof_q_lcb:.9f}"
+        )
     return ""
 
 

@@ -1291,11 +1291,11 @@ def _overlay_proof(
 
 
 def test_overlay_uses_qkernel_probability_fields_and_updates_score():
-    """qkernel route economics become the single live execution probability."""
+    """qkernel route economics may tighten the lower bound on the same served belief."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
-    new_proof = _overlay_proof(q_posterior=0.80, q_lcb_5pct=0.70, economics=economics)
+    new_proof = _overlay_proof(q_posterior=0.202, q_lcb_5pct=0.10, economics=economics)
 
     assert new_proof.q_posterior == pytest.approx(0.202)
     assert new_proof.q_lcb_5pct == pytest.approx(0.052)
@@ -1312,16 +1312,10 @@ def test_overlay_uses_qkernel_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["point_ev"] == pytest.approx(0.20)
     assert new_proof.qkernel_execution_economics["optimal_stake_usd"] == "5"
     assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
-        0.80
+        0.202
     )
     assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
-        0.70
-    )
-    assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
-        0.80
-    )
-    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(
-        0.70
+        0.10
     )
     assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
     assert new_proof.qkernel_execution_economics["probability_authority"] == (
@@ -1329,8 +1323,8 @@ def test_overlay_uses_qkernel_probability_fields_and_updates_score():
     )
 
 
-def test_overlay_does_not_use_pre_qkernel_probability_as_second_authority():
-    """A valid qkernel direct route replaces stale proof q instead of self-rejecting."""
+def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():
+    """A direct route cannot mint a qkernel probability from a different q-space."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
@@ -1342,14 +1336,27 @@ def test_overlay_does_not_use_pre_qkernel_probability_as_second_authority():
         economics=economics,
     )
 
-    assert new_proof is not None
-    assert new_proof.q_posterior == pytest.approx(0.202)
-    assert new_proof.q_lcb_5pct == pytest.approx(0.052)
-    assert new_proof.qkernel_execution_economics["pre_qkernel_q_lcb_5pct"] == pytest.approx(0.001)
+    assert new_proof is None
+
+
+def test_overlay_rejects_qkernel_lcb_that_loosens_served_belief():
+    """A qkernel direct route can tighten, but not raise, the served lower bound."""
+
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
+    )
+
+    new_proof = _overlay_proof(
+        q_posterior=0.202,
+        q_lcb_5pct=0.02,
+        economics=economics,
+    )
+
+    assert new_proof is None
 
 
 def test_overlay_live_direct_no_uses_qkernel_probability_authority():
-    """Direct NO sizing uses the qkernel payoff pair after identity/selection guards."""
+    """Direct NO sizing uses the qkernel payoff pair after served-belief identity guards."""
 
     economics = _selected_economics(
         edge_lcb=0.22226499587493073,
@@ -1360,8 +1367,8 @@ def test_overlay_live_direct_no_uses_qkernel_probability_authority():
     )
 
     new_proof = _overlay_proof(
-        q_posterior=0.803222,
-        q_lcb_5pct=0.7298,
+        q_posterior=0.9154395759428866,
+        q_lcb_5pct=0.90,
         economics=economics,
         direction="buy_no",
     )
@@ -1370,7 +1377,7 @@ def test_overlay_live_direct_no_uses_qkernel_probability_authority():
     assert new_proof.q_posterior == pytest.approx(0.9154395759428866)
     assert new_proof.q_lcb_5pct == pytest.approx(0.8722649958749307)
     assert new_proof.qkernel_execution_economics["pre_qkernel_q_posterior"] == pytest.approx(
-        0.803222
+        0.9154395759428866
     )
 
 
@@ -1460,8 +1467,8 @@ def test_qkernel_receipt_annotation_uses_direct_no_qkernel_probability():
         direction="buy_no",
         row=row,
         token_id="no-qk-loosened-no",
-        q_posterior=0.803222,
-        q_lcb_5pct=0.7298,
+        q_posterior=0.9154395759428866,
+        q_lcb_5pct=0.90,
         bin_obj=Bin(low=29.0, high=29.0, unit="C", label="29C"),
     )
     cert = {

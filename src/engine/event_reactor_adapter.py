@@ -10751,7 +10751,47 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
         return None
     if route_id.startswith("DIRECT_NO:") and native_side != "NO":
         return None
+    if _qkernel_cert_served_belief_rejection_reason(
+        cert,
+        proof_q_point=_optional_float(getattr(proof, "q_posterior", None)),
+        proof_q_lcb=_optional_float(getattr(proof, "q_lcb_5pct", None)),
+    ):
+        return None
     return cert
+
+
+def _qkernel_cert_served_belief_rejection_reason(
+    cert: Mapping[str, Any],
+    *,
+    proof_q_point: float | None,
+    proof_q_lcb: float | None,
+) -> str | None:
+    """Reject qkernel certs whose direct-route q is not the served proof belief."""
+
+    try:
+        payoff_q_point = float(cert.get("payoff_q_point"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+    except (TypeError, ValueError):
+        return "QKERNEL_SERVED_BELIEF_INVALID"
+    values = (payoff_q_point, payoff_q_lcb, proof_q_point, proof_q_lcb)
+    if not all(value is not None and math.isfinite(float(value)) for value in values):
+        return "QKERNEL_SERVED_BELIEF_INVALID"
+    assert proof_q_point is not None
+    assert proof_q_lcb is not None
+    if not (0.0 <= proof_q_lcb <= proof_q_point <= 1.0):
+        return "QKERNEL_SERVED_BELIEF_INVALID"
+    tolerance = 1e-6
+    if not math.isclose(payoff_q_point, proof_q_point, rel_tol=1e-9, abs_tol=tolerance):
+        return (
+            "QKERNEL_SERVED_BELIEF_POINT_MISMATCH:"
+            f"payoff_q_point={payoff_q_point:.9f}:served_q_point={proof_q_point:.9f}"
+        )
+    if payoff_q_lcb > proof_q_lcb + tolerance:
+        return (
+            "QKERNEL_SERVED_BELIEF_LCB_LOOSENED:"
+            f"payoff_q_lcb={payoff_q_lcb:.9f}:served_q_lcb={proof_q_lcb:.9f}"
+        )
+    return None
 
 
 def _qkernel_execution_float(
@@ -11531,6 +11571,13 @@ def _proofs_with_qkernel_candidate_economics(
             cert_payload["pre_qkernel_q_lcb_5pct"] = proof_q_lcb
         cert_payload["q_lcb_authority"] = "qkernel_payoff_bound"
         cert_payload["probability_authority"] = "qkernel_payoff_direct_route"
+        served_belief_reason = _qkernel_cert_served_belief_rejection_reason(
+            cert_payload,
+            proof_q_point=proof_q_point if math.isfinite(proof_q_point) else None,
+            proof_q_lcb=proof_q_lcb if math.isfinite(proof_q_lcb) else None,
+        )
+        if qkernel_reason is None and served_belief_reason is not None:
+            qkernel_reason = served_belief_reason
         overlay: dict[str, object] = {
             "trade_score": (
                 trade_score
