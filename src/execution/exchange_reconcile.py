@@ -107,6 +107,9 @@ _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_TERMINAL_ENTRY_COMMAND_STATES = frozenset(
+    {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED", "FILLED"}
+)
 _CHAIN_CONFIRMED_HELD_PHASES = frozenset({"active", "day0_window"})
 # A quarantined local row is not tradable exposure, but a confirmed EXIT sell for
 # the same position is stronger venue truth and must be allowed to economically
@@ -164,7 +167,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_unresolved_subject
 """
 
 
-def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
+def _canonical_trade_fact_cte(
+    cte_name: str = "canonical_trade_fact",
+    *,
+    source_clause_sql: str = "",
+) -> str:
     """Rank trade facts by proof strength before local_sequence recency."""
 
     return f"""
@@ -193,6 +200,7 @@ def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
                                        ELSE 100
                                    END AS proof_rank
                               FROM venue_trade_facts fact
+                              {source_clause_sql}
                            ) scored
                    ) ranked
              WHERE ranked.canonical_rank = 1
@@ -1794,25 +1802,59 @@ def reconcile_recorded_maker_fill_economics(
         return summary
     observed = _coerce_dt(observed_at)
     params: list[object] = []
-    live_tick_join = ""
-    live_tick_filter = ""
+    live_tick_ctes = ""
+    source_clause_sql = ""
     if live_tick_scope:
-        live_tick_join = """
-          LEFT JOIN position_current pc
-            ON pc.position_id = cmd.position_id
-        """
         phase_placeholders = ", ".join("?" for _ in sorted(_ENTRY_FILL_PROJECTION_PHASES))
-        live_tick_filter = f"""
-           AND (
-                 UPPER(cmd.intent_kind) != 'ENTRY'
-              OR pc.position_id IS NULL
-              OR COALESCE(pc.phase, '') IN ({phase_placeholders})
-           )
+        terminal_placeholders = ", ".join("?" for _ in sorted(_TERMINAL_ENTRY_COMMAND_STATES))
+        live_tick_ctes = f"""
+        live_tick_entry_repair_commands AS (
+            SELECT DISTINCT cmd.command_id
+              FROM venue_commands cmd
+              JOIN venue_trade_facts fact
+                ON fact.command_id = cmd.command_id
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+              LEFT JOIN position_lots lot
+                ON lot.source_trade_fact_id = fact.trade_fact_id
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND COALESCE(fact.raw_payload_json, '') LIKE '%maker_orders%'
+               AND (
+                    pc.position_id IS NULL
+                 OR (
+                        COALESCE(pc.phase, '') IN ({phase_placeholders})
+                    AND (
+                            NOT EXISTS (
+                                SELECT 1
+                                  FROM position_events pe
+                                 WHERE pe.position_id = cmd.position_id
+                                   AND pe.event_type = 'ENTRY_ORDER_FILLED'
+                                   AND pe.order_id = cmd.venue_order_id
+                                 LIMIT 1
+                            )
+                         OR (
+                                UPPER(COALESCE(cmd.state, '')) NOT IN ({terminal_placeholders})
+                            AND lot.lot_id IS NULL
+                            )
+                    )
+                    )
+               )
+        ),
         """
         params.extend(sorted(_ENTRY_FILL_PROJECTION_PHASES))
+        params.extend(sorted(_TERMINAL_ENTRY_COMMAND_STATES))
+        source_clause_sql = """
+                              JOIN live_tick_entry_repair_commands live_cmd
+                                ON live_cmd.command_id = fact.command_id
+        """
 
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + f"""
+        "WITH " + live_tick_ctes + _canonical_trade_fact_cte(
+            source_clause_sql=source_clause_sql
+        ) + """
         SELECT
             tf.*,
             cmd.snapshot_id AS cmd_snapshot_id,
@@ -1833,10 +1875,8 @@ def reconcile_recorded_maker_fill_economics(
           FROM canonical_trade_fact tf
           JOIN venue_commands cmd
             ON cmd.command_id = tf.command_id
-          {live_tick_join}
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
-           {live_tick_filter}
          ORDER BY tf.observed_at, tf.trade_fact_id
         """,
         tuple(params),
@@ -1896,6 +1936,8 @@ def reconcile_recorded_maker_fill_economics(
                 "exchange_reconcile: maker fill economics repair failed for trade_fact_id=%s",
                 fact.get("trade_fact_id"),
             )
+    if live_tick_scope:
+        return summary
     exit_summary = _reconcile_recorded_exit_fill_projections(conn, observed_at=observed)
     if exit_summary["projected"]:
         summary["exit_projected"] = exit_summary["projected"]
@@ -3358,11 +3400,10 @@ def _canonical_filled_size_for_command(conn: sqlite3.Connection, command_id: str
     if not command_id or not _table_exists(conn, "venue_trade_facts"):
         return Decimal("0")
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
         SELECT filled_size
           FROM canonical_trade_fact
-         WHERE command_id = ?
-           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         WHERE state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),
     ).fetchall()
@@ -4388,11 +4429,10 @@ def _entry_fill_economics_for_command(
     """Aggregate latest authoritative trade facts for an entry command."""
 
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
         SELECT tf.state, tf.filled_size, tf.fill_price
           FROM canonical_trade_fact tf
-         WHERE tf.command_id = ?
-           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),
     ).fetchall()
@@ -4555,11 +4595,10 @@ def _exit_fill_economics_for_command(
     fallback_fill_price: str,
 ) -> tuple[Decimal, Decimal] | None:
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
         SELECT tf.state, tf.filled_size, tf.fill_price
           FROM canonical_trade_fact tf
-         WHERE tf.command_id = ?
-           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),
     ).fetchall()
@@ -4701,11 +4740,10 @@ def _append_entry_position_lots_for_command(
     if position_lot_id is None:
         return
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
         SELECT tf.*
           FROM canonical_trade_fact tf
-         WHERE tf.command_id = ?
-           AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+         WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
          ORDER BY tf.observed_at, tf.trade_fact_id
         """,
         (str(command.get("command_id") or ""),),
@@ -4901,10 +4939,9 @@ def _float_or_none(value: Any) -> float | None:
 
 def _latest_trade_fact_for_trade_id(conn: sqlite3.Connection, trade_id: str) -> dict[str, Any] | None:
     row = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.trade_id = ?") + """
         SELECT *
           FROM canonical_trade_fact
-         WHERE trade_id = ?
         """,
         (trade_id,),
     ).fetchone()

@@ -1374,6 +1374,159 @@ def test_live_tick_repairs_recorded_fill_when_position_projection_is_missing(con
     assert projection["order_status"] == "partial"
 
 
+def test_live_tick_maker_fill_repair_is_bounded_to_missing_entry_projection(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    def append_maker_fact(
+        *,
+        command_id: str,
+        venue_order_id: str,
+        trade_id: str,
+        token_id: str,
+        size: str = "4.2",
+        price: str = "0.54",
+    ) -> None:
+        raw = {
+            "id": trade_id,
+            "status": "CONFIRMED",
+            "size": size,
+            "price": str(Decimal("1") - Decimal(price)),
+            "asset_id": f"{token_id}-other-side",
+            "maker_orders": [
+                {
+                    "order_id": venue_order_id,
+                    "matched_amount": size,
+                    "price": price,
+                    "asset_id": token_id,
+                    "side": "BUY",
+                }
+            ],
+        }
+        append(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            state="CONFIRMED",
+            filled_size=size,
+            fill_price=price,
+            source="REST",
+            observed_at=NOW,
+            raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+            raw_payload_json=raw,
+        )
+
+    for idx, phase in enumerate(("voided", "settled", "economically_closed")):
+        token = f"history-maker-token-{idx}"
+        command_id = f"cmd-history-maker-{idx}"
+        order_id = f"ord-history-maker-{idx}"
+        position_id = f"pos-history-maker-{idx}"
+        seed_command(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+            position_id=position_id,
+            token_id=token,
+            state="CANCELLED",
+        )
+        seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = ?,
+                   market_id = ?,
+                   condition_id = ?
+             WHERE position_id = ?
+            """,
+            (phase, f"history-condition-{idx}", f"history-condition-{idx}", position_id),
+        )
+        append_maker_fact(
+            command_id=command_id,
+            venue_order_id=order_id,
+            trade_id=f"trade-history-maker-{idx}",
+            token_id=token,
+        )
+
+    yes_token = "live-bounded-yes-token"
+    no_token = f"{yes_token}-no"
+    seed_command(
+        conn,
+        command_id="cmd-live-bounded-missing",
+        venue_order_id="ord-live-bounded-missing",
+        position_id="pos-live-bounded-missing",
+        token_id=no_token,
+        state="CANCELLED",
+        snapshot_token_id=yes_token,
+        snapshot_no_token_id=no_token,
+        snapshot_selected_token_id=no_token,
+        snapshot_outcome_label="NO",
+        envelope_yes_token_id=yes_token,
+        envelope_no_token_id=no_token,
+    )
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT,
+            city TEXT,
+            target_date TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            outcome TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, condition_id, token_id, range_label, outcome
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "highest-temperature-in-istanbul-on-june-29-2026",
+            "Istanbul",
+            "2026-06-29",
+            "condition-m5",
+            yes_token,
+            "Will the highest temperature in Istanbul be 29°C on June 29?",
+            "Yes",
+        ),
+    )
+    append_maker_fact(
+        command_id="cmd-live-bounded-missing",
+        venue_order_id="ord-live-bounded-missing",
+        trade_id="trade-live-bounded-missing",
+        token_id=no_token,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+        live_tick_scope=True,
+    )
+
+    assert summary["scanned"] == 1
+    assert summary["projected"] == 1
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_current
+         WHERE position_id LIKE 'pos-history-maker-%'
+           AND phase IN ('voided', 'settled', 'economically_closed')
+        """
+    ).fetchone()[0] == 3
+    projection = conn.execute(
+        "SELECT phase, city, direction, shares FROM position_current WHERE position_id = 'pos-live-bounded-missing'"
+    ).fetchone()
+    assert projection is not None
+    assert projection["phase"] == "active"
+    assert projection["city"] == "Istanbul"
+    assert projection["direction"] == "buy_no"
+    assert Decimal(str(projection["shares"])) == Decimal("4.2")
+
+
 def test_maker_fill_economics_repair_uses_canonical_trade_fact_over_later_weaker_fact(conn):
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
     from src.state.venue_command_repo import append_trade_fact as append
