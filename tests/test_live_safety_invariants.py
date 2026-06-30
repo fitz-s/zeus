@@ -5185,7 +5185,7 @@ def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authori
 
 
 def test_family_monitor_overlay_blocks_exit_decision_only_immature_day0_authority():
-    """Munich regression: exit-decision Day0 maturity evidence is exit authority."""
+    """Munich regression: exit-decision-only immature Day0 cannot authorize exit."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
