@@ -50,6 +50,10 @@ def _cutover_guard_live_enabled(monkeypatch):
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.execution.executor._assert_collateral_allows_sell",
+        lambda *args, **kwargs: {"component": "collateral_ledger", "allowed": True},
+    )
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
 
@@ -2967,11 +2971,11 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-matched-sell",
             )
 
-        assert result.status == "pending"
+        assert result.status == "filled"
         assert len(command_ids_seen) == 1
         cmd = get_command(mem_conn, command_ids_seen[0])
         assert cmd is not None
-        assert cmd["state"] == "ACKED"
+        assert cmd["state"] == "FILLED"
         order_fact = mem_conn.execute(
             """
             SELECT venue_order_id, state, remaining_size, matched_size, source
@@ -2988,6 +2992,23 @@ class TestExitOrderCommandSplit:
             "remaining_size": "0",
             "matched_size": "15.5",
             "source": "REST",
+        }
+        trade_fact = mem_conn.execute(
+            """
+            SELECT venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_ids_seen[0],),
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "venue_order_id": "ord-exit-matched-sell",
+            "state": "MATCHED",
+            "filled_size": "15.5",
+            "fill_price": "0.7",
+            "tx_hash": "0xhash-exit-matched",
         }
 
     def test_exit_idempotency_key_collision_raises_before_submit(self, mem_conn):

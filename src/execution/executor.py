@@ -3921,7 +3921,12 @@ def execute_exit_order(
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand
-    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
+    from src.state.venue_command_repo import (
+        append_event,
+        append_order_fact,
+        append_trade_fact,
+        insert_command,
+    )
     from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -4778,6 +4783,30 @@ def execute_exit_order(
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
             )
 
+        order_fact_state = _venue_submit_order_fact_state(result)
+        matched_size = _venue_submit_matched_size(result, side="SELL")
+        remaining_size = _venue_submit_remaining_size(
+            result,
+            shares,
+            matched_size=matched_size,
+            side="SELL",
+        )
+        fill_price = _venue_submit_fill_price(result, side="SELL")
+        fill_tx_hash = next(iter(_venue_submit_transaction_hashes(result)), None)
+        fill_trade_id = next(iter(_venue_submit_trade_ids(result)), None) or fill_tx_hash
+        fill_event_type: str | None = None
+        if (
+            order_fact_state in {"MATCHED", "PARTIALLY_MATCHED"}
+            and _positive_decimal_or_none(matched_size)
+            and fill_price is not None
+            and fill_trade_id
+        ):
+            fill_event_type = (
+                "FILL_CONFIRMED"
+                if _venue_fill_covers_submit(matched_size, shares)
+                else "PARTIAL_FILL_OBSERVED"
+            )
+
         # SUBMIT_ACKED — order placed successfully
         # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. The venue side
         # effect already happened, so this records a KNOWN outcome — retried on a transient
@@ -4799,13 +4828,9 @@ def execute_exit_order(
                 conn,
                 venue_order_id=order_id,
                 command_id=command_id,
-                state=_venue_submit_order_fact_state(result),
-                remaining_size=_venue_submit_remaining_size(
-                    result,
-                    shares,
-                    side="SELL",
-                ),
-                matched_size=_venue_submit_matched_size(result, side="SELL"),
+                state=order_fact_state,
+                remaining_size=remaining_size,
+                matched_size=matched_size,
                 source="REST",
                 observed_at=ack_time,
                 # C4 telemetry-truth: REST ACK response carries no server matchTime;
@@ -4825,6 +4850,61 @@ def execute_exit_order(
                     "source": "place_limit_order_ack",
                 },
             )
+            if fill_event_type and fill_trade_id:
+                if not _trade_fact_already_persisted(
+                    conn,
+                    command_id=command_id,
+                    trade_id=fill_trade_id,
+                ):
+                    append_trade_fact(
+                        conn,
+                        trade_id=fill_trade_id,
+                        venue_order_id=order_id,
+                        command_id=command_id,
+                        state="MATCHED",
+                        filled_size=matched_size,
+                        fill_price=fill_price,
+                        source="REST",
+                        observed_at=ack_time,
+                        venue_timestamp=None,
+                        tx_hash=fill_tx_hash,
+                        raw_payload_hash=_canonical_payload_hash(
+                            {
+                                "command_id": command_id,
+                                "venue_order_id": order_id,
+                                "trade_id": fill_trade_id,
+                                "submit_result": result,
+                            }
+                        ),
+                        raw_payload_json={
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "submit_result": _jsonable_payload(result),
+                            "source": "place_exit_order_matched_submit",
+                        },
+                    )
+                if not _command_event_already_persisted(
+                    conn,
+                    command_id=command_id,
+                    event_type=fill_event_type,
+                    order_id=order_id,
+                    trade_id=fill_trade_id,
+                ):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=fill_event_type,
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "place_exit_order_matched_submit",
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "filled_size": matched_size,
+                            "fill_price": fill_price,
+                            "tx_hash": fill_tx_hash,
+                            **final_envelope_payload,
+                        },
+                    )
             # PR 6 (2026-05-19): persist submit intent + venue ack timing to settlement_commands.
             # Best-effort: do not fail the order on UPDATE error (column may not exist on older DBs).
             try:
@@ -4873,10 +4953,23 @@ def execute_exit_order(
                 command_state=durable_state,
             )
 
+        durable_state = _current_command_state_value(conn, command_id) or "ACKED"
         result_obj = OrderResult(
             trade_id=intent.trade_id,
-            status="pending",
-            reason="sell order posted",
+            status=(
+                "filled"
+                if fill_event_type == "FILL_CONFIRMED"
+                else ("partial" if fill_event_type == "PARTIAL_FILL_OBSERVED" else "pending")
+            ),
+            reason=(
+                "sell order filled"
+                if fill_event_type == "FILL_CONFIRMED"
+                else (
+                    "sell order partially filled"
+                    if fill_event_type == "PARTIAL_FILL_OBSERVED"
+                    else "sell order posted"
+                )
+            ),
             order_id=order_id,
             submitted_price=limit_price,
             shares=shares,
@@ -4886,7 +4979,7 @@ def execute_exit_order(
             command_id=command_id,  # F7: FK to venue_commands row
             venue_status=str(result.get("status") or "placed"),
             idempotency_key=idem.value,
-            command_state="ACKED",  # P1.S5 INV-32: materialize_position gates on this
+            command_state=durable_state,
         )
         try:
             alert_trade(

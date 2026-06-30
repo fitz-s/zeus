@@ -1633,6 +1633,33 @@ def _fill_trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     return int((_dict_row(row).get("count") if row else 0) or 0)
 
 
+def _fill_trade_fact_with_tx_count(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    tx_hash: str | None = None,
+) -> int:
+    if not _table_exists(conn, "venue_trade_facts"):
+        return 0
+    params: list[object] = [command_id]
+    tx_clause = "AND COALESCE(tx_hash, '') != ''"
+    if tx_hash:
+        tx_clause = "AND tx_hash = ?"
+        params.append(tx_hash)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS count
+          FROM venue_trade_facts
+         WHERE command_id = ?
+           AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+           {tx_clause}
+        """,
+        tuple(params),
+    ).fetchone()
+    return int((_dict_row(row).get("count") if row else 0) or 0)
+
+
 def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     if not _table_exists(conn, "venue_trade_facts"):
         return 0
@@ -1867,6 +1894,105 @@ def _point_order_transaction_hashes(point_order: dict | None) -> tuple[str, ...]
         if values:
             return values
     return ()
+
+
+def _submission_payload_transaction_hashes(payload: Mapping[str, object] | None) -> tuple[str, ...]:
+    if not isinstance(payload, Mapping):
+        return ()
+    for key in ("transactionsHashes", "transactionHashes", "transaction_hashes", "txHashes", "tx_hashes"):
+        values = _string_sequence_from_value(_first_present(payload, key))
+        if values:
+            return values
+    return ()
+
+
+def _json_sequence(raw: object) -> tuple[str, ...]:
+    if raw in (None, ""):
+        return ()
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    return _string_sequence_from_value(parsed)
+
+
+def _submission_envelope_transaction_hashes(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> tuple[str, ...]:
+    if not _table_exists(conn, "venue_submission_envelopes"):
+        return ()
+    envelope_ids: list[str] = []
+    if _table_exists(conn, "venue_commands") and command_id:
+        row = conn.execute(
+            "SELECT envelope_id FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        command_envelope_id = str((_dict_row(row).get("envelope_id") if row else "") or "").strip()
+        if command_envelope_id:
+            envelope_ids.append(command_envelope_id)
+    if _table_exists(conn, "venue_command_events") and command_id:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no
+            """,
+            (command_id,),
+        ).fetchall()
+        for row in rows:
+            payload = _json_dict(_dict_row(row).get("payload_json"))
+            for key in (
+                "final_submission_envelope_id",
+                "submission_envelope_id",
+                "venue_submission_envelope_id",
+                "envelope_id",
+            ):
+                envelope_id = str(payload.get(key) or "").strip()
+                if envelope_id:
+                    envelope_ids.append(envelope_id)
+
+    rows: list[dict] = []
+    seen_envelope_ids = tuple(dict.fromkeys(envelope_ids))
+    if seen_envelope_ids:
+        placeholders = ", ".join("?" for _ in seen_envelope_ids)
+        rows.extend(
+            _dict_row(row)
+            for row in conn.execute(
+                f"""
+                SELECT envelope_id, raw_response_json, transaction_hashes_json
+                  FROM venue_submission_envelopes
+                 WHERE envelope_id IN ({placeholders})
+                """,
+                seen_envelope_ids,
+            ).fetchall()
+        )
+    if venue_order_id:
+        rows.extend(
+            _dict_row(row)
+            for row in conn.execute(
+                """
+                SELECT envelope_id, raw_response_json, transaction_hashes_json
+                  FROM venue_submission_envelopes
+                 WHERE order_id = ?
+                """,
+                (venue_order_id,),
+            ).fetchall()
+        )
+
+    hashes: list[str] = []
+    seen_rows: set[str] = set()
+    for row in rows:
+        row_id = str(row.get("envelope_id") or "")
+        if row_id in seen_rows:
+            continue
+        seen_rows.add(row_id)
+        hashes.extend(_json_sequence(row.get("transaction_hashes_json")))
+        hashes.extend(_submission_payload_transaction_hashes(_json_dict(row.get("raw_response_json"))))
+    return tuple(dict.fromkeys(hash_value for hash_value in hashes if hash_value))
 
 
 def _trade_payload(value: object) -> dict:
@@ -6353,13 +6479,22 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 summary["errors"] += 1
                 continue
             trade_ids = _point_order_trade_ids(point_order)
+            tx_hashes = _point_order_transaction_hashes(point_order)
+            if not tx_hashes:
+                tx_hashes = _submission_envelope_transaction_hashes(
+                    conn,
+                    command_id=command_id,
+                    venue_order_id=order_id,
+                )
+            tx_hash = next(iter(tx_hashes), None)
             trade_id = next(iter(trade_ids), None)
+            if not trade_id and tx_hash:
+                trade_id = tx_hash
             if not trade_id and terminal_positive_fact:
                 trade_id = f"order_fact:{row.get('order_fact_id')}:matched"
             if not trade_id:
                 summary["errors"] += 1
                 continue
-            tx_hash = next(iter(_point_order_transaction_hashes(point_order)), None)
             event_type = _matched_event_type(row, matched_size, venue_status=venue_status)
             command_already_terminal = (
                 str(row.get("state") or "").upper() in _TERMINAL_POSITIVE_MATCH_COMMAND_STATES
@@ -6720,11 +6855,19 @@ def _append_missing_exit_trade_fact_from_order_fact(
 ) -> None:
     command_id = str(candidate.get("command_id") or "")
     venue_order_id = str(candidate.get("venue_order_id") or "")
-    if _fill_trade_fact_count(conn, command_id) > 0:
-        return
     trade_ids = _point_order_trade_ids(point_order)
     tx_hashes = _point_order_transaction_hashes(point_order)
+    if not tx_hashes:
+        tx_hashes = _submission_envelope_transaction_hashes(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        )
     tx_hash = next(iter(tx_hashes), "")
+    if _fill_trade_fact_count(conn, command_id) > 0 and (
+        not tx_hash or _fill_trade_fact_with_tx_count(conn, command_id=command_id, tx_hash=tx_hash) > 0
+    ):
+        return
     trade_id = next(iter(trade_ids), "")
     if not trade_id:
         trade_id = tx_hash or f"order_fact:{candidate.get('order_fact_id') or command_id}"
@@ -6755,6 +6898,127 @@ def _append_missing_exit_trade_fact_from_order_fact(
         raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
         raw_payload_json=payload,
     )
+
+
+def _filled_exit_trade_fact_missing_tx_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_trade_facts")
+        and _table_exists(conn, "venue_order_facts")
+        and _table_exists(conn, "venue_submission_envelopes")
+    ):
+        return []
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _canonical_order_truth_cte(cte_name="latest_order")
+        + """
+        SELECT cmd.command_id,
+               cmd.venue_order_id,
+               trade.trade_id,
+               trade.state AS trade_state,
+               trade.filled_size,
+               trade.fill_price,
+               trade.source AS trade_source,
+               trade.observed_at AS trade_observed_at,
+               trade.venue_timestamp AS trade_venue_timestamp,
+               trade.raw_payload_json AS trade_raw_payload_json,
+               latest_order.fact_id AS order_fact_id,
+               latest_order.state AS order_fact_state,
+               latest_order.matched_size AS order_fact_matched_size,
+               latest_order.remaining_size AS order_fact_remaining_size
+          FROM venue_commands cmd
+          JOIN canonical_trade_fact trade
+            ON trade.command_id = cmd.command_id
+           AND trade.venue_order_id = cmd.venue_order_id
+          JOIN latest_order
+            ON latest_order.command_id = cmd.command_id
+           AND latest_order.venue_order_id = cmd.venue_order_id
+         WHERE cmd.intent_kind = 'EXIT'
+           AND cmd.state = 'FILLED'
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND trade.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+           AND COALESCE(trade.tx_hash, '') = ''
+           AND latest_order.state IN ('MATCHED', 'FILLED')
+           AND CAST(COALESCE(latest_order.matched_size, '0') AS REAL) > 0
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts tx_fact
+                 WHERE tx_fact.command_id = cmd.command_id
+                   AND COALESCE(tx_fact.tx_hash, '') != ''
+                   AND tx_fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(COALESCE(tx_fact.filled_size, '0') AS REAL) > 0
+           )
+         ORDER BY datetime(trade.observed_at), cmd.command_id
+        """
+    )
+    return [_dict_row(row) for row in conn.execute(sql).fetchall()]
+
+
+def reconcile_filled_exit_trade_fact_tx_repairs(conn: sqlite3.Connection) -> dict:
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _filled_exit_trade_fact_missing_tx_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        venue_order_id = str(candidate.get("venue_order_id") or "")
+        try:
+            tx_hash = next(
+                iter(
+                    _submission_envelope_transaction_hashes(
+                        conn,
+                        command_id=command_id,
+                        venue_order_id=venue_order_id,
+                    )
+                ),
+                "",
+            )
+            if not tx_hash:
+                summary["stayed"] += 1
+                continue
+            if _fill_trade_fact_with_tx_count(conn, command_id=command_id, tx_hash=tx_hash) > 0:
+                summary["stayed"] += 1
+                continue
+            trade_id = str(candidate.get("trade_id") or "").strip() or tx_hash
+            payload = {
+                "reason": "filled_exit_trade_fact_missing_tx_repair",
+                "proof_class": "filled_exit_trade_fact_with_submission_envelope_tx",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "trade_id": trade_id,
+                "tx_hash": tx_hash,
+                "source_trade_state": candidate.get("trade_state"),
+                "source_trade_observed_at": candidate.get("trade_observed_at"),
+                "latest_order_fact_id": candidate.get("order_fact_id"),
+                "latest_order_fact_state": candidate.get("order_fact_state"),
+                "raw_trade_payload": _json_dict(candidate.get("trade_raw_payload_json")),
+            }
+            append_trade_fact(
+                conn,
+                trade_id=trade_id,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state=str(candidate.get("trade_state") or "MATCHED"),
+                filled_size=str(candidate.get("filled_size") or ""),
+                fill_price=str(candidate.get("fill_price") or ""),
+                source=str(candidate.get("trade_source") or "REST"),
+                observed_at=_now_iso(),
+                venue_timestamp=str(candidate.get("trade_venue_timestamp") or candidate.get("trade_observed_at") or ""),
+                tx_hash=tx_hash,
+                raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
+                raw_payload_json=payload,
+            )
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: filled exit trade-fact tx repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _repair_exit_matched_order_fact_projection(
@@ -13576,6 +13840,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += matched_summary["stayed"]
         summary["errors"] += matched_summary["errors"]
 
+        filled_exit_tx_summary = reconcile_filled_exit_trade_fact_tx_repairs(conn)
+        summary["filled_exit_trade_fact_tx_repair"] = filled_exit_tx_summary
+        summary["advanced"] += filled_exit_tx_summary["advanced"]
+        summary["stayed"] += filled_exit_tx_summary["stayed"]
+        summary["errors"] += filled_exit_tx_summary["errors"]
+
         cancel_ack_terminal_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
         summary["cancel_ack_terminal_no_fill_facts"] = cancel_ack_terminal_summary
         summary["advanced"] += cancel_ack_terminal_summary["advanced"]
@@ -14410,6 +14680,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
         )
+        _boot_db_pass(
+            "filled_exit_trade_fact_tx_repair",
+            reconcile_filled_exit_trade_fact_tx_repairs,
+            "filled_exit_trade_fact_tx_repair",
+        )
 
         abandoned_ghosts = summary.get("abandoned_unsubmitted_ghosts")
         abandoned_continuations = (
@@ -14536,6 +14811,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             fold_stayed=False,
             observed_at=started_at,
         )
+        _db_pass(
+            "filled_exit_trade_fact_tx_repair",
+            reconcile_filled_exit_trade_fact_tx_repairs,
+            "filled_exit_trade_fact_tx_repair",
+        )
         summary["scope"] = scope
         summary["restart_preflight_narrow"] = True
         return
@@ -14581,6 +14861,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _client_pass("matched_order_facts",
                      reconcile_matched_order_facts,
                      "matched_order_facts")
+        _db_pass(
+            "filled_exit_trade_fact_tx_repair",
+            reconcile_filled_exit_trade_fact_tx_repairs,
+            "filled_exit_trade_fact_tx_repair",
+        )
         _client_pass(
             "edli_post_submit_unknown_absence",
             _reconcile_edli_post_submit_unknown_absence,
@@ -14643,6 +14928,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     _client_pass("terminal_point_orders",
                  reconcile_terminal_point_orders, "terminal_point_orders")
     _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
+    _db_pass(
+        "filled_exit_trade_fact_tx_repair",
+        reconcile_filled_exit_trade_fact_tx_repairs,
+        "filled_exit_trade_fact_tx_repair",
+    )
     _db_pass("cancel_ack_terminal_no_fill_facts",
              reconcile_cancel_ack_terminal_no_fill_facts, "cancel_ack_terminal_no_fill_facts")
     _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")

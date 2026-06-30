@@ -459,6 +459,9 @@ def _ensure_envelope(
     side: str = "BUY",
     price: float | Decimal = 0.5,
     size: float | Decimal = 10.0,
+    raw_response_json: str | None = None,
+    order_id: str | None = None,
+    transaction_hashes: tuple[str, ...] = (),
 ) -> str:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
@@ -500,10 +503,10 @@ def _ensure_envelope(
             signed_order=None,
             signed_order_hash=None,
             raw_request_hash="e" * 64,
-            raw_response_json=None,
-            order_id=None,
+            raw_response_json=raw_response_json,
+            order_id=order_id,
             trade_ids=(),
-            transaction_hashes=(),
+            transaction_hashes=transaction_hashes,
             error_code=None,
             error_message=None,
             captured_at=_NOW.isoformat(),
@@ -945,6 +948,7 @@ def _append_trade_fact(
     state="CONFIRMED",
     filled_size="1.25",
     fill_price="0.50",
+    tx_hash: str | None = None,
 ):
     from src.state.venue_command_repo import append_trade_fact
 
@@ -959,12 +963,14 @@ def _append_trade_fact(
         source="REST",
         observed_at="2026-04-26T00:06:00Z",
         venue_timestamp="2026-04-26T00:06:00Z",
+        tx_hash=tx_hash,
         raw_payload_hash=hashlib.sha256(
-            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}".encode()
+            f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}:{tx_hash}".encode()
         ).hexdigest(),
         raw_payload_json={
             "id": trade_id,
             "status": state,
+            "tx_hash": tx_hash,
             "maker_orders": [
                 {
                     "order_id": order_id,
@@ -10449,6 +10455,191 @@ class TestRecoveryResolutionTable:
             "order_id": "ord-exit",
             "command_id": "cmd-exit",
             "venue_status": "sell_filled",
+        }
+
+    def test_acked_exit_order_fact_uses_submission_envelope_tx_hash(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Matched exit recovery must not lose tx hashes carried only by the submit envelope."""
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=6.0, price=0.31)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 6.0,
+                   cost_basis_usd = 1.86,
+                   entry_price = 0.31,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=6.0,
+            price=0.29,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            state="MATCHED",
+            matched_size="6",
+            remaining_size="0",
+        )
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-final-exit-submit",
+            side="SELL",
+            price=Decimal("0.29"),
+            size=Decimal("6.0"),
+            order_id="ord-exit",
+            transaction_hashes=("0xhash-exit-envelope",),
+            raw_response_json=json.dumps(
+                {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "transactionsHashes": ["0xhash-exit-envelope"],
+                },
+                sort_keys=True,
+            ),
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-exit",
+            "status": "MATCHED",
+            "size_matched": "6",
+            "price": "0.29",
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit") == "FILLED"
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "0xhash-exit-envelope",
+            "venue_order_id": "ord-exit",
+            "state": "MATCHED",
+            "filled_size": "6",
+            "fill_price": "0.29",
+            "tx_hash": "0xhash-exit-envelope",
+        }
+
+    def test_filled_exit_trade_fact_missing_tx_uses_submission_envelope_tx_hash(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Already-FILLED exits with tx-less trade facts must still repair from final envelope."""
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=33.15,
+            price=0.55,
+            token_id="tok-001",
+        )
+        _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            state="MATCHED",
+            matched_size="33.15",
+            remaining_size="0",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-existing",
+            state="MATCHED",
+            filled_size="33.15",
+            fill_price="0.55",
+            tx_hash=None,
+        )
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "trade_id": "trade-exit-existing",
+                "filled_size": "33.15",
+                "fill_price": "0.55",
+            },
+        )
+        _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-final-filled-exit-submit",
+            side="SELL",
+            price=Decimal("0.55"),
+            size=Decimal("33.15"),
+            order_id="ord-exit",
+            transaction_hashes=("0xhash-filled-exit-envelope",),
+            raw_response_json=json.dumps(
+                {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "transactionsHashes": ["0xhash-filled-exit-envelope"],
+                },
+                sort_keys=True,
+            ),
+        )
+
+        from src.execution.command_recovery import reconcile_filled_exit_trade_fact_tx_repairs
+
+        summary = reconcile_filled_exit_trade_fact_tx_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-exit-existing",
+            "venue_order_id": "ord-exit",
+            "state": "MATCHED",
+            "filled_size": "33.15",
+            "fill_price": "0.55",
+            "tx_hash": "0xhash-filled-exit-envelope",
         }
 
     def test_exit_matched_trade_fact_repairs_existing_event_torn_projection(
