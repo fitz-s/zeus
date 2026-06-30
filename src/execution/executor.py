@@ -192,8 +192,6 @@ _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
-_ENTRY_TERMINAL_NO_FILL_PRICE_CHANGE_EPS = Decimal("0.0001")
-_ENTRY_TERMINAL_NO_FILL_SIZE_CHANGE_EPS = Decimal("0.000001")
 _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE = Decimal("0.03")
 _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD = Decimal("0.05")
 _ENTRY_TAKER_MIN_CONFIDENCE = Decimal("0.60")
@@ -1163,57 +1161,6 @@ def _parse_sqlite_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _entry_terminal_no_fill_material_change(
-    *,
-    prior_price: object | None,
-    prior_size: object | None,
-    candidate_price: object | None,
-    candidate_shares: object | None,
-) -> tuple[bool, dict]:
-    def _to_decimal(value: object | None) -> Decimal | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            return Decimal(text)
-        except (InvalidOperation, ValueError):
-            return None
-
-    prior_price_dec = _to_decimal(prior_price)
-    candidate_price_dec = _to_decimal(candidate_price)
-    prior_size_dec = _to_decimal(prior_size)
-    candidate_size_dec = _to_decimal(candidate_shares)
-    price_delta = (
-        None
-        if prior_price_dec is None or candidate_price_dec is None
-        else abs(candidate_price_dec - prior_price_dec)
-    )
-    size_delta = (
-        None
-        if prior_size_dec is None or candidate_size_dec is None
-        else abs(candidate_size_dec - prior_size_dec)
-    )
-    changed = (
-        price_delta is not None
-        and price_delta >= _ENTRY_TERMINAL_NO_FILL_PRICE_CHANGE_EPS
-    ) or (
-        size_delta is not None
-        and size_delta >= _ENTRY_TERMINAL_NO_FILL_SIZE_CHANGE_EPS
-    )
-    return changed, {
-        "prior_price": "" if prior_price_dec is None else str(prior_price_dec),
-        "candidate_price": ""
-        if candidate_price_dec is None
-        else str(candidate_price_dec),
-        "price_delta": "" if price_delta is None else str(price_delta),
-        "prior_size": "" if prior_size_dec is None else str(prior_size_dec),
-        "candidate_shares": "" if candidate_size_dec is None else str(candidate_size_dec),
-        "size_delta": "" if size_delta is None else str(size_delta),
-    }
-
-
 def _entry_same_token_cooldown_component(
     conn: sqlite3.Connection,
     *,
@@ -1343,33 +1290,28 @@ def _entry_same_token_cooldown_component(
         state=state,
     )
     if terminal_no_fill:
-        changed, change_details = _entry_terminal_no_fill_material_change(
-            prior_price=prior_price,
-            prior_size=prior_size,
-            candidate_price=limit_price,
-            candidate_shares=shares,
-        )
-        if changed:
-            return {
-                "component": "entry_same_token_cooldown",
-                "allowed": True,
-                "reason": "allowed_terminal_no_fill_redecision_material_change",
-                "age_seconds": int(age_seconds),
-                "existing_command_id": command_id,
-                "existing_command_state": state,
-                **change_details,
-            }
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_no_fill_no_exposure_redecision",
+            "age_seconds": int(age_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
+        }
 
     remaining_seconds = _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - age_seconds
     if remaining_seconds > 0:
         return {
             "component": "entry_same_token_cooldown",
             "allowed": False,
-            "reason": (
-                "same_token_terminal_no_fill_cooling_down"
-                if terminal_no_fill
-                else "same_token_entry_cooling_down"
-            ),
+            "reason": "same_token_entry_cooling_down",
             "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
             "remaining_seconds": int(remaining_seconds),
             "existing_command_id": command_id,
@@ -1385,11 +1327,7 @@ def _entry_same_token_cooldown_component(
     return {
         "component": "entry_same_token_cooldown",
         "allowed": True,
-        "reason": (
-            "allowed_terminal_no_fill_redecision_cooldown_elapsed"
-            if terminal_no_fill
-            else "allowed_cooldown_elapsed"
-        ),
+        "reason": "allowed_cooldown_elapsed",
         "cooldown_seconds": _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
         "age_seconds": int(age_seconds),
         "existing_command_id": command_id,

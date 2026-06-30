@@ -3529,7 +3529,8 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
                 ",".join("?" for _ in chain_state_values)
             )
         else:
-            chain_truth_sql = "0"
+            chain_truth_sql = "phase IN ('voided', 'quarantined')"
+            chain_state_values = ()
         positive_chain_clause = (
             " OR (COALESCE(chain_shares, 0) > ? "
             f"AND ({chain_truth_sql}))"

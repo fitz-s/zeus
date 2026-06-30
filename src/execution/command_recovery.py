@@ -786,6 +786,20 @@ def _market_events_ref(conn: sqlite3.Connection) -> str | None:
     return None
 
 
+def _opportunity_events_refs(conn: sqlite3.Connection) -> tuple[str, str] | None:
+    _maybe_attach_world_for_recovery(conn)
+    if _table_exists(conn, "opportunity_events") and _table_exists(conn, "opportunity_event_processing"):
+        return "opportunity_events", "opportunity_event_processing"
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if (
+        "world" in attached
+        and _attached_table_exists(conn, "world", "opportunity_events")
+        and _attached_table_exists(conn, "world", "opportunity_event_processing")
+    ):
+        return "world.opportunity_events", "world.opportunity_event_processing"
+    return None
+
+
 def _json_dict(raw: object) -> dict:
     if raw in (None, ""):
         return {}
@@ -6228,6 +6242,152 @@ def _terminal_no_fill_continuation_from_row(row: dict) -> dict:
     return continuation
 
 
+def _redecision_event_with_terminal_no_fill_origin(event, *, command_id: str):
+    try:
+        from src.events.opportunity_event import make_opportunity_event
+
+        payload = json.loads(str(event.payload_json or "{}"))
+        if not isinstance(payload, dict):
+            return event
+        payload["redecision_origin"] = "terminal_no_fill"
+        payload["terminal_no_fill_command_id"] = str(command_id or "")
+        return make_opportunity_event(
+            event_type=event.event_type,
+            entity_key=event.entity_key,
+            source=event.source,
+            observed_at=event.observed_at,
+            available_at=event.available_at,
+            received_at=event.received_at,
+            causal_snapshot_id=event.causal_snapshot_id,
+            payload=payload,
+            priority=event.priority,
+            expires_at=event.expires_at,
+            created_at=event.created_at,
+        )
+    except Exception:  # noqa: BLE001
+        return event
+
+
+def _insert_opportunity_event_qualified(conn: sqlite3.Connection, event) -> bool:
+    refs = _opportunity_events_refs(conn)
+    if refs is None:
+        raise RuntimeError("opportunity event tables unavailable for terminal no-fill redecision")
+    events_ref, processing_ref = refs
+    row = {
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "entity_key": event.entity_key,
+        "source": event.source,
+        "observed_at": event.observed_at,
+        "available_at": event.available_at,
+        "received_at": event.received_at,
+        "causal_snapshot_id": event.causal_snapshot_id,
+        "payload_hash": event.payload_hash,
+        "idempotency_key": event.idempotency_key,
+        "priority": event.priority,
+        "expires_at": event.expires_at,
+        "payload_json": event.payload_json,
+        "schema_version": event.schema_version,
+        "created_at": event.created_at,
+    }
+    cur = conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {events_ref} (
+            event_id, event_type, entity_key, source,
+            observed_at, available_at, received_at,
+            causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (
+            :event_id, :event_type, :entity_key, :source,
+            :observed_at, :available_at, :received_at,
+            :causal_snapshot_id, :payload_hash, :idempotency_key,
+            :priority, :expires_at, :payload_json, :schema_version, :created_at
+        )
+        """,
+        row,
+    )
+    inserted = cur.rowcount == 1
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {processing_ref} (
+            consumer_name, event_id, processing_status, attempt_count,
+            processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'pending', 0, NULL, NULL, ?)
+        """,
+        (event.event_id, now),
+    )
+    return inserted
+
+
+def _recovery_forecasts_read_connection(conn: sqlite3.Connection):
+    if _table_exists(conn, "forecast_posteriors"):
+        return conn, False
+    try:
+        from src.state.db import get_forecasts_connection_read_only
+
+        return get_forecasts_connection_read_only(), True
+    except Exception:  # noqa: BLE001
+        return conn, False
+
+
+def _emit_terminal_no_fill_redecision_from_recovery(
+    conn: sqlite3.Connection,
+    *,
+    continuation: dict,
+    occurred_at: str,
+) -> int:
+    city = str(continuation.get("city") or "").strip()
+    target_date = str(continuation.get("target_date") or "").strip()
+    metric = _canonical_temperature_metric_text(
+        continuation.get("metric") or continuation.get("temperature_metric") or ""
+    )
+    command_id = str(continuation.get("command_id") or "").strip()
+    if not (city and target_date and metric in {"high", "low"}):
+        return 0
+    if _opportunity_events_refs(conn) is None:
+        return 0
+
+    forecasts_conn, should_close = _recovery_forecasts_read_connection(conn)
+    try:
+        from src.events.event_writer import EventWriter
+        from src.events.triggers.forecast_snapshot_ready import (
+            ForecastSnapshotReadyTrigger,
+            executable_forecast_live_eligible_reader,
+        )
+
+        decision_time = datetime.now(timezone.utc)
+        received_at = decision_time.isoformat()
+        trigger = ForecastSnapshotReadyTrigger(
+            EventWriter(conn),
+            live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+        )
+        events = trigger.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=decision_time,
+            received_at=received_at,
+            limit=None,
+            source=f"terminal-no-fill:{command_id or 'unknown'}",
+            event_type="EDLI_REDECISION_PENDING",
+            restrict_to_families={(city, target_date, metric)},
+        )
+        emitted = 0
+        for event in events:
+            event = _redecision_event_with_terminal_no_fill_origin(
+                event,
+                command_id=command_id,
+            )
+            _insert_opportunity_event_qualified(conn, event)
+            emitted += 1
+        return emitted
+    finally:
+        if should_close:
+            try:
+                forecasts_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _ensure_entry_projection_is_pending_zero_exposure(
     conn: sqlite3.Connection,
     *,
@@ -6276,6 +6436,7 @@ def reconcile_terminal_order_facts(
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     continuations: list[dict] = []
+    immediate_redecision_events = 0
     for row in _latest_terminal_order_fact_candidates(conn):
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
@@ -6365,20 +6526,37 @@ def reconcile_terminal_order_facts(
                     order_fact=row,
                     occurred_at=occurred_at,
                 )
+                continuation = _terminal_no_fill_continuation_from_row(row)
+                try:
+                    emitted = _emit_terminal_no_fill_redecision_from_recovery(
+                        conn,
+                        continuation=continuation,
+                        occurred_at=occurred_at,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "recovery: terminal no-fill immediate redecision emit failed "
+                        "for command %s; leaving summary continuation fallback: %s",
+                        command_id,
+                        exc,
+                    )
+                    emitted = 0
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
                 conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 raise
             summary["advanced"] += 1
-            if collect_continuations:
-                continuations.append(_terminal_no_fill_continuation_from_row(row))
+            immediate_redecision_events += emitted
+            if collect_continuations and emitted <= 0:
+                continuations.append(continuation)
             logger.info(
                 "recovery: command %s ACKED terminal order fact %s -> EXPIRED and ENTRY_ORDER_VOIDED "
-                "(edli_terminal_no_fill_projected=%s)",
+                "(edli_terminal_no_fill_projected=%s immediate_redecision_events=%d)",
                 command_id,
                 row.get("order_fact_state"),
                 edli_projected,
+                emitted,
             )
         except Exception as exc:
             logger.error(
@@ -6389,6 +6567,8 @@ def reconcile_terminal_order_facts(
             summary["errors"] += 1
     if collect_continuations:
         summary["continuations"] = continuations
+    if immediate_redecision_events:
+        summary["immediate_redecision_events"] = immediate_redecision_events
     return summary
 
 

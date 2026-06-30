@@ -3517,6 +3517,89 @@ class TestRecoveryResolutionTable:
             }
         ]
 
+    def test_terminal_no_fill_recovery_writes_redecision_event_in_same_pass(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Terminal no-fill projection must durably requeue EDLI before main bridge."""
+        import src.events.triggers.forecast_snapshot_ready as fsr_trigger
+        from src.events.opportunity_event import make_opportunity_event
+        from src.execution import command_recovery
+        from src.execution.command_recovery import reconcile_terminal_order_facts
+
+        _insert(
+            conn,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+        )
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        class FakeTrigger:
+            def __init__(self, writer, *, live_eligibility_reader):
+                self.writer = writer
+                self.live_eligibility_reader = live_eligibility_reader
+
+            def build_committed_snapshot_events(self, **kwargs):
+                assert kwargs["event_type"] == "EDLI_REDECISION_PENDING"
+                assert kwargs["restrict_to_families"] == {("Karachi", "2026-05-17", "high")}
+                assert kwargs["source"] == "terminal-no-fill:cmd-001"
+                received_at = kwargs["received_at"]
+                return [
+                    make_opportunity_event(
+                        event_type="EDLI_REDECISION_PENDING",
+                        entity_key="Karachi|2026-05-17|high|snap-terminal-no-fill",
+                        source=kwargs["source"],
+                        observed_at=received_at,
+                        available_at=received_at,
+                        received_at=received_at,
+                        causal_snapshot_id="snap-terminal-no-fill",
+                        payload={
+                            "city": "Karachi",
+                            "target_date": "2026-05-17",
+                            "metric": "high",
+                            "snapshot_id": "snap-terminal-no-fill",
+                        },
+                        priority=50,
+                    )
+                ]
+
+        monkeypatch.setattr(fsr_trigger, "ForecastSnapshotReadyTrigger", FakeTrigger)
+        monkeypatch.setattr(
+            fsr_trigger,
+            "executable_forecast_live_eligible_reader",
+            lambda forecasts_conn: "reader",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_recovery_forecasts_read_connection",
+            lambda recovery_conn: (recovery_conn, False),
+        )
+
+        summary = reconcile_terminal_order_facts(conn, collect_continuations=True)
+
+        assert summary["advanced"] == 1
+        assert summary["continuations"] == []
+        assert summary["immediate_redecision_events"] == 1
+        row = conn.execute(
+            """
+            SELECT e.event_type, e.source, e.payload_json, p.processing_status
+              FROM opportunity_events e
+              JOIN opportunity_event_processing p ON p.event_id = e.event_id
+             WHERE e.event_type = 'EDLI_REDECISION_PENDING'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["source"] == "terminal-no-fill:cmd-001"
+        assert row["processing_status"] == "pending"
+        payload = json.loads(row["payload_json"])
+        assert payload["redecision_origin"] == "terminal_no_fill"
+        assert payload["terminal_no_fill_command_id"] == "cmd-001"
+
     def test_acked_point_order_terminal_no_fill_fact_expires_command_and_voids_pending_entry(
         self,
         conn,

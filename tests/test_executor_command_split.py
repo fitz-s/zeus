@@ -1107,7 +1107,26 @@ class TestLiveOrderCommandSplit:
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
         )
 
-        intent = _make_entry_intent(mem_conn, token_id=token_id)
+        certificate_hash = "c" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            token_id=token_id,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
 
         with patch("src.state.venue_command_repo.insert_command") as insert_command, patch(
             "src.data.polymarket_client.PolymarketClient"
@@ -1126,6 +1145,126 @@ class TestLiveOrderCommandSplit:
         insert_command.assert_not_called()
         MockClient.assert_not_called()
         assert mem_conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
+
+    def test_entry_same_token_terminal_no_fill_redecision_reposts_before_cooldown(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """A proven zero-fill terminal ENTRY must not suppress continuous redecision."""
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+
+        token_id = "tok-terminal-nofill-repost"
+        snapshot_id = _ensure_snapshot(mem_conn, token_id=token_id)
+        envelope_id = _ensure_envelope(
+            mem_conn,
+            token_id=token_id,
+            price=Decimal("0.40"),
+            size=Decimal("10.0"),
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        mem_conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, venue_order_id, state, last_event_id, created_at,
+                updated_at, review_required_reason
+            ) VALUES (
+                'cmd-recent-terminal-nofill', ?, ?, 'pos-recent-terminal-nofill',
+                'dec-recent-terminal-nofill', 'idem-recent-terminal-nofill', 'ENTRY',
+                'mkt-test-001', ?, 'BUY', 10.0, 0.40, 'order-terminal-nofill',
+                'CANCELLED', NULL, ?, ?, NULL
+            )
+            """,
+            (
+                snapshot_id,
+                envelope_id,
+                token_id,
+                now_iso,
+                now_iso,
+            ),
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, venue_timestamp, local_sequence,
+                raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'order-terminal-nofill', 'cmd-recent-terminal-nofill',
+                'CANCEL_CONFIRMED', '10.0', '0', 'WS_USER', ?, ?, 1, ?, '{}'
+            )
+            """,
+            (
+                now_iso,
+                now_iso,
+                "f" * 64,
+            ),
+        )
+        mem_conn.commit()
+
+        monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+
+        certificate_hash = "b" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            token_id=token_id,
+            actionable_certificate_hash=certificate_hash,
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-terminal-nofill-repost")
+            )
+
+            result = _live_order(
+                trade_id="trd-terminal-nofill-repost",
+                intent=intent,
+                shares=11.0,
+                conn=mem_conn,
+                decision_id="dec-terminal-nofill-repost",
+            )
+
+        assert result.status == "pending"
+        assert result.order_id == "ord-terminal-nofill-repost"
+        assert mock_inst.place_limit_order.called
+        assert (
+            mem_conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM venue_commands
+                 WHERE token_id = ? AND intent_kind = 'ENTRY'
+                """,
+                (token_id,),
+            ).fetchone()[0]
+            == 2
+        )
 
     def test_final_intent_legacy_envelope_ignores_pre_submit_audit_only_gaps(self):
         """FinalExecutionIntent handoff must use the same pre-submit integrity split."""

@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-06-29
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S3 + B_patch_plan.md
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
@@ -51,6 +51,7 @@ def mem_db():
             bin_label TEXT,
             direction TEXT NOT NULL DEFAULT 'buy_yes',
             shares REAL DEFAULT 0,
+            chain_shares REAL DEFAULT 0,
             cost_basis_usd REAL DEFAULT 0,
             token_id TEXT,
             no_token_id TEXT,
@@ -102,15 +103,25 @@ def mem_db():
     return conn
 
 
-def _insert_position(conn, position_id, phase, token_id, direction="buy_yes", no_token_id=None):
+def _insert_position(
+    conn,
+    position_id,
+    phase,
+    token_id,
+    direction="buy_yes",
+    no_token_id=None,
+    *,
+    shares=0.0,
+    chain_shares=0.0,
+):
     conn.execute(
         """INSERT INTO position_current
            (position_id, phase, trade_id, market_id, city, bin_label,
-            direction, shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            direction, shares, chain_shares, cost_basis_usd, token_id, no_token_id, order_id, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", direction, 0.0, 0.0, token_id,
+            "London", "18°C", direction, shares, chain_shares, 0.0, token_id,
             no_token_id or TOKEN_X_NO, "order-" + position_id, "2026-05-17T22:13:38",
         ),
     )
@@ -170,6 +181,44 @@ def test_voided_position_allows_reentry(mem_db):
     """Voided positions are terminal — must not block."""
     _insert_position(mem_db, "cee5fc85-3dd", "voided", TOKEN_X)
     assert has_same_token_open_db(mem_db, TOKEN_X) is False
+
+
+def test_terminal_local_phase_with_positive_chain_shares_blocks_reentry(mem_db):
+    """Chain-backed exposure remains live even if local lifecycle projection is terminal.
+
+    This protects the Munich/Istanbul class: a local void/quarantine label cannot
+    make a chain-held token available to the fresh-entry selector.
+    """
+    _insert_position(
+        mem_db,
+        "voided-but-chain-held",
+        "voided",
+        TOKEN_X,
+        chain_shares=12.5,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
+
+
+def test_economically_closed_positive_chain_projection_does_not_block_reentry(mem_db):
+    _insert_position(
+        mem_db,
+        "closed-stale-chain-projection",
+        "economically_closed",
+        TOKEN_X,
+        chain_shares=12.5,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is False
+
+
+def test_quarantined_positive_chain_shares_blocks_reentry(mem_db):
+    _insert_position(
+        mem_db,
+        "quarantine-chain-held",
+        "quarantined",
+        TOKEN_X,
+        chain_shares=3.0,
+    )
+    assert has_same_token_open_db(mem_db, TOKEN_X) is True
 
 
 # ── buy_no token coverage (PR #143 bot review fix) ───────────────────────────────
@@ -548,7 +597,7 @@ def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position
     assert result["existing_position_id"] == "active-position"
 
 
-def test_terminal_no_fill_no_exposure_cools_down_same_terms_redecision(mem_db):
+def test_terminal_no_fill_no_exposure_allows_same_terms_redecision(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -584,12 +633,14 @@ def test_terminal_no_fill_no_exposure_cools_down_same_terms_redecision(mem_db):
         now=datetime.fromisoformat("2026-06-18T10:00:00+00:00"),
     )
 
-    assert result["allowed"] is False
-    assert result["reason"] == "same_token_terminal_no_fill_cooling_down"
-    assert result["remaining_seconds"] == _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS - 60
+    assert result["allowed"] is True
+    assert result["reason"] == "allowed_terminal_no_fill_no_exposure_redecision"
+    assert result["existing_command_id"] == "cmd-cancelled"
+    assert result["candidate_price"] == "0.73"
+    assert result["candidate_shares"] == "12.7"
 
 
-def test_terminal_no_fill_redecision_requires_material_price_or_size_change(mem_db):
+def test_terminal_no_fill_redecision_does_not_require_material_price_change(mem_db):
     _insert_position(
         mem_db,
         "stale-pending",
@@ -626,8 +677,8 @@ def test_terminal_no_fill_redecision_requires_material_price_or_size_change(mem_
     )
 
     assert result["allowed"] is True
-    assert result["reason"] == "allowed_terminal_no_fill_redecision_material_change"
-    assert result["price_delta"] == "0.01"
+    assert result["reason"] == "allowed_terminal_no_fill_no_exposure_redecision"
+    assert result["existing_command_id"] == "cmd-cancelled"
 
 
 def test_cancelled_entry_without_zero_fill_fact_still_blocks_redecision(mem_db):
