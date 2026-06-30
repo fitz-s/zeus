@@ -3561,8 +3561,8 @@ def test_pending_exit_chain_absent_zero_balance_uses_chain_truth_resolution(monk
     assert portfolio.positions == []
 
 
-def test_monitor_entry_selection_guard_invalidates_unarmed_qkernel_hold():
-    """Monitor must not keep an unarmed qkernel entry as a raw-posterior hold."""
+def test_monitor_entry_selection_guard_invalidity_requires_independent_exit():
+    """A bad historical entry proof is not itself live exit authority."""
     from src.engine import cycle_runtime
 
     conn = sqlite3.connect(":memory:")
@@ -3646,10 +3646,11 @@ def test_monitor_entry_selection_guard_invalidates_unarmed_qkernel_hold():
     )
 
     assert decision is not None
-    assert decision.should_exit is True
-    assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_EXIT"
+    assert decision.should_exit is False
+    assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_HOLD_REQUIRES_CURRENT_EXIT"
     assert "selection_guard_side_not_armed" in decision.reason
     assert summary["entry_selection_guard_invalid_positions"] == 1
+    assert summary["entry_selection_guard_invalid_independent_exit_required"] == 1
 
 
 def test_monitor_entry_selection_guard_does_not_force_exit_over_fresh_positive_edge():

@@ -411,7 +411,23 @@ def _active_exit_already_projected(
         return False
     order_id = str(_row_value(row, "order_id", 0) or "")
     order_status = str(_row_value(row, "order_status", 1) or "").lower()
-    return order_id == venue_order_id and order_status.startswith("sell_")
+    if order_id == venue_order_id and order_status.startswith("sell_"):
+        return True
+    try:
+        event_row = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_POSTED'
+               AND order_id = ?
+             LIMIT 1
+            """,
+            (position_id, venue_order_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return event_row is not None
 
 
 def _venue_command_columns(conn: sqlite3.Connection) -> set[str]:

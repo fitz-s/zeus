@@ -3069,21 +3069,24 @@ def _entry_selection_guard_exit_decision(
             ),
         )
 
+    summary["entry_selection_guard_invalid_independent_exit_required"] = (
+        summary.get("entry_selection_guard_invalid_independent_exit_required", 0) + 1
+    )
     return _ExitDecision(
-        True,
+        False,
         (
-            "ENTRY_SELECTION_GUARD_INVALID_EXIT "
+            "ENTRY_SELECTION_GUARD_INVALID_HOLD_REQUIRES_CURRENT_EXIT "
             f"({verdict.get('invalid_reason')}; sell_value_usd={sell_value:.4f}; "
             f"q_safe={verdict.get('selection_guard_q_safe')})"
         ),
         urgency="normal",
-        trigger="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+        trigger="ENTRY_SELECTION_GUARD_INVALID_HOLD_REQUIRES_CURRENT_EXIT",
         selected_method=getattr(pos, "selected_method", "") or getattr(pos, "entry_method", ""),
         applied_validations=list(
             dict.fromkeys(
                 [
                     *(getattr(pos, "applied_validations", []) or []),
-                    "entry_selection_guard_invalid_exit",
+                    "entry_selection_guard_invalid_requires_current_exit",
                 ]
             )
         ),

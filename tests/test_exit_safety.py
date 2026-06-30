@@ -3472,6 +3472,56 @@ def test_execute_exit_adopts_active_prior_sell_without_new_submit(conn, monkeypa
     assert current["phase"] == "pending_exit"
     assert current["order_id"] == "ord-active-exit"
     assert current["order_status"] == "sell_placed"
+    posted_count = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_POSTED'
+           AND order_id = ?
+        """,
+        (pos.trade_id, "ord-active-exit"),
+    ).fetchone()[0]
+    assert posted_count == 1
+
+    conn.execute(
+        """
+        UPDATE position_current
+           SET order_status = 'retry_pending'
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    )
+    pos.order_status = "retry_pending"
+    pos.exit_state = "retry_pending"
+    pos.last_exit_order_id = ""
+
+    result = execute_exit(
+        PortfolioState(positions=[pos]),
+        pos,
+        ExitContext(
+            exit_reason="ENTRY_SELECTION_GUARD_INVALID_EXIT",
+            current_market_price=0.02,
+            current_market_price_is_fresh=True,
+            best_bid=0.019,
+            position_state="active",
+        ),
+        clob=None,
+        conn=conn,
+    )
+
+    assert result.startswith("sell_pending: active_prior_exit_sell")
+    posted_count = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_ORDER_POSTED'
+           AND order_id = ?
+        """,
+        (pos.trade_id, "ord-active-exit"),
+    ).fetchone()[0]
+    assert posted_count == 1
 
 
 def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn, monkeypatch):
