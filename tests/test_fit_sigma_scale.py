@@ -93,6 +93,125 @@ def test_fit_recovers_known_params_within_ci(k_true, w_true) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 1b. EB shrinkage geometry: shrink on TRANSFORMED params (log k, logit w)
+# ---------------------------------------------------------------------------
+
+def test_eb_shrink_is_geometric_in_k_and_logit_in_w() -> None:
+    """Per-city EB shrinkage must operate on TRANSFORMED parameters — log(k) and logit(w) —
+    not the raw bounded values. k is a positive scale (natural geometry multiplicative); w is a
+    (0,1) probability (natural geometry logit). Raw-linear shrinkage on bounded params is the wrong
+    geometry (frontier consult flagged it HIGH in both rounds). At lambda=0.5 the shrunk k must be
+    the GEOMETRIC mean sqrt(kj*kg), and w the logistic of the averaged logits — not the arithmetic mean."""
+    import math
+    kj, wj = 1.20, 0.30
+    kg, wg = 0.70, 0.15
+    kappa = 30
+    nj = kappa  # lambda = n/(n+kappa) = 0.5
+    ks, ws = fs._eb_shrink(kj, wj, nj, kg, wg, kappa)
+
+    lam = nj / (nj + kappa)  # 0.5
+    expected_k = math.exp(lam * math.log(kj) + (1.0 - lam) * math.log(kg))  # kj**lam * kg**(1-lam)
+
+    def _logit(p: float) -> float:
+        return math.log(p / (1.0 - p))
+
+    def _sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
+
+    expected_w = _sigmoid(lam * _logit(wj) + (1.0 - lam) * _logit(wg))
+
+    assert ks == pytest.approx(expected_k, abs=1e-9), f"k shrink not geometric: {ks} vs {expected_k}"
+    assert ws == pytest.approx(expected_w, abs=1e-9), f"w shrink not logit-linear: {ws} vs {expected_w}"
+    # Regression guard: must DIFFER from the old raw arithmetic mean.
+    assert ks != pytest.approx(lam * kj + (1.0 - lam) * kg, abs=1e-6)
+
+
+def test_eb_shrink_limits_full_pool_and_no_pool() -> None:
+    """lambda=0 (n=0) -> exactly the global pair; lambda->1 (n>>kappa) -> ~the city MLE.
+    Holds under any monotone reparameterization, so it pins both the old and new geometry."""
+    kg, wg = 0.70, 0.15
+    ks0, ws0 = fs._eb_shrink(1.20, 0.30, 0, kg, wg, 30)
+    assert ks0 == pytest.approx(kg, abs=1e-9)
+    assert ws0 == pytest.approx(wg, abs=1e-9)
+    ksN, wsN = fs._eb_shrink(1.20, 0.30, 100_000, kg, wg, 30)
+    assert ksN == pytest.approx(1.20, abs=1e-2)
+    assert wsN == pytest.approx(0.30, abs=1e-2)
+
+
+def test_eb_shrink_handles_degenerate_w_bounds() -> None:
+    """A city MLE at the w boundary (0 or 1) must not blow up the logit transform — it clamps."""
+    import math
+    kg, wg = 0.70, 0.15
+    ks, ws = fs._eb_shrink(1.20, 0.0, 30, kg, wg, 30)  # wj=0 -> logit(-inf) guarded
+    assert math.isfinite(ks) and math.isfinite(ws)
+    assert 0.0 < ws < 1.0
+    ks2, ws2 = fs._eb_shrink(1.20, 1.0, 30, kg, wg, 30)  # wj=1 -> logit(+inf) guarded
+    assert math.isfinite(ks2) and 0.0 < ws2 < 1.0
+
+
+# ---------------------------------------------------------------------------
+# 1c. Per-city prequential score-capital ledger C_ℓ
+# ---------------------------------------------------------------------------
+
+def _relabelled_corpus(specs, dates, seed=11):
+    """Multi-city, multi-date settled corpus. specs = [(city, k_true, w_true, n_cells)].
+    Each city's synthetic cells are spread round-robin across `dates` so rolling date-splits work."""
+    cells = []
+    for ci, (city, k, w, n) in enumerate(specs):
+        pop = _synthetic_population(n, k, w, seed=seed + ci)
+        for j, c in enumerate(pop):
+            c = dict(c)
+            c["city"] = city
+            c["target_date"] = dates[j % len(dates)]
+            cells.append(c)
+    return cells
+
+
+_DATES8 = [f"2026-06-{d:02d}" for d in range(9, 17)]  # 8 distinct target dates
+
+
+def test_city_capital_zero_when_fully_pooled() -> None:
+    """kappa -> infinity collapses every city's EB (k,w) to the split-global, so the OOS Bernoulli
+    score equals the global baseline and earned capital is ~0 for every city — the ledger mechanism
+    (capital = NLL_global - NLL_cityEB, leak-free per split) is exact regardless of the data."""
+    cells = _relabelled_corpus(
+        [("A", 0.9, 0.15, 130), ("B", 1.4, 0.25, 130), ("C", 0.7, 0.10, 130)], _DATES8
+    )
+    cap = fs._fit_city_capital(cells, 10**9)
+    assert cap, "expected a per-city capital dict"
+    for city, c in cap.items():
+        assert abs(c) < 0.5, f"fully-pooled capital should be ~0, got {city}={c}"
+
+
+def test_city_capital_positive_for_distinct_city() -> None:
+    """A city whose true (k,w) differs sharply from the pooled global earns POSITIVE OOS capital
+    (its EB layer beats global out-of-sample); a global-matching city earns less."""
+    cells = _relabelled_corpus(
+        [("Global1", 0.9, 0.15, 150), ("Global2", 0.9, 0.15, 150), ("Distinct", 1.8, 0.30, 220)],
+        _DATES8, seed=21,
+    )
+    cap = fs._fit_city_capital(cells, 30)
+    assert cap["Distinct"] > 0.0, f"distinct city should earn positive OOS capital, got {cap['Distinct']}"
+    assert cap["Global1"] <= cap["Distinct"], "distinct city must out-earn a global-matching one"
+
+
+def test_fit_cities_shrunk_writes_only_positive_capital_with_score() -> None:
+    """The artifact cities section carries ONLY cities with positive earned OOS capital, each with its
+    score_capital; a global-matching city (no earned capital) is omitted by the capital math (⇒ the
+    materializer serves it ρ=0 = pure global), NOT by a hand-set min-n gate."""
+    cells = _relabelled_corpus(
+        [("Global1", 0.9, 0.15, 150), ("Global2", 0.9, 0.15, 150), ("Distinct", 1.8, 0.30, 220)],
+        _DATES8, seed=21,
+    )
+    gk, gw, _ = fs._fit_mle(cells)
+    cities = fs._fit_cities_shrunk(cells, gk, gw, 30)
+    assert "Distinct" in cities, "a positive-capital city must be written"
+    assert cities["Distinct"]["score_capital"] > 0.0
+    assert all(c["score_capital"] > 0.0 for c in cities.values()), "no nonpositive-capital city may be written"
+    assert cities["Distinct"]["k"] > 0.0 and 0.0 <= cities["Distinct"]["w"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
 # 2. Refusal on insufficient n (via the same path main() uses)
 # ---------------------------------------------------------------------------
 

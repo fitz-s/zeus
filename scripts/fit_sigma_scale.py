@@ -485,6 +485,144 @@ def _fit_mle(cells) -> tuple[float, float, float]:
     return _fit_grid(cells)
 
 
+def _eb_shrink(kj: float, wj: float, nj: int, kg: float, wg: float, kappa: float) -> tuple[float, float]:
+    """EB partial-pool a per-group (k,w) toward the global (kg,wg) on TRANSFORMED parameters.
+
+    k>0 shrinks on the LOG scale (geometric — its natural multiplicative geometry) and w in (0,1) on the
+    LOGIT scale (its natural probability geometry), by lambda = n/(n+kappa). Raw-linear shrinkage on these
+    bounded params is the wrong geometry (frontier consult flagged it HIGH, both rounds): a 50/50 pool of
+    k=1.2 and k=0.7 is the geometric mean 0.917, not the arithmetic 0.95. w/k are clamped off the open
+    boundaries before the transform so a degenerate city MLE (w=0 or w=1) cannot produce a +/-inf logit.
+    """
+    lam = nj / (nj + float(kappa))
+    _eps = 1e-6
+
+    def _logit(p: float) -> float:
+        p = min(1.0 - _eps, max(_eps, float(p)))
+        return math.log(p / (1.0 - p))
+
+    log_k = lam * math.log(max(_eps, kj)) + (1.0 - lam) * math.log(max(_eps, kg))
+    logit_w = lam * _logit(wj) + (1.0 - lam) * _logit(wg)
+    return math.exp(log_k), 1.0 / (1.0 + math.exp(-logit_w))
+
+
+def _select_kappa_cv(cells, kg: float, wg: float, kappas=(20, 30, 50, 100, 200)):
+    """CV-select the shrink kappa by rolling date-split OOS NLL of per-city EB-shrunk (k,w).
+
+    Returns the kappa minimizing mean out-of-sample −LL, or None when there are too few dates to
+    validate (then no per-city layer is written — fail-soft to the single global pair). The kappa is
+    therefore math-supported (operator law 2026-06-12: no hand-set value), not a chosen constant.
+    """
+    dates = sorted({c["target_date"] for c in cells})
+    if len(dates) < 6:
+        return None
+    # Precompute each split ONCE: global fit + per-city MLE (cached) + test cells per city. The per-city
+    # MLE does not depend on kappa, so caching makes the kappa sweep O(splits*cities) fits, not
+    # O(splits*cities*kappas) — the difference between seconds and many minutes.
+    splits = []
+    for frac in (0.5, 0.6, 0.7):
+        cut = dates[int(len(dates) * frac)]
+        tr = [c for c in cells if c["target_date"] < cut]
+        te = [c for c in cells if c["target_date"] >= cut]
+        if len(te) < 50 or len(tr) < 100:
+            continue
+        gk, gw, _ = _fit_mle(tr)
+        by_tr: dict = defaultdict(list)
+        for c in tr:
+            by_tr[c["city"]].append(c)
+        by_te: dict = defaultdict(list)
+        for c in te:
+            by_te[c["city"]].append(c)
+        city_fit = {}
+        for cty, trg in by_tr.items():
+            if len(trg) >= 10:
+                kj, wj, _ = _fit_mle(trg)
+                city_fit[cty] = (kj, wj, len(trg))
+        splits.append((gk, gw, city_fit, by_te))
+    if not splits:
+        return None
+    best_kappa, best_nll = None, float("inf")
+    for kap in kappas:
+        tot = 0.0
+        for gk, gw, city_fit, by_te in splits:
+            for cty, teg in by_te.items():
+                if cty in city_fit:
+                    kj, wj, nj = city_fit[cty]
+                    ks, ws = _eb_shrink(kj, wj, nj, gk, gw, kap)
+                else:
+                    ks, ws = gk, gw
+                tot += _neg_log_likelihood(teg, ks, ws)
+        if tot < best_nll:
+            best_kappa, best_nll = kap, tot
+    return best_kappa
+
+
+def _fit_cities_shrunk(cells, kg: float, wg: float, kappa: int) -> dict:
+    """Per-city EB-shrunk (k,w) with earned OOS score capital — the artifact cities section.
+
+    Writes ONLY cities with POSITIVE prequential score capital (the materializer serves them
+    ρ=1−exp(−C/W); an absent city ⇒ ρ=0 ⇒ pure global fallback). The served (k,w) is the full-corpus EB
+    estimate (best point estimate), licensed by the OOS-earned capital. There is NO manual min-n gate: a
+    city too thin to beat global out-of-sample simply has C≤0 and is omitted by the capital math, not by a
+    hand-set count (operator law 2026-06-12; frontier consult both rounds). The serving decision is
+    statistical, not a threshold."""
+    capital = _fit_city_capital(cells, kappa)
+    by_city: dict = defaultdict(list)
+    for c in cells:
+        by_city[c["city"]].append(c)
+    out: dict = {}
+    for cty, cc in by_city.items():
+        cap = capital.get(cty, 0.0)
+        if cap <= 0.0:
+            continue  # no earned capital ⇒ ρ=0 ⇒ served as global; omit to keep the artifact lean
+        kj, wj, _ = _fit_mle(cc)
+        ks, ws = _eb_shrink(kj, wj, len(cc), kg, wg, kappa)
+        out[cty] = {"k": round(ks, 4), "w": round(ws, 4), "n_cells": len(cc),
+                    "k_raw": round(kj, 4), "w_raw": round(wj, 4),
+                    "score_capital": round(cap, 6)}
+    return out
+
+
+def _fit_city_capital(cells, kappa) -> dict:
+    """Per-city OOS prequential score capital C_ℓ — the ledger the materializer spends via ρ=1−exp(−C/W).
+
+    C_ℓ = Σ_splits [ NLL_global(te_ℓ) − NLL_cityEB(te_ℓ) ] : the out-of-sample Bernoulli-log-score the
+    city's EB-shrunk (k,w) earns OVER the proven global fallback on rolling, time-respecting date splits.
+    Leak-free: each split fits the global pair AND the city MLE on the TRAIN portion only, shrinks the
+    city toward THAT split's global (the honest as-of-decision pair), then scores the held-out test cells.
+    Positive ⇒ the local layer has demonstrably beaten global OOS for that city (licenses ρ>0); ≤0 ⇒ the
+    materializer serves pure fallback for it (ρ=0, structurally cannot harm). Empty when <6 dates to
+    validate (then no city earns capital — the same fail-soft as _select_kappa_cv). The capital is the
+    SOLE statistical license for serving a local layer; it is not a hand-set gate (operator law 2026-06-12).
+    """
+    dates = sorted({c["target_date"] for c in cells})
+    if len(dates) < 6:
+        return {}
+    capital: dict = defaultdict(float)
+    for frac in (0.5, 0.6, 0.7):
+        cut = dates[int(len(dates) * frac)]
+        tr = [c for c in cells if c["target_date"] < cut]
+        te = [c for c in cells if c["target_date"] >= cut]
+        if len(te) < 50 or len(tr) < 100:
+            continue
+        gk, gw, _ = _fit_mle(tr)
+        by_tr: dict = defaultdict(list)
+        for c in tr:
+            by_tr[c["city"]].append(c)
+        by_te: dict = defaultdict(list)
+        for c in te:
+            by_te[c["city"]].append(c)
+        for cty, teg in by_te.items():
+            trg = by_tr.get(cty, [])
+            if len(trg) >= 10:
+                kj, wj, _ = _fit_mle(trg)
+                ks, ws = _eb_shrink(kj, wj, len(trg), gk, gw, kappa)
+            else:
+                ks, ws = gk, gw  # too thin to fit locally this split ⇒ no capital movement
+            capital[cty] += _neg_log_likelihood(teg, gk, gw) - _neg_log_likelihood(teg, ks, ws)
+    return dict(capital)
+
+
 def _profile_ci(cells, k_hat: float, w_hat: float, nll_hat: float):
     """Profile-likelihood 95% CIs for k and w (Δ(−LL) = 1.92, χ²₁ 0.95).
 
@@ -640,6 +778,16 @@ def main() -> int:
             "calibration_at_fit": _calibration_table(cells, k_hat, w_hat),
             "calibration_at_k1_w0": _calibration_table(cells, 1.0, 0.0),
         }
+        # PER-CITY EB-SHRUNK (k,w) — hierarchical partial pooling. OOS-validated: +5.04 mean NLL over
+        # 6 rolling date-splits vs the single global pair (per-city beats global on every split). Each
+        # city's MLE (k,w) is shrunk toward the family pair by lambda=n/(n+kappa); kappa is CV-selected
+        # (rolling OOS). ADDITIVE: families[unit].k/w are unchanged, so a reader that ignores "cities"
+        # is byte-identical to before — the per-city layer is opt-in at the materializer.
+        _kappa = _select_kappa_cv(cells, k_hat, w_hat)
+        if _kappa is not None:
+            families[unit]["shrink_kappa"] = int(_kappa)
+            families[unit]["cities_method"] = "per_city_eb_shrunk_kappa_cv"
+            families[unit]["cities"] = _fit_cities_shrunk(cells, k_hat, w_hat, int(_kappa))
 
     prov_basis = json.dumps(
         {u: {kk: families[u].get(kk) for kk in ("fitted", "k", "w", "n_cells")} for u in families},
