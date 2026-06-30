@@ -198,3 +198,25 @@ REMAINING after this wave (operator-gated, not blocked-on-stuck):
 - **`outcome_type` retirement arc** — populate `resolution_state` on new rows + revisions, cut the
   remaining `outcome_type` readers (`_coerce_outcome` / the `outcome_state` field), then stop writing
   `outcome_type`. Deliberate multi-step; schema foundation laid.
+
+### Live-DB finding (2026-06-29): the `outcome_type` "corruption" was never live
+
+Implementation review prompted a live-owner inventory of every `outcome_type` WRITE site, which
+surfaced that the corruption the A8/A9 split guards against **never reached the live DB**:
+- The only `outcome_type` writer is `scripts/backfill_settlement_outcome_type.py:117`, which runs
+  `UPDATE settlements_v2 SET outcome_type = ?`. **`settlements_v2` does not exist** in the current
+  forecasts schema (the table was renamed to `settlement_outcomes`; `init_schema_forecasts` creates only
+  `settlement_outcomes`), nor in the live `zeus-forecasts.db`. So the backfill is a dead no-op.
+- Live confirmation: `SELECT outcome_type, COUNT(*) FROM settlement_outcomes GROUP BY outcome_type` on
+  `zeus-forecasts.db` returns a **single NULL group of 8276 rows** — `outcome_type` is NULL for every
+  live settlement. `classify_settlement_outcome` drives harvester decisions but is never persisted to
+  `outcome_type`.
+
+Implications: the event-level `outcome_type` "all-WIN backfill corruption" (the original A8/A9 motivator)
+is **theoretical / on a renamed-away table**, not a live data hazard. The live reader path already uses
+the authority-based fallback (`outcome_type` NULL → `_coerce_outcome` default → `legacy_outcome_type_to_
+resolution_state`), which the step-3 eligibility cut preserved zero-diff. The A8/A9 `SettlementResolution
+State` lifecycle + `resolution_state` column are therefore **clean forward-prep**, not a corruption repair,
+and the retirement arc has nothing live to retire until the dead backfill is reconciled (flagged as a
+separate task: fix-or-delete `backfill_settlement_outcome_type.py`). The schema/projection layer stands on
+its own merits (typed axes, no value-coupling); no live behavior depends on it yet.
