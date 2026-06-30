@@ -4267,6 +4267,8 @@ def _build_event_bound_no_submit_receipt_core(
             held_position_conn=trade_conn,
             allow_same_family_monitor_owned=allow_same_family_monitor_owned,
             honor_admission_rejections=False,
+            enforce_win_rate_floor=False,
+            enforce_strategy_entry_floors=True,
         )
         _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
         if _pre_day0_low_block_reason is not None:
@@ -11524,12 +11526,19 @@ def _selection_scoped_proofs(
     held_position_conn: sqlite3.Connection | None = None,
     allow_same_family_monitor_owned: bool = False,
     honor_admission_rejections: bool = True,
+    enforce_win_rate_floor: bool = True,
+    enforce_strategy_entry_floors: bool = False,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
     executable = [
         proof
         for proof in executable
-        if _live_selection_rejection_reason(proof) is None
+        if _live_selection_rejection_reason(
+            proof,
+            enforce_win_rate_floor=enforce_win_rate_floor,
+            enforce_strategy_entry_floors=enforce_strategy_entry_floors,
+        )
+        is None
     ]
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
     # admission gate REJECTED (missing_reason set: DIRECTION_LAW / COVERAGE_
@@ -11619,7 +11628,12 @@ def _selection_scoped_proofs(
     return tuple(scoped)
 
 
-def _live_selection_rejection_reason(proof: _CandidateProof) -> str | None:
+def _live_selection_rejection_reason(
+    proof: _CandidateProof,
+    *,
+    enforce_win_rate_floor: bool = True,
+    enforce_strategy_entry_floors: bool = False,
+) -> str | None:
     """Return the live admission reason that prevents a proof from being ranked.
 
     The ΔU selector is the entry decision surface; proofs that cannot satisfy live
@@ -11627,15 +11641,40 @@ def _live_selection_rejection_reason(proof: _CandidateProof) -> str | None:
     the final venue submit gate.  This keeps cheap positive-EV lottery legs and
     qkernel SIDE_NOT_ARMED telemetry from becoming selected live intents.
     """
-    from src.strategy.live_inference.live_admission import (
-        live_win_rate_floor_rejection_reason,
-    )
+    if enforce_win_rate_floor:
+        from src.strategy.live_inference.live_admission import (
+            live_win_rate_floor_rejection_reason,
+        )
 
-    win_rate_reason = live_win_rate_floor_rejection_reason(
-        q_lcb=getattr(proof, "q_lcb_5pct", None)
-    )
-    if win_rate_reason is not None:
-        return win_rate_reason
+        win_rate_reason = live_win_rate_floor_rejection_reason(
+            q_lcb=getattr(proof, "q_lcb_5pct", None)
+        )
+        if win_rate_reason is not None:
+            return win_rate_reason
+
+    if (
+        enforce_strategy_entry_floors
+        and str(getattr(proof, "direction", "") or "").strip().lower() == "buy_yes"
+    ):
+        try:
+            min_entry_price = float(
+                _event_bound_strategy_live_quality_floors("center_buy")[
+                    "min_entry_price"
+                ]
+            )
+            cost = float(getattr(proof.execution_price, "value"))
+        except Exception:  # noqa: BLE001
+            return "QKERNEL_COST_BELOW_STRATEGY_FLOOR:cost_unavailable"
+        if (
+            math.isfinite(min_entry_price)
+            and min_entry_price > 0.0
+            and math.isfinite(cost)
+            and cost <= min_entry_price + 1e-12
+        ):
+            return (
+                "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
+                f"side=YES:cost={cost:.9f}:min_entry_price={min_entry_price:.9f}"
+            )
 
     cert = getattr(proof, "qkernel_execution_economics", None)
     if cert is None:
@@ -12121,8 +12160,10 @@ def _selection_exposure_receipt_summary(
 ) -> dict[str, Any] | None:
     """Compact provenance for the family exposure vector used at qkernel selection."""
 
+    if exposure_by_outcome is None:
+        return None
     cleaned: dict[str, float] = {}
-    for outcome_id, raw_usd in (exposure_by_outcome or {}).items():
+    for outcome_id, raw_usd in exposure_by_outcome.items():
         try:
             usd = float(raw_usd)
         except (TypeError, ValueError):
@@ -12131,11 +12172,21 @@ def _selection_exposure_receipt_summary(
             continue
         cleaned[str(outcome_id)] = usd
     if not cleaned:
-        return None
+        return _json_finite(
+            {
+                "source": "position_current_family_selection_exposure",
+                "status": "checked_empty",
+                "nonzero_outcome_count": 0,
+                "total_exposure_usd": 0.0,
+                "max_outcome_exposure_usd": 0.0,
+                "by_outcome_usd": {},
+            }
+        )
     total = sum(cleaned.values())
     return _json_finite(
         {
             "source": "position_current_family_selection_exposure",
+            "status": "nonzero",
             "nonzero_outcome_count": len(cleaned),
             "total_exposure_usd": total,
             "max_outcome_exposure_usd": max(cleaned.values()),

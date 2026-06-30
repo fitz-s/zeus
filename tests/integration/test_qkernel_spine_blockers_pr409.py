@@ -1076,6 +1076,34 @@ def test_opportunity_book_receipt_records_selection_exposure():
     assert summary["by_outcome_usd"][utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(12.0)
 
 
+def test_opportunity_book_receipt_records_checked_empty_selection_exposure():
+    """Empty family exposure is explicit evidence, not an omitted receipt field."""
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+
+    book = era._opportunity_book_from_proofs(
+        event_id="evt-selection-exposure-empty",
+        family_id=family.family_id,
+        proofs=proofs,
+        selected_proof=proofs[0],
+        selection_exposure_by_outcome={},
+    )
+
+    summary = book.to_receipt_dict()["cache_summary"]["selection_exposure"]
+    assert summary["source"] == "position_current_family_selection_exposure"
+    assert summary["status"] == "checked_empty"
+    assert summary["nonzero_outcome_count"] == 0
+    assert summary["total_exposure_usd"] == pytest.approx(0.0)
+    assert summary["by_outcome_usd"] == {}
+
+
 def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_topology():
     """Same city/date/metric exposure cannot flatten to zero when topology split hides it.
 
@@ -2225,6 +2253,73 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypat
     assert center_yes
     assert center_yes[0].economics.edge_lcb > 0.0
     assert center_yes[0].economics.optimal_delta_u > 0.0
+
+
+def test_qkernel_scope_uses_roi_not_legacy_win_rate_floor_for_yes():
+    """Qkernel can score low-cost YES by ROI instead of legacy q_lcb >= 51% admission."""
+
+    family, bins = _three_bin_family()
+    row = _row(
+        condition_id="cond-center",
+        yes_token="yes-center",
+        no_token="no-center",
+        yes_ask=0.27,
+        no_ask=0.73,
+        snapshot_id="snap-center",
+    )
+    center_yes = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-center",
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        bin_obj=bins[1],
+        execution_price=0.27,
+    )
+
+    legacy_scoped = era._selection_scoped_proofs(proofs=(center_yes,))
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=(center_yes,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+        enforce_strategy_entry_floors=True,
+    )
+
+    assert legacy_scoped == ()
+    assert qkernel_scoped == (center_yes,)
+    assert family.family_id
+
+
+def test_qkernel_scope_blocks_center_yes_below_strategy_floor():
+    """Sub-floor 0.0x YES must not occupy qkernel selection before submit."""
+
+    _family, bins = _three_bin_family()
+    row = _row(
+        condition_id="cond-cheap",
+        yes_token="yes-cheap",
+        no_token="no-cheap",
+        yes_ask=0.01,
+        no_ask=0.99,
+        snapshot_id="snap-cheap",
+    )
+    cheap_yes = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-cheap",
+        q_posterior=0.20,
+        q_lcb_5pct=0.20,
+        bin_obj=bins[1],
+        execution_price=0.01,
+    )
+
+    qkernel_scoped = era._selection_scoped_proofs(
+        proofs=(cheap_yes,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+        enforce_strategy_entry_floors=True,
+    )
+
+    assert qkernel_scoped == ()
 
 
 def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence():

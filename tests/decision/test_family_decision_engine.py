@@ -64,6 +64,7 @@ from src.decision.family_decision_engine import (
     NO_TRADE_NO_MIN_ORDER_UTILITY,
     NO_TRADE_NO_POSITIVE_EDGE,
     NO_TRADE_NO_POSITIVE_UTILITY,
+    NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING,
     NO_TRADE_PREDICTIVE_NOT_LIVE_ELIGIBLE,
     NO_TRADE_SUPERIOR_PORTFOLIO_ROUTE_NOT_EXECUTABLE,
     CandidateDecision,
@@ -583,6 +584,11 @@ def _hand_decision(
     q_lcb_guard_basis: str = "",
     q_lcb_guard_abstained: bool = False,
     q_lcb_guard_cell_key: str = "",
+    selection_guard_basis: str = "",
+    selection_guard_abstained: bool = False,
+    selection_guard_cell_key: str = "",
+    selection_guard_n: int = 0,
+    selection_guard_q_safe: Optional[float] = None,
     payoff_q_lcb: Optional[float] = None,
     chosen_stake_cost: Optional[float] = None,
     chosen_stake_edge_lcb: Optional[float] = None,
@@ -622,6 +628,11 @@ def _hand_decision(
         q_lcb_guard_basis=q_lcb_guard_basis,
         q_lcb_guard_abstained=q_lcb_guard_abstained,
         q_lcb_guard_cell_key=q_lcb_guard_cell_key,
+        selection_guard_basis=selection_guard_basis,
+        selection_guard_abstained=selection_guard_abstained,
+        selection_guard_cell_key=selection_guard_cell_key,
+        selection_guard_n=selection_guard_n,
+        selection_guard_q_safe=selection_guard_q_safe,
     )
 
 
@@ -1235,6 +1246,96 @@ def test_symmetric_center_yes_dominance_does_not_force_weaker_yes():
     )
 
     assert selected is selected_no
+
+
+def test_modal_yes_missing_empirical_authority_blocks_no_substitute():
+    """A blocked modal YES cannot be re-expressed as a broader nonmodal NO.
+
+    Shanghai/Munich class failure: the modal YES has positive point value but its
+    empirical guard is missing/thin, so the selector should abstain at family
+    level instead of buying a NO leg that still pays when the modal outcome wins.
+    """
+
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.02,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("20"),
+    )
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=-0.27,
+        optimal_delta_u=0.0,
+        delta_u_at_min=0.0,
+        robust_trade_score=0.53,
+        optimal_stake_usd=Decimal("0"),
+        selection_guard_basis="ACTIVE_MISSING_CELL",
+        selection_guard_abstained=True,
+        selection_guard_n=0,
+        selection_guard_q_safe=0.0,
+        chosen_stake_point_ev=0.53,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._apply_modal_yes_empirical_authority_invariant(
+        selected_decision=selected_no,
+        scored=[selected_no, modal_yes],
+        forecast_bin="b25",
+        outcome_bin_ids=tuple(b.bin_id for b in space.bins),
+    )
+
+    assert selected is None
+    assert reason == NO_TRADE_MODAL_YES_EMPIRICAL_AUTHORITY_MISSING
+
+
+def test_modal_yes_authority_invariant_does_not_block_independent_no():
+    """The modal-YES invariant is not a NO ban; it only blocks missing-authority substitution."""
+
+    case = _case()
+    space = _outcome_space(case)
+    selected_no = _hand_decision(
+        _hand_route(space, side="NO", bin_id="b24", cost=0.79),
+        edge_lcb=0.02,
+        optimal_delta_u=0.10,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.20,
+        optimal_stake_usd=Decimal("20"),
+    )
+    licensed_modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.01,
+        optimal_delta_u=0.01,
+        delta_u_at_min=0.001,
+        robust_trade_score=0.28,
+        optimal_stake_usd=Decimal("5"),
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_n=80,
+        selection_guard_q_safe=0.28,
+    )
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+
+    selected, reason = engine._apply_modal_yes_empirical_authority_invariant(
+        selected_decision=selected_no,
+        scored=[selected_no, licensed_modal_yes],
+        forecast_bin="b25",
+        outcome_bin_ids=tuple(b.bin_id for b in space.bins),
+    )
+
+    assert selected is selected_no
+    assert reason is None
 
 
 def test_center_yes_canonicalizes_adjacent_no_pair_equivalent_upside():
