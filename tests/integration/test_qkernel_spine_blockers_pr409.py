@@ -1888,7 +1888,8 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
 
     A qkernel-selected proof must not keep the legacy proof p-value after the
     qkernel band has selected a different payoff-space route. The p-value is the
-    finite-sample-corrected share of band route edges <= 0.
+    finite-sample-corrected share of band route edges <= 0 when no active
+    settlement reliability guard has re-authored the served lower bound.
     """
     from types import SimpleNamespace
 
@@ -1899,12 +1900,12 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
     selected_decision = SimpleNamespace(
         economics=economics,
         route=selected_route,
-        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_basis="INERT_TEST",
         q_lcb_guard_abstained=False,
         q_lcb_guard_cell_key="cell",
         direction_law_ok=True,
         coherence_allows=True,
-        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_basis="UNGUARDED_TEST",
         selection_guard_abstained=False,
         selection_guard_cell_key="NO|L2_3|modal|pb1",
         selection_guard_n=80,
@@ -1927,6 +1928,53 @@ def test_overlay_sets_qkernel_band_false_edge_p_value():
     assert new_proof.p_value == pytest.approx(0.5)  # (one failure + 1) / (three draws + 1)
     assert new_proof.passed_prefilter is True
     assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.5)
+
+
+def test_overlay_uses_guarded_false_edge_rate_when_guard_authors_edge():
+    """FDR must consume the same guarded q_safe authority as the selected edge.
+
+    Regression: after OOF/selection guards recomputed edge_lcb as q_safe-cost, the
+    bridge still recomputed p_value from the raw q-band samples. That made live
+    receipts self-contradictory: strong positive guarded edge but p=0.5, so every
+    qkernel-selected route died FDR_REJECTED.
+    """
+    from types import SimpleNamespace
+
+    economics = _selected_economics(
+        edge_lcb=0.01, cost=0.05, q_dot_payoff=0.08, point_ev=0.03
+    )
+    selected_route = SimpleNamespace(side="NO", bin_id="b1", payoff_vector=np.array([1.0]))
+    selected_decision = SimpleNamespace(
+        economics=economics,
+        route=selected_route,
+        q_lcb_guard_basis="OOF_WILSON_95",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="cell",
+        direction_law_ok=True,
+        coherence_allows=True,
+        selection_guard_basis="SELECTION_BETA_95",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="NO|L2_3|modal|pb1",
+        selection_guard_n=80,
+        selection_guard_q_safe=0.06,
+    )
+    decision = SimpleNamespace(
+        selected=economics,
+        band=SimpleNamespace(samples=np.array([[0.03], [0.06], [0.08]])),
+        candidate_decisions=(selected_decision,),
+    )
+    base = _overlay_proof(
+        q_posterior=0.08,
+        q_lcb_5pct=0.06,
+        economics=economics,
+    )
+    new_proof = bridge._overlay_spine_economics_onto_proof(base, decision)
+
+    assert new_proof is not None
+    assert new_proof.trade_score == pytest.approx(0.01)
+    assert new_proof.p_value == pytest.approx(0.05)
+    assert new_proof.passed_prefilter is True
+    assert new_proof.qkernel_execution_economics["false_edge_rate"] == pytest.approx(0.05)
 
 
 def test_fdr_maps_consume_selected_qkernel_overlay_authority():

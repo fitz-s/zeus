@@ -1954,6 +1954,77 @@ def qkernel_candidate_economics_by_bin_side(
     return out
 
 
+_GUARDED_FALSE_EDGE_RATE_95_BASES = {
+    "OOF_WILSON_95",
+    "OOF_WILSON_95_POOLED_TAIL",
+    "SELECTION_BETA_95",
+    "SELECTION_EB_BETA",
+}
+
+
+def _guarded_qkernel_false_edge_rate(selected_decision: Any | None) -> float | None:
+    """False-edge bound aligned to the guard that produced the served q_lcb.
+
+    Once the family engine applies an active OOF/selection reliability guard,
+    the selected edge is no longer the raw ``band.samples @ payoff - cost``
+    quantile. It is the guarded ``q_safe - cost`` value. Feeding raw band edges
+    to FDR after that creates two live authorities for the same candidate and can
+    reject a trade whose served 95% lower bound is already above cost.
+    """
+
+    if selected_decision is None:
+        return None
+    econ = getattr(selected_decision, "economics", None)
+    if econ is None:
+        return None
+    try:
+        edge_lcb_raw = getattr(econ, "chosen_stake_edge_lcb", None)
+        edge_lcb = float(edge_lcb_raw) if edge_lcb_raw is not None else float(econ.edge_lcb)
+        payoff_q_lcb = float(econ.payoff_q_lcb)
+        chosen_cost = getattr(econ, "chosen_stake_cost", None)
+        cost_obj = chosen_cost if chosen_cost is not None else econ.cost
+        cost = float(cost_obj.value)
+    except Exception:  # noqa: BLE001
+        return None
+    if not (
+        math.isfinite(edge_lcb)
+        and math.isfinite(payoff_q_lcb)
+        and math.isfinite(cost)
+        and edge_lcb > 0.0
+        and 0.0 <= payoff_q_lcb <= 1.0
+        and math.isclose(edge_lcb, payoff_q_lcb - cost, rel_tol=1e-9, abs_tol=1e-9)
+    ):
+        return None
+
+    guarded_bases: list[str] = []
+    q_lcb_basis = str(getattr(selected_decision, "q_lcb_guard_basis", "") or "").strip()
+    if (
+        q_lcb_basis in _GUARDED_FALSE_EDGE_RATE_95_BASES
+        and getattr(selected_decision, "q_lcb_guard_abstained", None) is False
+    ):
+        guarded_bases.append(q_lcb_basis)
+
+    selection_basis = str(getattr(selected_decision, "selection_guard_basis", "") or "").strip()
+    if (
+        selection_basis in _GUARDED_FALSE_EDGE_RATE_95_BASES
+        and getattr(selected_decision, "selection_guard_abstained", None) is False
+    ):
+        try:
+            selection_q_safe = float(getattr(selected_decision, "selection_guard_q_safe"))
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(selection_q_safe) and selection_q_safe > 0.0):
+            return None
+        guarded_bases.append(selection_basis)
+
+    if not guarded_bases:
+        return None
+    # The active guard bases above are 95% lower bounds. Use the same confidence
+    # semantics as the FDR p-value for the guarded route; unguarded routes fall
+    # back to the raw band empirical rate below.
+    return 0.05
+
+
 def _qkernel_false_edge_rate(
     decision: FamilyDecision,
     selected_decision: Any | None,
@@ -1967,6 +2038,9 @@ def _qkernel_false_edge_rate(
     empirical p-value over the tested band draws.
     """
 
+    guarded_rate = _guarded_qkernel_false_edge_rate(selected_decision)
+    if guarded_rate is not None:
+        return guarded_rate
     if selected_decision is None or getattr(decision, "band", None) is None:
         return None
     try:
