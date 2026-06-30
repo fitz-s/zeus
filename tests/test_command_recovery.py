@@ -4388,6 +4388,141 @@ class TestRecoveryResolutionTable:
             "tx_hash": "0xhash-sell-matched",
         }
 
+    def test_review_required_exit_matched_order_fact_finalizes_exit_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-exit-review")
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-exit-review",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   direction = 'buy_yes',
+                   shares = 85.17,
+                   chain_shares = 85.17,
+                   cost_basis_usd = 4.34367,
+                   entry_price = 0.050999,
+                   token_id = 'tok-001',
+                   no_token_id = 'tok-001-no',
+                   order_status = 'retry_pending',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-exit-review'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit-review",
+            position_id="pos-exit-review",
+            intent_kind="EXIT",
+            side="SELL",
+            size=85.17,
+            price=0.04,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-review",
+            venue_order_id="ord-exit-review",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-review",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"venue_order_id": "ord-exit-review"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-review",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:03:01Z",
+            payload={
+                "venue_order_id": "ord-exit-review",
+                "reason": "matched orders can't be canceled",
+                "cancel_outcome": {
+                    "status": "NOT_CANCELED",
+                    "errorMessage": "matched orders can't be canceled",
+                },
+            },
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit-review",
+            order_id="ord-exit-review",
+            state="MATCHED",
+            matched_size="85.17",
+            remaining_size="0",
+            raw_payload_json={
+                "id": "ord-exit-review",
+                "status": "MATCHED",
+                "size_matched": "85.17",
+                "price": "0.04",
+                "associate_trades": ["trade-exit-review"],
+            },
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-exit-review",
+            "status": "MATCHED",
+            "size_matched": "85.17",
+            "price": "0.04",
+            "associate_trades": ["trade-exit-review"],
+            "transactionsHashes": ["0xhash-exit-review"],
+        }
+        before_cancel_requested = sum(
+            1
+            for event in _get_events(conn, "cmd-exit-review")
+            if event["event_type"] == "CANCEL_REQUESTED"
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-exit-review") == "FILLED"
+        events = _get_events(conn, "cmd-exit-review")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        assert sum(1 for event in events if event["event_type"] == "CANCEL_REQUESTED") == before_cancel_requested
+        trade_fact = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-exit-review'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "trade_id": "trade-exit-review",
+            "venue_order_id": "ord-exit-review",
+            "state": "MATCHED",
+            "filled_size": "85.17",
+            "fill_price": "0.04",
+            "tx_hash": "0xhash-exit-review",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, chain_shares, order_status, exit_price
+              FROM position_current
+             WHERE position_id = 'pos-exit-review'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "economically_closed",
+            "chain_shares": 0.0,
+            "order_status": "sell_filled",
+            "exit_price": 0.04,
+        }
+
     def test_matched_order_recovery_finalizes_when_venue_normalizes_size_below_command(
         self,
         conn,
@@ -4890,7 +5025,7 @@ class TestRecoveryResolutionTable:
             "command_id": "cmd-001",
             "shares": 5.0,
             "fill_price": 0.34,
-            "venue_status": "FILLED",
+            "venue_status": "MATCHED",
             "terminal_exec_status": "filled",
         }
         second_summary = reconcile_unresolved_commands(conn, mock_client)

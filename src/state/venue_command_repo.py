@@ -2009,6 +2009,7 @@ def _validate_review_confirmed_fill_payload(
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
         "recovery_no_venue_order_id_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
+        "review_required_matched_order_fact_with_positive_trade_fact",
     }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -2038,6 +2039,13 @@ def _validate_review_confirmed_fill_payload(
             "residual_size_is_dust",
             "active_projection_matches_confirmed_fill",
         )
+    elif proof_class == "review_required_matched_order_fact_with_positive_trade_fact":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "positive_trade_fact",
+            "matched_order_fact_positive",
+        )
     else:
         required_true = (
             "latest_event_is_review_required",
@@ -2061,6 +2069,7 @@ def _validate_review_confirmed_fill_payload(
         "command_recovery._review_required_cancel_unknown_live_order_recovery",
         "command_recovery._reconcile_row",
         "command_recovery.reconcile_matched_cancel_review_required_entries",
+        "command_recovery.reconcile_matched_order_facts",
     }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():
@@ -2399,7 +2408,7 @@ def _actual_review_confirmed_fill_predicates(
             (command_id, venue_order_id),
         ).fetchone()
         command = conn.execute(
-            "SELECT position_id FROM venue_commands WHERE command_id = ?",
+            "SELECT position_id, state FROM venue_commands WHERE command_id = ?",
             (command_id,),
         ).fetchone()
         position_rows = conn.execute(
@@ -2416,6 +2425,7 @@ def _actual_review_confirmed_fill_predicates(
             ),
         ).fetchall()
     latest_event_type = str(events[-1]["event_type"] or "") if events else ""
+    command_state = str(command["state"] or "") if command is not None else ""
     prior_fill_confirmed = False
     for event in events[:-1]:
         if str(event["event_type"] or "") != "FILL_CONFIRMED":
@@ -2485,10 +2495,27 @@ def _actual_review_confirmed_fill_predicates(
         and payload_filled is not None
         and abs(aggregate_filled - payload_filled) <= Decimal("0.000001")
     )
+    order_fact_matched = _decimal_or_none(order_fact["matched_size"]) if order_fact is not None else None
+    order_fact_remaining = _decimal_or_none(order_fact["remaining_size"]) if order_fact is not None else None
+    matched_order_fact_positive = (
+        order_fact is not None
+        and payload_filled is not None
+        and order_fact_matched is not None
+        and order_fact_matched > 0
+        and abs(order_fact_matched - payload_filled) <= Decimal("0.000001")
+        and order_fact_remaining is not None
+        and Decimal("0") <= order_fact_remaining <= Decimal("0.011")
+    )
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         required_predicates = {}
     return {
+        "command_state_review_required": command_state == "REVIEW_REQUIRED",
+        "latest_event_is_review_boundary": latest_event_type in {
+            "REVIEW_REQUIRED",
+            "CANCEL_FAILED",
+            "CANCEL_REPLACE_BLOCKED",
+        },
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
         "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
         "semantic_cancel_status_cancel_unknown": _latest_payload_is_cancel_unknown(latest_payload),
@@ -2497,6 +2524,7 @@ def _actual_review_confirmed_fill_predicates(
         "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
+        "matched_order_fact_positive": matched_order_fact_positive,
         "positive_trade_facts": aggregate_positive_trade_facts,
         "cancel_response_not_canceled_because_matched": (
             "not_canceled" in cancel_text and "matched" in cancel_text

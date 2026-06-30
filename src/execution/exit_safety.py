@@ -524,6 +524,13 @@ def request_cancel_for_command(
     cmd = get_command(conn, command_id)
     if cmd is None:
         raise ValueError(f"Unknown command_id: {command_id!r}")
+    command_state = str(cmd.get("state") or "").upper()
+    if command_state not in _CANCEL_REQUESTABLE_STATES and command_state != "CANCEL_PENDING":
+        return CancelOutcome(
+            "UNKNOWN",
+            f"state_not_cancel_requestable:{command_state}",
+            {"command_state": command_state},
+        )
     venue_order_id = str(cmd.get("venue_order_id") or "")
     if not venue_order_id:
         outcome = CancelOutcome("UNKNOWN", "missing_venue_order_id", {})
@@ -535,7 +542,7 @@ def request_cancel_for_command(
             execution_capability=_build_cancel_execution_capability(
                 command_id=command_id,
                 venue_order_id=venue_order_id,
-                command_state=str(cmd.get("state") or "").upper(),
+                command_state=command_state,
                 cutover=None,
                 freshness_time=when,
             ),
@@ -546,7 +553,6 @@ def request_cancel_for_command(
     if not cutover.allow_cancel:
         raise CutoverPending(cutover.block_reason or cutover.state.value)
 
-    command_state = str(cmd.get("state") or "").upper()
     if command_state != "CANCEL_PENDING":
         execution_capability = _build_cancel_execution_capability(
             command_id=command_id,

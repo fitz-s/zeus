@@ -565,6 +565,48 @@ def test_cancel_pending_without_capability_fails_closed_without_duplicate_reques
     assert get_command(conn, "cmd-exit-1")["state"] == "REVIEW_REQUIRED"
 
 
+def test_review_required_cancel_request_is_blocked_without_illegal_event(conn):
+    from src.execution.exit_safety import request_cancel_for_command
+    from src.state.venue_command_repo import append_event, get_command, list_events
+
+    _insert_exit_command(conn, venue_order_id="ord-1")
+    _ack_exit(conn)
+    append_event(
+        conn,
+        command_id="cmd-exit-1",
+        event_type="CANCEL_REQUESTED",
+        occurred_at=_NOW.isoformat(),
+        payload={"venue_order_id": "ord-1"},
+    )
+    append_event(
+        conn,
+        command_id="cmd-exit-1",
+        event_type="CANCEL_FAILED",
+        occurred_at=_NOW.isoformat(),
+        payload={
+            "venue_order_id": "ord-1",
+            "reason": "matched orders can't be canceled",
+            "cancel_outcome": {
+                "status": "NOT_CANCELED",
+                "errorMessage": "matched orders can't be canceled",
+            },
+        },
+    )
+    before_events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
+
+    outcome = request_cancel_for_command(
+        conn,
+        "cmd-exit-1",
+        lambda _order_id: (_ for _ in ()).throw(AssertionError("must not cancel REVIEW_REQUIRED")),
+    )
+
+    after_events = [event["event_type"] for event in list_events(conn, "cmd-exit-1")]
+    assert outcome.status == "UNKNOWN"
+    assert outcome.reason == "state_not_cancel_requestable:REVIEW_REQUIRED"
+    assert after_events == before_events
+    assert get_command(conn, "cmd-exit-1")["state"] == "REVIEW_REQUIRED"
+
+
 def test_CANCEL_UNKNOWN_blocks_replacement(conn, monkeypatch):
     from src.execution.executor import create_exit_order_intent, execute_exit_order
     from src.execution.exit_safety import request_cancel_for_command
@@ -1128,9 +1170,10 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
 
     assert stats["filled"] == 0
     assert stats["retried"] == 1
+    assert stats["released_no_order"] == 1
     assert stats["unchanged"] == 0
-    assert position.exit_state == "retry_pending"
-    assert position.last_exit_error == "no_order_id"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
     events = conn.execute(
         """
         SELECT event_type, payload_json
@@ -1140,9 +1183,7 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
         """,
         (position.trade_id,),
     ).fetchall()
-    assert [event["event_type"] for event in events] == ["EXIT_ORDER_REJECTED"]
-    payload = json.loads(events[0]["payload_json"])
-    assert payload["error"] == "no_order_id"
+    assert events == []
 
 
 def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):

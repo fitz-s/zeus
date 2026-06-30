@@ -126,6 +126,9 @@ _ACKED_ORDER_STATES = frozenset({
     CommandState.ACKED.value,
     CommandState.POST_ACKED.value,
 })
+_POSITIVE_MATCH_RECOVERABLE_COMMAND_STATES = _ACKED_ORDER_STATES | frozenset({
+    CommandState.REVIEW_REQUIRED.value,
+})
 _TERMINAL_POSITIVE_MATCH_COMMAND_STATES = frozenset({
     CommandState.CANCELLED.value,
     CommandState.EXPIRED.value,
@@ -1647,7 +1650,9 @@ def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
 def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
-    command_states = tuple(sorted(_ACKED_ORDER_STATES | _TERMINAL_POSITIVE_MATCH_COMMAND_STATES))
+    command_states = tuple(
+        sorted(_POSITIVE_MATCH_RECOVERABLE_COMMAND_STATES | _TERMINAL_POSITIVE_MATCH_COMMAND_STATES)
+    )
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
     fact_states = (
         "LIVE",
@@ -1686,7 +1691,18 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
         sql,
         (*command_states, *fact_states, *sources),
     ).fetchall()
-    return [_dict_row(row) for row in rows]
+    candidates: list[dict] = []
+    terminal_no_fill_fact_states = {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+    for row in rows:
+        candidate = _dict_row(row)
+        if (
+            str(candidate.get("state") or "").upper() == CommandState.REVIEW_REQUIRED.value
+            and str(candidate.get("order_fact_state") or "").upper() in terminal_no_fill_fact_states
+            and _positive_decimal_or_none(candidate.get("order_fact_matched_size")) is None
+        ):
+            continue
+        candidates.append(candidate)
+    return candidates
 
 
 def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -6265,9 +6281,10 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
             if not order_id or not command_order_id or order_id != command_order_id:
                 summary["errors"] += 1
                 continue
+            review_required_command = str(row.get("state") or "").upper() == CommandState.REVIEW_REQUIRED.value
             terminal_positive_fact = _is_terminal_positive_match_candidate(row)
             existing_fill_trade_fact_count = _fill_trade_fact_count(conn, command_id)
-            if existing_fill_trade_fact_count > 0 and not terminal_positive_fact:
+            if existing_fill_trade_fact_count > 0 and not (terminal_positive_fact or review_required_command):
                 summary["stayed"] += 1
                 continue
             point_order = _order_fact_point_payload(row) if terminal_positive_fact else None
@@ -6360,17 +6377,40 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
             )
             if not observed_at:
                 observed_at = _now_iso()
-            payload = {
-                "reason": (
+            payload_reason = (
+                "review_cleared_confirmed_fill"
+                if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
+                else (
                     "terminal_order_fact_positive_match"
                     if terminal_positive_fact
                     else "acked_order_point_order_matched"
+                )
+            )
+            proof_class = (
+                "review_required_matched_order_fact_with_positive_trade_fact"
+                if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
+                else "point_order_matched_fill"
+            )
+            required_predicates = (
+                {
+                    "command_state_review_required": True,
+                    "latest_event_is_review_boundary": True,
+                    "positive_trade_fact": True,
+                    "matched_order_fact_positive": True,
+                }
+                if review_required_command and event_type == CommandEventType.FILL_CONFIRMED.value
+                else {}
+            )
+            payload = {
+                "reason": (
+                    payload_reason
                 ),
-                "proof_class": "point_order_matched_fill",
+                "proof_class": proof_class,
                 "venue_order_id": order_id,
                 "command_id": command_id,
                 "venue_status": venue_status,
                 "matched_size": matched_size,
+                "filled_size": matched_size,
                 "remaining_size": remaining_size,
                 "fill_price": fill_price,
                 "trade_id": trade_id,
@@ -6381,6 +6421,12 @@ def reconcile_matched_order_facts(conn: sqlite3.Connection, client) -> dict:
                 "latest_order_fact_source": row.get("order_fact_source"),
                 "command_state": row.get("state"),
                 "trade_ids": list(trade_ids),
+                "required_predicates": required_predicates,
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": "command_recovery.reconcile_matched_order_facts",
+                    "source_reason": "review_required_matched_order_fact_clearance",
+                },
             }
             safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
             sp_name = f"sp_matched_order_fact_{safe_command_id}"
