@@ -2240,6 +2240,66 @@ def test_fresh_pre_submit_book_upgrades_proven_maker_to_taker_when_crossing_clea
     assert command.payload["post_only"] is False
 
 
+def test_live_order_build_releases_stale_wal_snapshot_before_aggregate_write(tmp_path):
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    db_path = tmp_path / "trade.db"
+    setup = sqlite3.connect(str(db_path))
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.execute("CREATE TABLE stale_probe (id INTEGER PRIMARY KEY, value TEXT)")
+    setup.execute("INSERT INTO stale_probe (value) VALUES ('before')")
+    setup.commit()
+    setup.close()
+
+    conn = sqlite3.connect(str(db_path), timeout=1.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout = 100")
+
+    conn.execute("BEGIN")
+    assert conn.execute("SELECT COUNT(*) FROM stale_probe").fetchone()[0] == 1
+    assert conn.in_transaction is True
+
+    other = sqlite3.connect(str(db_path), timeout=1.0)
+    try:
+        other.execute("PRAGMA journal_mode=WAL")
+        other.execute("INSERT INTO stale_probe (value) VALUES ('after')")
+        other.commit()
+    finally:
+        other.close()
+
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            accepted,
+            decision_time=decision_time,
+        ),
+    )
+
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        live_cap_conn=conn,
+        trade_conn=conn,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+            current_best_bid=0.39,
+            current_best_ask=0.40,
+        ),
+    )
+
+    assert any(getattr(c, "certificate_type", None) == claims.EXECUTION_COMMAND for c in certs)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_events").fetchone()[0] >= 1
+    conn.close()
+
+
 def test_live_command_reuses_single_pre_submit_authority_witness():
     from src.decision_kernel import claims
     from src.engine import event_reactor_adapter as adapter

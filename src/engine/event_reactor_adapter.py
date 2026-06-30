@@ -3361,6 +3361,25 @@ def _run_live_order_build_savepoint(
     raise RuntimeError("unreachable live order build retry state")
 
 
+def _release_live_order_build_stale_transaction(conn: sqlite3.Connection, *, phase: str) -> None:
+    """End an old read/write transaction before the final live-order write unit.
+
+    The live reactor uses one trade connection across many reads before it appends the
+    live-order aggregate and live-cap rows. In WAL mode, a stale read snapshot cannot
+    always be upgraded into a writer after sidecars have committed newer trade rows; the
+    upgrade fails immediately as ``database is locked`` and retrying the same snapshot is
+    useless. The live-order write unit has its own savepoint below, so release any older
+    transaction first and write from a fresh snapshot.
+    """
+
+    if not bool(getattr(conn, "in_transaction", False)):
+        return
+    logging.getLogger(__name__).info(
+        "live order build releasing stale sqlite transaction before %s", phase
+    )
+    conn.commit()
+
+
 def _rollback_release_live_order_build_savepoint(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_build")
@@ -7288,6 +7307,12 @@ def _build_live_execution_command_certificates(
                 f"fresh_mode=TAKER:reason=FRESH_BOOK_EV_FAVORS_CROSS_FOR_PROVEN_MAKER:"
                 f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
             )
+        if live_cap_conn is None:
+            raise ValueError("LIVE_CAP_CONNECTION_REQUIRED")
+        _release_live_order_build_stale_transaction(
+            live_cap_conn,
+            phase="active_duplicate_read",
+        )
         # FIX A (#125): live-order-state duplicate lock. Suppress THIS submit only
         # while an order for the same (token, direction) is genuinely ACTIVE on the
         # venue (open/pending/in-flight/unknown). After a TERMINAL unfilled cancel
@@ -7314,8 +7339,6 @@ def _build_live_execution_command_certificates(
         if already_locked_reason is not None:
             raise _LiveOpportunityAlreadyLocked(already_locked_reason)
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
-        if live_cap_conn is None:
-            raise ValueError("LIVE_CAP_CONNECTION_REQUIRED")
 
         def _append_live_order_state() -> tuple[DecisionCertificate, DecisionCertificate, DecisionCertificate]:
             aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
