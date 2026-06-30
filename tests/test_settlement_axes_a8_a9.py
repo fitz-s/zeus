@@ -22,6 +22,7 @@ from src.contracts.settlement_axes import (
     PROMOTION_ELIGIBLE_RESOLUTION_STATES,
     MarketResolutionSide,
     PositionEconomicOutcome,
+    RedemptionAccountingPhase,
     SettlementResolutionState,
     economic_outcome_for_position,
     is_promotion_eligible_resolution_state,
@@ -29,6 +30,7 @@ from src.contracts.settlement_axes import (
     market_resolution_side_from_position_relative_outcome,
     market_resolution_side_for_bin,
     position_economic_outcome,
+    redemption_accounting_phase,
     settlement_resolution_state_from_row,
 )
 from src.contracts.settlement_outcome import SettlementOutcome
@@ -275,3 +277,47 @@ def test_no_scoring_file_reads_event_outcome_type() -> None:
             if "outcome_type" in line and "outcome_type_raw" not in line and not line.lstrip().startswith("#"):
                 offenders.append(f"{rel}:{i}: {line.strip()}")
     assert not offenders, "scoring code references event-level outcome_type: " + " | ".join(offenders)
+
+
+# --- A10 redemption-accounting axis (consult 6a42bc3d: a distinct third axis) ---- #
+# Redemption is ACCOUNTING-ONLY: Zeus never submits a redeem tx (operator law
+# 2026-06-10); a third-party auto-redeem owns submission. This phase is an OBSERVED
+# accounting lifecycle over settlement_commands.state, never a Zeus action and never
+# market side (A8) or economic win/loss (A9).
+
+def test_redemption_accounting_phase_membership() -> None:
+    assert {s.value for s in RedemptionAccountingPhase} == {
+        "NOT_RECORDED", "INTENT_RECORDED", "TX_OBSERVED", "CONFIRMED",
+        "REVIEW_REQUIRED", "OPERATOR_REQUIRED", "FAILED",
+    }
+
+
+@pytest.mark.parametrize("state,expected", [
+    (None, RedemptionAccountingPhase.NOT_RECORDED),
+    ("", RedemptionAccountingPhase.NOT_RECORDED),
+    ("REDEEM_INTENT_CREATED", RedemptionAccountingPhase.INTENT_RECORDED),
+    ("REDEEM_RETRYING", RedemptionAccountingPhase.INTENT_RECORDED),
+    ("REDEEM_SUBMITTED", RedemptionAccountingPhase.TX_OBSERVED),
+    ("REDEEM_TX_HASHED", RedemptionAccountingPhase.TX_OBSERVED),
+    ("REDEEM_CONFIRMED", RedemptionAccountingPhase.CONFIRMED),
+    ("REDEEM_FAILED", RedemptionAccountingPhase.FAILED),
+    ("REDEEM_REVIEW_REQUIRED", RedemptionAccountingPhase.REVIEW_REQUIRED),
+    ("REDEEM_OPERATOR_REQUIRED", RedemptionAccountingPhase.OPERATOR_REQUIRED),
+])
+def test_redemption_accounting_phase_maps_settlement_state(state, expected: RedemptionAccountingPhase) -> None:
+    assert redemption_accounting_phase(state) is expected
+
+
+def test_redemption_accounting_phase_unknown_is_review() -> None:
+    # An unmapped/unexpected state surfaces for operator review (fail-safe), not silent.
+    assert redemption_accounting_phase("REDEEM_GARBAGE") is RedemptionAccountingPhase.REVIEW_REQUIRED
+
+
+def test_redemption_phase_covers_every_live_settlement_state() -> None:
+    # Antibody: every live SettlementState value must map to a real (non-NOT_RECORDED)
+    # phase — a new redemption state cannot silently fall through. Importing the live
+    # enum in the TEST keeps the contracts module free of an execution dependency.
+    from src.execution.settlement_commands import SettlementState
+    for st in SettlementState:
+        phase = redemption_accounting_phase(st.value)
+        assert phase is not RedemptionAccountingPhase.NOT_RECORDED, f"{st.value} unmapped"

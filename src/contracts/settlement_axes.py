@@ -19,8 +19,9 @@ though the fused enum label says "WIN".
 These are PURE derived views. They add NO writer, NO DB column, and do NOT renumber the
 SettlementOutcome integers — they exist so consumers can branch on one typed axis
 instead of re-deriving WIN/LOSE-vs-YES/NO from the overloaded integer. The redemption
-ACCOUNTING axis (A9 sub-axis over the SettlementState command machine) is intentionally
-NOT modelled here yet: it needs its own live-owner audit before a typed projection.
+ACCOUNTING axis (A10, over the settlement_commands.state machine) is modelled below as
+RedemptionAccountingPhase — a DISTINCT third axis (Zeus is accounting-only; it never
+submits a redeem tx, operator law 2026-06-10).
 """
 
 from __future__ import annotations
@@ -248,3 +249,50 @@ def economic_outcome_for_position(
         return PositionEconomicOutcome.UNRESOLVED
     won = settled_in_bin if d == "buy_yes" else (not settled_in_bin)
     return PositionEconomicOutcome.WIN if won else PositionEconomicOutcome.LOSE
+
+
+# --------------------------------------------------------------------------- #
+# A10 redemption accounting (consult 6a42bc3d) — a DISTINCT third axis over    #
+# settlement_commands.state. ACCOUNTING-ONLY: Zeus never submits a redeem tx   #
+# (operator law 2026-06-10); a third-party auto-redeem owns submission. This   #
+# is an OBSERVED phase — never a Zeus action, never market side (A8), never    #
+# economic win/loss (A9).                                                      #
+# --------------------------------------------------------------------------- #
+
+class RedemptionAccountingPhase(StrEnum):
+    """A10 observed redemption-accounting lifecycle over settlement_commands.state."""
+
+    NOT_RECORDED = "NOT_RECORDED"            # no redemption command row
+    INTENT_RECORDED = "INTENT_RECORDED"      # redeem intent / retrying — pre-tx accounting
+    TX_OBSERVED = "TX_OBSERVED"              # a (third-party) redemption tx submitted / hash-anchored
+    CONFIRMED = "CONFIRMED"                  # redemption confirmed on chain
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"      # needs classification / review
+    OPERATOR_REQUIRED = "OPERATOR_REQUIRED"  # manual operator action required
+    FAILED = "FAILED"                        # redemption failed
+
+
+_SETTLEMENT_STATE_TO_REDEMPTION_PHASE: dict[str, RedemptionAccountingPhase] = {
+    "REDEEM_INTENT_CREATED": RedemptionAccountingPhase.INTENT_RECORDED,
+    "REDEEM_RETRYING": RedemptionAccountingPhase.INTENT_RECORDED,
+    "REDEEM_SUBMITTED": RedemptionAccountingPhase.TX_OBSERVED,
+    "REDEEM_TX_HASHED": RedemptionAccountingPhase.TX_OBSERVED,
+    "REDEEM_CONFIRMED": RedemptionAccountingPhase.CONFIRMED,
+    "REDEEM_FAILED": RedemptionAccountingPhase.FAILED,
+    "REDEEM_REVIEW_REQUIRED": RedemptionAccountingPhase.REVIEW_REQUIRED,
+    "REDEEM_OPERATOR_REQUIRED": RedemptionAccountingPhase.OPERATOR_REQUIRED,
+}
+
+
+def redemption_accounting_phase(settlement_state: str | None) -> RedemptionAccountingPhase:
+    """Project the A10 observed redemption-accounting phase from a settlement_commands
+    state value (passed as a string, to keep this contracts module free of an execution
+    import).
+
+    Accounting-only: REDEEM_SUBMITTED / REDEEM_TX_HASHED reflect a THIRD-PARTY
+    auto-redeem tx observed on chain, never a Zeus submission (operator law 2026-06-10).
+    An absent state is NOT_RECORDED; an unmapped/unexpected state surfaces for operator
+    review (fail-safe) rather than silently passing."""
+    if not settlement_state:
+        return RedemptionAccountingPhase.NOT_RECORDED
+    key = str(settlement_state).strip().upper()
+    return _SETTLEMENT_STATE_TO_REDEMPTION_PHASE.get(key, RedemptionAccountingPhase.REVIEW_REQUIRED)
