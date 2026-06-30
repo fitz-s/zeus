@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import json
+import os
 import re
 import sqlite3
 import time
@@ -14004,65 +14005,170 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         # exit monitor from starting. Keep boot to local, already-durable facts
         # that can release impossible locks; the scheduled live_tick sweep owns
         # venue-backed reconciliation once the live loop is running.
-        _db_pass(
+        raw_budget = os.environ.get("ZEUS_BOOT_FAST_RECOVERY_BUDGET_SECONDS", "8.0")
+        try:
+            boot_budget_s = max(0.0, float(raw_budget))
+        except (TypeError, ValueError):
+            logger.warning(
+                "recovery.boot_fast: invalid ZEUS_BOOT_FAST_RECOVERY_BUDGET_SECONDS=%r; using 8.0",
+                raw_budget,
+            )
+            boot_budget_s = 8.0
+        boot_started_monotonic = time.monotonic()
+        boot_deadline = boot_started_monotonic + boot_budget_s
+        boot_deferred: list[str] = []
+        boot_defer_reasons: dict[str, str] = {}
+        summary["boot_fast_budget_seconds"] = boot_budget_s
+
+        def _defer_boot_pass(label: str, reason: str) -> None:
+            if label not in boot_deferred:
+                boot_deferred.append(label)
+            boot_defer_reasons[label] = reason
+            summary["boot_fast_deferred_passes"] = list(boot_deferred)
+            summary["boot_fast_defer_reasons"] = dict(boot_defer_reasons)
+            summary["boot_fast_deferred"] = True
+            if reason.startswith("budget_"):
+                summary["boot_fast_budget_exhausted"] = True
+            logger.warning(
+                "recovery.boot_fast: deferred pass=%s reason=%s elapsed_s=%.3f budget_s=%.3f",
+                label,
+                reason,
+                time.monotonic() - boot_started_monotonic,
+                boot_budget_s,
+            )
+
+        def _boot_conn_factory() -> sqlite3.Connection:
+            conn = conn_factory()
+            remaining_s = max(0.0, boot_deadline - time.monotonic())
+            # Default trade connections wait up to 30s for BEGIN IMMEDIATE.
+            # Boot-fast runs before the scheduler exists, so its lock wait must
+            # be capped by the same startup budget as the DB pass body.
+            conn.execute("PRAGMA busy_timeout = %d" % max(1, int(remaining_s * 1000)))
+            return conn
+
+        def _boot_db_pass(
+            label,
+            pass_fn,
+            summary_key,
+            *,
+            advanced_key="advanced",
+            fold_stayed=True,
+            **pass_kwargs,
+        ):
+            remaining_s = boot_deadline - time.monotonic()
+            if remaining_s <= 0:
+                _defer_boot_pass(label, "budget_exhausted_before_pass")
+                return None
+            logger.info(
+                "recovery.boot_fast: starting pass=%s remaining_s=%.3f",
+                label,
+                remaining_s,
+            )
+
+            def _apply(conn):
+                def _interrupt_if_deadline_exceeded() -> int:
+                    return 1 if time.monotonic() >= boot_deadline else 0
+
+                conn.set_progress_handler(_interrupt_if_deadline_exceeded, 20_000)
+                try:
+                    ps = pass_fn(conn, **pass_kwargs)
+                    _accumulate(
+                        summary,
+                        summary_key,
+                        ps,
+                        advanced_key=advanced_key,
+                        fold_stayed=fold_stayed,
+                    )
+                    return ps
+                finally:
+                    conn.set_progress_handler(None, 0)
+
+            try:
+                return run_db_only_pass(
+                    _apply,
+                    conn_factory=_boot_conn_factory,
+                    label=f"recovery.{label}",
+                )
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if "interrupted" in msg:
+                    _defer_boot_pass(label, "budget_exhausted_during_pass")
+                    return None
+                if "database is locked" in msg:
+                    _defer_boot_pass(label, "database_locked_before_scheduler")
+                    return None
+                raise
+            finally:
+                summary["boot_fast_elapsed_seconds"] = round(
+                    time.monotonic() - boot_started_monotonic,
+                    3,
+                )
+                logger.info(
+                    "recovery.boot_fast: finished pass=%s elapsed_s=%.3f remaining_s=%.3f",
+                    label,
+                    time.monotonic() - boot_started_monotonic,
+                    max(0.0, boot_deadline - time.monotonic()),
+                )
+
+        _boot_db_pass(
             "edli_confirmed_legacy_command_repair",
             reconcile_edli_confirmed_legacy_command_repairs,
             "edli_confirmed_legacy_command_repair",
         )
-        _db_pass(
+        _boot_db_pass(
             "stale_intent_created_no_submit",
             reconcile_stale_intent_created_no_submit,
             "stale_intent_created_no_submit",
             updated_before=started_at,
         )
-        _db_pass(
+        _boot_db_pass(
             "abandoned_unsubmitted_ghosts",
             reconcile_abandoned_unsubmitted_ghosts,
             "abandoned_unsubmitted_ghosts",
             updated_before=started_at,
         )
-        _db_pass(
+        _boot_db_pass(
             "cancel_ack_terminal_no_fill_facts",
             reconcile_cancel_ack_terminal_no_fill_facts,
             "cancel_ack_terminal_no_fill_facts",
         )
-        _db_pass(
+        _boot_db_pass(
             "terminal_order_facts",
             reconcile_terminal_order_facts,
             "terminal_order_facts",
             collect_continuations=True,
         )
-        _db_pass(
+        _boot_db_pass(
             "stale_terminal_no_fill_findings",
             reconcile_stale_terminal_no_fill_findings,
             "stale_terminal_no_fill_findings",
         )
-        _db_pass(
+        _boot_db_pass(
             "edli_acknowledged_venue_command_sync",
             reconcile_edli_acknowledged_venue_command_sync,
             "edli_acknowledged_venue_command_sync",
         )
-        _db_pass(
+        _boot_db_pass(
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,
             "live_entry_projection_repair",
         )
-        _db_pass(
+        _boot_db_pass(
             "hard_terminal_position_projection_repair",
             reconcile_hard_terminal_position_projection_repairs,
             "hard_terminal_position_projection_repair",
         )
-        _db_pass(
+        _boot_db_pass(
             "confirmed_phantom_void_repair",
             repair_confirmed_phantom_voids,
             "confirmed_phantom_void_repair",
         )
-        _db_pass(
+        _boot_db_pass(
             "confirmed_chain_absence_projection_repair",
             repair_confirmed_chain_absence_positive_projections,
             "confirmed_chain_absence_projection_repair",
         )
-        _db_pass(
+        _boot_db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
