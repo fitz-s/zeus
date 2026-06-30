@@ -3883,6 +3883,16 @@ def _append_linkable_trade_fact_if_missing(
         return finality_finding
     event = _fill_event_for_command(latest, filled_size, trade_state=state)
     if event is None:
+        _ensure_entry_fill_position_event(
+            conn,
+            command=latest,
+            venue_order_id=order_id,
+            filled_size=filled_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+            command_event=None,
+            order_fact_source="REST",
+        )
         return finality_finding
     try:
         append_event(
@@ -3968,6 +3978,229 @@ def _record_nonfinal_full_exit_fill_finality_finding(
     )
 
 
+def _latest_snapshot_for_entry_command(
+    conn: sqlite3.Connection,
+    command: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _table_exists(conn, "executable_market_snapshots"):
+        return None
+    snapshot_id = str(command.get("snapshot_id") or "").strip()
+    token_id = str(command.get("token_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    params: list[object] = []
+    predicates: list[str] = []
+    if snapshot_id:
+        predicates.append("snapshot_id = ?")
+        params.append(snapshot_id)
+    if token_id:
+        predicates.append("(yes_token_id = ? OR no_token_id = ? OR selected_outcome_token_id = ?)")
+        params.extend([token_id, token_id, token_id])
+    if not predicates and venue_order_id:
+        latest_fact = _latest_order_fact(conn, venue_order_id)
+        raw = _json_mapping(latest_fact.get("raw_payload_json") if latest_fact else None)
+        condition_id = str(raw.get("market") or raw.get("condition_id") or "").strip()
+        if condition_id:
+            predicates.append("condition_id = ?")
+            params.append(condition_id)
+    if not predicates:
+        return None
+    row = conn.execute(
+        f"""
+        SELECT *
+          FROM executable_market_snapshots
+         WHERE {' OR '.join(predicates)}
+         ORDER BY CASE WHEN snapshot_id = ? THEN 0 ELSE 1 END,
+                  captured_at DESC
+         LIMIT 1
+        """,
+        (*params, snapshot_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _market_event_metadata_for_entry_fill(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    condition_id: str,
+) -> dict[str, Any] | None:
+    if not _table_exists(conn, "market_events"):
+        return None
+    cols = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(market_events)").fetchall()
+    }
+    metric_expr = (
+        "temperature_metric"
+        if "temperature_metric" in cols
+        else (
+            "CASE WHEN lower(COALESCE(market_slug, '')) LIKE '%lowest-temperature%' "
+            "THEN 'low' ELSE 'high' END"
+        )
+    )
+    row = conn.execute(
+        f"""
+        SELECT city, target_date, {metric_expr} AS temperature_metric,
+               market_slug, range_label, token_id, condition_id
+          FROM market_events
+         WHERE (
+                NULLIF(condition_id, '') = NULLIF(?, '')
+             OR NULLIF(token_id, '') = NULLIF(?, '')
+         )
+         ORDER BY CASE WHEN token_id = ? THEN 0 ELSE 1 END, id DESC
+         LIMIT 1
+        """,
+        (condition_id, token_id, token_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _same_token_position_metadata_for_entry_fill(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    condition_id: str,
+) -> dict[str, Any] | None:
+    if not _table_exists(conn, "position_current"):
+        return None
+    row = conn.execute(
+        """
+        SELECT *
+          FROM position_current
+         WHERE (
+                NULLIF(token_id, '') = NULLIF(?, '')
+             OR NULLIF(no_token_id, '') = NULLIF(?, '')
+             OR (
+                    NULLIF(condition_id, '') = NULLIF(?, '')
+                AND NULLIF(?, '') IS NOT NULL
+                )
+         )
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        (token_id, token_id, condition_id, condition_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _missing_entry_projection_from_linked_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    venue_order_id: str,
+    observed_at: datetime,
+) -> dict[str, Any] | None:
+    """Recover a monitorable position row when fill truth outruns projection.
+
+    A later cancel terminalizes only the unfilled remainder. If the order also
+    has linked positive trade facts, absence of ``position_current`` is a local
+    projection gap, not proof of zero exposure.
+    """
+
+    if str(command.get("intent_kind") or "").upper() != "ENTRY":
+        return None
+    if str(command.get("side") or "").upper() != "BUY":
+        return None
+    position_id = str(command.get("position_id") or "").strip()
+    token_id = str(command.get("token_id") or "").strip()
+    if not position_id or not token_id:
+        return None
+
+    snapshot = _latest_snapshot_for_entry_command(conn, command) or {}
+    condition_id = str(snapshot.get("condition_id") or "").strip()
+    if not condition_id:
+        latest_fact = _latest_order_fact(conn, venue_order_id)
+        raw = _json_mapping(latest_fact.get("raw_payload_json") if latest_fact else None)
+        condition_id = str(raw.get("market") or raw.get("condition_id") or command.get("market_id") or "").strip()
+    metadata_row = _same_token_position_metadata_for_entry_fill(
+        conn,
+        token_id=token_id,
+        condition_id=condition_id,
+    )
+    market_event = _market_event_metadata_for_entry_fill(
+        conn,
+        token_id=token_id,
+        condition_id=condition_id,
+    )
+    yes_token = str(snapshot.get("yes_token_id") or "").strip()
+    no_token = str(snapshot.get("no_token_id") or "").strip()
+    if metadata_row is not None:
+        yes_token = yes_token or str(metadata_row.get("token_id") or "").strip()
+        no_token = no_token or str(metadata_row.get("no_token_id") or "").strip()
+    direction = "buy_no" if no_token and token_id == no_token else "buy_yes"
+    if not yes_token:
+        yes_token = "" if direction == "buy_no" else token_id
+    if not no_token and direction == "buy_no":
+        no_token = token_id
+
+    def _meta(field: str, default: object = "") -> object:
+        if metadata_row is not None and metadata_row.get(field) not in (None, ""):
+            return metadata_row.get(field)
+        if market_event is not None and market_event.get(field) not in (None, ""):
+            return market_event.get(field)
+        return default
+
+    city = str(_meta("city", "") or "").strip()
+    target_date = str(_meta("target_date", "") or "").strip()
+    temperature_metric = str(_meta("temperature_metric", "high") or "high").strip()
+    bin_label = str(
+        _meta("bin_label", _meta("range_label", snapshot.get("event_slug") or condition_id))
+        or ""
+    ).strip()
+    if not city or not target_date or temperature_metric not in {"high", "low"}:
+        logger.warning(
+            "exchange_reconcile: cannot materialize filled entry without market metadata "
+            "position_id=%s command_id=%s token=%s condition_id=%s",
+            position_id,
+            command.get("command_id"),
+            token_id,
+            condition_id,
+        )
+        return None
+
+    now_iso = observed_at.isoformat()
+    unit = str(_meta("unit", "") or "")
+    if not unit:
+        unit = "C" if ("°C" in bin_label or condition_id.startswith("0x")) else "F"
+    return {
+        "position_id": position_id,
+        "phase": "pending_entry",
+        "trade_id": position_id,
+        "market_id": condition_id or str(command.get("market_id") or ""),
+        "city": city,
+        "cluster": str(_meta("cluster", city) or city),
+        "target_date": target_date,
+        "bin_label": bin_label,
+        "direction": direction,
+        "unit": unit,
+        "size_usd": 0.0,
+        "shares": 0.0,
+        "cost_basis_usd": 0.0,
+        "entry_price": 0.0,
+        "p_posterior": float(_meta("p_posterior", 0.0) or 0.0),
+        "entry_ci_width": float(_meta("entry_ci_width", 0.0) or 0.0),
+        "last_monitor_prob": None,
+        "last_monitor_edge": None,
+        "last_monitor_market_price": None,
+        "decision_snapshot_id": str(command.get("snapshot_id") or snapshot.get("snapshot_id") or ""),
+        "entry_method": str(_meta("entry_method", "exchange_reconcile_fill_recovery") or ""),
+        "strategy_key": str(_meta("strategy_key", "opening_inertia") or "opening_inertia"),
+        "edge_source": str(_meta("edge_source", "exchange_reconcile_linked_fill") or ""),
+        "discovery_mode": str(_meta("discovery_mode", "exchange_reconcile") or ""),
+        "chain_state": "local_only",
+        "token_id": yes_token,
+        "no_token_id": no_token,
+        "condition_id": condition_id,
+        "order_id": venue_order_id,
+        "order_status": "pending",
+        "updated_at": now_iso,
+        "temperature_metric": temperature_metric,
+        "env": "live",
+        "order_posted_at": str(command.get("created_at") or now_iso),
+        "entered_at": "",
+    }
+
+
 def _ensure_entry_fill_position_event(
     conn: sqlite3.Connection,
     *,
@@ -3996,10 +4229,19 @@ def _ensure_entry_fill_position_event(
         """,
         (position_id, venue_order_id),
     ).fetchone()
+    missing_projection = False
     if row is None:
-        return
-
-    current = dict(row)
+        current = _missing_entry_projection_from_linked_fill(
+            conn,
+            command=command,
+            venue_order_id=venue_order_id,
+            observed_at=observed_at,
+        )
+        if current is None:
+            return
+        missing_projection = True
+    else:
+        current = dict(row)
     projection_position_id = str(current.get("position_id") or position_id).strip()
     if projection_position_id:
         position_id = projection_position_id
@@ -4103,13 +4345,24 @@ def _ensure_entry_fill_position_event(
     ).fetchone()
     sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
 
-    from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
+    if missing_projection and sequence_no == 1:
+        from src.engine.lifecycle_events import build_entry_canonical_write
 
-    events, projection = build_entry_fill_only_canonical_write(
-        position,
-        sequence_no=sequence_no,
-        source_module="src.execution.exchange_reconcile",
-    )
+        events, projection = build_entry_canonical_write(
+            position,
+            phase_after="active",
+            decision_id=str(command.get("decision_id") or "") or None,
+            source_module="src.execution.exchange_reconcile",
+            decision_evidence_reason="recovered_from_linked_venue_fill_without_position_projection",
+        )
+    else:
+        from src.engine.lifecycle_events import build_entry_fill_only_canonical_write
+
+        events, projection = build_entry_fill_only_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            source_module="src.execution.exchange_reconcile",
+        )
     _apply_entry_fill_projection_and_execution_fact(
         conn,
         events=events,
@@ -4274,6 +4527,7 @@ def _ensure_exit_fill_position_event(
         phase_before="pending_exit",
         source_module="src.execution.exchange_reconcile",
     )
+    projection["order_status"] = "sell_filled"
     command_id = str(command.get("command_id") or "")
     if command_id:
         for event in events:

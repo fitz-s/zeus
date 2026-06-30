@@ -41,6 +41,7 @@ from src.execution.day0_hard_fact_exit import (
     _reset_wu_memo_for_tests,
     cancel_day0_dead_bin_resting_entries,
     evaluate_hard_fact_exit,
+    final_observed_bin_verdict,
     hard_fact_bin_verdict,
     hard_fact_monitor_belief,
     settlement_grade_effective_extreme,
@@ -122,6 +123,13 @@ def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
         wu_station="LFPB", settlement_source_type="wu_icao",
+    )
+
+
+def _manila():
+    return SimpleNamespace(
+        name="Manila", timezone="Asia/Manila", settlement_unit="C",
+        wu_station="RPLL", settlement_source_type="wu_icao",
     )
 
 
@@ -239,6 +247,24 @@ class TestVerdictMatrix:
             metric="high", direction="buy_yes", bin_low=27.0, bin_high=27.0,
             effective_extreme=25.0,
         ) is None
+
+    def test_final_observed_finite_bin_containment_is_settlement_verdict(self):
+        yes = final_observed_bin_verdict(
+            metric="high",
+            direction="buy_yes",
+            bin_low=32.0,
+            bin_high=32.0,
+            final_extreme=32.0,
+        )
+        no = final_observed_bin_verdict(
+            metric="high",
+            direction="buy_no",
+            bin_low=32.0,
+            bin_high=32.0,
+            final_extreme=32.0,
+        )
+        assert yes is not None and yes.action == "HOLD_STRUCTURAL_WIN"
+        assert no is not None and no.action == "EXIT_DEAD_BIN"
 
 
 # ===========================================================================
@@ -364,6 +390,93 @@ class TestSourceDiscipline:
         )
         assert effective == pytest.approx(23.0)
         assert source == "durable_observation_instants"
+
+    def test_final_day_durable_exact_bin_marks_buy_no_structural_loss(self, monkeypatch):
+        """Manila regression: after local day completion, final high=32 means
+        32C YES won and a held 32C NO is structurally dead. Intraday containment
+        remains estimator territory; this only fires with durable end-of-day
+        WU coverage."""
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        for local_ts, utc_ts, high, low in [
+            ("2026-06-29T00:00:00+08:00", "2026-06-28T16:00:00+00:00", 30.0, 28.0),
+            ("2026-06-29T18:00:00+08:00", "2026-06-29T10:00:00+00:00", 32.0, 30.0),
+            ("2026-06-29T23:00:00+08:00", "2026-06-29T15:00:00+00:00", 28.0, 28.0),
+        ]:
+            conn.execute(
+                "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "Manila",
+                    "2026-06-29",
+                    "wu_icao_history",
+                    "Asia/Manila",
+                    local_ts,
+                    utc_ts,
+                    high,
+                    low,
+                    "VERIFIED",
+                    "OK",
+                    None,
+                ),
+            )
+
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Manila",
+                target_date="2026-06-29",
+                bin_label="Will the highest temperature in Manila be 32°C on June 29?",
+                direction="buy_no",
+                temperature_metric="high",
+            ),
+            city=_manila(),
+            now=datetime(2026, 6, 30, 3, 40, tzinfo=UTC),
+            world_conn=conn,
+        )
+        assert verdict is not None
+        assert verdict.action == "EXIT_DEAD_BIN"
+        assert verdict.rounded_extreme == pytest.approx(32.0)
+        assert verdict.source == "durable_observation_instants"
+        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
+        assert belief is not None
+        assert belief.yes_prob == pytest.approx(1.0)
+        assert belief.held_side_prob == pytest.approx(0.0)
+
+    def test_final_day_exact_bin_does_not_fire_before_local_day_complete(self, monkeypatch):
+        _set_metar_memo(monkeypatch, None)
+        conn = self._observation_instants_conn()
+        for local_ts, utc_ts, high, low in [
+            ("2026-06-29T18:00:00+08:00", "2026-06-29T10:00:00+00:00", 32.0, 30.0),
+            ("2026-06-29T23:00:00+08:00", "2026-06-29T15:00:00+00:00", 32.0, 28.0),
+        ]:
+            conn.execute(
+                "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "Manila",
+                    "2026-06-29",
+                    "wu_icao_history",
+                    "Asia/Manila",
+                    local_ts,
+                    utc_ts,
+                    high,
+                    low,
+                    "VERIFIED",
+                    "OK",
+                    None,
+                ),
+            )
+
+        assert evaluate_hard_fact_exit(
+            position=_position(
+                city="Manila",
+                target_date="2026-06-29",
+                bin_label="Will the highest temperature in Manila be 32°C on June 29?",
+                direction="buy_no",
+                temperature_metric="high",
+            ),
+            city=_manila(),
+            now=datetime(2026, 6, 29, 15, 30, tzinfo=UTC),
+            world_conn=conn,
+        ) is None
 
     def test_evaluate_hard_fact_exit_normalizes_direction_enum(self, monkeypatch):
         from src.contracts.semantic_types import Direction
@@ -1212,9 +1325,10 @@ def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(mo
     )
 
     assert calls["refresh"] == 1
-    assert summary.get("monitor_pending_exit_phase_evaluated") == 1
-    assert summary.get("pending_exit_exit_signal_already_in_flight") == 1
-    assert summary["exits"] == 0
+    assert summary.get("monitor_released_pending_exit_without_order") == 1
+    assert summary.get("monitor_pending_exit_phase_evaluated") is None
+    assert summary.get("pending_exit_exit_signal_already_in_flight") is None
+    assert summary["exits"] == 1
     assert results and results[0].should_exit is True
 
 
