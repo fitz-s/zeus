@@ -229,6 +229,7 @@ from src.sizing.sizing_context import SizingContext
 from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 from src.strategy.market_phase import (
@@ -671,7 +672,7 @@ _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
 )
 _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
-    {"active", "day0_window", "pending_exit", "quarantined"}
+    {"active", "day0_window", "pending_exit"}
 )
 _ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
     {"pending_entry", *_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES}
@@ -679,6 +680,7 @@ _ENTRY_HELD_POSITION_BLOCKING_PHASES = frozenset(
 _ENTRY_HELD_POSITION_REASON_BASE = "OPEN_POSITION_SAME_TOKEN_MONITOR_OWNED"
 _ENTRY_HELD_FAMILY_REASON_BASE = "OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED"
 _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
+_CURRENT_MONEY_RISK_CHAIN_STATES = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
 
 
 def _position_phase_or_positive_chain_clause(
@@ -687,9 +689,10 @@ def _position_phase_or_positive_chain_clause(
 ) -> tuple[str, tuple[object, ...]]:
     """SQL clause for position rows that are monitor-owned or chain-exposed.
 
-    Local lifecycle labels can lag venue truth. A quarantined/voided row with
-    positive venue shares is still real exposure; settled/economically_closed
-    stale projections are not reopened by this helper.
+    Local lifecycle labels can lag venue truth. A quarantined row with positive
+    chain exposure is still live risk only when chain_state itself asserts
+    current money risk. Confirmed chain absence stays reconciliation debt and
+    must not enter live family selection.
     """
     if "phase" in columns:
         phase_sql = "phase IN ({})".format(",".join("?" for _ in phases))
@@ -698,20 +701,22 @@ def _position_phase_or_positive_chain_clause(
         phase_sql = "1=1"
         params = []
     if "chain_shares" in columns:
-        terminal_phase_sql = (
-            "phase IN ('quarantined', 'voided')"
-            if "phase" in columns
-            else (
-                "chain_state IN ('entry_authority_quarantined', "
-                "'chain_absent_confirmed_position_unattributed')"
-                if "chain_state" in columns
-                else "0"
+        chain_risk_sql = "0"
+        chain_params: list[object] = []
+        if "chain_state" in columns:
+            chain_risk_sql = "chain_state IN ({})".format(
+                ",".join("?" for _ in _CURRENT_MONEY_RISK_CHAIN_STATES)
             )
+            chain_params = list(_CURRENT_MONEY_RISK_CHAIN_STATES)
+        terminal_phase_sql = (
+            f"phase = 'quarantined' AND {chain_risk_sql}"
+            if "phase" in columns
+            else chain_risk_sql
         )
         return (
             f"({phase_sql} OR (COALESCE(chain_shares, 0) > ? "
             f"AND ({terminal_phase_sql})))",
-            tuple([*params, _POSITIVE_CHAIN_EXPOSURE_EPS]),
+            tuple([*params, _POSITIVE_CHAIN_EXPOSURE_EPS, *chain_params]),
         )
     return phase_sql, tuple(params)
 

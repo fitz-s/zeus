@@ -1562,17 +1562,22 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
         }
         if not {"phase", "token_id", "no_token_id"}.issubset(columns):
             return set()
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        chain_placeholders = ",".join("?" for _ in chain_state_values)
         open_phase_clause = "phase IN ('pending_entry','active','day0_window','pending_exit')"
         exposure_clause = open_phase_clause
         params: tuple[object, ...] = ()
-        if "chain_shares" in columns:
+        if "chain_shares" in columns and "chain_state" in columns:
             exposure_clause = (
                 f"({open_phase_clause} OR ("
-                "phase IN ('quarantined','voided') "
+                "phase = 'quarantined' "
+                f"AND COALESCE(chain_state, '') IN ({chain_placeholders}) "
                 "AND COALESCE(chain_shares, 0) > ?"
                 "))"
             )
-            params = (0.000001,)
+            params = (*chain_state_values, 0.000001)
         rows = trade_conn.execute(
             f"""
             SELECT token_id, no_token_id

@@ -53,6 +53,8 @@ LIVE_TRADE_FACT_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API",
 FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON = "chain_absent_confirmed_position_unattributed"
 CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE = "chain_absent_confirmed_position_unattributed"
+ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON = "entry_authority_chain_absence_conflict"
+ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE = "entry_authority_quarantined"
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
@@ -1190,7 +1192,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         )
         return True
 
-    def _quarantine_confirmed_chain_absence(
+    def _preserve_confirmed_fill_chain_absence_conflict(
         position: Position,
         *,
         token_id: str,
@@ -1198,30 +1200,43 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     ) -> None:
         corrected = replace(position)
         corrected.state = LifecycleState.QUARANTINED.value
-        corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+        corrected.chain_state = ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+        if not _positive_decimal(getattr(corrected, "chain_shares", None)):
+            corrected.chain_shares = float(getattr(corrected, "shares", 0.0) or 0.0)
+        if not _positive_decimal(getattr(corrected, "chain_avg_price", None)):
+            corrected.chain_avg_price = float(getattr(corrected, "entry_price", 0.0) or 0.0)
+        if not _positive_decimal(getattr(corrected, "chain_cost_basis_usd", None)):
+            corrected.chain_cost_basis_usd = float(getattr(corrected, "cost_basis_usd", 0.0) or 0.0)
+        corrected.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        corrected.exit_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
         corrected.last_chain_absence_observed_at = now
         corrected.quarantined_at = corrected.quarantined_at or now
         logger.error(
-            "CONFIRMED_POSITION_CHAIN_ABSENT: trade_id=%s token=%s source=%s; "
-            "quarantining for attribution instead of phantom void",
+            "CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT: trade_id=%s token=%s source=%s; "
+            "preserving live monitorable exposure for attribution instead of marking no-risk absent",
             getattr(position, "trade_id", "?"),
             token_id,
             source,
         )
         if _append_canonical_review_required(
             corrected,
-            reason=CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+            reason=ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ):
             stats["review_required_persisted"] = (
                 stats.get("review_required_persisted", 0) + 1
             )
         position.state = corrected.state
         position.chain_state = corrected.chain_state
+        position.chain_shares = corrected.chain_shares
+        position.chain_avg_price = corrected.chain_avg_price
+        position.chain_cost_basis_usd = corrected.chain_cost_basis_usd
+        position.fill_authority = corrected.fill_authority
+        position.exit_reason = corrected.exit_reason
         position.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
         position.quarantined_at = corrected.quarantined_at
         stats["quarantined"] += 1
-        stats["confirmed_chain_absence_quarantined"] = (
-            stats.get("confirmed_chain_absence_quarantined", 0) + 1
+        stats["confirmed_fill_chain_absence_conflict_preserved"] = (
+            stats.get("confirmed_fill_chain_absence_conflict_preserved", 0) + 1
         )
 
     def _persist_chain_only_quarantine_fact(token_id: str, chain: ChainPosition) -> str:
@@ -1608,7 +1623,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     source="aggregate_allocation",
                 ):
                     continue
-                _quarantine_confirmed_chain_absence(
+                _preserve_confirmed_fill_chain_absence_conflict(
                     pos,
                     token_id=tid,
                     source="aggregate_allocation",
@@ -1655,14 +1670,22 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         ):
             corrected = replace(pos)
             corrected.state = LifecycleState.QUARANTINED.value
-            corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+            corrected.chain_state = ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+            if not _positive_decimal(getattr(corrected, "chain_shares", None)):
+                corrected.chain_shares = float(getattr(corrected, "shares", 0.0) or 0.0)
+            if not _positive_decimal(getattr(corrected, "chain_avg_price", None)):
+                corrected.chain_avg_price = float(getattr(corrected, "entry_price", 0.0) or 0.0)
+            if not _positive_decimal(getattr(corrected, "chain_cost_basis_usd", None)):
+                corrected.chain_cost_basis_usd = float(getattr(corrected, "cost_basis_usd", 0.0) or 0.0)
+            corrected.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            corrected.exit_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
             corrected.last_chain_absence_observed_at = (
                 getattr(corrected, "last_chain_absence_observed_at", "") or now
             )
             corrected.quarantined_at = corrected.quarantined_at or now
             if _append_canonical_review_required(
                 corrected,
-                reason="false_phantom_void_positive_exposure",
+                reason=ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
             ):
                 stats["false_phantom_void_positive_exposure_restored"] = (
                     stats.get("false_phantom_void_positive_exposure_restored", 0) + 1
@@ -1676,6 +1699,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 )
             pos.state = corrected.state
             pos.chain_state = corrected.chain_state
+            pos.chain_shares = corrected.chain_shares
+            pos.chain_avg_price = corrected.chain_avg_price
+            pos.chain_cost_basis_usd = corrected.chain_cost_basis_usd
+            pos.fill_authority = corrected.fill_authority
+            pos.exit_reason = corrected.exit_reason
             pos.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
             pos.quarantined_at = corrected.quarantined_at
             stats["quarantined"] += 1
@@ -1891,7 +1919,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     source="per_position_missing_token",
                 ):
                     continue
-                _quarantine_confirmed_chain_absence(
+                _preserve_confirmed_fill_chain_absence_conflict(
                     pos,
                     token_id=tid,
                     source="per_position_missing_token",

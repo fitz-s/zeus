@@ -2805,7 +2805,7 @@ def test_quarantine_expired_blocks_new_entries_until_resolved():
     assert _has_quarantined_positions(portfolio) is True
 
 
-def test_recent_chain_absent_quarantine_redecision_exposure_does_not_block_entries():
+def test_recent_entry_authority_quarantine_redecision_exposure_does_not_block_entries():
     """A monitor-managed real exposure quarantine must not freeze all new entries."""
     from src.engine.cycle_runner import _has_quarantined_positions
 
@@ -2813,7 +2813,7 @@ def test_recent_chain_absent_quarantine_redecision_exposure_does_not_block_entri
     pos = _make_position(
         direction="buy_yes",
         state="quarantined",
-        chain_state="chain_absent_confirmed_position_unattributed",
+        chain_state="entry_authority_quarantined",
         shares=65.0,
         chain_shares=65.0,
         last_chain_absence_observed_at=observed_at,
@@ -3100,8 +3100,8 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
     assert monitor_results[0].exit_reason == "ENTRY_AUTHORITY_QUARANTINE_REDECISION_HOLD"
 
 
-def test_chain_absent_confirmed_recent_exposure_reaches_redecision(monkeypatch):
-    """Recently mis-attributed chain absence with real exposure must still be monitor-managed."""
+def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):
+    """Confirmed chain absence is reconciliation debt, not live monitor-managed exposure."""
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
 
@@ -3209,25 +3209,20 @@ def test_chain_absent_confirmed_recent_exposure_reaches_redecision(monkeypatch):
 
     assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert observed_refresh == [(
-        "chain-absence-quarantine-position",
-        "quarantined",
-        "chain_absent_confirmed_position_unattributed",
-    )]
-    assert observed_exit_contexts
-    assert observed_exit_contexts[0].position_state == "quarantined"
-    assert summary["quarantined_exposure_routed_to_redecision"] == 1
-    assert summary.get("monitor_skipped_quarantine_resolution", 0) == 0
-    assert summary["monitors"] == 1
+    assert observed_refresh == []
+    assert observed_exit_contexts == []
+    assert summary.get("quarantined_exposure_routed_to_redecision", 0) == 0
+    assert summary["monitor_skipped_quarantine_resolution"] == 1
+    assert summary["monitors"] == 0
     assert len(monitor_results) == 1
-    assert monitor_results[0].fresh_prob == 0.03
-    assert monitor_results[0].fresh_edge == 0.026
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
     assert monitor_results[0].should_exit is False
-    assert monitor_results[0].exit_reason == "CHAIN_ABSENCE_QUARANTINE_REDECISION_HOLD"
+    assert monitor_results[0].exit_reason == "QUARANTINE_REVIEW_REQUIRED"
 
 
-def test_chain_absent_confirmed_recent_exposure_exit_signal_reaches_exit_lifecycle(monkeypatch):
-    """A monitor exit signal for real quarantined exposure must reach the exit actuator."""
+def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(monkeypatch):
+    """Confirmed chain absence must not manufacture a live exit lifecycle action."""
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
 
@@ -3346,25 +3341,18 @@ def test_chain_absent_confirmed_recent_exposure_exit_signal_reaches_exit_lifecyc
 
     assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert summary["quarantined_exposure_routed_to_redecision"] == 1
-    assert summary["monitors"] == 1
-    assert summary["exits"] == 1
-    assert monitor_results[0].should_exit is True
-    assert monitor_results[0].exit_reason == "QUARANTINED_EXPOSURE_REDECISION_EXIT"
-    assert observed_execute == [
-        {
-            "position_id": "chain-absence-quarantine-exit-position",
-            "state": "quarantined",
-            "chain_state": "chain_absent_confirmed_position_unattributed",
-            "exit_reason": "QUARANTINED_EXPOSURE_REDECISION_EXIT",
-            "token_id": "yes-singapore",
-        }
-    ]
-    assert pos.state == "pending_exit"
+    assert summary.get("quarantined_exposure_routed_to_redecision", 0) == 0
+    assert summary["monitor_skipped_quarantine_resolution"] == 1
+    assert summary["monitors"] == 0
+    assert summary.get("exits", 0) == 0
+    assert monitor_results[0].should_exit is False
+    assert monitor_results[0].exit_reason == "QUARANTINE_REVIEW_REQUIRED"
+    assert observed_execute == []
+    assert pos.state == "quarantined"
 
 
-def test_chain_absent_confirmed_positive_exposure_redecision_does_not_expire():
-    """Positive exposure in a chain-absent quarantine must stay in redecision."""
+def test_chain_absent_confirmed_positive_projection_does_not_redecision():
+    """Stale local shares on a confirmed-absent quarantine do not create live exposure."""
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -3377,7 +3365,7 @@ def test_chain_absent_confirmed_positive_exposure_redecision_does_not_expire():
         chain_verified_at="",
     )
 
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is True
+    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
 
 
 def test_pending_exit_chain_absent_positive_exposure_stays_open_for_exit_lifecycle():

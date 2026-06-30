@@ -38,6 +38,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from check_data_pipeline_live_e2e import _connect_live_readonly
 from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
 SETTINGS_PATH = ROOT / "config" / "settings.json"
 LIVE_TRADING_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -3253,13 +3254,7 @@ _RESTART_REDECISION_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
 )
 _RESTART_REDECISION_CHAIN_EXPOSURE_PHASES = frozenset(
-    {"quarantined", "voided"}
-)
-_RESTART_REDECISION_CHAIN_STATES = frozenset(
-    {
-        "entry_authority_quarantined",
-        "chain_absent_confirmed_position_unattributed",
-    }
+    {"quarantined"}
 )
 
 
@@ -3278,13 +3273,20 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
             "order_id",
         ):
             optional_selects.append(column if column in columns else f"NULL AS {column}")
-        phase_sql = (
-            "phase IN ({})".format(
+        phase_sql_params: list[object] = []
+        if "phase" in columns:
+            phase_sql = "phase IN ({})".format(
                 ",".join("?" for _ in _RESTART_REDECISION_POSITION_PHASES)
             )
-            if "phase" in columns
-            else "1=1"
-        )
+            phase_sql_params.extend(sorted(_RESTART_REDECISION_POSITION_PHASES))
+            if "chain_state" in columns:
+                state_placeholders = ",".join(
+                    "?" for _ in CURRENT_MONEY_RISK_CHAIN_STATES
+                )
+                phase_sql = f"({phase_sql} AND chain_state IN ({state_placeholders}))"
+                phase_sql_params.extend(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        else:
+            phase_sql = "1=1"
         if "chain_shares" in columns:
             exposure_terms = ["COALESCE(chain_shares, 0) > ?"]
             for name in ("shares", "chain_cost_basis_usd", "cost_basis_usd"):
@@ -3314,17 +3316,17 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
                 chain_positive_params.extend(
                     sorted(_RESTART_REDECISION_CHAIN_EXPOSURE_PHASES)
                 )
-            elif "chain_state" in columns:
+            if "chain_state" in columns:
                 chain_truth_terms.append(
                     "chain_state IN ({})".format(
-                        ",".join("?" for _ in _RESTART_REDECISION_CHAIN_STATES)
+                        ",".join("?" for _ in CURRENT_MONEY_RISK_CHAIN_STATES)
                     )
                 )
-                chain_positive_params.extend(sorted(_RESTART_REDECISION_CHAIN_STATES))
+                chain_positive_params.extend(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
             if chain_truth_terms:
                 chain_positive_sql = (
                     "COALESCE(chain_shares, 0) > ? AND ("
-                    + " OR ".join(chain_truth_terms)
+                    + " AND ".join(chain_truth_terms)
                     + ")"
                 )
                 chain_positive_params.insert(0, _POSITIVE_CHAIN_EXPOSURE_EPS)
@@ -3333,11 +3335,7 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
             if positive_chain_only and exposure_terms
             else ""
         )
-        params: list[object] = (
-            [*sorted(_RESTART_REDECISION_POSITION_PHASES)]
-            if "phase" in columns
-            else []
-        )
+        params: list[object] = list(phase_sql_params)
         params.extend(chain_positive_params)
         if positive_chain_only and exposure_terms:
             params.extend([_POSITIVE_CHAIN_EXPOSURE_EPS] * len(exposure_terms))

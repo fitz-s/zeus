@@ -39,14 +39,41 @@ from typing import Optional
 
 
 # Quarantined is a local lifecycle bucket, not proof that money is no longer at
-# risk. These chain states still carry real positive venue exposure and must stay
-# visible to held-position monitor/redecision lanes.
+# risk. Only chain states that still assert current venue exposure may keep a
+# quarantined row in live monitor/redecision lanes. A plain confirmed chain
+# absence is no-current-risk reconciliation debt; a confirmed venue fill with a
+# missing/contradictory chain snapshot is represented as entry_authority_quarantined.
+CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
+    {
+        "synced",
+        "chain_present",
+        "exit_pending_missing",
+        "entry_authority_quarantined",
+    }
+)
+
 REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset(
     {
         "entry_authority_quarantined",
-        "chain_absent_confirmed_position_unattributed",
     }
 )
+
+NO_CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
+    {
+        "chain_absent_confirmed_position_unattributed",
+        "chain_confirmed_zero",
+        "external_operator_closed",
+        "local_only",
+        "quarantined",
+        "quarantine_expired",
+    }
+)
+
+
+def has_current_money_risk_chain_state(value: object) -> bool:
+    """True when a chain_state still represents live venue exposure."""
+
+    return str(getattr(value, "value", value) or "").strip() in CURRENT_MONEY_RISK_CHAIN_STATES
 
 
 # --------------------------------------------------------------------------- #

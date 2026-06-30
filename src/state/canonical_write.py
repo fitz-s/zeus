@@ -169,10 +169,7 @@ def transition_phase(
         redecision_quarantine_exit = (
             current_phase == "quarantined"
             and current_chain_state
-            in {
-                "entry_authority_quarantined",
-                "chain_absent_confirmed_position_unattributed",
-            }
+            == "entry_authority_quarantined"
             and _positive_position_exposure()
         )
         if (

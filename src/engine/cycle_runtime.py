@@ -3442,8 +3442,6 @@ def _quarantined_position_can_redecision(pos) -> bool:
         return False
     if chain_state == "entry_authority_quarantined":
         return True
-    if chain_state == "chain_absent_confirmed_position_unattributed":
-        return True
     return _chain_absent_quarantine_is_fresh_enough_for_redecision(pos)
 
 
@@ -4436,7 +4434,7 @@ def execute_monitoring_phase(
                 artifact.add_monitor_result(
                     deps.MonitorResult(
                         position_id=pos.trade_id,
-                        fresh_prob=None,
+                        fresh_prob=pos.last_monitor_prob,
                         fresh_edge=None,
                         should_exit=False,
                         exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",

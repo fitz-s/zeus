@@ -6742,23 +6742,29 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
         }
         if not required.issubset(cols):
             return {}
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        chain_placeholders = ",".join("?" for _ in chain_state_values)
         rows = trade_ro.execute(
-            """
+            f"""
             SELECT city, target_date, temperature_metric, condition_id
               FROM position_current
              WHERE (
                     (
                         phase IN ('active', 'day0_window', 'pending_exit')
-                        AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')
+                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
                     )
                     OR (
-                        phase IN ('quarantined', 'voided')
+                        phase = 'quarantined'
+                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
                     )
                    )
                AND condition_id IS NOT NULL
                AND TRIM(condition_id) != ''
                AND COALESCE(chain_shares, 0) > 0.000001
             """,
+            (*chain_state_values, *chain_state_values),
         ).fetchall()
         for row in rows:
             family_key = (

@@ -215,7 +215,6 @@ _ABSORBING_POSITION_PHASES = frozenset(
 _REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
     {
         "entry_authority_quarantined",
-        "chain_absent_confirmed_position_unattributed",
     }
 )
 _REDECISION_QUARANTINE_EXIT_EVENTS = frozenset(

@@ -7351,11 +7351,12 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
         return summary
     try:
         from src.state.chain_reconciliation import (
-            CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
-            CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+            ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+            ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         )
         from src.state.portfolio import (
             FILL_AUTHORITY_CANCELLED_REMAINDER,
+            FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
             has_verified_trade_fill,
         )
     except Exception as exc:  # noqa: BLE001
@@ -7389,7 +7390,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
         sp_name = f"sp_confirmed_phantom_void_repair_{safe_position_id}"
         payload = {
             "schema_version": 1,
-            "reason": CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+            "reason": ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
             "proof_class": "confirmed_fill_phantom_void_reclassified_to_review",
             "position_id": position_id,
             "phase_before": "voided",
@@ -7430,7 +7431,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                     str(row.get("strategy_key") or "unknown"),
                     str(row.get("decision_snapshot_id") or ""),
                     str(row.get("order_id") or ""),
-                    CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                    ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
                     f"{position_id}:confirmed_phantom_void_repair:{next_sequence}",
                     "src.execution.command_recovery",
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
@@ -7441,9 +7442,24 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                 UPDATE position_current
                    SET phase = 'quarantined',
                        chain_state = ?,
+                       chain_shares = CASE
+                           WHEN ABS(COALESCE(chain_shares, 0)) > 0.000000001
+                               THEN chain_shares
+                           ELSE COALESCE(shares, 0)
+                       END,
+                       chain_avg_price = CASE
+                           WHEN ABS(COALESCE(chain_avg_price, 0)) > 0.000000001
+                               THEN chain_avg_price
+                           ELSE COALESCE(entry_price, 0)
+                       END,
+                       chain_cost_basis_usd = CASE
+                           WHEN ABS(COALESCE(chain_cost_basis_usd, 0)) > 0.000000001
+                               THEN chain_cost_basis_usd
+                           ELSE COALESCE(cost_basis_usd, 0)
+                       END,
                        exit_reason = ?,
                        fill_authority = CASE
-                           WHEN COALESCE(fill_authority, '') IN ('', 'none') THEN ?
+                           WHEN COALESCE(fill_authority, '') IN ('', 'none', 'optimistic_submitted') THEN ?
                            ELSE fill_authority
                        END,
                        chain_absence_at = CASE
@@ -7456,9 +7472,13 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                    AND LOWER(COALESCE(chain_state, '')) != 'chain_confirmed_zero'
                 """,
                 (
-                    CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
-                    CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
-                    repaired_fill_authority,
+                    ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+                    ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
+                    (
+                        repaired_fill_authority
+                        if repaired_fill_authority
+                        else FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+                    ),
                     now,
                     now,
                     position_id,
@@ -7473,6 +7493,248 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             logger.error(
                 "recovery: confirmed phantom-void repair failed for %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _confirmed_chain_absence_positive_projection_candidates(
+    conn: sqlite3.Connection,
+    *,
+    chain_state: str,
+) -> list[dict]:
+    if not (
+        _table_exists(conn, "position_current")
+        and _table_exists(conn, "position_events")
+    ):
+        return []
+    rows = conn.execute(
+        """
+        SELECT pc.*,
+               (
+                   SELECT MAX(pe.sequence_no)
+                     FROM position_events pe
+                    WHERE pe.position_id = pc.position_id
+               ) AS latest_any_sequence_no
+          FROM position_current pc
+         WHERE LOWER(COALESCE(pc.chain_state, '')) = LOWER(?)
+           AND (
+               ABS(COALESCE(pc.chain_shares, 0)) > 0.000000001
+               OR ABS(COALESCE(pc.chain_avg_price, 0)) > 0.000000001
+               OR ABS(COALESCE(pc.chain_cost_basis_usd, 0)) > 0.000000001
+           )
+         ORDER BY pc.updated_at, pc.position_id
+        """,
+        (chain_state,),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection) -> dict:
+    """Repair contradictory chain-absent positive exposure projections.
+
+    ``chain_absent_confirmed_position_unattributed`` is no-current-risk only
+    when no positive venue fill fact backs the row. If venue trade facts prove a
+    fill, the row is current-risk reconciliation debt and must be promoted to
+    ``entry_authority_quarantined`` so monitor/redecision/family exposure can
+    manage it. Rows without fill facts are stale projection debt and are cleared.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    try:
+        from src.state.chain_reconciliation import (
+            CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+            CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+            ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+            ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
+        )
+        from src.state.portfolio import (
+            FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recovery: confirmed chain-absence projection repair unavailable: %s", exc)
+        summary["errors"] += 1
+        return summary
+
+    candidates = _confirmed_chain_absence_positive_projection_candidates(
+        conn,
+        chain_state=CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+    )
+    if not candidates:
+        return summary
+
+    for row in candidates:
+        summary["scanned"] += 1
+        position_id = str(row.get("position_id") or "")
+        if not position_id:
+            summary["stayed"] += 1
+            continue
+        now = _now_iso()
+        trade_fact_proof = _positive_trade_fact_proof_for_position(conn, position_id)
+        has_positive_trade_fact = bool(trade_fact_proof.get("has_positive_trade_fact"))
+        if has_positive_trade_fact:
+            repair_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
+            proof_class = "confirmed_fill_chain_absence_projection_preserved_current_money_risk"
+            source_reason = (
+                "positive venue trade facts prove current exposure risk; "
+                "chain absence conflict must stay in live redecision as entry authority quarantine"
+            )
+            phase_after = "quarantined"
+        else:
+            repair_reason = CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON
+            proof_class = "confirmed_chain_absence_projection_chain_fields_cleared"
+            source_reason = (
+                "confirmed chain absence with no positive venue trade fact is no-current-money-risk "
+                "chain truth; positive chain projection fields are stale projection debt"
+            )
+            phase_after = str(row.get("phase") or "unknown")
+        next_sequence = int(row.get("latest_any_sequence_no") or 0) + 1
+        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
+        sp_name = f"sp_confirmed_chain_absence_projection_repair_{safe_position_id}"
+        payload = {
+            "schema_version": 1,
+            "reason": repair_reason,
+            "proof_class": proof_class,
+            "position_id": position_id,
+            "phase": str(row.get("phase") or ""),
+            "chain_state": str(row.get("chain_state") or ""),
+            "previous_chain_shares": row.get("chain_shares"),
+            "previous_chain_avg_price": row.get("chain_avg_price"),
+            "previous_chain_cost_basis_usd": row.get("chain_cost_basis_usd"),
+            "shares": row.get("shares"),
+            "cost_basis_usd": row.get("cost_basis_usd"),
+            "entry_price": row.get("entry_price"),
+            "positive_trade_fact_proof": trade_fact_proof,
+            "source_proof": {
+                "source_function": (
+                    "command_recovery."
+                    "repair_confirmed_chain_absence_positive_projections"
+                ),
+                "source_reason": source_reason,
+            },
+        }
+        try:
+            conn.execute(f"SAVEPOINT {sp_name}")
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no,
+                    event_type, occurred_at, phase_before, phase_after,
+                    strategy_key, decision_id, snapshot_id, order_id,
+                    command_id, caused_by, idempotency_key, venue_status,
+                    source_module, payload_json, env
+                ) VALUES (?, ?, 1, ?, 'REVIEW_REQUIRED', ?, ?, ?,
+                          ?, NULL, ?, ?, NULL, ?, ?, 'projection_repaired',
+                          ?, ?, 'live')
+                """,
+                (
+                    f"{position_id}:confirmed_chain_absence_projection_repair:{next_sequence}",
+                    position_id,
+                    next_sequence,
+                    now,
+                    str(row.get("phase") or "unknown"),
+                    phase_after,
+                    str(row.get("strategy_key") or "unknown"),
+                    str(row.get("decision_snapshot_id") or ""),
+                    str(row.get("order_id") or ""),
+                    repair_reason,
+                    f"{position_id}:confirmed_chain_absence_projection_repair:{next_sequence}",
+                    "src.execution.command_recovery",
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+            if has_positive_trade_fact:
+                cursor = conn.execute(
+                    """
+                    UPDATE position_current
+                       SET phase = 'quarantined',
+                           chain_state = ?,
+                           chain_shares = CASE
+                               WHEN ABS(COALESCE(chain_shares, 0)) > 0.000000001
+                                   THEN chain_shares
+                               ELSE COALESCE(shares, 0)
+                           END,
+                           chain_avg_price = CASE
+                               WHEN ABS(COALESCE(chain_avg_price, 0)) > 0.000000001
+                                   THEN chain_avg_price
+                               ELSE COALESCE(entry_price, 0)
+                           END,
+                           chain_cost_basis_usd = CASE
+                               WHEN ABS(COALESCE(chain_cost_basis_usd, 0)) > 0.000000001
+                                   THEN chain_cost_basis_usd
+                               ELSE COALESCE(cost_basis_usd, 0)
+                           END,
+                           fill_authority = CASE
+                               WHEN COALESCE(fill_authority, '') IN ('', 'none', 'optimistic_submitted') THEN ?
+                               ELSE fill_authority
+                           END,
+                           exit_reason = ?,
+                           chain_absence_at = CASE
+                               WHEN COALESCE(chain_absence_at, '') = '' THEN ?
+                               ELSE chain_absence_at
+                           END,
+                           updated_at = ?
+                     WHERE position_id = ?
+                       AND LOWER(COALESCE(chain_state, '')) = LOWER(?)
+                       AND (
+                           ABS(COALESCE(chain_shares, 0)) > 0.000000001
+                           OR ABS(COALESCE(chain_avg_price, 0)) > 0.000000001
+                           OR ABS(COALESCE(chain_cost_basis_usd, 0)) > 0.000000001
+                       )
+                    """,
+                    (
+                        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+                        FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+                        ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
+                        now,
+                        now,
+                        position_id,
+                        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE position_current
+                       SET chain_shares = 0,
+                           chain_avg_price = 0,
+                           chain_cost_basis_usd = 0,
+                           exit_reason = CASE
+                               WHEN COALESCE(exit_reason, '') = '' THEN ?
+                               ELSE exit_reason
+                           END,
+                           chain_absence_at = CASE
+                               WHEN COALESCE(chain_absence_at, '') = '' THEN ?
+                               ELSE chain_absence_at
+                           END,
+                           updated_at = ?
+                     WHERE position_id = ?
+                       AND LOWER(COALESCE(chain_state, '')) = LOWER(?)
+                       AND (
+                           ABS(COALESCE(chain_shares, 0)) > 0.000000001
+                           OR ABS(COALESCE(chain_avg_price, 0)) > 0.000000001
+                           OR ABS(COALESCE(chain_cost_basis_usd, 0)) > 0.000000001
+                       )
+                    """,
+                    (
+                        CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+                        now,
+                        now,
+                        position_id,
+                        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+                    ),
+                )
+            if cursor.rowcount != 1:
+                raise RuntimeError("position_current update did not affect exactly one row")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:  # noqa: BLE001
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: confirmed chain-absence projection repair failed for %s: %s",
                 position_id,
                 exc,
             )
@@ -13205,6 +13467,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += confirmed_phantom_void_summary["stayed"]
         summary["errors"] += confirmed_phantom_void_summary["errors"]
 
+        chain_absence_projection_summary = repair_confirmed_chain_absence_positive_projections(conn)
+        summary["confirmed_chain_absence_projection_repair"] = chain_absence_projection_summary
+        summary["advanced"] += chain_absence_projection_summary["advanced"]
+        summary["stayed"] += chain_absence_projection_summary["stayed"]
+        summary["errors"] += chain_absence_projection_summary["errors"]
+
         partial_summary = reconcile_partial_remainders(
             conn,
             client,
@@ -13772,6 +14040,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "confirmed_phantom_void_repair",
         )
         _db_pass(
+            "confirmed_chain_absence_projection_repair",
+            repair_confirmed_chain_absence_positive_projections,
+            "confirmed_chain_absence_projection_repair",
+        )
+        _db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
@@ -13887,6 +14160,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_restart_no_venue_exit_retry_projections,
             "restart_no_venue_exit_retry_projection",
         )
+        _db_pass(
+            "confirmed_chain_absence_projection_repair",
+            repair_confirmed_chain_absence_positive_projections,
+            "confirmed_chain_absence_projection_repair",
+        )
         summary["scope"] = scope
         summary["restart_preflight_narrow"] = True
         return
@@ -13969,6 +14247,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_live_entry_projection_repairs,
                  "live_entry_projection_repair")
         _db_pass(
+            "confirmed_chain_absence_projection_repair",
+            repair_confirmed_chain_absence_positive_projections,
+            "confirmed_chain_absence_projection_repair",
+        )
+        _db_pass(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
@@ -14044,6 +14327,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              "structural_win_pending_exit_repair")
     _db_pass("confirmed_phantom_void_repair",
              repair_confirmed_phantom_voids, "confirmed_phantom_void_repair")
+    _db_pass(
+        "confirmed_chain_absence_projection_repair",
+        repair_confirmed_chain_absence_positive_projections,
+        "confirmed_chain_absence_projection_repair",
+    )
     _client_pass("partial_remainders",
                  reconcile_partial_remainders, "partial_remainders", updated_before=started_at)
 

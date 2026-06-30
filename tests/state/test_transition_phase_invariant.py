@@ -134,12 +134,13 @@ def test_every_mark_pending_exit_call_is_paired_with_canonical_writer():
     )
 
 
-def test_six_known_call_sites_all_paired():
-    """Regression pin on the 6 LIFECYCLE_FINDINGS_DEFERRED.md sites.
+def test_known_mark_pending_exit_call_sites_all_paired():
+    """Regression pin on the known LIFECYCLE_FINDINGS_DEFERRED.md sites.
 
-    The audit identified 6 _mark_pending_exit invocations as the structural
-    smell. After the WAVE-3 Batch B fix every one of them lives inside a
-    function that pairs with a canonical writer."""
+    The audit identified _mark_pending_exit invocations as the structural
+    smell. Every one must live inside a function that pairs with a canonical
+    writer; the current executable surface has seven call sites.
+    """
     source = EXIT_LIFECYCLE_PATH.read_text()
     tree = ast.parse(source)
 
@@ -161,8 +162,8 @@ def test_six_known_call_sites_all_paired():
         if func.name != "_mark_pending_exit"
     )
 
-    assert len(call_sites) == 6, (
-        f"Expected 6 _mark_pending_exit call sites (per "
+    assert len(call_sites) == 7, (
+        f"Expected 7 _mark_pending_exit call sites (per current "
         f"LIFECYCLE_FINDINGS_DEFERRED.md); found {len(call_sites)}: "
         f"{call_sites}"
     )
@@ -405,8 +406,8 @@ def test_entry_authority_quarantined_position_can_transition_to_pending_exit():
     conn.close()
 
 
-def test_chain_absent_confirmed_position_can_transition_to_pending_exit():
-    """Recent chain-absence review on real inventory must not block exit execution."""
+def test_chain_absent_confirmed_position_cannot_transition_to_pending_exit():
+    """Confirmed chain absence is not live inventory and must not emit exit intent."""
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.canonical_write import transition_phase
     from src.state.db import append_many_and_project, apply_architecture_kernel_schema
@@ -471,17 +472,15 @@ def test_chain_absent_confirmed_position_can_transition_to_pending_exit():
         reason="CHAIN_ABSENCE_QUARANTINE_REDECISION_EXIT",
         error="",
         source_module="tests/state/test_transition_phase_invariant.py",
-    ) is True
+    ) is False
 
     row = conn.execute(
         "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
         (pos.trade_id,),
     ).fetchone()
-    assert dict(row) == {
-        "phase": LifecyclePhase.PENDING_EXIT.value,
-        "chain_state": "chain_absent_confirmed_position_unattributed",
-        "order_status": "exit_intent",
-    }
+    assert row["phase"] == LifecyclePhase.QUARANTINED.value
+    assert row["chain_state"] == "chain_absent_confirmed_position_unattributed"
+    assert row["order_status"] != "exit_intent"
     event = conn.execute(
         """
         SELECT event_type, phase_before, phase_after
@@ -492,11 +491,7 @@ def test_chain_absent_confirmed_position_can_transition_to_pending_exit():
         """,
         (pos.trade_id,),
     ).fetchone()
-    assert dict(event) == {
-        "event_type": "EXIT_INTENT",
-        "phase_before": LifecyclePhase.QUARANTINED.value,
-        "phase_after": LifecyclePhase.PENDING_EXIT.value,
-    }
+    assert event["event_type"] != "EXIT_INTENT"
     conn.close()
 
 

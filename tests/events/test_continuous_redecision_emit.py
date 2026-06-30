@@ -1689,7 +1689,6 @@ def test_held_position_family_provider_excludes_closed_phases():
         ("Tokyo", "2026-06-18", "low"),
         ("Shenzhen", "2026-06-19", "high"),
         ("Seoul", "2026-06-08", "high"),
-        ("Munich", "2026-06-30", "high"),
         ("Lucknow", "2026-06-28", "high"),
     }
 

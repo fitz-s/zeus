@@ -45,7 +45,10 @@ from src.contracts.position_truth import (
     CHAIN_ONLY_REVIEW_WINDOW_HOURS,
     ChainOnlyFact,
     ChainOnlyReviewState,
+    CURRENT_MONEY_RISK_CHAIN_STATES,
+    NO_CURRENT_MONEY_RISK_CHAIN_STATES,
     REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+    has_current_money_risk_chain_state,
 )
 from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
@@ -2920,15 +2923,7 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
 INACTIVE_RUNTIME_STATES = frozenset(
     set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
 )
-NO_EXPOSURE_CHAIN_STATES = frozenset(
-    {
-        "chain_confirmed_zero",
-        "chain_absent_confirmed_position_unattributed",
-        "external_operator_closed",
-        "quarantined",
-        "quarantine_expired",
-    }
-)
+NO_EXPOSURE_CHAIN_STATES = NO_CURRENT_MONEY_RISK_CHAIN_STATES
 _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
 
 
@@ -2955,7 +2950,8 @@ def _is_runtime_open_position(pos: Position) -> bool:
     if (
         chain_shares > 0.0
         and (
-            state in {"quarantined", "voided"}
+            state == "quarantined"
+            and has_current_money_risk_chain_state(chain_state)
             or (not state and chain_state in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES)
         )
     ):
@@ -3523,12 +3519,14 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
         for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
     }
     if "chain_shares" in columns:
-        if "phase" in columns:
-            chain_truth_sql = "phase IN ('quarantined', 'voided')"
+        chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+        if "phase" in columns and "chain_state" in columns:
+            chain_truth_sql = "phase = 'quarantined' AND chain_state IN ({})".format(
+                ",".join("?" for _ in chain_state_values)
+            )
         elif "chain_state" in columns:
-            chain_truth_sql = (
-                "chain_state IN ('entry_authority_quarantined', "
-                "'chain_absent_confirmed_position_unattributed')"
+            chain_truth_sql = "chain_state IN ({})".format(
+                ",".join("?" for _ in chain_state_values)
             )
         else:
             chain_truth_sql = "0"
@@ -3538,9 +3536,10 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
         )
     else:
         positive_chain_clause = ""
+        chain_state_values = ()
     params: list[object] = [token_id, token_id, *_NON_OPEN_PHASES]
     if positive_chain_clause:
-        params.append(_POSITIVE_CHAIN_EXPOSURE_EPS)
+        params.extend([_POSITIVE_CHAIN_EXPOSURE_EPS, *chain_state_values])
     row = conn.execute(
         f"""SELECT 1 FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)

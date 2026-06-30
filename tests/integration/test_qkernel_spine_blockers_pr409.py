@@ -923,10 +923,9 @@ def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
 def test_selection_exposure_includes_quarantined_chain_backed_position():
     """Quarantined chain-backed exposure must still shape family selection.
 
-    A local quarantine label is not proof that the venue exposure is gone. Munich
-    Jun30 reproduced this: 30C NO was quarantined with positive chain shares, then
-    the selector treated the family as empty and allowed 29C NO. The selection
-    exposure map must see that old NO payoff before choosing a sibling route.
+    A local quarantine label is not proof that the venue exposure is gone when
+    chain_state still asserts current money risk. The selection exposure map
+    must see that old NO payoff before choosing a sibling route.
     """
     from types import SimpleNamespace
 
@@ -953,7 +952,7 @@ def test_selection_exposure_includes_quarantined_chain_backed_position():
         bin_label="30C",
         direction="buy_no",
         state="quarantined",
-        chain_state="chain_absent_confirmed_position_unattributed",
+        chain_state="entry_authority_quarantined",
         condition_id="cond-1",
         chain_shares=29.14,
         chain_cost_basis_usd=21.27,
@@ -1002,22 +1001,23 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
-        CREATE TABLE position_current (
-            condition_id TEXT,
-            direction TEXT,
-            phase TEXT,
-            chain_shares REAL,
-            chain_cost_basis_usd REAL
-        )
+            CREATE TABLE position_current (
+                condition_id TEXT,
+                direction TEXT,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                chain_cost_basis_usd REAL
+            )
         """
     )
     conn.execute(
         """
-        INSERT INTO position_current (
-            condition_id, direction, phase, chain_shares, chain_cost_basis_usd
-        ) VALUES ('cond-1', 'buy_no', 'quarantined', 29.14, 21.27)
-        """
-    )
+            INSERT INTO position_current (
+                condition_id, direction, phase, chain_state, chain_shares, chain_cost_basis_usd
+            ) VALUES ('cond-1', 'buy_no', 'quarantined', 'entry_authority_quarantined', 29.14, 21.27)
+            """
+        )
 
     exposure = era._family_existing_exposure_for_selection_by_bin_id(
         proofs=proofs,
@@ -1033,6 +1033,45 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
         if cond == "cond-1":
             continue
         assert exposure[bin_id] == pytest.approx(21.27)
+
+
+def test_selection_exposure_excludes_chain_absent_quarantine():
+    """Confirmed chain absence must not be reintroduced as live family exposure."""
+    from types import SimpleNamespace
+
+    from src.state.portfolio import Position
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    position = Position(
+        trade_id="munich-30c-chain-absent",
+        market_id="m",
+        city=family.city,
+        cluster="eu",
+        target_date=family.target_date,
+        bin_label="30C",
+        direction="buy_no",
+        state="quarantined",
+        chain_state="chain_absent_confirmed_position_unattributed",
+        condition_id="cond-1",
+        chain_shares=29.14,
+        chain_cost_basis_usd=21.27,
+        chain_avg_price=0.73,
+        fill_authority="venue_position_observed",
+    )
+    state = SimpleNamespace(positions=[position])
+
+    assert era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=lambda: state,
+        family=family,
+    ) == {}
 
 
 def test_selection_exposure_fails_closed_when_trade_db_truth_unreadable():

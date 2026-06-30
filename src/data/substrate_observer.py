@@ -66,6 +66,7 @@ from src.data.substrate_priority import (
     money_path_substrate_priority_request,
     record_money_path_substrate_priority_receipt,
 )
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
 logger = logging.getLogger("zeus.substrate_observer")
 
@@ -706,11 +707,19 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
                 if "shares" in cols
                 else "COALESCE(chain_shares, 0)"
             )
-            chain_state_filter = (
-                "AND COALESCE(chain_state, '') IN ('synced', 'chain_present', 'exit_pending_missing')"
-                if "chain_state" in cols
-                else ""
-            )
+            chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+            if "chain_state" in cols:
+                chain_state_filter = "AND COALESCE(chain_state, '') IN ({})".format(
+                    ",".join("?" for _ in chain_state_values)
+                )
+                quarantine_chain_state_filter = "AND COALESCE(chain_state, '') IN ({})".format(
+                    ",".join("?" for _ in chain_state_values)
+                )
+                query_params: tuple[object, ...] = (*chain_state_values, *chain_state_values)
+            else:
+                chain_state_filter = ""
+                quarantine_chain_state_filter = "AND 0"
+                query_params = ()
             rows = conn.execute(
                 f"""
                 SELECT DISTINCT city, target_date, temperature_metric, condition_id
@@ -722,13 +731,15 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
                             {chain_state_filter}
                         )
                         OR (
-                            phase IN ('quarantined', 'voided')
+                            phase = 'quarantined'
                             AND COALESCE(chain_shares, 0) > 0.000001
+                            {quarantine_chain_state_filter}
                         )
                        )
                    AND condition_id IS NOT NULL
                    AND TRIM(condition_id) != ''
-                """
+                """,
+                query_params,
             ).fetchall()
         finally:
             conn.close()

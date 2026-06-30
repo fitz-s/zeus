@@ -56,14 +56,12 @@ def test_chain_confirmed_zero_round_trips_through_position():
 
 
 def test_chain_absent_confirmed_unattributed_round_trips_through_position():
-    """The confirmed-chain-absence attribution-quarantine state must coerce.
+    """The no-current-risk confirmed-chain-absence state must coerce.
 
     Antibody for the 2026-06-22 recurrence of the riskguard-kill class:
-    chain_reconciliation._quarantine_confirmed_chain_absence writes
-    chain_state='chain_absent_confirmed_position_unattributed' (via the named
-    constant CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE), a value outside the enum, so
-    load_portfolio POISON-quarantined 9 live positions (Tokyo/Seoul/Houston/...).
-    RED before the enum member exists; GREEN after.
+    this writer-set value escaped the enum and load_portfolio POISON-quarantined
+    live positions. It remains valid only for no-current-risk attribution debt;
+    confirmed fill conflicts must use entry_authority_quarantined.
     """
     from src.state.portfolio import Position
 
@@ -95,7 +93,7 @@ def test_entry_authority_quarantined_round_trips_through_position():
 
 def test_constant_mediated_chain_state_writers_are_declared_members():
     """The literal-only antibody above misses chain_state assigned via a named
-    constant (e.g. `corrected.chain_state = CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE`).
+    constant (e.g. `corrected.chain_state = SOME_TYPED_CHAIN_STATE`).
     Resolve module-level `*_CHAIN_STATE = "literal"` constants and require each to
     be a declared member — this is the gap through which
     'chain_absent_confirmed_position_unattributed' escaped to production."""

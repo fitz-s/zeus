@@ -134,6 +134,103 @@ def test_boot_fast_recovery_does_not_capture_venue_snapshot(tmp_path, monkeypatc
     assert row["next_exit_retry_at"] is None
 
 
+def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
+    tmp_path,
+    monkeypatch,
+):
+    """Boot-fast must clear chain-absent positive projection debt before schedulers start."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / "boot-fast-chain-absence.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    seed.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, market_id, city, cluster, target_date, bin_label,
+            direction, unit, size_usd, shares, cost_basis_usd, entry_price,
+            p_posterior, decision_snapshot_id, entry_method, strategy_key,
+            edge_source, discovery_mode, chain_state, token_id, no_token_id,
+            condition_id, order_id, order_status, updated_at, temperature_metric,
+            chain_shares, chain_avg_price, chain_cost_basis_usd, exit_reason
+        ) VALUES (
+            'pos-boot-chain-absent-positive', 'quarantined', 'condition-munich',
+            'Munich', 'Europe', '2026-06-30',
+            'Will the highest temperature in Munich be 30C on June 30?',
+            'buy_no', 'C', 21.27, 29.14, 21.27, 0.73,
+            0.1449, 'forecast-snap-munich', 'qkernel_spine', 'center_buy',
+            'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+            'tok-yes', 'tok-no', 'condition-munich', 'ord-entry', 'filled',
+            '2026-06-30T00:22:00+00:00', 'high', 29.14, 0.73, 21.27,
+            'chain_absent_confirmed_position_unattributed'
+        )
+        """
+    )
+    seed.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, caused_by, idempotency_key,
+            venue_status, source_module, payload_json, env
+        ) VALUES (
+            'evt-boot-chain-absent-positive', 'pos-boot-chain-absent-positive',
+            4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+            'active', 'quarantined', 'center_buy', 'dec-1', 'snap-1',
+            'ord-entry', NULL, 'chain_absent_confirmed_position_unattributed',
+            'idem-boot-chain-absent-positive', 'review_required',
+            'src.state.chain_reconciliation',
+            '{"reason":"chain_absent_confirmed_position_unattributed"}',
+            'live'
+        )
+        """
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _fail_capture(*args, **kwargs):
+        raise AssertionError("boot_fast must not call capture_venue_read_snapshot")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", _fail_capture)
+
+    client = MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"])
+    summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+
+    assert summary["scope"] == "boot_fast"
+    assert summary["venue_snapshot_deferred"] is True
+    assert summary["confirmed_chain_absence_projection_repair"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verified = _conn_factory()
+    try:
+        row = verified.execute(
+            """
+            SELECT chain_shares, chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-boot-chain-absent-positive'
+            """
+        ).fetchone()
+    finally:
+        verified.close()
+    assert dict(row) == {
+        "chain_shares": 0.0,
+        "chain_avg_price": 0.0,
+        "chain_cost_basis_usd": 0.0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -9385,10 +9482,10 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(current) == {
             "phase": "quarantined",
-            "chain_state": "chain_absent_confirmed_position_unattributed",
-            "exit_reason": "chain_absent_confirmed_position_unattributed",
+            "chain_state": "entry_authority_quarantined",
+            "exit_reason": "entry_authority_chain_absence_conflict",
             "shares": 5.06,
-            "chain_shares": 5.0599,
+            "chain_shares": pytest.approx(5.0599),
         }
         event = conn.execute(
             """
@@ -9503,11 +9600,247 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(current) == {
             "phase": "quarantined",
-            "chain_state": "chain_absent_confirmed_position_unattributed",
-            "exit_reason": "chain_absent_confirmed_position_unattributed",
+            "chain_state": "entry_authority_quarantined",
+            "exit_reason": "entry_authority_chain_absence_conflict",
             "fill_authority": "cancelled_remainder",
-            "chain_shares": 85.17,
+            "chain_shares": pytest.approx(85.17),
         }
+
+    def test_confirmed_chain_absence_projection_repair_clears_stale_chain_fields(
+        self,
+        conn,
+    ):
+        position_id = "pos-chain-absent-positive-projection"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                '2026-06-30',
+                'Will the highest temperature in Munich be 30°C on June 30?',
+                'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
+                'snap-munich', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+                'tok-yes', 'tok-no', 'cond-munich', 'ord-entry', 'filled',
+                '2026-06-30T00:22:00+00:00', 'high',
+                'chain_absent_confirmed_position_unattributed',
+                'venue_confirmed_full', 29.14, 0.73, 21.27, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+                      'active', 'quarantined', 'center_buy', NULL,
+                      'snap-munich', 'ord-entry', NULL,
+                      'chain_absent_confirmed_position_unattributed',
+                      ?, 'review_required', 'src.state.chain_reconciliation',
+                      '{"reason":"chain_absent_confirmed_position_unattributed"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_absent_review:4",
+                position_id,
+                f"{position_id}:chain_absent_review:4",
+            ),
+        )
+
+        from src.execution.command_recovery import (
+            repair_confirmed_chain_absence_positive_projections,
+        )
+
+        summary = repair_confirmed_chain_absence_positive_projections(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, shares, cost_basis_usd, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd,
+                   COALESCE(chain_absence_at, '') AS chain_absence_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "chain_absent_confirmed_position_unattributed",
+            "shares": 29.14,
+            "cost_basis_usd": 21.27,
+            "chain_shares": 0.0,
+            "chain_avg_price": 0.0,
+            "chain_cost_basis_usd": 0.0,
+            "chain_absence_at": current["chain_absence_at"],
+        }
+        assert current["chain_absence_at"]
+        event = conn.execute(
+            """
+            SELECT event_type, sequence_no, phase_before, phase_after,
+                   source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["sequence_no"] == 5
+        assert event["phase_before"] == "quarantined"
+        assert event["phase_after"] == "quarantined"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["previous_chain_shares"] == 29.14
+        assert payload["proof_class"] == "confirmed_chain_absence_projection_chain_fields_cleared"
+
+    def test_confirmed_chain_absence_projection_with_trade_fact_stays_monitorable(
+        self,
+        conn,
+    ):
+        position_id = "pos-chain-absent-positive-trade-fact"
+        command_id = _insert(
+            conn,
+            command_id="cmd-chain-absent-positive-trade-fact",
+            position_id=position_id,
+            token_id="tok-yes",
+            no_token_id="tok-no",
+            selected_token_id="tok-no",
+            outcome_label="NO",
+            side="BUY",
+            size=29.14,
+            price=0.73,
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_trade_facts (
+                trade_id, venue_order_id, command_id, state, filled_size,
+                fill_price, fee_paid_micro, tx_hash, block_number,
+                confirmation_count, source, observed_at, venue_timestamp,
+                local_sequence, raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'trade-chain-absent-positive', 'ord-entry', ?, 'CONFIRMED',
+                '29.14', '0.73', NULL, NULL, NULL, 0, 'WS_USER',
+                '2026-06-30T00:22:15+00:00',
+                '2026-06-30T00:22:15+00:00',
+                1, ?, '{}'
+            )
+            """,
+            (command_id, "b" * 64),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason,
+                fill_authority, chain_shares, chain_avg_price,
+                chain_cost_basis_usd, chain_absence_at
+            ) VALUES (
+                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                '2026-06-30',
+                'Will the highest temperature in Munich be 30°C on June 30?',
+                'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
+                'snap-munich', 'qkernel_spine', 'center_buy',
+                'center_buy', 'day0', 'chain_absent_confirmed_position_unattributed',
+                'tok-yes', 'tok-no', 'cond-munich', 'ord-entry', 'filled',
+                '2026-06-30T00:22:00+00:00', 'high',
+                'chain_absent_confirmed_position_unattributed',
+                'none', 29.14, 0.73, 21.27, ''
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no,
+                event_type, occurred_at, phase_before, phase_after,
+                strategy_key, decision_id, snapshot_id, order_id,
+                command_id, caused_by, idempotency_key, venue_status,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
+                      'active', 'quarantined', 'center_buy', NULL,
+                      'snap-munich', 'ord-entry', NULL,
+                      'chain_absent_confirmed_position_unattributed',
+                      ?, 'review_required', 'src.state.chain_reconciliation',
+                      '{"reason":"chain_absent_confirmed_position_unattributed"}',
+                      'live')
+            """,
+            (
+                f"{position_id}:chain_absent_review:4",
+                position_id,
+                f"{position_id}:chain_absent_review:4",
+            ),
+        )
+
+        from src.execution.command_recovery import (
+            repair_confirmed_chain_absence_positive_projections,
+        )
+
+        summary = repair_confirmed_chain_absence_positive_projections(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, fill_authority, exit_reason,
+                   shares, cost_basis_usd, chain_shares,
+                   chain_avg_price, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "quarantined",
+            "chain_state": "entry_authority_quarantined",
+            "fill_authority": "venue_confirmed_full",
+            "exit_reason": "entry_authority_chain_absence_conflict",
+            "shares": 29.14,
+            "cost_basis_usd": 21.27,
+            "chain_shares": 29.14,
+            "chain_avg_price": 0.73,
+            "chain_cost_basis_usd": 21.27,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, sequence_no, phase_before, phase_after,
+                   source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "REVIEW_REQUIRED"
+        assert event["sequence_no"] == 5
+        assert event["phase_before"] == "quarantined"
+        assert event["phase_after"] == "quarantined"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
+        assert (
+            payload["proof_class"]
+            == "confirmed_fill_chain_absence_projection_preserved_current_money_risk"
+        )
 
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,

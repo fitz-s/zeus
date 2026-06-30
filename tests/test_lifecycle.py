@@ -615,8 +615,8 @@ def test_chain_reconciliation_confirmed_absent_position_quarantines_not_voids(tm
     """Relationship: confirmed fills missing on-chain require attribution, not void."""
 
     from src.state.chain_reconciliation import (
-        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
-        CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+        ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ChainPosition,
         reconcile,
     )
@@ -713,13 +713,13 @@ def test_chain_reconciliation_confirmed_absent_position_quarantines_not_voids(tm
     conn.close()
 
     assert stats["voided"] == 0
-    assert stats["confirmed_chain_absence_quarantined"] == 1
+    assert stats["confirmed_fill_chain_absence_conflict_preserved"] == 1
     assert row["phase"] == "quarantined"
-    assert row["chain_state"] == CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["chain_state"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
     assert row["shares"] == pos.shares
     assert row["chain_shares"] == pos.chain_shares
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
-    assert events[0]["details"]["reason"] == CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON
+    assert events[0]["details"]["reason"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
     assert events[0]["details"]["held_token_id"] == "tok-confirmed-no"
     assert events[0]["details"]["no_token_id"] == "tok-confirmed-no"
 
@@ -942,8 +942,8 @@ def test_chain_reconciliation_venue_partial_fill_fact_prevents_phantom_void(tmp_
     """A live partial fill is real exposure even before local fill authority catches up."""
 
     from src.state.chain_reconciliation import (
-        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
-        CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
+        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+        ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ChainPosition,
         reconcile,
     )
@@ -1081,19 +1081,20 @@ def test_chain_reconciliation_venue_partial_fill_fact_prevents_phantom_void(tmp_
     conn.close()
 
     assert stats["voided"] == 0
-    assert stats["confirmed_chain_absence_quarantined"] == 1
+    assert stats["confirmed_fill_chain_absence_conflict_preserved"] == 1
     assert row["phase"] == "quarantined"
-    assert row["chain_state"] == CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["chain_state"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
     assert row["shares"] == pos.shares
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
-    assert events[0]["details"]["reason"] == CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON
+    assert events[0]["details"]["reason"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
 
 
 def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure(tmp_path):
     """A false PHANTOM void with positive exposure must re-enter redecision quarantine."""
 
     from src.state.chain_reconciliation import (
-        CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
+        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+        ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ChainPosition,
         reconcile,
     )
@@ -1192,11 +1193,11 @@ def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure
 
     assert stats["false_phantom_void_positive_exposure_restored"] == 1
     assert row["phase"] == "quarantined"
-    assert row["chain_state"] == CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["chain_state"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
     assert row["shares"] == pytest.approx(85.17)
     assert row["chain_shares"] == pytest.approx(85.17)
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
-    assert events[0]["details"]["reason"] == "false_phantom_void_positive_exposure"
+    assert events[0]["details"]["reason"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
 
 
 def test_chain_reconciliation_restores_terminal_no_fill_void_when_chain_holds_token(tmp_path):
