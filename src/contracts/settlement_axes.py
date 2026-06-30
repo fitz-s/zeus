@@ -80,16 +80,22 @@ def position_economic_outcome(outcome: SettlementOutcome) -> PositionEconomicOut
     return PositionEconomicOutcome.UNRESOLVED
 
 
-def market_resolution_side(
+def market_resolution_side_from_position_relative_outcome(
     outcome: SettlementOutcome,
     *,
     position_direction: str,
 ) -> MarketResolutionSide:
-    """Project the A8 market-resolution side by UN-FUSING the position-relative
+    """Project the A8 market-resolution side by UN-FUSING a genuinely PER-POSITION
     SettlementOutcome with our held direction.
 
     The market resolved on OUR side iff our position won; on the OPPOSITE side iff it
     lost. The void/disputed/revision/unresolved states are side-independent.
+
+    WARNING (consult 6a42bc3d): use ONLY where ``outcome`` is a true per-position fused
+    outcome. Do NOT feed event-level ``settlement_outcomes.outcome_type`` here — that
+    column is backfill-corrupt (every VERIFIED row stamped VENUE_RESOLVED_WIN), so this
+    would falsely infer NO for every buy_no row. For event rows derive the side from
+    ``winning_bin``/bin membership via ``market_resolution_side_for_bin``.
     """
     direction = str(position_direction or "").strip().lower()
     if direction not in _VALID_DIRECTIONS:
@@ -112,3 +118,133 @@ def market_resolution_side(
         return MarketResolutionSide.SOURCE_REVISION
     # UNRESOLVED, PHYSICALLY_CONFIRMED, SOURCE_PUBLISHED_VENUE_UNRESOLVED, OBSERVATION_REVISED
     return MarketResolutionSide.UNRESOLVED
+
+
+# --------------------------------------------------------------------------- #
+# A8 event-level resolution lifecycle (consult 6a42bc3d) — the canonical A8    #
+# storage axis. NO win/lose/yes/no/redeemed: economics are A9 (per-position,   #
+# derived via the Direction Law); redemption is A10 (settlement_commands).     #
+# --------------------------------------------------------------------------- #
+
+class SettlementResolutionState(StrEnum):
+    """A8 event-level settlement lifecycle, keyed at the (city, target_date, metric)
+    grain. Carries ONLY the resolution lifecycle — never position WIN/LOSE (incoherent
+    at the event grain) nor redemption accounting."""
+
+    UNRESOLVED = "UNRESOLVED"
+    PHYSICALLY_CONFIRMED = "PHYSICALLY_CONFIRMED"
+    SOURCE_PUBLISHED_VENUE_UNRESOLVED = "SOURCE_PUBLISHED_VENUE_UNRESOLVED"
+    VENUE_RESOLVED = "VENUE_RESOLVED"
+    OBSERVATION_REVISED = "OBSERVATION_REVISED"
+    DISPUTED = "DISPUTED"
+    VOID_50_50 = "VOID_50_50"
+    SOURCE_REVISION = "SOURCE_REVISION"
+
+
+# Legacy fused outcome_type int -> event lifecycle state. The position-relative
+# WIN/LOSE/REDEEMED values (3/4/5) collapse to VENUE_RESOLVED: their economics are
+# intentionally DISCARDED here (they are recomputed per-position via the Direction
+# Law), preserving only the lifecycle/eligibility meaning.
+_LEGACY_OUTCOME_TYPE_LIFECYCLE: dict[int, SettlementResolutionState] = {
+    0: SettlementResolutionState.UNRESOLVED,
+    1: SettlementResolutionState.PHYSICALLY_CONFIRMED,
+    2: SettlementResolutionState.SOURCE_PUBLISHED_VENUE_UNRESOLVED,
+    3: SettlementResolutionState.VENUE_RESOLVED,
+    4: SettlementResolutionState.VENUE_RESOLVED,
+    5: SettlementResolutionState.VENUE_RESOLVED,
+    6: SettlementResolutionState.OBSERVATION_REVISED,
+    100: SettlementResolutionState.DISPUTED,
+    101: SettlementResolutionState.VOID_50_50,
+    102: SettlementResolutionState.SOURCE_REVISION,
+}
+
+
+def legacy_outcome_type_to_resolution_state(
+    outcome_type: int | None,
+    authority: str = "",
+    winning_bin: object = None,
+) -> SettlementResolutionState:
+    """Map a legacy settlement_outcomes row to its event lifecycle state — LIFECYCLE
+    ONLY, never side/economics. An explicit outcome_type wins; a NULL/unknown one falls
+    back to authority + winning_bin presence (the consult's safe historical backfill)."""
+    if outcome_type is not None:
+        mapped = _LEGACY_OUTCOME_TYPE_LIFECYCLE.get(int(outcome_type))
+        if mapped is not None:
+            return mapped
+    auth = str(authority or "").strip().upper()
+    if auth == "VERIFIED" and winning_bin:
+        return SettlementResolutionState.VENUE_RESOLVED
+    if auth == "QUARANTINED":
+        return SettlementResolutionState.DISPUTED
+    return SettlementResolutionState.UNRESOLVED
+
+
+def settlement_resolution_state_from_row(row: dict) -> SettlementResolutionState:
+    """Read the canonical A8 lifecycle from a settlement_outcomes row: the explicit
+    ``resolution_state`` column if present, else the legacy outcome_type/authority
+    fallback. Never returns YES/NO/WIN/LOSE."""
+    explicit = row.get("resolution_state")
+    if explicit:
+        return SettlementResolutionState(str(explicit))
+    return legacy_outcome_type_to_resolution_state(
+        row.get("outcome_type"),
+        authority=row.get("authority") or "",
+        winning_bin=row.get("winning_bin"),
+    )
+
+
+# Calibration/promotion eligibility — the resolution-state equivalent of the legacy
+# _PROMOTION_ELIGIBLE_OUTCOMES set. Proven zero-diff vs the legacy gate across every
+# outcome_type value (tests/test_settlement_axes_a8_a9.py).
+PROMOTION_ELIGIBLE_RESOLUTION_STATES: frozenset[SettlementResolutionState] = frozenset({
+    SettlementResolutionState.PHYSICALLY_CONFIRMED,
+    SettlementResolutionState.VENUE_RESOLVED,
+    SettlementResolutionState.OBSERVATION_REVISED,
+    SettlementResolutionState.SOURCE_REVISION,
+})
+
+
+def is_promotion_eligible_resolution_state(state: SettlementResolutionState) -> bool:
+    """True iff this event lifecycle state is eligible to feed promotion-grade scoring
+    / calibration learning (resolved-enough), independent of who won."""
+    return state in PROMOTION_ELIGIBLE_RESOLUTION_STATES
+
+
+def market_resolution_side_for_bin(
+    *,
+    settled_in_bin: bool | None,
+    resolution_state: SettlementResolutionState,
+) -> MarketResolutionSide:
+    """A8 market side for a SPECIFIC bin's binary market, from event lifecycle + bin
+    membership (``settled_in_bin`` = did the settlement land in this bin). This is the
+    event-correct path (unlike the position-relative un-fuse): a bin's YES token paid
+    iff the settlement landed in that bin. Side is defined only when VENUE_RESOLVED."""
+    if resolution_state is SettlementResolutionState.VOID_50_50:
+        return MarketResolutionSide.VOID_50_50
+    if resolution_state is SettlementResolutionState.DISPUTED:
+        return MarketResolutionSide.DISPUTED
+    if resolution_state is SettlementResolutionState.SOURCE_REVISION:
+        return MarketResolutionSide.SOURCE_REVISION
+    if resolution_state is not SettlementResolutionState.VENUE_RESOLVED:
+        return MarketResolutionSide.UNRESOLVED
+    if settled_in_bin is None:
+        return MarketResolutionSide.UNRESOLVED
+    return MarketResolutionSide.RESOLVED_YES if settled_in_bin else MarketResolutionSide.RESOLVED_NO
+
+
+def economic_outcome_for_position(
+    *,
+    settled_in_bin: bool | None,
+    direction: str,
+) -> PositionEconomicOutcome:
+    """A9 economic outcome for a position via the Direction Law — the CANONICAL
+    per-position grading path (matches grade_receipt). buy_yes wins iff settlement
+    landed in its bin; buy_no wins iff it did NOT. Unresolved bin membership -> UNRESOLVED.
+    """
+    d = str(direction or "").strip().lower()
+    if d not in _VALID_DIRECTIONS:
+        raise ValueError(f"direction must be one of {sorted(_VALID_DIRECTIONS)}, got {direction!r}")
+    if settled_in_bin is None:
+        return PositionEconomicOutcome.UNRESOLVED
+    won = settled_in_bin if d == "buy_yes" else (not settled_in_bin)
+    return PositionEconomicOutcome.WIN if won else PositionEconomicOutcome.LOSE
