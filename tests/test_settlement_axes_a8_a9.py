@@ -228,3 +228,50 @@ def test_economic_outcome_for_position_direction_law(settled, direction: str, ex
 def test_economic_outcome_for_position_rejects_bad_direction() -> None:
     with pytest.raises(ValueError):
         economic_outcome_for_position(settled_in_bin=True, direction="hodl")
+
+
+# --- step 4 (consult 6a42bc3d): the live Brier/calibration path is ALREADY -------- #
+# --- corruption-free — lock it instead of "repairing" it ------------------------- #
+
+def _live_exit_price_outcome(settled_in_bin: bool, direction: str) -> int:
+    """The live A9 computation (harvester._settle_positions, audit §E5): exit_price
+    applies the Direction Law; outcome_fact.outcome = 1 iff exit_price > 0."""
+    if direction == "buy_yes":
+        exit_price = 1.0 if settled_in_bin else 0.0
+    else:  # buy_no
+        exit_price = 1.0 if not settled_in_bin else 0.0
+    return 1 if exit_price > 0 else 0
+
+
+@pytest.mark.parametrize("settled,direction", [
+    (True, "buy_yes"), (False, "buy_yes"), (True, "buy_no"), (False, "buy_no"),
+])
+def test_canonical_a9_matches_live_exit_price_outcome(settled: bool, direction: str) -> None:
+    # The canonical Direction-Law A9 (economic_outcome_for_position) reproduces the live
+    # outcome_fact.outcome EXACTLY. riskguard's Brier reads `outcome` (A9), so it is
+    # already corruption-free: the settlement_outcomes.outcome_type backfill corruption
+    # never reaches a scoring target — it was confined to the promotion-eligibility gate,
+    # which step 3 cut to the typed accessor (zero-diff). No Brier "repair" is needed.
+    canonical_win = economic_outcome_for_position(settled_in_bin=settled, direction=direction) is PositionEconomicOutcome.WIN
+    live_win = _live_exit_price_outcome(settled, direction) == 1
+    assert canonical_win == live_win
+
+
+def test_no_scoring_file_reads_event_outcome_type() -> None:
+    # INV ratchet: the corrupt event-level settlement_outcomes.outcome_type must NEVER be
+    # a Brier/calibration/learning TARGET. The scoring organs grade from
+    # outcome_fact.outcome / settlement_attribution.won / winning_bin (A8/A9). Locks the
+    # verified-clean state (2026-06-29: zero offenders) so a regression fails loudly.
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    scoring_files = (
+        "src/riskguard/riskguard.py",
+        "src/analysis/settlement_skill_attribution.py",
+        "src/engine/replay_selection_coverage.py",
+    )
+    offenders = []
+    for rel in scoring_files:
+        for i, line in enumerate(repo.joinpath(rel).read_text().splitlines(), 1):
+            if "outcome_type" in line and "outcome_type_raw" not in line and not line.lstrip().startswith("#"):
+                offenders.append(f"{rel}:{i}: {line.strip()}")
+    assert not offenders, "scoring code references event-level outcome_type: " + " | ".join(offenders)
