@@ -4823,6 +4823,21 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         if "duplicate column" not in str(_exc).lower():
             raise
 
+    # A8/A9 split (consult 6a42bc3d, 2026-06-29): add the canonical event-lifecycle
+    # column alongside the legacy fused outcome_type. Nullable; readers fall back to the
+    # legacy outcome_type mapping when absent (zero behavior change). log_settlement's
+    # INSERT is intentionally NOT changed — population is a later writer/backfill step.
+    try:
+        conn.execute(
+            "ALTER TABLE settlement_outcomes ADD COLUMN resolution_state TEXT "
+            "CHECK (resolution_state IS NULL OR resolution_state IN ("
+            "'UNRESOLVED', 'PHYSICALLY_CONFIRMED', 'SOURCE_PUBLISHED_VENUE_UNRESOLVED', "
+            "'VENUE_RESOLVED', 'OBSERVATION_REVISED', 'DISPUTED', 'VOID_50_50', 'SOURCE_REVISION'))"
+        )
+    except sqlite3.OperationalError as _exc:
+        if "duplicate column" not in str(_exc).lower():
+            raise
+
     # Phase 7 T3 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
     # settlement_capture_verifications: forecasts-only, not in world_src.sqlite_master.
     # Follow _create_market_microstructure_snapshots precedent: static helper, no registry add.

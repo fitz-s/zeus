@@ -111,6 +111,11 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             provenance_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             outcome_type INTEGER,
+            resolution_state TEXT
+                CHECK (resolution_state IS NULL OR resolution_state IN (
+                    'UNRESOLVED', 'PHYSICALLY_CONFIRMED', 'SOURCE_PUBLISHED_VENUE_UNRESOLVED',
+                    'VENUE_RESOLVED', 'OBSERVATION_REVISED', 'DISPUTED', 'VOID_50_50', 'SOURCE_REVISION'
+                )),
             settlement_station TEXT,
             settlement_unit TEXT
                 CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
