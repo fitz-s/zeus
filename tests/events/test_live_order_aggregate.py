@@ -396,6 +396,42 @@ def test_live_order_cap_transition_pending_reconcile_sets_projection_pending():
     assert projection.current_state == "PENDING_RECONCILE"
 
 
+def test_cap_consumed_does_not_hide_acknowledged_live_order_projection():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed_command_with_submit_attempt(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "venue_order_id": "venue-live-1",
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="CapTransitioned",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "to_status": "CONSUMED",
+            "execution_receipt_hash": "receipt-hash",
+        },
+        occurred_at=NOW,
+        source_authority="live_cap_ledger",
+    )
+
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "VENUE_SUBMIT_ACKED"
+    assert projection.last_event_type == "CapTransitioned"
+    assert projection.venue_order_id == "venue-live-1"
+    assert projection.pending_reconcile is False
+
+
 def test_execution_command_requires_pre_submit_revalidation():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(

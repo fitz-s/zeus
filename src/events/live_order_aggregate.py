@@ -276,9 +276,19 @@ class LiveOrderAggregateLedger:
             if event_type == "SubmitUnknown":
                 current_state = EVENT_STATE[event_type]
                 pending_reconcile = True
-            elif event_type == "CapTransitioned" and str(payload.get("to_status") or "") == "PENDING_RECONCILE":
-                current_state = "PENDING_RECONCILE"
-                pending_reconcile = True
+            elif event_type == "CapTransitioned":
+                to_status = str(payload.get("to_status") or "")
+                if to_status == "PENDING_RECONCILE":
+                    current_state = "PENDING_RECONCILE"
+                    pending_reconcile = True
+                elif to_status == "CONSUMED":
+                    # CONSUMED is capital-ledger state, not order lifecycle state.
+                    # A successful submit remains a live/acked order until venue
+                    # facts or user-channel events prove a lifecycle transition.
+                    if current_state == "UNKNOWN":
+                        current_state = "VENUE_SUBMIT_ACKED"
+                else:
+                    current_state = EVENT_STATE[event_type]
             elif event_type == "Reconciled":
                 current_state = EVENT_STATE[event_type]
                 pending_reconcile = bool(payload.get("pending_reconcile", False))

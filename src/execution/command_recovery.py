@@ -10768,9 +10768,18 @@ def _rebuild_edli_projection_qualified(
         if current_event_type == "SubmitUnknown":
             current_state = "PENDING_RECONCILE"
             pending_reconcile = True
-        elif current_event_type == "CapTransitioned" and str(payload.get("to_status") or "") == "PENDING_RECONCILE":
-            current_state = "PENDING_RECONCILE"
-            pending_reconcile = True
+        elif current_event_type == "CapTransitioned":
+            to_status = str(payload.get("to_status") or "")
+            if to_status == "PENDING_RECONCILE":
+                current_state = "PENDING_RECONCILE"
+                pending_reconcile = True
+            elif to_status == "CONSUMED":
+                # CONSUMED belongs to the live-cap ledger. It must not hide
+                # the active venue order lifecycle in the projection.
+                if current_state == "UNKNOWN":
+                    current_state = "VENUE_SUBMIT_ACKED"
+            else:
+                current_state = state_by_type.get(current_event_type, current_event_type)
         elif current_event_type == "Reconciled":
             current_state = "RECONCILED"
             pending_reconcile = bool(payload.get("pending_reconcile", False))
