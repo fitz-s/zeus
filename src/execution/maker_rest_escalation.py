@@ -47,6 +47,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.state.canonical_projections import OPEN_ORDER_FACT_STATES
 
 logger = logging.getLogger("zeus.maker_rest_escalation")
@@ -462,7 +463,7 @@ def run_persisted_cancels_for_expired_rests(
             outcome = None
             raw = {"exception_type": type(exc).__name__, "exception_message": str(exc)}
 
-        if outcome is not None and outcome.status == "CANCELED":
+        if outcome is not None and is_cancel_confirmed_status(outcome.status):
             event_type = "CANCEL_ACKED"
             payload = {
                 "venue_order_id": order_id,

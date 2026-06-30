@@ -51,7 +51,6 @@ _BASELINE_OFFENDERS = frozenset({
     "src/execution/executor.py",
     "src/execution/exit_lifecycle.py",
     "src/execution/exit_safety.py",
-    "src/execution/maker_rest_escalation.py",
     "src/main.py",
 })
 
