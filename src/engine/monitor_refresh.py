@@ -903,7 +903,56 @@ def _monitor_forecast_source_validations(ens_result: dict) -> list[str]:
     degradation_level = ens_result.get("degradation_level")
     if degradation_level:
         validations.append(f"forecast_degradation:{degradation_level}")
+    source_models = [
+        str(model).strip()
+        for model in (ens_result.get("source_models") or [])
+        if str(model).strip()
+    ]
+    if source_models:
+        validations.append(f"forecast_source_models:{','.join(source_models)}")
+    expected_models = [
+        str(model).strip()
+        for model in (ens_result.get("expected_models") or [])
+        if str(model).strip()
+    ]
+    if expected_models:
+        validations.append(f"forecast_expected_models:{','.join(expected_models)}")
+    source_model_count = ens_result.get("source_model_count")
+    if source_model_count is not None:
+        validations.append(f"forecast_source_model_count:{source_model_count}")
+    fetch_time = ens_result.get("fetch_time")
+    if fetch_time:
+        validations.append(f"forecast_fetch_time:{fetch_time}")
     return validations
+
+
+def _day0_hourly_bundle_authority_rejection_reason(ens_result: dict) -> str | None:
+    if str(ens_result.get("source_id") or "") != "day0_hourly_vectors":
+        return None
+    expected = {
+        str(model).strip()
+        for model in (ens_result.get("expected_models") or [])
+        if str(model).strip()
+    }
+    observed = {
+        str(model).strip()
+        for model in (ens_result.get("source_models") or [])
+        if str(model).strip()
+    }
+    if not expected:
+        return "day0_hourly_bundle_expected_models_missing"
+    missing = sorted(expected - observed)
+    if missing:
+        return "day0_hourly_bundle_missing_expected_models:" + ",".join(missing)
+    try:
+        count = int(ens_result.get("source_model_count"))
+    except (TypeError, ValueError):
+        return "day0_hourly_bundle_source_model_count_missing"
+    if count < len(expected):
+        return f"day0_hourly_bundle_source_model_count_short:{count}/{len(expected)}"
+    if ens_result.get("fetch_time") is None:
+        return "day0_hourly_bundle_fetch_time_missing"
+    return None
 
 
 def _parse_utc_datetime(raw: object) -> datetime | None:
@@ -2570,6 +2619,16 @@ def _refresh_day0_observation(
     live_forecast_source = "day0_hourly_vectors"
     if ens_result is not None:
         forecast_source_validations = _monitor_forecast_source_validations(ens_result)
+        hourly_bundle_rejection = _day0_hourly_bundle_authority_rejection_reason(ens_result)
+        if hourly_bundle_rejection is not None:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                live_forecast_source,
+                *forecast_source_validations,
+                "day0_hourly_bundle_authority_gate",
+                hourly_bundle_rejection,
+            ]
         extrema, hours_remaining = remaining_member_extrema_for_day0(
             ens_result["members_hourly"],
             ens_result["times"],

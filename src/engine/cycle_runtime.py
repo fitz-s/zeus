@@ -336,6 +336,15 @@ def _exit_evidence_gate_allows_statistical_exit(
     summary: dict,
     deps,
 ) -> tuple[bool, str | None]:
+    day0_immature_reason = _day0_immature_exit_authority_reason(pos)
+    if day0_immature_reason and _exit_trigger_requires_mature_day0_authority(exit_trigger):
+        return _record_exit_evidence_gate_block(
+            summary,
+            deps,
+            trade_id=pos.trade_id,
+            trigger=exit_trigger,
+            reason=f"DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED:{day0_immature_reason}",
+        )
     if exit_trigger not in _D4_ASYMMETRIC_EXIT_TRIGGERS:
         return True, None
     if conn is None:
@@ -3135,6 +3144,18 @@ def _day0_immature_exit_authority_reason(*sources) -> str | None:
             if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
                 return text
     return None
+
+
+def _exit_trigger_requires_mature_day0_authority(exit_trigger: str) -> bool:
+    trigger = str(exit_trigger or "")
+    if trigger == "FAMILY_DIRECT_SELL_DOMINATES_HOLD":
+        return True
+    if trigger == "DAY0_OBSERVATION_REVERSAL":
+        return True
+    return any(
+        trigger.startswith(prefix)
+        for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS
+    )
 
 
 def _monitor_value_inputs(position) -> tuple[float, float | None, float | None, str | None]:

@@ -85,6 +85,53 @@ def _conn():
     return conn
 
 
+def test_monitor_forecast_source_validations_include_hourly_bundle_provenance():
+    """Monitor receipts must expose the complete Day0 hourly source bundle."""
+    from src.engine import monitor_refresh
+
+    validations = monitor_refresh._monitor_forecast_source_validations(
+        {
+            "source_id": "day0_hourly_vectors",
+            "forecast_source_role": "day0_remaining_window_live",
+            "source_models": ["icon_d2", "ecmwf_ifs"],
+            "expected_models": ["icon_d2", "ecmwf_ifs"],
+            "source_model_count": 2,
+            "fetch_time": "2026-06-30T12:12:12+00:00",
+        }
+    )
+
+    assert "forecast_source_id:day0_hourly_vectors" in validations
+    assert "forecast_source_role:day0_remaining_window_live" in validations
+    assert "forecast_source_models:icon_d2,ecmwf_ifs" in validations
+    assert "forecast_expected_models:icon_d2,ecmwf_ifs" in validations
+    assert "forecast_source_model_count:2" in validations
+    assert "forecast_fetch_time:2026-06-30T12:12:12+00:00" in validations
+
+
+def test_day0_hourly_bundle_authority_requires_expected_model_proof():
+    """A Day0 hourly vector without complete model proof cannot refresh belief."""
+    from src.engine import monitor_refresh
+
+    assert monitor_refresh._day0_hourly_bundle_authority_rejection_reason(
+        {
+            "source_id": "day0_hourly_vectors",
+            "source_models": ["icon_d2"],
+            "source_model_count": 1,
+            "fetch_time": "2026-06-30T02:44:32+00:00",
+        }
+    ) == "day0_hourly_bundle_expected_models_missing"
+
+    assert monitor_refresh._day0_hourly_bundle_authority_rejection_reason(
+        {
+            "source_id": "day0_hourly_vectors",
+            "expected_models": ["icon_d2", "ecmwf_ifs"],
+            "source_models": ["icon_d2"],
+            "source_model_count": 1,
+            "fetch_time": "2026-06-30T02:44:32+00:00",
+        }
+    ) == "day0_hourly_bundle_missing_expected_models:ecmwf_ifs"
+
+
 # ===========================================================================
 # Parsing (live-verified payload shape)
 # ===========================================================================

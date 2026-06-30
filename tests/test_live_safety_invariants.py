@@ -5441,6 +5441,54 @@ def test_family_monitor_overlay_blocks_immature_day0_before_missing_family_quote
     ]
 
 
+def test_exit_evidence_gate_blocks_family_direct_sell_on_immature_day0_authority():
+    """Final exit gate is a second Day0 maturity lock after family overlay."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-direct-sell-final-gate-day0-immature",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.83,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.applied_validations = [
+        "day0_observation_remaining_window",
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+        "family_direct_sell_dominates_hold_exit",
+    ]
+    summary = {}
+    deps = SimpleNamespace(logger=logging.getLogger("test_exit_gate_day0_immature"))
+
+    allowed, reason = cycle_runtime._exit_evidence_gate_allows_statistical_exit(
+        conn=sqlite3.connect(":memory:"),
+        pos=pos,
+        exit_trigger="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        summary=summary,
+        deps=deps,
+    )
+
+    assert allowed is False
+    assert reason == (
+        "DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED:"
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034"
+    )
+    assert summary["exit_evidence_missing_blocked"] == 1
+    assert summary["exit_evidence_gate_blocked_positions"] == [
+        {
+            "position_id": "family-direct-sell-final-gate-day0-immature",
+            "trigger": "FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+            "reason": reason,
+        }
+    ]
+
+
 def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
     """A high bid over a conservative belief is not by itself an exit signal."""
     from src.engine import cycle_runtime
@@ -5967,8 +6015,12 @@ def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
             "2026-06-07T16:00:00+00:00",
             "2026-06-07T17:00:00+00:00",
         ],
-        "source_id": "test_source",
+        "source_id": "day0_hourly_vectors",
         "forecast_source_role": "day0_remaining_window_live",
+        "source_models": ["icon_d2", "ecmwf_ifs"],
+        "expected_models": ["icon_d2", "ecmwf_ifs"],
+        "source_model_count": 2,
+        "fetch_time": datetime(2026, 6, 7, 15, 5, tzinfo=timezone.utc),
     })
     monkeypatch.setattr(diurnal, "build_day0_temporal_context", lambda *a, **k: SimpleNamespace(
         daypart="morning",
