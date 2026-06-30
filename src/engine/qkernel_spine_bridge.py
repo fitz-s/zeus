@@ -116,6 +116,8 @@ from src.probability.event_resolution import (
     ResolutionError,
     event_resolution_for_city,
 )
+from src.probability.joint_q import JointQ
+from src.probability.joint_q_band import JointQBand
 from src.probability.outcome_space import (
     OutcomeBin,
     OutcomeSpace,
@@ -419,6 +421,122 @@ def build_outcome_space(family: Any, case: ForecastCase) -> OutcomeSpace:
     )
     omega.validate()  # fail-closed: incomplete/overlapping family raises here
     return omega
+
+
+def _served_joint_belief_from_proofs(
+    *,
+    omega: OutcomeSpace,
+    proofs: Sequence[Any],
+    candidate_bin_id,
+    alpha: float,
+) -> tuple[JointQ, JointQBand, dict[tuple[str, str], float], None] | tuple[None, None, None, str]:
+    """Rehydrate the reactor-served posterior q for the qkernel selector.
+
+    The bridge must not let qkernel rebuild a second point probability from the
+    raw member envelope while admission/execution use the already-served
+    replacement posterior.  This helper builds a ``JointQ`` directly from the
+    selected family's proof probabilities and a candidate-side q_lcb map from
+    those same proofs, so route economics and submit certificates consume one
+    live belief surface.
+    """
+
+    yes_q_by_bin: dict[str, float] = {}
+    payoff_lcb_by_side: dict[tuple[str, str], float] = {}
+
+    for proof in proofs:
+        side = _proof_side(proof)
+        if side not in {"YES", "NO"}:
+            continue
+        try:
+            bin_id = str(candidate_bin_id(proof))
+            q_point = float(getattr(proof, "q_posterior"))
+            q_lcb = float(getattr(proof, "q_lcb_5pct"))
+        except (TypeError, ValueError):
+            return None, None, None, "SERVED_BELIEF_PROOF_Q_UNPARSEABLE"
+        if not (
+            bin_id
+            and math.isfinite(q_point)
+            and math.isfinite(q_lcb)
+            and 0.0 <= q_lcb <= q_point <= 1.0
+        ):
+            return None, None, None, "SERVED_BELIEF_PROOF_Q_INVALID"
+        if side == "YES":
+            yes_q_by_bin[bin_id] = q_point
+            payoff_lcb_by_side[(bin_id, "YES")] = q_lcb
+        else:
+            yes_q_by_bin.setdefault(bin_id, float(1.0 - q_point))
+            payoff_lcb_by_side[(bin_id, "NO")] = q_lcb
+
+    q_values: list[float] = []
+    for b in omega.bins:
+        if b.bin_id not in yes_q_by_bin:
+            return None, None, None, f"SERVED_BELIEF_Q_MISSING:{b.bin_id}"
+        q = float(yes_q_by_bin[b.bin_id])
+        if not (math.isfinite(q) and 0.0 <= q <= 1.0):
+            return None, None, None, f"SERVED_BELIEF_Q_INVALID:{b.bin_id}"
+        q_values.append(q)
+
+    q_arr = np.asarray(q_values, dtype=float)
+    total = float(q_arr.sum())
+    if not (math.isfinite(total) and abs(total - 1.0) <= 1e-6):
+        return None, None, None, f"SERVED_BELIEF_Q_NOT_SIMPLEX:sum={total:.12f}"
+    if abs(total - 1.0) > 1e-12:
+        q_arr = q_arr / total
+
+    # Every executable route the proof-native route builder can enumerate must
+    # have its own side lower bound.  Missing side-q_lcb would make the selector
+    # fall back to a synthetic band bound and recreate the split-belief defect.
+    for proof in proofs:
+        side = _proof_side(proof)
+        if side not in {"YES", "NO"}:
+            continue
+        try:
+            key = (str(candidate_bin_id(proof)), side)
+        except Exception:  # noqa: BLE001
+            return None, None, None, "SERVED_BELIEF_LCB_KEY_UNRESOLVABLE"
+        if key not in payoff_lcb_by_side:
+            return None, None, None, f"SERVED_BELIEF_LCB_MISSING:{key[0]}:{key[1]}"
+
+    h = hashlib.sha256()
+    h.update(b"REACTOR_SERVED_POSTERIOR_JOINT_Q_V1")
+    h.update(omega.topology_hash.encode("utf-8"))
+    h.update(omega.resolution.rounding_rule.encode("utf-8"))
+    for b, q in zip(omega.bins, q_arr):
+        h.update(f"|{b.bin_id}={float(q):.12f}".encode("utf-8"))
+    identity_hash = h.hexdigest()
+    q_by_bin_id = {b.bin_id: float(q) for b, q in zip(omega.bins, q_arr)}
+    joint_q = JointQ(
+        omega=omega,
+        q=q_arr,
+        q_by_bin_id=q_by_bin_id,
+        predictive_distribution_id="reactor_served_posterior",
+        q_source="REACTOR_SERVED_POSTERIOR_V1",  # type: ignore[arg-type]
+        q_sum=float(q_arr.sum()),
+        identity_hash=identity_hash,
+    )
+    joint_q.assert_valid()
+
+    # Candidate economics receive the side-specific served q_lcb through
+    # ``guarded_payoff_q_lcb``.  The band still has to be a valid simplex draw
+    # matrix for coherence/receipt/sizing plumbing; a deterministic one-row band
+    # is honest here because this bridge is not inventing a new uncertainty
+    # surface.  Any q_lcb authority comes from ``payoff_lcb_by_side`` above.
+    samples = np.asarray([q_arr], dtype=float)
+    bh = hashlib.sha256()
+    bh.update(b"REACTOR_SERVED_POSTERIOR_DETERMINISTIC_BAND_V1")
+    bh.update(identity_hash.encode("utf-8"))
+    bh.update(f"alpha={float(alpha):.12f}".encode("utf-8"))
+    band = JointQBand(
+        joint_q=joint_q,
+        samples=samples,
+        q_lcb=q_arr.copy(),
+        q_ucb=q_arr.copy(),
+        alpha=float(alpha),
+        basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        sample_hash=bh.hexdigest(),
+    )
+    band.assert_valid()
+    return joint_q, band, payoff_lcb_by_side, None
 
 
 def _served_predictive_inputs(payload: Mapping[str, Any]) -> Optional[dict[str, Any]]:
@@ -1058,6 +1176,24 @@ def decide_family_via_spine(
                 decision=None,
             )
         omega = build_outcome_space(family, case)
+        _band_alpha = _qkernel_spine_band_alpha()
+        (
+            served_joint_q,
+            served_band,
+            served_payoff_q_lcb_by_side,
+            served_belief_reason,
+        ) = _served_joint_belief_from_proofs(
+            omega=omega,
+            proofs=proofs,
+            candidate_bin_id=candidate_bin_id,
+            alpha=_band_alpha,
+        )
+        if served_belief_reason:
+            return SpineDecisionResult(
+                selected_proof=None,
+                no_trade_reason=f"{NO_TRADE_SPINE_INPUTS_UNAVAILABLE}:{served_belief_reason}",
+                decision=None,
+            )
         models = build_fresh_model_set(case, served)
         sizing_candidates = _sizing_candidates_from_proofs(
             family_key=family_key,
@@ -1078,7 +1214,7 @@ def decide_family_via_spine(
         _engine_kwargs: dict[str, Any] = {}
         if SPINE_BAND_DRAWS is not None:
             _engine_kwargs["n_band_draws"] = int(SPINE_BAND_DRAWS)
-        _engine_kwargs["band_alpha"] = _qkernel_spine_band_alpha()
+        _engine_kwargs["band_alpha"] = _band_alpha
         engine = FamilyDecisionEngine(
             fresh_model_reader=_ReactorServedFreshModelReader(models),
             day0_reader=_NoDay0Reader(),
@@ -1138,6 +1274,9 @@ def decide_family_via_spine(
             sizing_candidates=sizing_candidates,
             max_stake_usd=max_stake_usd,
             shares_for_routing=shares_for_routing,
+            served_joint_q=served_joint_q,
+            served_band=served_band,
+            served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
     except (ResolutionError, OutcomeSpaceError) as exc:
         # A settlement/topology resolution fault is a genuine reconstruction gap:

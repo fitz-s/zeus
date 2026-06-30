@@ -4167,6 +4167,7 @@ def execute_monitoring_phase(
         execute_exit,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        release_backoff_exhausted_pending_exit_for_redecision,
         release_pending_exit_without_order_if_retryable,
         release_market_closed_pending_exit_hold,
     )
@@ -4260,6 +4261,11 @@ def execute_monitoring_phase(
                     portfolio_dirty = True
                     summary["monitor_repaired_market_closed_pending_exit_hold"] = (
                         summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
+                    )
+                elif release_backoff_exhausted_pending_exit_for_redecision(pos, conn=conn):
+                    portfolio_dirty = True
+                    summary["monitor_released_backoff_exhausted_for_redecision"] = (
+                        summary.get("monitor_released_backoff_exhausted_for_redecision", 0) + 1
                     )
                 else:
                     summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1

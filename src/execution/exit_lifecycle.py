@@ -1181,6 +1181,55 @@ def release_market_closed_pending_exit_hold(
     return True
 
 
+def release_backoff_exhausted_pending_exit_for_redecision(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Release a still-held exhausted exit attempt back to live redecision.
+
+    ``backoff_exhausted`` belongs to the last sell-order attempt chain. It is
+    not a permanent held-position lifecycle phase. If the position still has
+    positive exposure, the next monitor cycle must recompute belief, market
+    value, and exit/hold/shift intent instead of disappearing behind the old
+    retry budget.
+    """
+
+    if _runtime_state_value(position) != "pending_exit":
+        return False
+    exit_state = getattr(position, "exit_state", "")
+    exit_state = getattr(exit_state, "value", exit_state)
+    if str(exit_state or "") != "backoff_exhausted":
+        return False
+    chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
+    shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if shares is None:
+        shares = _positive_decimal(getattr(position, "shares", None))
+    if (chain_shares is None or chain_shares <= 0) and (shares is None or shares <= 0):
+        return False
+
+    prior_error = str(getattr(position, "last_exit_error", "") or "")
+    position.exit_state = ""
+    position.next_exit_retry_at = ""
+    position.exit_retry_count = 0
+    position.exit_reason = ""
+    position.last_exit_error = ""
+    if str(getattr(position, "order_status", "") or "") == "backoff_exhausted":
+        position.order_status = "filled"
+    _release_pending_exit(position)
+    if conn is not None:
+        from src.state.db import log_pending_exit_recovery_event
+
+        log_pending_exit_recovery_event(
+            conn,
+            position,
+            event_type="EXIT_RETRY_RELEASED",
+            reason="BACKOFF_EXHAUSTED_REDECISION_RELEASED",
+            error=prior_error,
+        )
+    return True
+
+
 def _release_pending_exit(position: Position) -> None:
     if position.state == "pending_exit":
         position.state = release_pending_exit_runtime_state(

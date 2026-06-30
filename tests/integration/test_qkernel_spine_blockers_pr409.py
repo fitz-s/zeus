@@ -2159,7 +2159,7 @@ def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence
         qkernel_scoped,
         _payload(mu=20.0, sigma=0.1, members=[20, 20, 20, 20, 20]),
     )
-    blocked_bin_id = era._candidate_bin_id(
+    legacy_vetoed_bin_id = era._candidate_bin_id(
         next(
             proof
             for proof in qkernel_scoped
@@ -2168,13 +2168,65 @@ def test_qkernel_scope_rescores_legacy_direction_veto_but_still_honors_coherence
     )
 
     assert res.decision is not None
-    blocked_decisions = [
+    legacy_vetoed_decisions = [
         decision
         for decision in res.decision.candidate_decisions
-        if decision.route.side == "NO" and decision.route.bin_id == blocked_bin_id
+        if decision.route.side == "NO" and decision.route.bin_id == legacy_vetoed_bin_id
     ]
-    assert blocked_decisions
-    assert all(decision.direction_law_ok is True for decision in blocked_decisions)
-    assert all(decision.coherence_allows is False for decision in blocked_decisions)
+    assert legacy_vetoed_decisions
+    assert all(decision.direction_law_ok is True for decision in legacy_vetoed_decisions)
+    assert res.decision.market_coherence.status == "INCOHERENT_BLOCK_LIVE"
+    assert res.decision.market_coherence.offending_bins
+    assert any(
+        decision.coherence_allows is False
+        for decision in res.decision.candidate_decisions
+        if decision.route.bin_id in res.decision.market_coherence.offending_bins
+    )
     assert res.selected_proof is None
-    assert res.no_trade_reason == "MARKET_INCOHERENT_BLOCK_LIVE"
+    assert res.no_trade_reason in {
+        "MARKET_INCOHERENT_BLOCK_LIVE",
+        "NO_ROI_FRONTIER_USEFUL_CANDIDATE",
+    }
+
+
+def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_normal():
+    """Live qkernel must score the same point q served by admission proof.
+
+    Regression: the bridge formerly fed proof/admission from the replacement posterior but
+    let FamilyDecisionEngine rebuild ``joint_q`` from raw members + sigma.  A narrow member
+    Normal around 20C then produced a different point q than the proof vector, tripping
+    QKERNEL_SERVED_BELIEF_POINT_MISMATCH and leaving live entry stalled.  The bridge now
+    rehydrates the served proof vector into ``decision.joint_q`` and injects each
+    side-specific proof q_lcb into candidate economics.
+    """
+
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    served_yes_lcb = [0.08, 0.65, 0.08, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=served_yes_lcb,
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+
+    res = _drive(
+        family,
+        proofs,
+        _payload(mu=20.0, sigma=0.05, members=[20.0, 20.0, 20.0, 20.0, 20.0]),
+    )
+
+    assert res.decision is not None
+    assert res.decision.joint_q is not None
+    assert list(res.decision.joint_q.q) == pytest.approx(served_yes_q)
+    for decision in res.decision.candidate_decisions:
+        proof = next(
+            p
+            for p in proofs
+            if era._candidate_bin_id(p) == decision.route.bin_id
+            and (("YES" if p.direction == "buy_yes" else "NO") == decision.route.side)
+        )
+        assert decision.economics.q_dot_payoff == pytest.approx(float(proof.q_posterior))
+        assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9

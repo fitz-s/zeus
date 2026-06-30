@@ -2762,6 +2762,132 @@ def test_backoff_exhausted_holds_to_settlement():
     assert pos.state != "voided"
 
 
+def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monkeypatch):
+    """Backoff exhaustion is an order-attempt state, not a permanent monitor stop."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="backoff-exhausted-held-risk",
+        direction="buy_no",
+        state="pending_exit",
+        pre_exit_state="holding",
+        chain_state="synced",
+        shares=18.0,
+        chain_shares=18.0,
+        city="Miami",
+        target_date="2026-07-02",
+        token_id="yes-miami",
+        no_token_id="no-miami",
+        condition_id="condition-miami",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_retry_count=MAX_EXIT_RETRIES,
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        last_exit_error="previous_order_attempt_budget_exhausted",
+    )
+    portfolio = _make_portfolio(pos)
+
+    class LiveClob:
+        def get_best_bid_ask(self, token_id):
+            return 0.44, 0.46, 100.0, 100.0
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("hold redecision must not record an exit")
+
+    observed_refresh = []
+
+    def mock_refresh(conn, clob, position):
+        observed_refresh.append((
+            position.trade_id,
+            getattr(position.state, "value", position.state),
+            getattr(position, "exit_state", ""),
+        ))
+        position.last_monitor_prob = 0.70
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_market_price = 0.44
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.44
+        position.last_monitor_best_ask = 0.46
+        position.last_monitor_market_vig = 0.90
+        position.last_monitor_whale_toxicity = False
+        position.last_monitor_at = "2026-07-01T12:00:00+00:00"
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.44]),
+            p_posterior=0.70,
+            forward_edge=0.26,
+            alpha=0.0,
+            confidence_band_upper=0.05,
+            confidence_band_lower=-0.01,
+            entry_provenance=EntryMethod.QKERNEL_SPINE,
+            decision_snapshot_id="snap-backoff-redecision",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    observed_exit_contexts = []
+
+    def mock_evaluate_exit(self, exit_context):
+        observed_exit_contexts.append(exit_context)
+        return ExitDecision(
+            False,
+            "CI_OVERLAP_HOLD",
+            trigger="CI_OVERLAP_HOLD",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["replacement_posterior"],
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", mock_evaluate_exit)
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_backoff_exhausted_redecision"),
+            "cities_by_name": {"Miami": type("City", (), {"timezone": "America/New_York"})()},
+            "_utcnow": staticmethod(lambda: datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        LiveClob(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+    )
+
+    assert observed_refresh == [("backoff-exhausted-held-risk", "holding", "")]
+    assert observed_exit_contexts
+    assert pos.state == "holding"
+    assert pos.exit_state == ""
+    assert pos.order_status == "filled"
+    assert pos.exit_retry_count == 0
+    assert pos.exit_reason == ""
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["monitor_released_backoff_exhausted_for_redecision"] == 1
+    assert summary["monitors"] == 1
+    assert summary["exits"] == 0
+    assert len(monitor_results) == 1
+    assert monitor_results[0].should_exit is False
+    assert monitor_results[0].exit_reason == "CI_OVERLAP_HOLD"
+
+
 # ---- Test 7: Collateral check blocks underfunded sell ----
 
 def test_collateral_check_blocks_underfunded_sell():

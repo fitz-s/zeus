@@ -627,6 +627,9 @@ class FamilyDecisionEngine:
         max_stake_usd: Optional[Decimal] = None,
         shares_for_routing: Decimal = Decimal("1"),
         licensed_model_superiority=None,
+        served_joint_q: JointQ | None = None,
+        served_band: JointQBand | None = None,
+        served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
     ) -> FamilyDecision:
         """Run the full decision pipeline once and emit a ``FamilyDecision`` (spec 876-901).
 
@@ -688,10 +691,26 @@ class FamilyDecisionEngine:
             )
 
         # --- (3) the joint q and its coherent band -------------------------------
-        joint_q = build_joint_q(predictive, omega)
-        band = build_joint_q_band(
-            predictive, omega, n_draws=self._n_band_draws, alpha=self._band_alpha
-        )
+        if served_joint_q is not None or served_band is not None:
+            if served_joint_q is None or served_band is None:
+                raise FamilyDecisionError("SERVED_BELIEF_INCOMPLETE")
+            if served_joint_q.omega.topology_hash != omega.topology_hash:
+                raise FamilyDecisionError(
+                    "SERVED_JOINT_Q_OMEGA_MISMATCH: served joint q does not match Omega"
+                )
+            if served_band.joint_q.identity_hash != served_joint_q.identity_hash:
+                raise FamilyDecisionError(
+                    "SERVED_BAND_JOINT_Q_MISMATCH: served band does not bracket served joint q"
+                )
+            served_joint_q.assert_valid()
+            served_band.assert_valid()
+            joint_q = served_joint_q
+            band = served_band
+        else:
+            joint_q = build_joint_q(predictive, omega)
+            band = build_joint_q_band(
+                predictive, omega, n_draws=self._n_band_draws, alpha=self._band_alpha
+            )
 
         # --- (4) the executable family book + de-frictioned market q -------------
         family_book = self._family_book_builder(
@@ -730,6 +749,7 @@ class FamilyDecisionEngine:
             exposure=portfolio,
             sizing_candidates=sizing_candidates,
             max_stake_usd=max_stake_usd,
+            served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
 
         # Stamp the native-side direction proof first. The q_lcb reliability guard is
@@ -902,6 +922,7 @@ class FamilyDecisionEngine:
         exposure: PortfolioExposureVector,
         sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
         max_stake_usd: Optional[Decimal],
+        served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
     ) -> tuple[CandidateDecision, ...]:
         """Enumerate one candidate per (bin, side) executable route and score its economics.
 
@@ -930,6 +951,7 @@ class FamilyDecisionEngine:
                     exposure=exposure,
                     sizing_candidates=sizing_candidates,
                     max_stake_usd=max_stake_usd,
+                    served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
                 )
                 if d is not None:
                     decisions.append(d)
@@ -949,6 +971,7 @@ class FamilyDecisionEngine:
                     exposure=exposure,
                     sizing_candidates=sizing_candidates,
                     max_stake_usd=max_stake_usd,
+                    served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
                 )
                 if d is not None:
                     decisions.append(d)
@@ -968,6 +991,7 @@ class FamilyDecisionEngine:
         exposure: PortfolioExposureVector,
         sizing_candidates: Mapping[tuple[str, str], NativeSideCandidate],
         max_stake_usd: Optional[Decimal],
+        served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
     ) -> Optional[CandidateDecision]:
         """Build a CandidateRoute for one route and compute its economics.
 
@@ -996,6 +1020,9 @@ class FamilyDecisionEngine:
             # It is still recorded for the receipt (a no-trade candidate is auditable).
             economics = self._zero_economics(route, joint_q, band)
         else:
+            served_payoff_q_lcb = None
+            if served_payoff_q_lcb_by_side is not None:
+                served_payoff_q_lcb = served_payoff_q_lcb_by_side.get((bin_id, side))
             economics = compute_candidate_economics(
                 route,
                 joint_q=joint_q,
@@ -1004,6 +1031,7 @@ class FamilyDecisionEngine:
                 matrix=matrix,
                 exposure=exposure,
                 max_stake_usd=max_stake_usd,
+                guarded_payoff_q_lcb=served_payoff_q_lcb,
             )
 
         scalar = scalar_trade_score(joint_q, route)
