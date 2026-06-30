@@ -6217,6 +6217,12 @@ def reconcile_terminal_order_facts(
                     order_fact=row,
                     occurred_at=occurred_at,
                 )
+                edli_projected = _project_edli_terminal_no_fill_order_lifecycle(
+                    conn,
+                    command=row,
+                    order_fact=row,
+                    occurred_at=occurred_at,
+                )
                 conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
                 conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
@@ -6226,9 +6232,11 @@ def reconcile_terminal_order_facts(
             if collect_continuations:
                 continuations.append(_terminal_no_fill_continuation_from_row(row))
             logger.info(
-                "recovery: command %s ACKED terminal order fact %s -> EXPIRED and ENTRY_ORDER_VOIDED",
+                "recovery: command %s ACKED terminal order fact %s -> EXPIRED and ENTRY_ORDER_VOIDED "
+                "(edli_terminal_no_fill_projected=%s)",
                 command_id,
                 row.get("order_fact_state"),
+                edli_projected,
             )
         except Exception as exc:
             logger.error(
@@ -10783,6 +10791,9 @@ def _rebuild_edli_projection_qualified(
         elif current_event_type == "Reconciled":
             current_state = "RECONCILED"
             pending_reconcile = bool(payload.get("pending_reconcile", False))
+        elif current_event_type == "OrderLifecycleProjected":
+            current_state = str(payload.get("order_lifecycle_state") or state_by_type.get(current_event_type, current_event_type))
+            pending_reconcile = bool(payload.get("pending_reconcile", False))
         else:
             current_state = state_by_type.get(current_event_type, current_event_type)
     last = rows[-1]
@@ -10951,6 +10962,159 @@ def _reconcile_edli_pending_no_order_if_proven(
         aggregate_id=aggregate_id,
     )
     return True
+
+
+def _project_edli_terminal_no_fill_order_lifecycle(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    order_fact: Mapping[str, object],
+    occurred_at: str,
+) -> bool:
+    """Mirror a proven zero-fill venue terminal fact into the EDLI order aggregate."""
+
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    if not events_ref or not projection_ref:
+        return False
+
+    command_id = str(command.get("command_id") or "").strip()
+    decision_id = str(command.get("decision_id") or "").strip()
+    venue_order_id = str(
+        order_fact.get("order_fact_venue_order_id")
+        or order_fact.get("venue_order_id")
+        or command.get("venue_order_id")
+        or ""
+    ).strip()
+    if not venue_order_id or not command_id:
+        return False
+
+    execution_ids = tuple(
+        value
+        for value in dict.fromkeys((decision_id, command_id))
+        if value
+    )
+    predicates = [
+        "json_extract(payload_json, '$.command_id') = ?",
+        "json_extract(payload_json, '$.venue_order_id') = ?",
+    ]
+    params: list[str] = [command_id, venue_order_id]
+    if execution_ids:
+        predicates.append(
+            "json_extract(payload_json, '$.execution_command_id') IN ("
+            + ",".join("?" for _ in execution_ids)
+            + ")"
+        )
+        params.extend(execution_ids)
+
+    rows = conn.execute(
+        f"""
+        WITH matched AS (
+            SELECT aggregate_id, MAX(event_sequence) AS matched_sequence
+              FROM {events_ref}
+             WHERE {' OR '.join(predicates)}
+             GROUP BY aggregate_id
+        )
+        SELECT proj.aggregate_id,
+               proj.event_id,
+               proj.final_intent_id,
+               proj.current_state,
+               proj.venue_order_id,
+               matched.matched_sequence
+          FROM matched
+          JOIN {projection_ref} proj
+            ON proj.aggregate_id = matched.aggregate_id
+         ORDER BY matched.matched_sequence DESC, proj.updated_at DESC
+         LIMIT 8
+        """,
+        tuple(params),
+    ).fetchall()
+    if not rows:
+        return False
+
+    for candidate_row in rows:
+        candidate = _dict_row(candidate_row)
+        aggregate_id = str(candidate.get("aggregate_id") or "")
+        if not aggregate_id:
+            continue
+        terminal = conn.execute(
+            f"""
+            SELECT 1
+              FROM {events_ref}
+             WHERE aggregate_id = ?
+               AND event_type IN ('UserTradeObserved', 'OrderLifecycleProjected')
+               AND (
+                    event_type = 'UserTradeObserved'
+                    OR json_extract(payload_json, '$.order_lifecycle_state') = 'TERMINAL_NO_FILL'
+               )
+             LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        if terminal is not None:
+            continue
+        command_event = conn.execute(
+            f"""
+            SELECT payload_json
+              FROM {events_ref}
+             WHERE aggregate_id = ?
+               AND event_type = 'ExecutionCommandCreated'
+             ORDER BY event_sequence DESC
+             LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        if command_event is None:
+            continue
+        command_payload = _json_dict(command_event["payload_json"])
+        event_id = str(candidate.get("event_id") or command_payload.get("event_id") or "")
+        final_intent_id = str(
+            candidate.get("final_intent_id")
+            or command_payload.get("final_intent_id")
+            or ""
+        )
+        execution_command_id = str(
+            command_payload.get("execution_command_id")
+            or decision_id
+            or command_id
+        )
+        if not event_id:
+            continue
+        _append_edli_event_qualified(
+            conn,
+            events_ref=events_ref,
+            aggregate_id=aggregate_id,
+            event_type="OrderLifecycleProjected",
+            payload={
+                "schema_version": 1,
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "execution_command_id": execution_command_id,
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "order_lifecycle_state": "TERMINAL_NO_FILL",
+                "pending_reconcile": False,
+                "exposure_created": False,
+                "reason": "venue_terminal_no_fill",
+                "proof_class": "terminal_order_fact_zero_matched",
+                "venue_order_fact_id": order_fact.get("order_fact_id"),
+                "venue_order_fact_state": order_fact.get("order_fact_state"),
+                "matched_size": order_fact.get("order_fact_matched_size"),
+                "remaining_size": order_fact.get("order_fact_remaining_size"),
+                "source": order_fact.get("order_fact_source"),
+                "source_authority": "venue_reconcile",
+            },
+            occurred_at=occurred_at,
+            source_authority="explicit_reconcile",
+        )
+        _rebuild_edli_projection_qualified(
+            conn,
+            events_ref=events_ref,
+            projection_ref=projection_ref,
+            aggregate_id=aggregate_id,
+        )
+        return True
+    return False
 
 
 # Terminal CommandEventType used to discharge an unresolved venue_commands row

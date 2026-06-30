@@ -921,6 +921,7 @@ def _latest_lifecycle(events: list[tuple[str, dict[str, Any], str]]) -> tuple[st
             "UserTradeObserved",
             "Reconciled",
             "CapTransitioned",
+            "OrderLifecycleProjected",
         }:
             return event_type, payload
     return None, {}
@@ -943,6 +944,8 @@ def _audit_state(event_type: str, payload: dict[str, Any]) -> str | None:
         return "RECONCILED"
     if event_type == "CapTransitioned":
         return str(payload.get("to_status") or "CAP_TRANSITIONED")
+    if event_type == "OrderLifecycleProjected":
+        return str(payload.get("order_lifecycle_state") or "ORDER_LIFECYCLE_PROJECTED")
     return None
 
 

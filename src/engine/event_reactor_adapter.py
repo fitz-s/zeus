@@ -7610,6 +7610,9 @@ def _execution_command_id_from_final_intent(
 #   - Reconciled       pending_reconcile=False  : fully settled; terminal.
 #   - Reconciled       pending_reconcile=True   : matched-pending-finality; NOT
 #       terminal for re-bid — must SUPPRESS (fail-closed).
+#   - OrderLifecycleProjected order_lifecycle_state=TERMINAL_NO_FILL and
+#       exposure_created=false: venue facts prove the acknowledged order is gone
+#       with zero matched size; terminal.
 #
 # A row returned by this query means TERMINAL → RELEASE.
 # No row means ACTIVE (or indeterminate) → SUPPRESS (fail-closed).
@@ -7623,6 +7626,9 @@ _TERMINAL_EVENT_SQL = """
             AND json_extract(payload_json, '$.to_status') = 'RELEASED')
         OR (event_type = 'Reconciled'
             AND COALESCE(json_extract(payload_json, '$.pending_reconcile'), 0) = 0)
+        OR (event_type = 'OrderLifecycleProjected'
+            AND json_extract(payload_json, '$.order_lifecycle_state') = 'TERMINAL_NO_FILL'
+            AND COALESCE(json_extract(payload_json, '$.exposure_created'), 1) = 0)
       )
     LIMIT 1
 """

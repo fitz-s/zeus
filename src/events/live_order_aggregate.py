@@ -87,6 +87,7 @@ PROFIT_AUDIT_TRIGGER_EVENTS = {
     "UserTradeObserved",
     "Reconciled",
     "CapTransitioned",
+    "OrderLifecycleProjected",
 }
 
 
@@ -291,6 +292,9 @@ class LiveOrderAggregateLedger:
                     current_state = EVENT_STATE[event_type]
             elif event_type == "Reconciled":
                 current_state = EVENT_STATE[event_type]
+                pending_reconcile = bool(payload.get("pending_reconcile", False))
+            elif event_type == "OrderLifecycleProjected":
+                current_state = str(payload.get("order_lifecycle_state") or EVENT_STATE[event_type])
                 pending_reconcile = bool(payload.get("pending_reconcile", False))
             else:
                 current_state = EVENT_STATE[event_type]
@@ -523,6 +527,19 @@ class LiveOrderAggregateLedger:
                     command_sequence,
                 ) is None and self._latest_row_of_type(aggregate_id, "Reconciled") is None:
                     raise LiveOrderAggregateError("CapTransitioned RELEASED requires SubmitRejected or Reconciled")
+            return
+        if event_type == "OrderLifecycleProjected":
+            command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
+            self._require_command_binding(event_type, payload, command_row)
+            lifecycle_state = str(payload.get("order_lifecycle_state") or "")
+            if lifecycle_state != "TERMINAL_NO_FILL":
+                raise LiveOrderAggregateError("OrderLifecycleProjected requires TERMINAL_NO_FILL lifecycle state")
+            if payload.get("exposure_created") is not False:
+                raise LiveOrderAggregateError("OrderLifecycleProjected TERMINAL_NO_FILL requires exposure_created=false")
+            if not str(payload.get("venue_order_id") or "").strip():
+                raise LiveOrderAggregateError("OrderLifecycleProjected requires venue_order_id")
+            if self._latest_row_of_type(aggregate_id, "UserTradeObserved") is not None:
+                raise LiveOrderAggregateError("OrderLifecycleProjected cannot terminal-no-fill after UserTradeObserved")
             return
 
     def _latest_row_of_type(self, aggregate_id: str, event_type: str) -> sqlite3.Row | None:

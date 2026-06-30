@@ -3294,6 +3294,109 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
         assert current["order_status"] == "canceled"
 
+    def test_acked_terminal_no_fill_order_fact_projects_edli_lifecycle_terminal(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        aggregate_id = "event-1:intent-1"
+        command_payload = {
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "dec-001",
+            "command_id": "cmd-001",
+        }
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=1,
+            event_type="ExecutionCommandCreated",
+            payload=command_payload,
+            occurred_at="2026-04-26T00:01:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=2,
+            event_type="VenueSubmitAcknowledged",
+            payload={**command_payload, "venue_order_id": "ord-001"},
+            occurred_at="2026-04-26T00:02:00Z",
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            sequence=3,
+            event_type="CapTransitioned",
+            payload={
+                **command_payload,
+                "venue_order_id": "ord-001",
+                "to_status": "CONSUMED",
+                "execution_receipt_hash": "receipt-hash",
+            },
+            occurred_at="2026-04-26T00:02:01Z",
+        )
+        last_hash = conn.execute(
+            """
+            SELECT event_hash
+              FROM edli_live_order_events
+             WHERE aggregate_id = ?
+             ORDER BY event_sequence DESC
+             LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()["event_hash"]
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-1', 'intent-1', 'CAP_TRANSITIONED',
+                      3, 'CapTransitioned', ?, 0, 'ord-001',
+                      '2026-04-26T00:02:01Z', 1)
+            """,
+            (aggregate_id, last_hash),
+        )
+        _append_order_fact(conn, state="CANCEL_CONFIRMED", matched_size="0", remaining_size="0")
+
+        from src.engine.event_reactor_adapter import _TERMINAL_EVENT_SQL
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        projection = conn.execute(
+            """
+            SELECT current_state, last_event_type, pending_reconcile, venue_order_id
+              FROM edli_live_order_projection
+             WHERE aggregate_id = ?
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        assert dict(projection) == {
+            "current_state": "TERMINAL_NO_FILL",
+            "last_event_type": "OrderLifecycleProjected",
+            "pending_reconcile": 0,
+            "venue_order_id": "ord-001",
+        }
+        lifecycle = conn.execute(
+            """
+            SELECT payload_json
+              FROM edli_live_order_events
+             WHERE aggregate_id = ?
+               AND event_type = 'OrderLifecycleProjected'
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        payload = json.loads(lifecycle["payload_json"])
+        assert payload["order_lifecycle_state"] == "TERMINAL_NO_FILL"
+        assert payload["exposure_created"] is False
+        assert payload["matched_size"] == "0"
+        assert conn.execute(_TERMINAL_EVENT_SQL, (aggregate_id,)).fetchone() is not None
+
     def test_cancel_pending_terminal_no_fill_order_fact_cancels_command_and_voids_pending_entry(
         self,
         conn,
@@ -10981,7 +11084,7 @@ class TestEdliAbsenceVenueCommandSync:
             (seeded["aggregate_id"],),
         ).fetchone()
         assert dict(projection) == {
-            "current_state": "CAP_TRANSITIONED",
+            "current_state": "VENUE_SUBMIT_ACKED",
             "last_event_type": "CapTransitioned",
             "venue_order_id": "0xackedvenueorder",
             "pending_reconcile": 0,

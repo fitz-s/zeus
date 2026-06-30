@@ -432,6 +432,45 @@ def test_cap_consumed_does_not_hide_acknowledged_live_order_projection():
     assert projection.pending_reconcile is False
 
 
+def test_order_lifecycle_projected_terminal_no_fill_closes_projection():
+    ledger = LiveOrderAggregateLedger(_conn())
+    _seed_command_with_submit_attempt(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="VenueSubmitAcknowledged",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "venue_order_id": "venue-live-1",
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="OrderLifecycleProjected",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "venue_order_id": "venue-live-1",
+            "order_lifecycle_state": "TERMINAL_NO_FILL",
+            "exposure_created": False,
+            "pending_reconcile": False,
+        },
+        occurred_at=NOW,
+        source_authority="explicit_reconcile",
+    )
+
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "TERMINAL_NO_FILL"
+    assert projection.last_event_type == "OrderLifecycleProjected"
+    assert projection.pending_reconcile is False
+    assert projection.venue_order_id == "venue-live-1"
+
+
 def test_execution_command_requires_pre_submit_revalidation():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
