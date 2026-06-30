@@ -4455,16 +4455,17 @@ def execute_monitoring_phase(
                     from src.state.portfolio import ExitDecision as _ExitDecision
 
                     hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
-                    pos.state = "day0_window"
-                    pos.pre_exit_state = ""
-                    pos.exit_state = ""
-                    pos.next_exit_retry_at = ""
-                    pos.exit_retry_count = 0
-                    pos.exit_reason = ""
-                    pos.last_exit_error = (
-                        "MARKET_CLOSED_AWAITING_SETTLEMENT:"
-                        f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
-                    )[:500]
+                    if _position_state_value(pos) != "quarantined":
+                        pos.state = "day0_window"
+                        pos.pre_exit_state = ""
+                        pos.exit_state = ""
+                        pos.next_exit_retry_at = ""
+                        pos.exit_retry_count = 0
+                        pos.exit_reason = ""
+                        pos.last_exit_error = (
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT:"
+                            f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
+                        )[:500]
                     pos.last_monitor_prob = 1.0 if hard_fact_win else 0.0
                     pos.last_monitor_prob_is_fresh = True
                     pos.last_monitor_edge = None

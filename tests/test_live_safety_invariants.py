@@ -4605,6 +4605,130 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     conn.close()
 
 
+def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path, monkeypatch):
+    """Hard-fact monitor receipts for chain-risk quarantine must not reopen phase."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "quarantine-hard-fact-monitor.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="quarantine-hard-fact-monitor-1",
+        state="quarantined",
+        city="Manila",
+        target_date="2026-06-29",
+        order_id="o-quarantine-hard-fact-monitor",
+        entered_at="2026-06-28T09:00:00+00:00",
+        order_posted_at="2026-06-28T08:59:00+00:00",
+        order_status="filled",
+        strategy_key="center_buy",
+        bin_label="32C",
+        condition_id="0xquarantinehardfactmonitor00000000000000000000000000000001",
+        direction="buy_no",
+        shares=18.1,
+        chain_shares=18.1,
+        chain_state="entry_authority_quarantined",
+        exit_reason="entry_authority_chain_absence_conflict",
+        no_token_id="tok-manila-32-no",
+        token_id="tok-manila-32-yes",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-quarantine-hard-fact-monitor-entry",
+        source_module="tests/test_quarantined_hard_fact_monitor",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'quarantined',
+               chain_state = 'entry_authority_quarantined',
+               chain_shares = 18.1,
+               exit_reason = 'entry_authority_chain_absence_conflict'
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *args, **kwargs: {"source": "clob_market_info"},
+    )
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        lambda **kwargs: HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="final high extreme 32.0 resolved inside bin [32.0,32.0] — YES won",
+            metric="high",
+            rounded_extreme=32.0,
+            source="durable_observation_instants",
+        ),
+    )
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_quarantined_chain_risk_hard_fact_monitor"),
+            "cities_by_name": {"Manila": type("City", (), {"timezone": "Asia/Manila"})()},
+            "_utcnow": staticmethod(lambda: datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        _make_portfolio(pos),
+        artifact,
+        type("Tracker", (), {"record_exit": lambda self, position: None})(),
+        summary,
+        deps=deps,
+        exit_order_submit_enabled=False,
+    )
+
+    current = conn.execute(
+        """
+        SELECT phase, chain_state, chain_shares, exit_reason,
+               last_monitor_prob, last_monitor_prob_is_fresh
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["phase"] == LifecyclePhase.QUARANTINED.value
+    assert current["chain_state"] == "entry_authority_quarantined"
+    assert current["chain_shares"] == pytest.approx(18.1)
+    assert current["exit_reason"] == "entry_authority_chain_absence_conflict"
+    assert current["last_monitor_prob"] == pytest.approx(0.0)
+    assert current["last_monitor_prob_is_fresh"] == 1
+    event = conn.execute(
+        """
+        SELECT phase_before, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert event is not None
+    assert event["phase_before"] == LifecyclePhase.QUARANTINED.value
+    assert event["phase_after"] == LifecyclePhase.QUARANTINED.value
+    payload = json.loads(event["payload_json"])
+    assert payload["exit_decision_reason"].startswith("DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED")
+    assert payload["phase_after"] == LifecyclePhase.QUARANTINED.value
+    assert monitor_results[0].should_exit is False
+    conn.close()
+
+
 def test_chain_projection_preserves_fresh_monitor_snapshot(tmp_path):
     """Chain sync writes must not erase the last monitor belief/quote snapshot."""
     from src.engine.lifecycle_events import (
