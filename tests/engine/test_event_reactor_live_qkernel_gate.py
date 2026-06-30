@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.engine.event_reactor_adapter import (
+    PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
+    _pre_submit_revalidation_payload_from_final_intent,
     _record_qkernel_selection_family_facts,
 )
 
@@ -264,6 +266,96 @@ def test_live_entry_day0_gate_rejects_missing_live_observation_authority():
         match="LIVE_ENTRY_DAY0_OBSERVATION_AUTHORITY_REQUIRED:live_authority_status=missing",
     ):
         _assert_live_entry_submit_authority(_day0_payload(live_authority_status=None))
+
+
+def test_day0_pre_submit_payload_preserves_observation_authority():
+    final_intent = SimpleNamespace(
+        certificate_hash="final-hash",
+        payload={
+            "event_id": "event-1",
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "final_intent_id": "intent-1",
+            "strategy_key": "settlement_capture",
+            "condition_id": "condition-1",
+            "token_id": "token-no",
+            "side": "BUY",
+            "direction": "buy_no",
+            "city": "Chicago",
+            "target_date": "2026-05-24",
+            "metric": "high",
+            "temperature_metric": "high",
+            "bin_label": "79F or below",
+            "outcome_label": "No",
+            "unit": "F",
+            "order_type": "LIMIT",
+            "time_in_force": "GTC",
+            "post_only": True,
+            "limit_price": 0.40,
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
+            "trade_score": 0.20,
+            "action_score": 0.20,
+            "size": 10.0,
+            "min_entry_price": 0.10,
+            "min_expected_profit_usd": 1.0,
+            "min_submit_edge_density": 0.05,
+            "c_fee_adjusted": 0.40,
+            "c_cost_95pct": 0.45,
+            "selection_authority_applied": None,
+            "qkernel_execution_economics": None,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "cost_basis_hash": "cost-hash",
+        },
+    )
+    witness = PreSubmitAuthorityWitness(
+        quote_seen_at="2026-05-24T18:59:59+00:00",
+        book_hash="book-hash",
+        current_best_bid=0.39,
+        current_best_ask=0.41,
+        tick_size=0.01,
+        min_order_size=5.0,
+        neg_risk=False,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="execution_feasibility_evidence",
+        book_captured_at="2026-05-24T18:59:59+00:00",
+        heartbeat_authority_id="heartbeat_supervisor",
+        heartbeat_checked_at="2026-05-24T19:00:00+00:00",
+        user_ws_authority_id="ws_gap_guard",
+        user_ws_checked_at="2026-05-24T19:00:00+00:00",
+        venue_connectivity_authority_id="polymarket_public_orderbook",
+        venue_connectivity_checked_at="2026-05-24T19:00:00+00:00",
+        balance_allowance_authority_id="polymarket_wallet_readonly",
+        balance_allowance_checked_at="2026-05-24T19:00:00+00:00",
+        checked_at="2026-05-24T19:00:00+00:00",
+    )
+
+    payload = _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent,
+        executable_snapshot=SimpleNamespace(payload={}),
+        decision_time=datetime(2026, 5, 24, 19, tzinfo=timezone.utc),
+        authority_witness=witness,
+    )
+
+    assert payload["event_type"] == "DAY0_EXTREME_UPDATED"
+    assert payload["qkernel_execution_economics"] is None
+    assert payload["source_match_status"] == "MATCH"
+    assert payload["local_date_status"] == "MATCH"
+    assert payload["station_match_status"] == "MATCH"
+    assert payload["dst_status"] == "UNAMBIGUOUS"
+    assert payload["metric_match_status"] == "MATCH"
+    assert payload["rounding_status"] == "MATCH"
+    assert payload["source_authorized_status"] == "AUTHORIZED"
+    assert payload["live_authority_status"] == "live"
 
 
 def test_live_entry_gate_rejects_unknown_event_type_even_with_qkernel_cert():

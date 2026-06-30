@@ -634,6 +634,74 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
         )
 
 
+def test_pre_submit_accepts_day0_observation_authority_without_qkernel():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_day0_pre_submit_payload(),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
+    assert pre_submit.payload["event_type"] == "DAY0_EXTREME_UPDATED"
+    assert pre_submit.payload["qkernel_execution_economics"] is None
+
+
+def test_pre_submit_rejects_day0_missing_observation_authority():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="day0 observation authority required"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(live_authority_status=None),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+def test_pre_submit_rejects_day0_qkernel_authority_mix():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="day0 must not carry qkernel"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_day0_pre_submit_payload(
+                qkernel_execution_economics=_pre_submit_payload()[
+                    "qkernel_execution_economics"
+                ]
+            ),
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
 def test_pre_submit_rejects_jeddah_qkernel_payoff_mismatched_submit_lcb():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
@@ -871,6 +939,23 @@ def _pre_submit_payload(**overrides):
             "selection_guard_q_safe": 0.60,
         },
     }
+    payload.update(overrides)
+    return payload
+
+
+def _day0_pre_submit_payload(**overrides):
+    payload = _pre_submit_payload(
+        event_type="DAY0_EXTREME_UPDATED",
+        qkernel_execution_economics=None,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
     payload.update(overrides)
     return payload
 

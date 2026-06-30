@@ -13,6 +13,17 @@ from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPE
 
 
 _LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+_DAY0_EVENT_TYPE = "DAY0_EXTREME_UPDATED"
+_DAY0_AUTHORITY_MATCHES = {
+    "source_match_status": "MATCH",
+    "local_date_status": "MATCH",
+    "station_match_status": "MATCH",
+    "dst_status": "UNAMBIGUOUS",
+    "metric_match_status": "MATCH",
+    "rounding_status": "MATCH",
+    "live_authority_status": "live",
+    "source_authorized_status": "AUTHORIZED",
+}
 
 
 PRE_SUBMIT_REQUIRED_FIELDS = (
@@ -820,7 +831,7 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     submit_edge_density = submit_edge / limit_price
     if submit_edge_density + 1e-9 < min_submit_edge_density:
         raise LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
-    _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
+    _validate_pre_submit_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
     # GATE#85 fix (2026-06-01): taker orders (post_only is False, FOK/FAK) are exempt
     # from the post_only=True and GTC/GTD invariants — those are maker-only constraints.
     # Explicit post_only=False signals taker intent; missing/None → fail-closed as maker.
@@ -846,6 +857,36 @@ def _probability_number(value: Any, name: str) -> float:
     if number > 1:
         raise LiveOrderAggregateError(f"PreSubmitRevalidated requires probability {name}")
     return number
+
+
+def _validate_pre_submit_probability_authority(
+    payload: dict[str, Any],
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> None:
+    event_type = str(payload.get("event_type") or "").strip()
+    if event_type == _DAY0_EVENT_TYPE:
+        _validate_day0_submit_observation_authority(payload)
+        if payload.get("qkernel_execution_economics") not in (None, ""):
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated day0 must not carry qkernel_execution_economics"
+            )
+        return
+    _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
+
+
+def _validate_day0_submit_observation_authority(payload: dict[str, Any]) -> None:
+    missing_or_bad: list[str] = []
+    for field, expected in _DAY0_AUTHORITY_MATCHES.items():
+        observed = str(payload.get(field) or "").strip()
+        if observed != expected:
+            missing_or_bad.append(f"{field}={observed or 'missing'}")
+    if missing_or_bad:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated day0 observation authority required:"
+            + ",".join(missing_or_bad)
+        )
 
 
 def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: float, q_lcb: float) -> None:

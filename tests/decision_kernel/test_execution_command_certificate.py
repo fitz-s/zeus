@@ -217,6 +217,35 @@ def test_event_bound_final_intent_normalizes_legacy_fractional_maker_size():
     assert native.actionable_certificate_hash == final_intent.payload["actionable_certificate_hash"]
 
 
+def test_day0_final_intent_preserves_observation_authority_fields():
+    _actionable, final_intent, _expressibility, _live_cap = builder_chain(
+        actionable_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "qkernel_execution_economics": None,
+            "selection_authority_applied": None,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+
+    assert final_intent.payload["event_type"] == "DAY0_EXTREME_UPDATED"
+    assert final_intent.payload["qkernel_execution_economics"] is None
+    assert final_intent.payload["source_match_status"] == "MATCH"
+    assert final_intent.payload["local_date_status"] == "MATCH"
+    assert final_intent.payload["station_match_status"] == "MATCH"
+    assert final_intent.payload["dst_status"] == "UNAMBIGUOUS"
+    assert final_intent.payload["metric_match_status"] == "MATCH"
+    assert final_intent.payload["rounding_status"] == "MATCH"
+    assert final_intent.payload["source_authorized_status"] == "AUTHORIZED"
+    assert final_intent.payload["live_authority_status"] == "live"
+
+
 def test_execution_command_rejects_missing_pre_submit_qkernel_economics():
     parents, command = execution_graph(
         command_payload={"qkernel_execution_economics": None},

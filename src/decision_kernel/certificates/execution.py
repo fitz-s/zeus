@@ -222,6 +222,14 @@ def build_final_intent_certificate_from_actionable(
         "c_cost_95pct": action.get("c_cost_95pct"),
         "selection_authority_applied": action.get("selection_authority_applied"),
         "qkernel_execution_economics": action.get("qkernel_execution_economics"),
+        "source_match_status": action.get("source_match_status"),
+        "local_date_status": action.get("local_date_status"),
+        "station_match_status": action.get("station_match_status"),
+        "dst_status": action.get("dst_status"),
+        "metric_match_status": action.get("metric_match_status"),
+        "rounding_status": action.get("rounding_status"),
+        "source_authorized_status": action.get("source_authorized_status"),
+        "live_authority_status": action.get("live_authority_status"),
         # WALL C (2026-06-01): for multi-level TAKER fills the sweep VWAP (average
         # fill price) differs from limit_price.  executor.py:1778 checks
         # sweep.average_price == intent.expected_fill_price_before_fee; storing the
