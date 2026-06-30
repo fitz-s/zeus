@@ -466,9 +466,11 @@ def test_live_input_lag_enqueues_single_family_cycle_advance():
     """A served posterior that lags a newer raw live input is a posterior-substrate block.
 
     The adapter wraps this as a live-inference missing reason chain; the reactor must still
-    identify the nested live-input-lag segment and enqueue the same single-family cycle advance.
+    identify the nested live-input-lag segment, enqueue the same single-family cycle advance,
+    and requeue the still-open event instead of terminally burning it under the wrapper reason.
     """
-    payload = json.loads(_forecast_event().payload_json)
+    event = _forecast_event(target_date="2026-05-25")
+    payload = json.loads(event.payload_json)
     enqueues: list[tuple] = []
 
     def _submit(event, _dt):
@@ -493,8 +495,7 @@ def test_live_input_lag_enqueues_single_family_cycle_advance():
         enqueues.append((city, target_date, metric))
         return True
 
-    _conn, store = _store()
-    event = _forecast_event()
+    conn, store = _store()
     store.insert_or_ignore(event)
     reactor = _reactor(
         store,
@@ -503,8 +504,11 @@ def test_live_input_lag_enqueues_single_family_cycle_advance():
         submit=_submit,
     )
     r = reactor.process_pending(decision_time=_DT)
-    assert enqueues == [("Chicago", "2026-05-24", "high")]
+    assert enqueues == [("Chicago", "2026-05-25", "high")]
     assert r.cycle_advance_enqueues == 1
+    assert r.retried == 1
+    assert r.rejected == 0
+    assert _status(conn, event.event_id) == "pending"
 
 
 def test_pre_cutover_posterior_staleness_reason_alias_enqueues_cycle_advance():

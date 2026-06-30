@@ -3037,6 +3037,17 @@ def _receipt_money_path_blocker(
 TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # Forecast-source re-ingested AFTER this cycle's decision moment.
     "SOURCE_CAPTURED_AFTER_DECISION_TIME",
+    # Replacement posterior substrate is missing/stale relative to live inputs.
+    # These can appear bare or nested under LIVE_INFERENCE_INPUTS_MISSING. The
+    # cure is a same-family posterior cycle-advance plus redecision, not terminal
+    # burn of the opportunity event.
+    "REPLACEMENT_0_1_LIVE_READINESS_MISSING",
+    "REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED",
+    "REPLACEMENT_0_1_LIVE_INPUT_LAG",
+    "REPLACEMENT_LIVE_INPUT_LAG",
+    # Read-boundary compatibility for queued/durable pre-cutover reasons.
+    "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+    "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
     # Executable family snapshot not captured yet / went stale this cycle.
     "EXECUTABLE_SNAPSHOT_BLOCKED",
     "EXECUTABLE_SNAPSHOT_STALE",
