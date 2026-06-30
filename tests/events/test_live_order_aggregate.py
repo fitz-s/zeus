@@ -559,7 +559,7 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
         )
 
 
-def test_pre_submit_rejects_jeddah_qkernel_payoff_above_submit_lcb():
+def test_pre_submit_rejects_jeddah_qkernel_payoff_mismatched_submit_lcb():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -569,7 +569,7 @@ def test_pre_submit_rejects_jeddah_qkernel_payoff_above_submit_lcb():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="payoff_q_lcb exceeds submit q_lcb_5pct"):
+    with pytest.raises(LiveOrderAggregateError, match="payoff_q_lcb mismatches submit q_lcb_5pct"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",

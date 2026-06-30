@@ -1666,6 +1666,31 @@ def test_money_path_priority_cycle_records_empty_scope_as_noop(monkeypatch):
     assert receipts[0]["summary"]["scheduler_failed"] is False
 
 
+def test_priority_conditions_deferred_when_refresh_inserted_substrate():
+    """A useful substrate refresh is not scheduler-failed just because priority budget deferred."""
+
+    result = substrate_observer._substrate_warm_business_summary(
+        {
+            "status": "refreshed",
+            "attempted": 12,
+            "inserted": 8,
+            "failed": 0,
+            "direct_clob_prefetch_selected_priority_condition_count": 0,
+        },
+        priority_request={
+            "request_id": "req-priority-budget",
+            "families": [("Munich", "2026-06-30", "high")],
+            "condition_ids": ["cond-munich-29"],
+        },
+        priority_marker_active=True,
+    )
+
+    assert result["scheduler_failed"] is False
+    assert result["priority_conditions_deferred"] is True
+    assert result["scheduler_degraded_reason"] == "priority_conditions_deferred"
+    assert result["priority_marker_condition_ids"] == 1
+
+
 def test_money_path_priority_cycle_services_blocked_family_priority_marker(monkeypatch):
     """A reactor-blocked family marker must be serviced before broad pending backlog."""
 

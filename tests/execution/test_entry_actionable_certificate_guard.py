@@ -73,6 +73,9 @@ def _valid_actionable_payload() -> dict:
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
         },
         "fdr_family_id": "family-1",
         "kelly_decision_id": "kelly-1",
@@ -129,6 +132,9 @@ def _submit_intent(**overrides) -> ExecutionIntent:
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.6,
         },
         "actionable_certificate_hash": "h1",
     }
@@ -342,7 +348,7 @@ def test_entry_actionable_certificate_guard_rejects_invalid_current_payload():
 
     assert component["allowed"] is False
     assert component["reason"] == "actionable_certificate_fails_current_verifier"
-    assert "payoff_q_point exceeds" in component["details"]["verification_error"]
+    assert "payoff_q_point mismatches" in component["details"]["verification_error"]
 
 
 def test_entry_actionable_certificate_guard_rejects_quarantined_certificate():

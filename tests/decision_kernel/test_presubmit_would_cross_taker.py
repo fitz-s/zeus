@@ -324,24 +324,24 @@ class TestLayer2VerifyPreSubmitForCommand:
         with pytest.raises(CertificateVerificationError, match="submit edge density"):
             self._call(ps)
 
-    def test_qkernel_direct_payoff_above_receipt_lcb_raises(self):
+    def test_qkernel_direct_payoff_probability_mismatch_raises(self):
         ps = _maker_pre_submit(
             direction="buy_no",
             token_id="no-1",
-            q_live=0.986261171798223,
-            q_lcb_5pct=0.986261171798223,
-            limit_price=0.98,
-            expected_edge=0.005,
+            q_live=0.999,
+            q_lcb_5pct=0.990,
+            limit_price=0.95,
+            expected_edge=0.030,
             min_submit_edge_density=0.0,
             qkernel_execution_economics={
                 "route_id": "DIRECT_NO:b24@proof",
                 "side": "NO",
-                "payoff_q_point": 0.986261171798223,
+                "payoff_q_point": 0.999,
                 "payoff_q_lcb": 0.998678563135879,
                 "selection_guard_basis": "SELECTION_BETA_95",
                 "selection_guard_abstained": False,
-                "selection_guard_q_safe": 0.986261171798223,
+                "selection_guard_q_safe": 0.990,
             },
         )
-        with pytest.raises(CertificateVerificationError, match="payoff_q_lcb exceeds"):
+        with pytest.raises(CertificateVerificationError, match="payoff_q_lcb mismatches"):
             self._call(ps)

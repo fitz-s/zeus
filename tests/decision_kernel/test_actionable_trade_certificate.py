@@ -103,7 +103,7 @@ def test_actionable_rejects_side_not_armed_qkernel_selection_guard():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
+def test_actionable_rejects_qkernel_payoff_probability_mismatch():
     parents, action = actionable_graph(
         action_payload={
             "q_live": 0.005426579861923467,
@@ -131,7 +131,7 @@ def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
         }
     )
 
-    with pytest.raises(CertificateVerificationError, match="payoff_q_point exceeds|payoff_q_lcb exceeds"):
+    with pytest.raises(CertificateVerificationError, match="payoff_q_point mismatches|payoff_q_lcb mismatches"):
         verify_actionable_trade(action, parents)
 
 

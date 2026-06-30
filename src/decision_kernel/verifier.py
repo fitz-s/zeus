@@ -429,10 +429,10 @@ def _verify_actionable_qkernel_economics(
     payoff_q_lcb = _probability_float(
         economics.get("payoff_q_lcb"), "actionable qkernel payoff_q_lcb"
     )
-    if payoff_q_point > q_live + 1e-6:
-        raise CertificateVerificationError("actionable qkernel payoff_q_point exceeds q_live")
-    if payoff_q_lcb > q_lcb + 1e-6:
-        raise CertificateVerificationError("actionable qkernel payoff_q_lcb exceeds q_lcb_5pct")
+    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("actionable qkernel payoff_q_point mismatches q_live")
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("actionable qkernel payoff_q_lcb mismatches q_lcb_5pct")
     cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
     edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
     optimal_delta_u = _finite_float(
@@ -1481,10 +1481,10 @@ def _verify_pre_submit_qkernel_economics(
     payoff_q_lcb = _probability_float(
         economics.get("payoff_q_lcb"), "pre-submit qkernel payoff_q_lcb"
     )
-    if payoff_q_point > q_live + 1e-6:
-        raise CertificateVerificationError("pre-submit qkernel payoff_q_point exceeds q_live")
-    if payoff_q_lcb > q_lcb + 1e-6:
-        raise CertificateVerificationError("pre-submit qkernel payoff_q_lcb exceeds q_lcb_5pct")
+    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("pre-submit qkernel payoff_q_point mismatches q_live")
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise CertificateVerificationError("pre-submit qkernel payoff_q_lcb mismatches q_lcb_5pct")
     if not _qkernel_direction_admitted(economics, direction=pre_submit.get("direction")):
         raise CertificateVerificationError("pre-submit qkernel direction admission missing")
     if economics.get("coherence_allows") is not True:

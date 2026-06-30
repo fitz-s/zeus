@@ -5084,6 +5084,61 @@ def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authori
     assert pos._monitor_family_redecision["decision"] == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
 
 
+def test_family_monitor_overlay_blocks_exit_decision_only_immature_day0_authority():
+    """Munich regression: exit-decision Day0 maturity evidence is exit authority."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-stat-exit-day0-immature-exit-decision-only",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.83,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
+    pos.last_monitor_prob = 0.15
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.55
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.55
+    pos.last_monitor_best_ask = 0.57
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = ["day0_observation_remaining_window"]
+    exit_decision = ExitDecision(
+        True,
+        reason="CI_SEPARATED_REVERSAL",
+        trigger="CI_SEPARATED_REVERSAL",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=[
+            "day0_observation_remaining_window",
+            "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+        ],
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=exit_decision,
+        should_exit=True,
+        exit_reason=exit_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+    assert pos._monitor_family_redecision["day0_maturity_block"].startswith(
+        "day0_high_extreme_not_mature:"
+    )
+
+
 def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
     """A high bid over a conservative belief is not by itself an exit signal."""
     from src.engine import cycle_runtime

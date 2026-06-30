@@ -1063,8 +1063,12 @@ def _substrate_warm_business_summary(
         if condition_ids:
             selected = int(out.get("direct_clob_prefetch_selected_priority_condition_count") or 0)
             if status == "refreshed" and selected <= 0:
-                out["scheduler_failed"] = True
-                out["scheduler_failure_reason"] = "priority_conditions_not_serviced"
+                if inserted <= 0:
+                    out["scheduler_failed"] = True
+                    out["scheduler_failure_reason"] = "priority_conditions_not_serviced"
+                else:
+                    out["priority_conditions_deferred"] = True
+                    out["scheduler_degraded_reason"] = "priority_conditions_deferred"
             elif status in {"error", "budget_exhausted_before_snapshot_capture", "topology_budget_exhausted"}:
                 out["scheduler_failed"] = True
                 out["scheduler_failure_reason"] = str(out.get("reason") or status)

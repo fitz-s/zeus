@@ -2173,9 +2173,9 @@ def _qkernel_direct_route_matches_receipt_probability(
         for value in (payoff_q_point, payoff_q_lcb, receipt_q_point, receipt_q_lcb)
     ):
         return False
-    if payoff_q_point > receipt_q_point + 1e-6:
+    if not math.isclose(payoff_q_point, receipt_q_point, rel_tol=1e-9, abs_tol=1e-6):
         return False
-    if payoff_q_lcb > receipt_q_lcb + 1e-6:
+    if not math.isclose(payoff_q_lcb, receipt_q_lcb, rel_tol=1e-9, abs_tol=1e-6):
         return False
     return True
 
@@ -4127,6 +4127,7 @@ def _build_event_bound_no_submit_receipt_core(
     selected_token_id = proof.token_id
     direction = proof.direction
     execution_price = proof.execution_price
+    receipt_q_live, receipt_q_lcb = _event_bound_execution_probability_pair(proof)
     if execution_price is None:
         # REJECTION-LABEL TRUTH (operator law 2026-06-11). A non-executable proof was
         # surfaced as the best-belief fallback. EXECUTABLE_NATIVE_ASK_MISSING is the
@@ -4157,8 +4158,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=None,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -4188,8 +4189,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -4347,6 +4348,10 @@ def _build_event_bound_no_submit_receipt_core(
                 )
     if provenance_capture is not None and proof.row is not None:
         provenance_capture["snapshot_row"] = proof.row
+    # Replacement hooks can swap the selected proof after the early unpriced branch.
+    # Recompute once at the executable boundary so every later receipt/sizing path
+    # consumes the final proof's single execution probability pair.
+    receipt_q_live, receipt_q_lcb = _event_bound_execution_probability_pair(proof)
     trade_score = proof.trade_score
     if trade_score <= 0.0:
         return EventSubmissionReceipt(
@@ -4363,8 +4368,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -4382,7 +4387,7 @@ def _build_event_bound_no_submit_receipt_core(
     _shrink = _compute_selection_shrinkage(
         proofs=proofs,
         selected_token_id=selected_token_id,
-        selected_q_posterior=proof.q_posterior,
+        selected_q_posterior=receipt_q_live,
         selected_price=execution_price.value,
         authority_on=False,
     )
@@ -4441,8 +4446,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -4471,8 +4476,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -4590,8 +4595,8 @@ def _build_event_bound_no_submit_receipt_core(
                 for _, usd in (portfolio_reservation or [])
             )
             sizing_context = SizingContext.from_candidate_proof_with_portfolio(
-                q_posterior=proof.q_posterior,
-                q_lcb_5pct=proof.q_lcb_5pct,
+                q_posterior=receipt_q_live,
+                q_lcb_5pct=receipt_q_lcb,
                 lead_days=_lead_days,
                 bankroll_usd=bankroll_usd,
                 corr_committed_usd=_corr_committed_usd,
@@ -4599,13 +4604,13 @@ def _build_event_bound_no_submit_receipt_core(
             )
         else:
             sizing_context = SizingContext.from_candidate_proof(
-                q_posterior=proof.q_posterior,
-                q_lcb_5pct=proof.q_lcb_5pct,
+                q_posterior=receipt_q_live,
+                q_lcb_5pct=receipt_q_lcb,
                 lead_days=_lead_days,
             )
         kelly = evaluate_kelly(
             kelly_decision_id=f"edli_kelly:{event.event_id}:{selected_token_id}",
-            p_posterior=proof.q_posterior,
+            p_posterior=receipt_q_live,
             execution_price=execution_price,
             bankroll_usd=bankroll_usd,
             sizing_context=sizing_context,
@@ -4763,8 +4768,8 @@ def _build_event_bound_no_submit_receipt_core(
                             family_id=family.family_id,
                             bin_label=candidate.bin.label,
                             direction=direction,
-                            q_live=proof.q_posterior,
-                            q_lcb_5pct=proof.q_lcb_5pct,
+                            q_live=receipt_q_live,
+                            q_lcb_5pct=receipt_q_lcb,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -4820,8 +4825,8 @@ def _build_event_bound_no_submit_receipt_core(
                             family_id=family.family_id,
                             bin_label=candidate.bin.label,
                             direction=direction,
-                            q_live=proof.q_posterior,
-                            q_lcb_5pct=proof.q_lcb_5pct,
+                            q_live=receipt_q_live,
+                            q_lcb_5pct=receipt_q_lcb,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -4850,8 +4855,8 @@ def _build_event_bound_no_submit_receipt_core(
                         family_id=family.family_id,
                         bin_label=candidate.bin.label,
                         direction=direction,
-                        q_live=proof.q_posterior,
-                        q_lcb_5pct=proof.q_lcb_5pct,
+                        q_live=receipt_q_live,
+                        q_lcb_5pct=receipt_q_lcb,
                         c_fee_adjusted=execution_price.value,
                         c_cost_95pct=proof.c_cost_95pct,
                         p_fill_lcb=proof.p_fill_lcb,
@@ -4892,7 +4897,7 @@ def _build_event_bound_no_submit_receipt_core(
                     selected_bin_id=_candidate_bin_id(proof),
                     selected_direction=str(direction or ""),
                     held=_held_same_token,
-                    q_current_lcb=proof.q_lcb_5pct,
+                    q_current_lcb=receipt_q_lcb,
                     target_total_exposure_usd=float(_robust_stake_usd),
                     same_token_pending_entry_usd=float(_same_token_pending),
                     venue_min_increment_usd=float(_venue_min_usd),
@@ -4917,8 +4922,8 @@ def _build_event_bound_no_submit_receipt_core(
                         family_id=family.family_id,
                         bin_label=candidate.bin.label,
                         direction=direction,
-                        q_live=proof.q_posterior,
-                        q_lcb_5pct=proof.q_lcb_5pct,
+                        q_live=receipt_q_live,
+                        q_lcb_5pct=receipt_q_lcb,
                         c_fee_adjusted=execution_price.value,
                         c_cost_95pct=proof.c_cost_95pct,
                         p_fill_lcb=proof.p_fill_lcb,
@@ -4988,8 +4993,8 @@ def _build_event_bound_no_submit_receipt_core(
                             family_id=family.family_id,
                             bin_label=candidate.bin.label,
                             direction=direction,
-                            q_live=proof.q_posterior,
-                            q_lcb_5pct=proof.q_lcb_5pct,
+                            q_live=receipt_q_live,
+                            q_lcb_5pct=receipt_q_lcb,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -5055,8 +5060,8 @@ def _build_event_bound_no_submit_receipt_core(
                             family_id=family.family_id,
                             bin_label=candidate.bin.label,
                             direction=direction,
-                            q_live=proof.q_posterior,
-                            q_lcb_5pct=proof.q_lcb_5pct,
+                            q_live=receipt_q_live,
+                            q_lcb_5pct=receipt_q_lcb,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -5094,8 +5099,8 @@ def _build_event_bound_no_submit_receipt_core(
                             family_id=family.family_id,
                             bin_label=candidate.bin.label,
                             direction=direction,
-                            q_live=proof.q_posterior,
-                            q_lcb_5pct=proof.q_lcb_5pct,
+                            q_live=receipt_q_live,
+                            q_lcb_5pct=receipt_q_lcb,
                             c_fee_adjusted=execution_price.value,
                             c_cost_95pct=proof.c_cost_95pct,
                             p_fill_lcb=proof.p_fill_lcb,
@@ -5158,8 +5163,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -5185,8 +5190,8 @@ def _build_event_bound_no_submit_receipt_core(
         _abort_trade_score = trade_score
         if _recapture.state is CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED:
             _abort_trade_score = _robust_trade_score_from_generated_inputs(
-                q_posterior=proof.q_posterior,
-                q_lcb_5pct=proof.q_lcb_5pct,
+                q_posterior=receipt_q_live,
+                q_lcb_5pct=receipt_q_lcb,
                 execution_price=execution_price,
                 c_cost_95pct=proof.c_cost_95pct,
                 p_fill_lcb=proof.p_fill_lcb,
@@ -5208,8 +5213,8 @@ def _build_event_bound_no_submit_receipt_core(
             family_id=family.family_id,
             bin_label=candidate.bin.label,
             direction=direction,
-            q_live=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
+            q_live=receipt_q_live,
+            q_lcb_5pct=receipt_q_lcb,
             c_fee_adjusted=execution_price.value,
             c_cost_95pct=proof.c_cost_95pct,
             p_fill_lcb=proof.p_fill_lcb,
@@ -5301,8 +5306,8 @@ def _build_event_bound_no_submit_receipt_core(
             "bin_label": candidate.bin.label,
             "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
-            "q_live": proof.q_posterior,
-            "q_lcb_5pct": proof.q_lcb_5pct,
+            "q_live": receipt_q_live,
+            "q_lcb_5pct": receipt_q_lcb,
             "q_lcb_calibration_source": proof.q_lcb_calibration_source,
             # Independently-materialized YES-bin posterior (== yes_q from the
             # q-vector; never a complement). Carried so the post-submit receipt-level
@@ -6350,18 +6355,21 @@ def _build_event_bound_taker_quality_proof(
                 "maker_expected_profit_usd": "0",
                 "incremental_expected_profit_usd": "0",
             }
-        if q_live > payload_q_live + 1e-6 or q_lcb > payload_q_lcb + 1e-6:
+        if not (
+            math.isclose(q_live, payload_q_live, rel_tol=1e-9, abs_tol=1e-6)
+            and math.isclose(q_lcb, payload_q_lcb, rel_tol=1e-9, abs_tol=1e-6)
+        ):
             return {
                 "schema_version": 1,
                 "passed": False,
-                "reason": "qkernel_payoff_exceeds_live_posterior_bound",
+                "reason": "qkernel_payoff_probability_mismatch",
                 "model_confidence": "0",
                 "taker_fee_adjusted_edge": "0",
                 "taker_expected_profit_usd": "0",
                 "maker_expected_profit_usd": "0",
                 "incremental_expected_profit_usd": "0",
             }
-        q_lcb_source = "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
+        q_lcb_source = "qkernel_execution_economics.payoff_q_lcb"
     else:
         q_live = _optional_float(actionable_payload.get("q_live"))
         q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
@@ -7234,9 +7242,12 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
         or payload_q_lcb is None
     ):
         raise ValueError("LIVE_ENTRY_QKERNEL_POSTERIOR_BOUND_MISSING")
-    if cert_q_live > payload_q_live + 1e-6 or cert_q_lcb > payload_q_lcb + 1e-6:
+    if not (
+        math.isclose(cert_q_live, payload_q_live, rel_tol=1e-9, abs_tol=1e-6)
+        and math.isclose(cert_q_lcb, payload_q_lcb, rel_tol=1e-9, abs_tol=1e-6)
+    ):
         raise ValueError(
-            "LIVE_ENTRY_QKERNEL_PAYOFF_EXCEEDS_POSTERIOR_BOUND:"
+            "LIVE_ENTRY_QKERNEL_PAYOFF_PROBABILITY_MISMATCH:"
             f"cert_q={cert_q_live:.9f}:payload_q={payload_q_live:.9f}:"
             f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
         )
@@ -10753,6 +10764,16 @@ def _qkernel_execution_q_point(proof: "_CandidateProof") -> float | None:
     return q_point
 
 
+def _event_bound_execution_probability_pair(proof: "_CandidateProof") -> tuple[float, float]:
+    """Return the single probability pair that may drive live execution."""
+
+    qkernel_q_point = _qkernel_execution_q_point(proof)
+    qkernel_q_lcb = _qkernel_execution_q_lcb(proof)
+    if qkernel_q_point is not None and qkernel_q_lcb is not None:
+        return qkernel_q_point, qkernel_q_lcb
+    return float(proof.q_posterior), float(proof.q_lcb_5pct)
+
+
 def _native_side_cost_curve_from_execution_price(
     *,
     proof: _CandidateProof,
@@ -11476,24 +11497,12 @@ def _proofs_with_qkernel_candidate_economics(
             )
         ):
             qkernel_reason = "QKERNEL_PERSISTED_POSTERIOR_BOUND_INVALID"
-        if (
-            qkernel_reason is None
-            and q_point is not None
-            and q_point > proof_q_point + 1e-6
-        ):
-            qkernel_reason = "QKERNEL_PAYOFF_Q_EXCEEDS_PERSISTED_POSTERIOR_POINT"
-        if (
-            qkernel_reason is None
-            and q_lcb is not None
-            and q_lcb > proof_q_lcb + 1e-6
-        ):
-            qkernel_reason = "QKERNEL_PAYOFF_QLCB_EXCEEDS_PERSISTED_POSTERIOR_BOUND"
         cert_payload = dict(cert)
         if math.isfinite(proof_q_point):
             cert_payload["persisted_posterior_q_posterior"] = proof_q_point
         if math.isfinite(proof_q_lcb):
             cert_payload["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
-        cert_payload["q_lcb_authority"] = "persisted_posterior_bound"
+        cert_payload["q_lcb_authority"] = "qkernel_payoff_bound"
         annotated.append(
             dataclass_replace(
                 proof,

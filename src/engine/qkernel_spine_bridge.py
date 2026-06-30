@@ -1505,17 +1505,7 @@ def _overlay_spine_economics_onto_proof_with_reason(
         return _OverlayResult(None, "PERSISTED_POSTERIOR_BOUND_INVALID")
     qkernel_execution_economics["persisted_posterior_q_posterior"] = proof_q_point
     qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
-    qkernel_execution_economics["q_lcb_authority"] = "persisted_posterior_bound"
-    if qkernel_q_point > proof_q_point + 1e-9:
-        return _OverlayResult(
-            None,
-            "QKERNEL_PAYOFF_Q_EXCEEDS_PERSISTED_POSTERIOR_POINT",
-        )
-    if qkernel_q_lcb > proof_q_lcb + 1e-9:
-        return _OverlayResult(
-            None,
-            "QKERNEL_PAYOFF_QLCB_EXCEEDS_PERSISTED_POSTERIOR_BOUND",
-        )
+    qkernel_execution_economics["q_lcb_authority"] = "qkernel_payoff_bound"
     if not _qkernel_execution_direction_admitted(
         qkernel_execution_economics,
         direction=str(getattr(proof, "direction", "") or ""),
@@ -1538,10 +1528,9 @@ def _overlay_spine_economics_onto_proof_with_reason(
     except (TypeError, ValueError):
         pass
     overlay: dict[str, Any] = {
-        # The selected qkernel candidate is licensed by route economics, but the
-        # receipt-facing probability authority remains the live posterior already
-        # on the proof. The guard above guarantees the route economics cannot be
-        # more optimistic than that posterior bound.
+        # The selected qkernel candidate is licensed by its route economics. The
+        # old proof posterior remains provenance only; stamped qkernel decisions
+        # must not be capped by a second probability authority downstream.
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",

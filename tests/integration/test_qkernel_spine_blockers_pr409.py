@@ -1259,7 +1259,7 @@ def _overlay_proof(
 
 
 def test_overlay_preserves_live_posterior_probability_fields_and_updates_score():
-    """qkernel may rank the route but must not loosen live posterior authority."""
+    """qkernel route economics become execution authority; proof q remains provenance."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
@@ -1291,20 +1291,28 @@ def test_overlay_preserves_live_posterior_probability_fields_and_updates_score()
     assert new_proof.qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] == pytest.approx(
         0.70
     )
+    assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
 
 
-def test_overlay_rejects_qkernel_bound_above_persisted_posterior_bound():
-    """Shanghai/Miami-class guard: qkernel cannot turn proof-level no-trade into live entry."""
+def test_overlay_accepts_qkernel_bound_above_persisted_posterior_provenance():
+    """Qkernel payoff probability is the selected route authority, not a stale proof cap."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
     )
 
-    assert _overlay_proof(
+    new_proof = _overlay_proof(
         q_posterior=0.80,
         q_lcb_5pct=0.001,
         economics=economics,
-    ) is None
+    )
+
+    assert new_proof is not None
+    assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(0.052)
+    assert new_proof.qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] == pytest.approx(
+        0.001
+    )
+    assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
 
 
 def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
@@ -1373,7 +1381,7 @@ def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
         **cert,
         "persisted_posterior_q_posterior": pytest.approx(0.02),
         "persisted_posterior_q_lcb_5pct": pytest.approx(0.000001),
-        "q_lcb_authority": "persisted_posterior_bound",
+        "q_lcb_authority": "qkernel_payoff_bound",
     }
 
 

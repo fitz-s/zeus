@@ -697,7 +697,7 @@ def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_misma
     assert result.evidence["risky_count"] == 0
     assert result.evidence["historical_risky_count"] == 1
     assert result.evidence["historical_risky"][0]["city"] == "Lucknow"
-    assert "payoff_q_point exceeds" in result.evidence["historical_risky"][0]["reason"]
+    assert "payoff_q_point mismatches" in result.evidence["historical_risky"][0]["reason"]
 
 
 def test_live_actionable_certificate_semantics_blocks_referenced_qkernel_mismatch(

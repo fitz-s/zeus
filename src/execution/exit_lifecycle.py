@@ -971,7 +971,8 @@ def mark_market_closed_hold_to_settlement(
         position.order_status = "filled"
     position.exit_reason = ""
     position.last_exit_error = f"{reason}:{error}"[:500]
-    if not bool(getattr(position, "last_monitor_prob_is_fresh", False)):
+    monitor_provenance = str(position.selected_method or position.entry_method or "")
+    if not bool(getattr(position, "last_monitor_prob_is_fresh", False)) or not monitor_provenance:
         position.last_monitor_prob = None
         position.last_monitor_edge = None
         position.last_monitor_market_price = None
@@ -980,6 +981,8 @@ def mark_market_closed_hold_to_settlement(
         position.last_monitor_best_ask = None
         position.last_monitor_market_vig = None
     validations = list(getattr(position, "applied_validations", []) or [])
+    if not monitor_provenance and "monitor_probability_provenance_missing" not in validations:
+        validations.append("monitor_probability_provenance_missing")
     if reason not in validations:
         validations.append(reason)
     position.applied_validations = validations
@@ -1004,6 +1007,8 @@ def _restore_last_monitor_snapshot_for_closed_hold(
     """
 
     columns = (
+        "entry_method",
+        "selected_method",
         "last_monitor_prob",
         "last_monitor_prob_is_fresh",
         "last_monitor_edge",
@@ -1045,7 +1050,12 @@ def _restore_last_monitor_snapshot_for_closed_hold(
             except Exception:
                 return None
 
-    if bool(_value("last_monitor_prob_is_fresh")):
+    monitor_provenance = str(_value("selected_method") or _value("entry_method") or "")
+    if bool(_value("last_monitor_prob_is_fresh")) and monitor_provenance:
+        position.entry_method = str(_value("entry_method") or getattr(position, "entry_method", "") or "")
+        position.selected_method = str(
+            _value("selected_method") or getattr(position, "selected_method", "") or ""
+        )
         position.last_monitor_prob = _value("last_monitor_prob")  # type: ignore[assignment]
         position.last_monitor_prob_is_fresh = True
         position.last_monitor_edge = _value("last_monitor_edge")  # type: ignore[assignment]

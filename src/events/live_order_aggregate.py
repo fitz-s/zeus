@@ -859,10 +859,10 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel side must match submit direction")
     payoff_q_point = _probability_number(economics.get("payoff_q_point"), "qkernel_execution_economics.payoff_q_point")
     payoff_q_lcb = _probability_number(economics.get("payoff_q_lcb"), "qkernel_execution_economics.payoff_q_lcb")
-    if payoff_q_point > q_live + 1e-6:
-        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_point exceeds submit q_live")
-    if payoff_q_lcb > q_lcb + 1e-6:
-        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb exceeds submit q_lcb_5pct")
+    if not math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_point mismatches submit q_live")
+    if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
+        raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
     cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
     edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
     optimal_delta_u = _positive_number(

@@ -1956,8 +1956,8 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
             # payoff path — this test exercises that path, so it supplies both.
             "candidate_id": "DIRECT_YES:bin-1",
             "direction": "buy_yes",
-            "q_live": 0.90,
-            "q_lcb_5pct": 0.90,
+            "q_live": 0.72,
+            "q_lcb_5pct": 0.30,
             "qkernel_execution_economics": _qkernel_execution_cert(
                 payoff_q_lcb=0.30,
                 cost=0.20,
@@ -1972,7 +1972,7 @@ def test_qkernel_taker_quality_uses_guarded_payoff_lcb_not_receipt_q_lcb():
     )
 
     assert proof is not None
-    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
+    assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
     assert proof["passed"] is False
     assert float(proof["taker_fee_adjusted_edge"]) < 0.0
 
@@ -2060,18 +2060,18 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         """The happy path is UNCHANGED: stamped + identity-matched cert is consumed."""
         proof = self._proof()
         assert proof is not None
-        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
+        assert proof["q_lcb_source"] == "qkernel_execution_economics.payoff_q_lcb"
         # positive after-cost surplus (0.72 payoff vs 0.50 ask) -> passes
         assert float(proof["taker_fee_adjusted_edge"]) > 0.0
         assert proof["passed"] is True
 
-    def test_matched_stamped_cert_above_receipt_probability_lcb_fails_closed(self):
-        """Qkernel execution economics cannot loosen the live posterior bound."""
+    def test_matched_stamped_cert_mismatched_receipt_probability_fails_closed(self):
+        """Qkernel execution economics must be the receipt probability pair."""
         proof = self._proof(q_lcb_5pct=0.01)
         assert proof is not None
         assert proof["passed"] is False
-        assert proof["reason"] == "qkernel_payoff_exceeds_live_posterior_bound"
-        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
+        assert proof["reason"] == "qkernel_payoff_probability_mismatch"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
 
     def test_candidate_identity_mismatch_fails_closed(self):
         """RED-ON-REVERT. Cert.candidate_id (DIRECT_YES:bin-1) != payload.candidate_id
@@ -2082,7 +2082,7 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         assert proof is not None
         assert proof["passed"] is False
         assert proof["reason"] == "qkernel_cert_candidate_identity_mismatch"
-        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
 
     def test_cert_without_authority_stamp_fails_closed(self):
         """RED-ON-REVERT. A qkernel cert present but the payload is NOT under qkernel
@@ -2092,7 +2092,7 @@ class TestB3QkernelCertAuthorityAndIdentityGuard:
         assert proof is not None
         assert proof["passed"] is False
         assert proof["reason"] == "qkernel_cert_present_without_qkernel_authority_stamp"
-        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb_bounded_by_live_posterior"
+        assert proof.get("q_lcb_source") != "qkernel_execution_economics.payoff_q_lcb"
 
     def test_missing_candidate_id_fails_closed(self):
         """A stamped cert with NO payload candidate_id cannot prove identity -> closed."""

@@ -3102,11 +3102,12 @@ _DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES = (
 )
 
 
-def _day0_immature_exit_authority_reason(pos) -> str | None:
-    for validation in getattr(pos, "applied_validations", []) or []:
-        text = str(validation or "")
-        if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
-            return text
+def _day0_immature_exit_authority_reason(*sources) -> str | None:
+    for source in sources:
+        for validation in getattr(source, "applied_validations", []) or []:
+            text = str(validation or "")
+            if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
+                return text
     return None
 
 
@@ -3223,7 +3224,7 @@ def _apply_family_monitor_overlay(
     sell_advantage_threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
     payload["family_direct_sell_advantage_usd"] = sell_advantage
     payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
-    day0_maturity_block = _day0_immature_exit_authority_reason(pos)
+    day0_maturity_block = _day0_immature_exit_authority_reason(pos, exit_decision)
 
     if day0_maturity_block is not None and _is_statistical_single_leg_exit(exit_decision, exit_reason):
         payload["decision"] = "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
