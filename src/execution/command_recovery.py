@@ -7524,6 +7524,15 @@ def _confirmed_chain_absence_positive_projection_candidates(
                ABS(COALESCE(pc.chain_shares, 0)) > 0.000000001
                OR ABS(COALESCE(pc.chain_avg_price, 0)) > 0.000000001
                OR ABS(COALESCE(pc.chain_cost_basis_usd, 0)) > 0.000000001
+               OR EXISTS (
+                   SELECT 1
+                     FROM venue_commands vc
+                     JOIN venue_trade_facts vtf
+                       ON vtf.command_id = vc.command_id
+                    WHERE vc.position_id = pc.position_id
+                      AND UPPER(COALESCE(vtf.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+                      AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
+               )
            )
          ORDER BY pc.updated_at, pc.position_id
         """,
@@ -7682,6 +7691,15 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
                            ABS(COALESCE(chain_shares, 0)) > 0.000000001
                            OR ABS(COALESCE(chain_avg_price, 0)) > 0.000000001
                            OR ABS(COALESCE(chain_cost_basis_usd, 0)) > 0.000000001
+                           OR EXISTS (
+                               SELECT 1
+                                 FROM venue_commands vc
+                                 JOIN venue_trade_facts vtf
+                                   ON vtf.command_id = vc.command_id
+                                WHERE vc.position_id = position_current.position_id
+                                  AND UPPER(COALESCE(vtf.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+                                  AND CAST(COALESCE(vtf.filled_size, '0') AS REAL) > 0
+                           )
                        )
                     """,
                     (

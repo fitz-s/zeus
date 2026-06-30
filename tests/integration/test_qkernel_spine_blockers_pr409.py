@@ -603,7 +603,7 @@ def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkey
 def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypatch, tmp_path):
     """Empirical q_lcb guard is the model-superiority license consumed by coherence.
 
-    Regression: market coherence used the default "license nothing" predicate, so a cheap
+    Regression: market coherence used the default "license nothing" predicate, so a live-floor
     center YES with positive guarded edge/Delta-U could be blocked solely because the deep
     market disagreed. That preserved the all-NO failure mode in Shanghai-style families.
     """
@@ -619,7 +619,7 @@ def test_oof_guard_licenses_center_yes_against_deep_market_disagreement(monkeypa
     family, _bins = _three_bin_family()
     proofs = _proofs_for(
         family,
-        yes_asks=[0.90, 0.05, 0.90, 0.90],
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
         no_asks=[0.79, 0.90, 0.80, 0.95],
         q_by_bin=[0.0, 1.0, 0.0, 0.0],
         q_lcb_by_bin=[0.0, 0.999, 0.0, 0.0],
@@ -1289,7 +1289,7 @@ def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
         "optimal_stake_usd": "2.5",
         "optimal_delta_u": 0.001,
         "q_dot_payoff": 0.061,
-        "cost": 0.010,
+        "cost": 0.270,
         "direction_law_ok": False,
         "coherence_allows": True,
         "q_lcb_guard_basis": "OOF_WILSON_95",
@@ -1577,6 +1577,38 @@ def test_overlay_rejects_center_buy_yes_below_strategy_floor_without_legacy_bloc
     )
 
     assert new_proof is None
+
+
+def test_overlay_rejects_center_buy_yes_live_tail_lottery_price():
+    """Qkernel selection cannot authorize 0.0x center-buy YES live entries."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.07, q_dot_payoff=0.15, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.15,
+        q_lcb_5pct=0.15,
+        economics=economics,
+        direction="buy_yes",
+    )
+
+    assert new_proof is None
+
+
+def test_overlay_allows_center_buy_yes_when_live_floor_clears():
+    """Shanghai-style center-bin YES remains live-eligible above the tail floor."""
+    economics = _selected_economics(
+        edge_lcb=0.05, cost=0.27, q_dot_payoff=0.35, point_ev=0.20, side="YES"
+    )
+    new_proof = _overlay_proof(
+        q_posterior=0.35,
+        q_lcb_5pct=0.35,
+        economics=economics,
+        direction="buy_yes",
+    )
+
+    assert new_proof is not None
+    assert new_proof.missing_reason is None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
 
 
 def test_overlay_sets_qkernel_band_false_edge_p_value():

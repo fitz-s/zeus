@@ -296,6 +296,14 @@ def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
         assert profile.min_submit_edge_density == pytest.approx(0.05)
 
 
+def test_center_buy_live_floor_blocks_tail_lottery_prices() -> None:
+    """Center-buy is a forecast-accuracy strategy, not an ultra-low tail strategy."""
+
+    profile = sp.get("center_buy")
+    assert profile.min_entry_price == pytest.approx(0.10)
+    assert profile.allow_ultra_low_tail is False
+
+
 def test_opening_inertia_supports_high_and_low_weather_metrics() -> None:
     profile = sp.get("opening_inertia")
     assert profile.metric_is_live("high") is True
