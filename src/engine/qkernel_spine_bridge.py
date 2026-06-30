@@ -1620,12 +1620,6 @@ def _overlay_spine_economics_onto_proof_with_reason(
     )
     if selection_guard_reason:
         return _OverlayResult(None, selection_guard_reason)
-    yes_floor_reason = _qkernel_buy_yes_strategy_floor_rejection_reason(
-        proof,
-        qkernel_execution_economics,
-    )
-    if yes_floor_reason:
-        return _OverlayResult(None, yes_floor_reason)
     qkernel_q_point, qkernel_q_lcb = _direct_route_probability_pair(
         qkernel_execution_economics
     )
@@ -1697,40 +1691,6 @@ def _qkernel_may_clear_legacy_missing_reason(missing_reason: str | None) -> bool
             "DIRECTION_LAW_BIN_FORECAST_MISMATCH",
         )
     )
-
-
-def _qkernel_buy_yes_strategy_floor_rejection_reason(
-    proof: Any,
-    qkernel_execution_economics: Mapping[str, Any],
-) -> str:
-    """Block center-buy cheap YES before it can become qkernel-authorized.
-
-    The final submit path also checks min_entry_price, but the bridge must not
-    create an actionable qkernel authority for a center_buy YES whose own cost is
-    already below the live strategy floor.
-    """
-
-    if str(getattr(proof, "direction", "") or "").strip().lower() != "buy_yes":
-        return ""
-    try:
-        cost = float(qkernel_execution_economics.get("cost"))
-    except (TypeError, ValueError):
-        return "QKERNEL_COST_INVALID"
-    if not math.isfinite(cost):
-        return "QKERNEL_COST_INVALID"
-    try:
-        from src.strategy.strategy_profile import try_get
-
-        profile = try_get("center_buy")
-        floor = float(getattr(profile, "min_entry_price", 0.05) if profile is not None else 0.05)
-    except Exception:  # noqa: BLE001
-        floor = 0.05
-    if cost <= floor + 1e-12:
-        return (
-            "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
-            f"strategy=center_buy:cost={cost:.9f}:min_entry_price={floor:.9f}"
-        )
-    return ""
 
 
 def _qkernel_selection_guard_rejection_reason(

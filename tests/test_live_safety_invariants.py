@@ -3954,7 +3954,7 @@ def test_monitor_entry_selection_guard_preserves_existing_day0_exit_decision():
 
 
 def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_posterior():
-    """Entry must not trade a stale posterior after live raw inputs have advanced."""
+    """Entry must not trade a stale posterior after anchor-qualified raw inputs advance."""
     from src.engine import event_reactor_adapter as adapter
 
     conn = sqlite3.connect(":memory:")
@@ -4007,6 +4007,64 @@ def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_poste
     assert "source_cycle_time_raw_model_forecasts_lag" in reason
     assert "latest_raw_cycle=2026-06-29T12:00:00+00:00" in reason
     assert "posterior_cycle=2026-06-29T06:00:00+00:00" in reason
+
+
+def test_entry_replacement_ignores_partial_non_anchor_raw_cycle_newer_than_posterior():
+    """Partial regional/model rows cannot stale replacement authority by themselves.
+
+    Live June-30 shape: DMI/ICON rows for 12Z arrived before any replacement
+    anchor artifact/posterior. Treating those three rows as a complete posterior
+    dependency froze entry with REPLACEMENT_0_1_LIVE_INPUT_LAG.
+    """
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            endpoint TEXT,
+            coverage_status TEXT,
+            captured_at TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    for model in ("dmi_harmonie_europe", "icon_eu", "icon_global"):
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model,
+                "Munich",
+                "2026-07-02",
+                "high",
+                "2026-06-30T12:00:00+00:00",
+                "single_runs",
+                "COVERED",
+                "2026-06-30T16:20:00+00:00",
+                "2026-06-30T16:06:00+00:00",
+            ),
+        )
+
+    reason = adapter._replacement_live_input_lag_reason(
+        conn,
+        family=SimpleNamespace(
+            city="Munich",
+            target_date="2026-07-02",
+            metric="high",
+        ),
+        decision_time=datetime(2026, 6, 30, 17, 0, tzinfo=timezone.utc),
+        posterior_source_cycle_time="2026-06-30T06:00:00+00:00",
+    )
+
+    assert reason is None
 
 
 def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monkeypatch):

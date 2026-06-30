@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-30
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-06-24
+# Last reused/audited: 2026-06-30
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -2383,6 +2383,35 @@ class TestLiveOrderCommandSplit:
 
 class TestExitOrderCommandSplit:
     """INV-30: execute_exit_order must persist before it submits."""
+
+    def test_exit_submit_checks_live_venue_runtime_gate(self, mem_conn, monkeypatch):
+        """Exit submit must be blocked by the same live runtime gate as entry."""
+        import src.architecture.gate_runtime as gate_runtime
+        from src.execution.executor import execute_exit_order
+
+        checked: list[str] = []
+
+        def _spy_check(capability: str) -> None:
+            checked.append(capability)
+
+        monkeypatch.setattr(gate_runtime, "check", _spy_check)
+        intent = _make_exit_intent(mem_conn)
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(bound, order_id="ord-exit-gate")
+            )
+
+            execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-gate",
+            )
+
+        assert checked[:2] == ["live_venue_submit", "settlement_write"]
 
     def test_exit_persist_precedes_submit(self, mem_conn):
         """insert_command must run before place_limit_order (exit path)."""

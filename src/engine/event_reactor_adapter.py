@@ -3667,6 +3667,231 @@ def _qkernel_selected_route_fdr_proof(
     )
 
 
+def _qkernel_selection_fact_family_id(
+    *,
+    family_id: str,
+    decision_id: str,
+    receipt_hash: str,
+) -> str:
+    return "qkernel_family:" + stable_hash(
+        {
+            "family_id": family_id,
+            "decision_id": decision_id,
+            "receipt_hash": receipt_hash,
+        }
+    )[:32]
+
+
+def _qkernel_selection_hypothesis_id(
+    *,
+    fact_family_id: str,
+    candidate_id: str,
+    side: str,
+) -> str:
+    return "qkernel_hypothesis:" + stable_hash(
+        {
+            "family_id": fact_family_id,
+            "candidate_id": candidate_id,
+            "side": side,
+        }
+    )[:32]
+
+
+def _record_qkernel_selection_family_facts(
+    conn: sqlite3.Connection | None,
+    *,
+    family: EventBoundCandidateFamily,
+    decision: Any | None,
+    event: OpportunityEvent,
+    decision_time: datetime,
+    decision_snapshot_id: str | None,
+) -> dict[str, Any]:
+    """Persist qkernel family-selection facts to canonical world DB only.
+
+    The qkernel path bypasses the legacy evaluator FDR writer by design; the
+    spine is the selector. This writer records the spine candidates without
+    rerunning legacy BH/FDR, and requires attached ``world`` tables so live
+    selected trades cannot proceed with only local ghost facts.
+    """
+
+    if conn is None:
+        return {"status": "skipped_no_connection", "families": 0, "hypotheses": 0}
+    if decision is None:
+        return {"status": "skipped_no_decision", "families": 0, "hypotheses": 0}
+
+    candidate_decisions = tuple(getattr(decision, "candidate_decisions", ()) or ())
+    if not candidate_decisions:
+        return {"status": "skipped_no_candidates", "families": 0, "hypotheses": 0}
+
+    decision_id = str(getattr(decision, "decision_id", "") or "")
+    receipt_hash = str(getattr(decision, "receipt_hash", "") or "")
+    fact_family_id = _qkernel_selection_fact_family_id(
+        family_id=str(getattr(family, "family_id", "") or ""),
+        decision_id=decision_id,
+        receipt_hash=receipt_hash,
+    )
+    selected_candidate_id = str(getattr(getattr(decision, "selected", None), "candidate_id", "") or "")
+    bin_label_by_id = {
+        str(getattr(bin_obj, "bin_id", "") or ""): str(getattr(bin_obj, "label", "") or "")
+        for bin_obj in tuple(getattr(getattr(decision, "omega", None), "bins", ()) or ())
+    }
+
+    from src.engine.qkernel_spine_bridge import qkernel_candidate_economics_by_bin_side
+    from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
+
+    economics_by_key = qkernel_candidate_economics_by_bin_side(decision)
+    rows: list[dict[str, Any]] = []
+    for candidate_decision in candidate_decisions:
+        route = getattr(candidate_decision, "route", None)
+        economics = getattr(candidate_decision, "economics", None)
+        if route is None or economics is None:
+            continue
+        side = str(getattr(route, "side", "") or "").strip().upper()
+        bin_id = str(getattr(route, "bin_id", "") or "").strip()
+        candidate_id = str(getattr(economics, "candidate_id", "") or "").strip()
+        if side not in {"YES", "NO"} or not bin_id or not candidate_id:
+            continue
+        payload = dict(economics_by_key.get((bin_id, side), {}) or {})
+        direction = "buy_yes" if side == "YES" else "buy_no"
+        edge_lcb = _optional_float(payload.get("edge_lcb"))
+        q_point = _optional_float(payload.get("payoff_q_point"))
+        q_lcb = _optional_float(payload.get("payoff_q_lcb"))
+        optimal_delta_u = _optional_float(payload.get("optimal_delta_u"))
+        passed_prefilter = bool(
+            payload.get("direction_law_ok") is True
+            and payload.get("coherence_allows") is True
+            and edge_lcb is not None
+            and edge_lcb > 0.0
+            and optimal_delta_u is not None
+            and optimal_delta_u > 0.0
+        )
+        selected_post_fdr = bool(candidate_id and candidate_id == selected_candidate_id)
+        rejection_stage = None
+        if not selected_post_fdr:
+            if payload.get("direction_law_ok") is not True:
+                rejection_stage = "DIRECTION_LAW_REJECTED"
+            elif payload.get("coherence_allows") is not True:
+                rejection_stage = "MARKET_COHERENCE_REJECTED"
+            elif not passed_prefilter:
+                rejection_stage = "QKERNEL_PREFILTER_REJECTED"
+            else:
+                rejection_stage = "QKERNEL_NOT_SELECTED"
+        rows.append(
+            {
+                "hypothesis_id": _qkernel_selection_hypothesis_id(
+                    fact_family_id=fact_family_id,
+                    candidate_id=candidate_id,
+                    side=side,
+                ),
+                "candidate_id": candidate_id,
+                "range_label": bin_label_by_id.get(bin_id) or bin_id,
+                "direction": direction,
+                "p_value": None,
+                "q_value": q_point,
+                "ci_lower": q_lcb,
+                "ci_upper": None,
+                "edge": edge_lcb,
+                "tested": True,
+                "passed_prefilter": passed_prefilter,
+                "selected_post_fdr": selected_post_fdr,
+                "rejection_stage": rejection_stage,
+                "meta": {
+                    "source": "qkernel_spine",
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "decision_id": decision_id,
+                    "receipt_hash": receipt_hash,
+                    "route_id": str(payload.get("route_id") or getattr(economics, "route_id", "") or ""),
+                    "side": side,
+                    "bin_id": bin_id,
+                    "qkernel_execution_economics": payload,
+                },
+            }
+        )
+
+    if not rows:
+        return {"status": "skipped_no_hypotheses", "families": 0, "hypotheses": 0}
+
+    recorded_at = decision_time.astimezone(UTC).isoformat()
+    family_meta = {
+        "source": "qkernel_spine",
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "decision_id": decision_id,
+        "receipt_hash": receipt_hash,
+        "spine_family_id": str(getattr(family, "family_id", "") or ""),
+        "tested_hypotheses": len(rows),
+        "passed_prefilter": sum(1 for row in rows if bool(row["passed_prefilter"])),
+        "selected_post_fdr": sum(1 for row in rows if bool(row["selected_post_fdr"])),
+        "selected_candidate_id": selected_candidate_id,
+        "no_trade_reason": str(getattr(decision, "no_trade_reason", "") or ""),
+    }
+    family_result = log_selection_family_fact(
+        conn,
+        family_id=fact_family_id,
+        cycle_mode="qkernel_spine",
+        created_at=recorded_at,
+        meta=family_meta,
+        decision_snapshot_id=decision_snapshot_id,
+        city=family.city,
+        target_date=family.target_date,
+        strategy_key="",
+        discovery_mode=event.event_type,
+        decision_time_status="live",
+        require_attached_world=True,
+    )
+    if family_result.get("status") != "written":
+        return {
+            "status": str(family_result.get("status") or "family_write_failed"),
+            "families": 0,
+            "hypotheses": 0,
+        }
+
+    hypothesis_writes = 0
+    first_failure: str | None = None
+    for row in rows:
+        result = log_selection_hypothesis_fact(
+            conn,
+            hypothesis_id=row["hypothesis_id"],
+            family_id=fact_family_id,
+            city=family.city,
+            target_date=family.target_date,
+            range_label=row["range_label"],
+            direction=row["direction"],
+            recorded_at=recorded_at,
+            meta=row["meta"],
+            decision_id=decision_id,
+            candidate_id=row["candidate_id"],
+            p_value=row["p_value"],
+            q_value=row["q_value"],
+            ci_lower=row["ci_lower"],
+            ci_upper=row["ci_upper"],
+            edge=row["edge"],
+            tested=bool(row["tested"]),
+            passed_prefilter=bool(row["passed_prefilter"]),
+            selected_post_fdr=bool(row["selected_post_fdr"]),
+            rejection_stage=row["rejection_stage"],
+            require_attached_world=True,
+        )
+        if result.get("status") == "written":
+            hypothesis_writes += 1
+        elif first_failure is None:
+            first_failure = str(result.get("status") or "hypothesis_write_failed")
+
+    if hypothesis_writes <= 0:
+        return {
+            "status": first_failure or "hypothesis_write_failed",
+            "families": 1,
+            "hypotheses": 0,
+        }
+    return {
+        "status": "written",
+        "families": 1,
+        "hypotheses": hypothesis_writes,
+        "family_id": fact_family_id,
+    }
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -4054,6 +4279,21 @@ def _build_event_bound_no_submit_receipt_core(
             _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
                 _spine_result.decision
             )
+            _selection_fact_result = _record_qkernel_selection_family_facts(
+                trade_conn,
+                family=family,
+                decision=_spine_result.decision,
+                event=event,
+                decision_time=decision_time,
+                decision_snapshot_id=event.causal_snapshot_id,
+            )
+            if proof is not None and _selection_fact_result.get("status") != "written":
+                proof = None
+                _spine_candidate_economics_by_key = {}
+                _spine_no_trade_reason = (
+                    "QKERNEL_SELECTION_FACT_PERSISTENCE_FAILED:"
+                    f"{_selection_fact_result.get('status') or 'unknown'}"
+                )
     else:
         proof = _selected_candidate_proof(
             payload,
@@ -9501,6 +9741,12 @@ def _latest_raw_model_input_cycle_for_family(
             "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
         )
         params.append(decision_iso)
+    anchor_terms = ["model = 'ecmwf_ifs'"]
+    if "source_id" in columns:
+        anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
+    if "product_id" in columns:
+        anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
+    anchor_expr = " OR ".join(anchor_terms)
     try:
         row = conn.execute(
             f"""
@@ -9510,6 +9756,7 @@ def _latest_raw_model_input_cycle_for_family(
                AND datetime(source_cycle_time) <= datetime(?)
              GROUP BY source_cycle_time
              HAVING COUNT(DISTINCT model) >= 3
+                AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
              ORDER BY datetime(source_cycle_time) DESC
              LIMIT 1
             """,

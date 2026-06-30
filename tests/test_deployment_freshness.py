@@ -1,13 +1,14 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-06-30
 # Authority basis: 2026-05-17 cascade incident (daemon ran 5h+ on pre-PR-#139 abs() code after merge)
 #                  + PR-S6 critic R1 (C1 dedicated flag file, auto-pause at 4h, scheduler integration,
 #                    boot-capture fail-loud)
+#                  + live-money 2026-06-30: stale runtime SHA mismatch pauses immediately
 """Antibody tests for PR-S6 deployment freshness gate (_check_deployment_freshness).
 
 R1 revisions (critic APPROVE_WITH_REVISION):
 - C1: flag written to state/deployment_freshness.json (not control_plane.json)
-- Stakeholder gap: 4-24h band now also calls pause_entries
+- Stakeholder gap: any runtime SHA mismatch below the hard-stop window calls pause_entries
 - M1: APScheduler job registration verified
 - M2: boot-capture failure is fail-loud (SystemExit unless ZEUS_ACCEPT_STALE_DEPLOY=1)
 """
@@ -123,27 +124,31 @@ class TestNoAction:
 
 
 # ---------------------------------------------------------------------------
-# Tests: grace window (<4h)
+# Tests: immediate stale-runtime pause (<24h)
 # ---------------------------------------------------------------------------
 
-class TestGraceWindow:
-    def test_recent_divergence_warns_only(self, caplog):
-        """Divergence within 4h emits WARNING but no SystemExit, no pause_entries."""
+class TestImmediatePause:
+    def test_recent_divergence_pauses_entries(self, caplog, tmp_path):
+        """Divergence within 4h pauses entries immediately."""
         import logging
         pause_mock = MagicMock()
-        with caplog.at_level(logging.WARNING, logger="zeus"):
+        df_path = tmp_path / "deployment_freshness.json"
+        with caplog.at_level(logging.ERROR, logger="zeus"):
             _run(
                 boot_sha=BOOT_SHA,
                 current_sha=DIFF_SHA,
                 now_hours_after_boot=1.0,
                 boot_ts_hours_ago=0.0,
                 pause_entries_mock=pause_mock,
+                state_path_return=df_path,
             )
         assert "deployment_freshness_diverged_total" in caplog.text
-        pause_mock.assert_not_called()
+        pause_mock.assert_called_once()
+        assert pause_mock.call_args[0][0] == "deployment_freshness_mismatch"
+        assert df_path.exists()
 
     def test_recent_divergence_no_exit(self):
-        """No SystemExit within grace window."""
+        """No SystemExit within the operator-restart window."""
         _run(
             boot_sha=BOOT_SHA,
             current_sha=DIFF_SHA,
@@ -153,12 +158,12 @@ class TestGraceWindow:
 
 
 # ---------------------------------------------------------------------------
-# Tests: 4-24h band — auto-pause + dedicated flag file
+# Tests: <24h stale alert — auto-pause + dedicated flag file
 # ---------------------------------------------------------------------------
 
 class TestStaleAlert:
     def test_stale_divergence_4h_logs_error(self, caplog, tmp_path):
-        """Divergence >=4h and <24h logs ERROR."""
+        """Divergence <24h logs ERROR."""
         import logging
 
         df_path = tmp_path / "deployment_freshness.json"
@@ -175,7 +180,7 @@ class TestStaleAlert:
         assert "deployment_freshness_diverged_total" in caplog.text
 
     def test_stale_divergence_4h_writes_dedicated_flag_file(self, tmp_path):
-        """4-24h writes to state/deployment_freshness.json, NOT control_plane.json."""
+        """Runtime SHA mismatch writes to state/deployment_freshness.json, NOT control_plane.json."""
         df_path = tmp_path / "deployment_freshness.json"
         cp_path = tmp_path / "control_plane.json"
 
@@ -223,8 +228,8 @@ class TestStaleAlert:
         flag = json.loads(df_path.read_text())
         assert flag["boot_sha"] == BOOT_SHA
 
-    def test_4h_divergence_auto_pauses_entries(self, tmp_path):
-        """4-24h divergence calls pause_entries with correct reason code."""
+    def test_runtime_sha_mismatch_auto_pauses_entries(self, tmp_path):
+        """Runtime SHA mismatch calls pause_entries with correct reason code."""
         df_path = tmp_path / "deployment_freshness.json"
         pause_mock = MagicMock()
 
@@ -239,14 +244,14 @@ class TestStaleAlert:
 
         pause_mock.assert_called_once()
         call_args = pause_mock.call_args
-        assert call_args[0][0] == "deployment_freshness_4h_divergence"
+        assert call_args[0][0] == "deployment_freshness_mismatch"
         # issued_by must be "system_auto_pause" to activate idempotency guard
         # in control_plane._has_active_auto_pause_override (prevents duplicate
         # control_overrides rows on every 60s tick).
         assert call_args[1].get("issued_by") == "system_auto_pause"
 
     def test_stale_divergence_4h_continues(self, tmp_path):
-        """4-24h divergence does NOT raise SystemExit — trading paused but daemon stays up."""
+        """<24h divergence does NOT raise SystemExit — trading paused but daemon stays up."""
         df_path = tmp_path / "deployment_freshness.json"
         with patch("src.config.state_path", return_value=df_path):
             with patch("src.control.control_plane.pause_entries"):
@@ -258,7 +263,7 @@ class TestStaleAlert:
                 )
 
     def test_pause_entries_idempotent_not_spam(self, tmp_path):
-        """5 consecutive 4-24h-band fires call pause_entries 5 times BUT
+        """5 consecutive stale-runtime fires call pause_entries 5 times BUT
         the system_auto_pause idempotency guard in control_plane ensures
         only 1 control_overrides row is inserted.
 

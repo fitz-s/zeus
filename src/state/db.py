@@ -8283,7 +8283,12 @@ def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) ->
     return row is not None
 
 
-def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
+def _selection_fact_table_ref(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    require_attached_world: bool = False,
+) -> str | None:
     # B-series restore: selection_family_fact / selection_hypothesis_fact are
     # world_class (db_table_ownership.yaml) — writes MUST route to world.<table>
     # when world.db is ATTACHed, else they land in the wrong DB (INV-37/K1).
@@ -8295,6 +8300,8 @@ def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | Non
             return f"world.{table}"
     except sqlite3.Error:
         pass
+    if require_attached_world:
+        return None
     if _table_exists(conn, table):
         return table
     return None
@@ -8313,11 +8320,21 @@ def log_selection_family_fact(
     strategy_key: str | None = None,
     discovery_mode: str | None = None,
     decision_time_status: str | None = None,
+    require_attached_world: bool = False,
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_family_fact"}
-    table_ref = _selection_fact_table_ref(conn, "selection_family_fact")
+    table_ref = _selection_fact_table_ref(
+        conn,
+        "selection_family_fact",
+        require_attached_world=require_attached_world,
+    )
     if table_ref is None:
+        if require_attached_world:
+            return {
+                "status": "skipped_missing_canonical_world_table",
+                "table": "selection_family_fact",
+            }
         return {"status": "skipped_missing_table", "table": "selection_family_fact"}
     if not family_id:
         return {"status": "skipped_missing_family_id", "table": "selection_family_fact"}
@@ -8377,11 +8394,21 @@ def log_selection_hypothesis_fact(
     passed_prefilter: bool = False,
     selected_post_fdr: bool = False,
     rejection_stage: str | None = None,
+    require_attached_world: bool = False,
 ) -> dict:
     if conn is None:
         return {"status": "skipped_no_connection", "table": "selection_hypothesis_fact"}
-    table_ref = _selection_fact_table_ref(conn, "selection_hypothesis_fact")
+    table_ref = _selection_fact_table_ref(
+        conn,
+        "selection_hypothesis_fact",
+        require_attached_world=require_attached_world,
+    )
     if table_ref is None:
+        if require_attached_world:
+            return {
+                "status": "skipped_missing_canonical_world_table",
+                "table": "selection_hypothesis_fact",
+            }
         return {"status": "skipped_missing_table", "table": "selection_hypothesis_fact"}
     if not hypothesis_id:
         return {"status": "skipped_missing_hypothesis_id", "table": "selection_hypothesis_fact"}

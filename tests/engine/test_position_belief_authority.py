@@ -365,8 +365,8 @@ class TestLoadReplacementBelief:
         assert "latest_raw_cycle_time=" not in validation
         assert validation.endswith(";fresh")
 
-    def test_newer_materializable_raw_model_cycle_marks_posterior_stale(self, forecasts_db):
-        """A full raw_model cycle is a live upstream input and must stale old posterior belief."""
+    def test_newer_anchor_qualified_raw_model_cycle_marks_posterior_stale(self, forecasts_db):
+        """An anchor-qualified raw_model cycle is a live upstream input and stales old belief."""
         _insert(
             forecasts_db,
             posterior_id="p1",
@@ -406,6 +406,48 @@ class TestLoadReplacementBelief:
         assert belief.freshness_basis == "source_cycle_time_raw_model_forecasts_lag"
         assert belief.latest_raw_cycle_time == (NOW - timedelta(hours=6)).isoformat()
         assert belief.raw_cycle_lag_hours == pytest.approx(6.0)
+
+    def test_partial_non_anchor_raw_model_cycle_does_not_stale_posterior(self, forecasts_db):
+        """Partial non-anchor cycle rows cannot make held-position belief stale."""
+        _insert(
+            forecasts_db,
+            posterior_id="p1",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+            q={BIN: 0.242},
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
+        for model in ("dmi_harmonie_europe", "icon_eu", "icon_global"):
+            conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    city, target_date, metric, source_cycle_time, endpoint,
+                    coverage_status, captured_at, source_available_at, model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "Karachi",
+                    "2026-06-12",
+                    "high",
+                    (NOW - timedelta(hours=6)).isoformat(),
+                    "single_runs",
+                    "COVERED",
+                    (NOW - timedelta(hours=5, minutes=30)).isoformat(),
+                    (NOW - timedelta(hours=5, minutes=45)).isoformat(),
+                    model,
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.fresh is True
+        assert belief.freshness_basis == "source_cycle_time"
+        assert belief.latest_raw_cycle_time is None
+        assert belief.raw_cycle_lag_hours is None
 
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot

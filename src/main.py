@@ -3033,12 +3033,10 @@ def _check_deployment_freshness(
     Compares the git HEAD SHA at daemon boot vs the current working-tree HEAD.
     Divergence means a merge/deploy happened after the daemon started.
 
-    Grace windows (by uptime):
-      < 4h   : WARNING log. Normal deploy window; no action (daemon may not have
-               restarted yet after a deploy).
-      4–24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
-               (reason='deployment_freshness_4h_divergence'). Trading paused to
-               prevent operating on stale pricing logic.
+    Live-money enforcement:
+      < 24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
+               (reason='deployment_freshness_mismatch'). Trading paused immediately
+               to prevent stale entry decisions while operator restarts.
       >= 24h : SystemExit fail-closed unless ZEUS_ACCEPT_STALE_DEPLOY=1.
 
     Advisory state written to state/deployment_freshness.json (NOT control_plane.json
@@ -3104,10 +3102,10 @@ def _check_deployment_freshness(
             f"has {current_sha[:8]} for >{uptime_hours:.1f}h. "
             f"Set ZEUS_ACCEPT_STALE_DEPLOY=1 to override."
         )
-    elif uptime_hours >= 4.0:
+    else:
         logger.error(
             "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — merged code not reloaded; pausing entries",
+            "uptime_hours=%.1f — merged code not reloaded; pausing entries immediately",
             _boot_sha[:8], current_sha[:8], uptime_hours,
         )
         # Write advisory flag to dedicated state/deployment_freshness.json.
@@ -3121,6 +3119,7 @@ def _check_deployment_freshness(
                 "current_sha": current_sha,
                 "uptime_hours": round(uptime_hours, 2),
                 "detected_at": _now.isoformat(),
+                "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
             }
             _tmp = str(df_path) + ".tmp"
             with open(_tmp, "w") as _f:
@@ -3128,36 +3127,34 @@ def _check_deployment_freshness(
             os.replace(_tmp, str(df_path))
         except Exception as _exc:
             logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
-        # Pause new entries — prevents trading 5h+ on stale pricing code
-        # (the exact 2026-05-17 incident class). Idempotent if already paused.
+        # Pause new entries immediately. Exit submits are also protected at the
+        # live_venue_submit capability boundary, so stale code cannot keep trading
+        # while the operator restarts.
         try:
             from src.control.control_plane import pause_entries
             # issued_by="system_auto_pause" activates the idempotency guard in
             # control_plane._has_active_auto_pause_override — prevents duplicate
             # control_overrides rows and alert spam on every 60s tick.
             pause_entries(
-                "deployment_freshness_4h_divergence",
+                _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
                 issued_by="system_auto_pause",
                 effective_until=None,
             )
         except Exception as _exc:
             logger.error(
                 "deployment_freshness: pause_entries failed (%s); "
-                "entries NOT paused despite 4h staleness", _exc,
+                "entries NOT paused despite SHA mismatch", _exc,
             )
-    else:
-        logger.warning(
-            "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f — within grace window, no action",
-            _boot_sha[:8], current_sha[:8], uptime_hours,
-        )
 
 
-_DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_4h_divergence"
+_DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_mismatch"
+_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS = frozenset(
+    {"deployment_freshness_4h_divergence"}
+)
 
 
 def _boot_deployment_freshness_auto_resume() -> None:
-    """Boot-time auto-resume: clear a deployment_freshness_4h_divergence pause when
+    """Boot-time auto-resume: clear a deployment freshness pause when
     the operator has restarted the daemon with the current git HEAD SHA.
 
     Called AFTER _assert_live_safe_strategies_or_exit() (which hydrates _control_state
@@ -3166,9 +3163,9 @@ def _boot_deployment_freshness_auto_resume() -> None:
 
     Logic:
     - If entries are NOT paused → no-op.
-    - If entries are paused for a reason OTHER than deployment_freshness_4h_divergence → no-op;
+    - If entries are paused for a non-deployment-freshness reason → no-op;
       do not clear operator-issued or other system pauses.
-    - If entries are paused with reason=deployment_freshness_4h_divergence AND the current
+    - If entries are paused with deployment-freshness reason AND the current
       git HEAD matches _BOOT_STATE['sha'] → call resume_entries() to clear the DB override
       + tombstone + refresh in-memory state. Logs at INFO with both SHAs.
     - If SHA is still mismatched → do NOT auto-resume; operator must investigate.
@@ -3187,7 +3184,10 @@ def _boot_deployment_freshness_auto_resume() -> None:
         if not is_entries_paused():
             return
         pause_reason = get_entries_pause_reason()
-        if pause_reason != _DEPLOYMENT_FRESHNESS_PAUSE_REASON:
+        if pause_reason not in (
+            {_DEPLOYMENT_FRESHNESS_PAUSE_REASON}
+            | set(_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS)
+        ):
             return
         boot_sha: str | None = _BOOT_STATE.get("sha")
         if not boot_sha:
@@ -3221,7 +3221,7 @@ def _boot_deployment_freshness_auto_resume() -> None:
             issued_by="control_plane",
         )
         logger.info(
-            "deployment_freshness_auto_resume: cleared deployment_freshness_4h_divergence pause "
+            "deployment_freshness_auto_resume: cleared deployment freshness pause "
             "— boot_sha=%s matches filesystem HEAD=%s; entries unblocked",
             boot_sha[:8], current_sha[:8],
         )

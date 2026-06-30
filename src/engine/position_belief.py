@@ -162,6 +162,12 @@ def _latest_raw_single_runs_cycle(
             "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
         )
         params.append(now.isoformat())
+    anchor_terms = ["model = 'ecmwf_ifs'"]
+    if "source_id" in columns:
+        anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
+    if "product_id" in columns:
+        anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
+    anchor_expr = " OR ".join(anchor_terms)
     try:
         row = conn.execute(
             f"""
@@ -171,6 +177,7 @@ def _latest_raw_single_runs_cycle(
               AND datetime(source_cycle_time) <= datetime(?)
             GROUP BY source_cycle_time
             HAVING COUNT(DISTINCT model) >= 3
+               AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
             ORDER BY datetime(source_cycle_time) DESC
             LIMIT 1
             """,

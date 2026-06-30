@@ -1763,8 +1763,8 @@ def test_overlay_refuses_to_clear_center_buy_ultra_low_live_blocker():
     assert new_proof is None
 
 
-def test_overlay_rejects_center_buy_yes_below_strategy_floor_without_legacy_blocker():
-    """Cheap center-buy YES cannot become qkernel-authorized actionable evidence."""
+def test_overlay_allows_center_buy_yes_below_strategy_floor_without_legacy_blocker():
+    """Qkernel selection does not hide cheap YES before submit authority sees it."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.015, q_dot_payoff=0.08, point_ev=0.20, side="YES"
     )
@@ -1775,11 +1775,13 @@ def test_overlay_rejects_center_buy_yes_below_strategy_floor_without_legacy_bloc
         direction="buy_yes",
     )
 
-    assert new_proof is None
+    assert new_proof is not None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+    assert new_proof.qkernel_execution_economics["cost"] == pytest.approx(0.015)
 
 
-def test_overlay_rejects_center_buy_yes_live_tail_lottery_price():
-    """Qkernel selection cannot authorize 0.0x center-buy YES live entries."""
+def test_overlay_allows_center_buy_yes_live_tail_lottery_price_for_downstream_gate():
+    """Submit authority, not qkernel selection, blocks 0.0x center-buy YES live entries."""
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.07, q_dot_payoff=0.15, point_ev=0.20, side="YES"
     )
@@ -1790,7 +1792,9 @@ def test_overlay_rejects_center_buy_yes_live_tail_lottery_price():
         direction="buy_yes",
     )
 
-    assert new_proof is None
+    assert new_proof is not None
+    assert new_proof.selection_authority_applied == "qkernel_spine"
+    assert new_proof.qkernel_execution_economics["cost"] == pytest.approx(0.07)
 
 
 def test_overlay_allows_center_buy_yes_when_live_floor_clears():
