@@ -10749,7 +10749,52 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
         return None
     if route_id.startswith("DIRECT_NO:") and native_side != "NO":
         return None
+    try:
+        proof_q_point = float(getattr(proof, "q_posterior"))
+        proof_q_lcb = float(getattr(proof, "q_lcb_5pct"))
+    except (TypeError, ValueError):
+        return None
+    if _qkernel_posterior_authority_rejection_reason(
+        cert,
+        proof_q_point=proof_q_point,
+        proof_q_lcb=proof_q_lcb,
+    ):
+        return None
     return cert
+
+
+def _qkernel_posterior_authority_rejection_reason(
+    cert: Mapping[str, Any],
+    *,
+    proof_q_point: float,
+    proof_q_lcb: float,
+) -> str:
+    """Reject direct qkernel execution q that loosens persisted proof authority."""
+
+    qkernel_q_point = _optional_float(cert.get("payoff_q_point"))
+    qkernel_q_lcb = _optional_float(cert.get("payoff_q_lcb"))
+    if (
+        qkernel_q_point is None
+        or qkernel_q_lcb is None
+        or not math.isfinite(proof_q_point)
+        or not math.isfinite(proof_q_lcb)
+        or not (0.0 <= proof_q_lcb <= proof_q_point <= 1.0)
+    ):
+        return "QKERNEL_PERSISTED_POSTERIOR_BOUND_INVALID"
+    tolerance = 1e-9
+    if qkernel_q_point > proof_q_point + tolerance:
+        return (
+            "QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:"
+            f"payoff_q_point={qkernel_q_point:.9f}:"
+            f"persisted_q_point={proof_q_point:.9f}"
+        )
+    if qkernel_q_lcb > proof_q_lcb + tolerance:
+        return (
+            "QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:"
+            f"payoff_q_lcb={qkernel_q_lcb:.9f}:"
+            f"persisted_q_lcb={proof_q_lcb:.9f}"
+        )
+    return ""
 
 
 def _qkernel_execution_float(
@@ -11531,12 +11576,19 @@ def _proofs_with_qkernel_candidate_economics(
             )
         ):
             qkernel_reason = "QKERNEL_PERSISTED_POSTERIOR_BOUND_INVALID"
+        if qkernel_reason is None:
+            qkernel_reason = _qkernel_posterior_authority_rejection_reason(
+                cert,
+                proof_q_point=proof_q_point,
+                proof_q_lcb=proof_q_lcb,
+            )
         cert_payload = dict(cert)
         if math.isfinite(proof_q_point):
             cert_payload["persisted_posterior_q_posterior"] = proof_q_point
         if math.isfinite(proof_q_lcb):
             cert_payload["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
         cert_payload["q_lcb_authority"] = "qkernel_payoff_bound"
+        cert_payload["posterior_authority_cap"] = "persisted_selected_side_posterior"
         annotated.append(
             dataclass_replace(
                 proof,

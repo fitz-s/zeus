@@ -1506,6 +1506,17 @@ def _overlay_spine_economics_onto_proof_with_reason(
     qkernel_execution_economics["persisted_posterior_q_posterior"] = proof_q_point
     qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] = proof_q_lcb
     qkernel_execution_economics["q_lcb_authority"] = "qkernel_payoff_bound"
+    qkernel_execution_economics["posterior_authority_cap"] = (
+        "persisted_selected_side_posterior"
+    )
+    posterior_cap_reason = _qkernel_posterior_authority_rejection_reason(
+        qkernel_q_point=qkernel_q_point,
+        qkernel_q_lcb=qkernel_q_lcb,
+        proof_q_point=proof_q_point,
+        proof_q_lcb=proof_q_lcb,
+    )
+    if posterior_cap_reason:
+        return _OverlayResult(None, posterior_cap_reason)
     if not _qkernel_execution_direction_admitted(
         qkernel_execution_economics,
         direction=str(getattr(proof, "direction", "") or ""),
@@ -1529,8 +1540,9 @@ def _overlay_spine_economics_onto_proof_with_reason(
         pass
     overlay: dict[str, Any] = {
         # The selected qkernel candidate is licensed by its route economics. The
-        # old proof posterior remains provenance only; stamped qkernel decisions
-        # must not be capped by a second probability authority downstream.
+        # old proof posterior remains receipt provenance, but direct-route
+        # execution probability must not loosen that persisted selected-side
+        # authority. The cap above lets qkernel be stricter, never more permissive.
         "trade_score": edge_lcb,
         "qkernel_execution_economics": qkernel_execution_economics,
         "selection_authority_applied": "qkernel_spine",
@@ -1644,6 +1656,38 @@ def _qkernel_execution_direction_admitted(
     if native_side and side != native_side:
         return False
     return True
+
+
+def _qkernel_posterior_authority_rejection_reason(
+    *,
+    qkernel_q_point: float,
+    qkernel_q_lcb: float,
+    proof_q_point: float,
+    proof_q_lcb: float,
+) -> str:
+    """Return a live no-trade reason when qkernel loosens persisted proof q.
+
+    For direct YES/NO routes the proof already carries the selected-side
+    posterior pair materialized from forecast_posteriors. The qkernel may rank and
+    size using a stricter payoff-vector bound, but it must not turn a wider or
+    differently-aligned q-space into a higher execution probability than that
+    persisted authority.
+    """
+
+    tolerance = 1e-9
+    if qkernel_q_point > proof_q_point + tolerance:
+        return (
+            "QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:"
+            f"payoff_q_point={qkernel_q_point:.9f}:"
+            f"persisted_q_point={proof_q_point:.9f}"
+        )
+    if qkernel_q_lcb > proof_q_lcb + tolerance:
+        return (
+            "QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:"
+            f"payoff_q_lcb={qkernel_q_lcb:.9f}:"
+            f"persisted_q_lcb={proof_q_lcb:.9f}"
+        )
+    return ""
 
 
 def _candidate_qkernel_execution_economics_payload(

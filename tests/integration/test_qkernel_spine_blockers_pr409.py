@@ -1292,10 +1292,13 @@ def test_overlay_preserves_live_posterior_probability_fields_and_updates_score()
         0.70
     )
     assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
+    assert new_proof.qkernel_execution_economics["posterior_authority_cap"] == (
+        "persisted_selected_side_posterior"
+    )
 
 
-def test_overlay_accepts_qkernel_bound_above_persisted_posterior_provenance():
-    """Qkernel payoff probability is the selected route authority, not a stale proof cap."""
+def test_overlay_rejects_qkernel_bound_above_persisted_posterior_authority():
+    """Qkernel direct routes may be stricter than persisted proof q, never looser."""
 
     economics = _selected_economics(
         edge_lcb=0.05, cost=0.002, q_dot_payoff=0.202, point_ev=0.200
@@ -1307,12 +1310,28 @@ def test_overlay_accepts_qkernel_bound_above_persisted_posterior_provenance():
         economics=economics,
     )
 
-    assert new_proof is not None
-    assert new_proof.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(0.052)
-    assert new_proof.qkernel_execution_economics["persisted_posterior_q_lcb_5pct"] == pytest.approx(
-        0.001
+    assert new_proof is None
+
+
+def test_overlay_rejects_live_seoul_class_direct_no_qkernel_loosened_authority():
+    """Seoul/Singapore regression: direct NO cannot size above persisted NO belief."""
+
+    economics = _selected_economics(
+        edge_lcb=0.22226499587493073,
+        cost=0.65,
+        q_dot_payoff=0.9154395759428866,
+        point_ev=0.26543957594288655,
+        side="NO",
     )
-    assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
+
+    new_proof = _overlay_proof(
+        q_posterior=0.803222,
+        q_lcb_5pct=0.7298,
+        economics=economics,
+        direction="buy_no",
+    )
+
+    assert new_proof is None
 
 
 def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
@@ -1382,7 +1401,69 @@ def test_no_trade_projection_uses_qkernel_rejection_reason_not_legacy_scalar():
         "persisted_posterior_q_posterior": pytest.approx(0.02),
         "persisted_posterior_q_lcb_5pct": pytest.approx(0.000001),
         "q_lcb_authority": "qkernel_payoff_bound",
+        "posterior_authority_cap": "persisted_selected_side_posterior",
     }
+
+
+def test_qkernel_receipt_annotation_rejects_direct_no_posterior_authority_loosening():
+    """Non-selected receipt annotations must not carry loosened qkernel execution q."""
+
+    row = _row(
+        condition_id="cond-qk-loosened-no",
+        yes_token="yes-qk-loosened-no",
+        no_token="no-qk-loosened-no",
+        yes_ask=0.36,
+        no_ask=0.65,
+        snapshot_id="snap-qk-loosened-no",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-qk-loosened-no",
+        q_posterior=0.803222,
+        q_lcb_5pct=0.7298,
+        bin_obj=Bin(low=29.0, high=29.0, unit="C", label="29C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-loosened-no",
+        "receipt_hash": "receipt-qk-loosened-no",
+        "candidate_id": "NO:b29:DIRECT_NO:b29@proof",
+        "route_id": "DIRECT_NO:b29@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(proof),
+        "payoff_q_point": 0.9154395759428866,
+        "payoff_q_lcb": 0.8722649958749307,
+        "edge_lcb": 0.22226499587493073,
+        "point_ev": 0.26543957594288655,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "20.0",
+        "optimal_delta_u": 0.012,
+        "q_dot_payoff": 0.9154395759428866,
+        "cost": 0.65,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb8|coarse_global",
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "NO|L2_3|nonmodal|pb8",
+        "selection_guard_n": 80,
+        "selection_guard_q_safe": 0.85,
+    }
+
+    (annotated,) = era._proofs_with_qkernel_candidate_economics(
+        proofs=(proof,),
+        qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "NO"): cert},
+    )
+
+    assert annotated.passed_prefilter is False
+    assert annotated.trade_score == 0.0
+    assert annotated.missing_reason.startswith("QKERNEL_POSTERIOR_AUTHORITY_LOOSENED:")
+    assert annotated.qkernel_execution_economics["posterior_authority_cap"] == (
+        "persisted_selected_side_posterior"
+    )
 
 
 def test_overlay_rejects_qkernel_selected_yes_without_direction_law():

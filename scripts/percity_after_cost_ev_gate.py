@@ -95,6 +95,7 @@ RECON_TOL = 1e-6
 
 def ro(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con.execute("PRAGMA query_only=ON")
     con.row_factory = sqlite3.Row
     return con
 

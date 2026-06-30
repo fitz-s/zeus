@@ -5254,6 +5254,59 @@ def test_family_monitor_overlay_blocks_direct_sell_on_immature_day0_authority():
     assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
 
 
+def test_family_monitor_overlay_holds_munich_buy_no_when_held_side_probability_high():
+    """Munich regression: buy_no monitor probability is NO-space, not same-bin YES q."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="munich-29-no-held-side-hold",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.8728257780611077,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
+    pos.last_monitor_prob = 0.8296
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.5646775174931549
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.55
+    pos.last_monitor_best_ask = 0.57
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = ["day0_observation_remaining_window"]
+
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
+        trigger="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=list(pos.applied_validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
+    family = pos._monitor_family_redecision
+    assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
+    assert family["family_hold_value_usd"] > family["family_direct_sell_value_usd"]
+    assert "family_direct_sell_dominates_hold_exit" not in pos.applied_validations
+
+
 def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authority():
     """An immature Day0 validation cannot sponsor a CI-style exit."""
     from src.engine import cycle_runtime
