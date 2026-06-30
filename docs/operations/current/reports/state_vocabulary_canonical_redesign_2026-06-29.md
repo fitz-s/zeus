@@ -155,3 +155,46 @@ REMAINING — DEEP WIRING (each replaces scattered special-cased money-path logi
 - A8/A9 settlement split is NOT a clean projection: `SettlementOutcome` conflates market-resolution (YES/NO) with position-outcome (WIN/LOSE) — untangling needs the position side.
 - `family_exclusive_dedup` reducer-based blocking rewrite (10-file harness).
 - CHECK-constraint narrowing (single-DB) for the CHECK-coupled dead values.
+
+### Continuation — implementation review + consult 6a42bc3d rulings (2026-06-29, `feature/state-vocab-canonical-redesign`)
+
+A second wave driven by the implementation review + two follow-up consult rulings on the
+"Zeus State Model Redesign" thread. Load-bearing method: **audit the LIVE owner before wiring any
+consult recommendation** — this caught two consult errors against live code.
+
+- **Hardening** (`f7e3cd5c8`) — `derive_exit_progress` honors UNKNOWN/REVIEW without a `has_venue_fact`
+  gate; `coerce_order_proof_class` at projection entry; `derive_order_result_status` fails loud on
+  command_rejected + positive venue fill.
+- **Family dedup** (`a4b9eb40a`) — the 3 cleanly-mappable blocking frozensets sourced from the typed
+  enums (byte-identical); inline block gate extracted to a tested predicate.
+- **A5 — RULED + WIRED.** The audit found the flat `derive_position_phase` precedence DIVERGES from the
+  live owner `phase_for_runtime_position`: it would re-quarantine an economically_closed/pending_exit
+  position on a stale chain-quarantine flag (a money-path bug the review missed by judging the spec, not
+  the live owner). Consult re-ruled — A5 state authority beats the A7 chain fallback. Rebuilt as the
+  authority-aware reducer (`735e53bd6`, byte-identical 192/192) and **wired as the live phase owner**
+  (`e35d2c66e` — `phase_for_runtime_position` delegates; the old elif is frozen as the equivalence
+  oracle `_legacy_runtime_phase_dispatch`). `PositionPhaseProjection` overlay keeps A7 chain-review visible.
+- **A8/A9/A10 settlement axes** — read-only projections in `src/contracts/settlement_axes.py`:
+  - A8 `MarketResolutionSide` + A9 `PositionEconomicOutcome` (`9b59c35eb`): the fused `SettlementOutcome`
+    un-tangled — A9 direction-free, A8 needs direction (a buy_no WIN means the market resolved NO).
+  - A8 event lifecycle `SettlementResolutionState` + legacy bridge (`21ac9106b`): consult ruled event-level
+    `outcome_type` incoherent (position-relative WIN/LOSE at the (city,date,metric) grain) + backfill-corrupt
+    → retire it; parallel lifecycle column; per-position WIN/LOSE derived via the Direction Law. Promotion
+    eligibility cut to the typed accessor (`dc61a3bd3`, proven zero-diff).
+  - Brier/calibration VERIFIED corruption-free (`9bb3c4911`): the live Brier reads `outcome_fact.outcome`
+    (A9, exit_price-derived), never the corrupt `outcome_type` — the consult's "repair" was unneeded;
+    locked with antibodies (canonical A9 ≡ live outcome; no scoring file reads outcome_type).
+  - `resolution_state` column + idempotent migration (`954475253`): additive, nullable; `log_settlement`
+    INSERT untouched, readers fall back to legacy (zero behavior change). Writer DEFERRED to the retirement
+    arc — writing it while `outcome_type` is the active source risks staleness on later revisions.
+  - A10 `RedemptionAccountingPhase` (`d75c4c7a3`): the third axis over `settlement_commands.state`;
+    accounting-only (Zeus never submits redeem, operator law 2026-06-10); coverage antibody over every
+    live `SettlementState`.
+
+REMAINING after this wave (operator-gated, not blocked-on-stuck):
+- **A1/A6 executor/exit wiring** — `derive_order_result_status` at the executor result seam +
+  `derive_exit_progress` for exit_lifecycle/portfolio sell-state. Files clean but the co-tenant's ACTIVE
+  battleground (`hotfix/redecision-execution-seams`); clobber risk — do when settled.
+- **`outcome_type` retirement arc** — populate `resolution_state` on new rows + revisions, cut the
+  remaining `outcome_type` readers (`_coerce_outcome` / the `outcome_state` field), then stop writing
+  `outcome_type`. Deliberate multi-step; schema foundation laid.
