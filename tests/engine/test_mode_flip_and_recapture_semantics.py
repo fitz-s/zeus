@@ -237,31 +237,36 @@ class TestActionablePayloadThreadsProofMode:
 # ---------------------------------------------------------------------------
 
 class TestModeFlipGuard:
-    """SUBMIT_ABORTED_MODE_FLIPPED raised when proof mode != fresh mode."""
+    """Unsafe proof/fresh mode disagreements still abort."""
 
-    def _call_with_proof_mode(self, proof_mode: str, fresh_bid: float, fresh_ask: float):
-        """Simulate _build_live_execution_command_certificates mode-flip check."""
-        order_mode_result = "MAKER"  # tight spread → MAKER (spread 4%)
-        _proof_mode = str(proof_mode or "").strip().upper() or None
-        if _proof_mode is not None and _proof_mode != str(order_mode_result).strip().upper():
-            raise ValueError(
-                f"SUBMIT_ABORTED_MODE_FLIPPED:proof_mode={_proof_mode}:fresh_mode={order_mode_result}"
-            )
-        return order_mode_result
+    def _call_with_proof_mode(self, proof_mode: str, fresh_mode: str):
+        """Call the real submit-boundary validator."""
+        from src.engine.event_reactor_adapter import _validate_final_order_mode_or_abort
+
+        return _validate_final_order_mode_or_abort(
+            proof_mode=proof_mode,
+            fresh_mode=fresh_mode,
+            fresh_best_bid=0.48,
+            fresh_best_ask=0.50,
+        )
 
     def test_no_flip_maker_proof_maker_fresh(self):
-        # Consistent: no exception
-        mode = self._call_with_proof_mode("MAKER", 0.48, 0.50)
+        mode = self._call_with_proof_mode("MAKER", "MAKER")
         assert mode == "MAKER"
+
+    def test_maker_proof_taker_fresh_upgrades(self):
+        mode = self._call_with_proof_mode("MAKER", "TAKER")
+        assert mode == "TAKER"
 
     def test_flip_taker_proof_maker_fresh_raises(self):
         with pytest.raises(ValueError, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-            self._call_with_proof_mode("TAKER", 0.48, 0.50)
+            self._call_with_proof_mode("TAKER", "MAKER")
 
     def test_no_proof_mode_no_flip_check(self):
-        # Legacy: proof has no mode → no exception regardless of fresh mode
-        _proof_mode = str("" or "").strip().upper() or None
-        assert _proof_mode is None  # no comparison happens
+        from src.engine.event_reactor_adapter import _SubmitAbortedModeFlipped
+
+        with pytest.raises(_SubmitAbortedModeFlipped, match="MISSING_OR_UNKNOWN_PROOF_MODE"):
+            self._call_with_proof_mode("", "TAKER")
 
     def test_select_edli_order_mode_flip_logic(self):
         """Direct unit test of the ValueError in _build_live_execution_command_certificates.

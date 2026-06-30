@@ -2169,15 +2169,11 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
         )
 
 
-def test_fresh_pre_submit_book_aborts_mode_flip_for_proven_maker_that_would_cross():
-    # P0 mode-authority (operator review 2026-06-10) — RE-PURPOSED from the former
-    # "promotes_stale_maker_candidate_to_taker" test. The final command builder may NOT
-    # promote a proven-MAKER candidate to TAKER on a fresh book that makes crossing newly
-    # attractive: that was the validator-bypassing late EV-override flip (a maker that never
-    # cleared TAKER recapture full-fee/PRICE_MOVED entering the taker submit path). The fresh
-    # tight book (bid 0.39 / ask 0.40) now makes _select_edli_order_mode return TAKER, so a
-    # PROVEN-MAKER proof must ABORT SUBMIT_ABORTED_MODE_FLIPPED — NO order built, defer to a
-    # full re-rank next cycle.
+def test_fresh_pre_submit_book_upgrades_proven_maker_to_taker_when_crossing_clears():
+    # Live redecision repair 2026-06-30: a resting MAKER proof is not allowed to
+    # disappear when the fresh book makes crossing better. The same rest-then-cross
+    # policy may upgrade it to TAKER, but the final command must then carry taker
+    # order semantics and prove against the fresh pre-submit book.
     from src.engine import event_reactor_adapter as adapter
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
@@ -2203,11 +2199,9 @@ def test_fresh_pre_submit_book_aborts_mode_flip_for_proven_maker_that_would_cros
                 "book_hash": "stale-book-hash",
             },
         ),
-        # Wave-1 2026-06-12 (canary force-taker deleted): the fresh mode is the deadline-aware
-        # rest-then-cross policy. To exercise the proven-MAKER-would-cross flip, the snapshot
-        # must sit NEAR the deadline so the policy genuinely crosses (fresh=TAKER) on the tight
-        # fresh book — the MAKER proof then aborts MODE_FLIPPED. (The shared fixture gives a far
-        # horizon to a MAKER proof; this test overrides it to the crossing scenario it targets.)
+        # Near deadline, the same rest-then-cross policy genuinely crosses
+        # (fresh=TAKER) on the tight fresh book. The test verifies this becomes a
+        # taker submit with fresh-book certificates, not a silent disappearance.
         executable_snapshot=replace(
             proof_bundle.executable_snapshot,
             payload={
@@ -2218,19 +2212,32 @@ def test_fresh_pre_submit_book_aborts_mode_flip_for_proven_maker_that_would_cros
     )
     accepted = replace(accepted, decision_proof_bundle=proof_bundle)
 
-    # The fresh tight book near the deadline makes the policy cross → fresh mode
-    # TAKER vs proven MAKER → mode flip → typed abort, NO certificates built.
-    with pytest.raises(adapter._SubmitAbortedModeFlipped, match="SUBMIT_ABORTED_MODE_FLIPPED"):
-        adapter._build_live_execution_command_certificates(
-            event=event,
-            receipt=accepted,
-            decision_time=decision_time,
-            live_cap_conn=conn,
-            pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
-                current_best_bid=0.39,
-                current_best_ask=0.40,
-            ),
-        )
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+            current_best_bid=0.39,
+            current_best_ask=0.40,
+        ),
+    )
+
+    from src.decision_kernel import claims
+
+    final_intent = next(c for c in certs if getattr(c, "certificate_type", None) == claims.FINAL_INTENT)
+    pre_submit = next(
+        c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION
+    )
+    command = next(c for c in certs if getattr(c, "certificate_type", None) == claims.EXECUTION_COMMAND)
+
+    assert final_intent.payload["order_mode"] == "TAKER"
+    assert final_intent.payload["post_only"] is False
+    assert pre_submit.payload["current_best_ask"] == 0.40
+    assert pre_submit.payload["would_cross_book"] is True
+    assert command.payload["order_type"] == "FOK_LIMIT"
+    assert command.payload["time_in_force"] == "FOK"
+    assert command.payload["post_only"] is False
 
 
 def test_live_command_reuses_single_pre_submit_authority_witness():
@@ -3484,6 +3491,8 @@ def _opportunity_book_with_qkernel_cert(qkernel_cert):
                 "condition_id": "condition-1",
                 "token_id": "yes-1",
                 "direction": "buy_yes",
+                "live_decision_selected": True,
+                "admitted": True,
                 "qkernel_execution_economics": qkernel_cert,
             }
         ],

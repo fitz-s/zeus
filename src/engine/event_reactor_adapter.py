@@ -19,15 +19,13 @@
 #   2026-06-12 deleted the edli.k1_persist_presubmit_snapshot_enabled flag — persist is
 #   now UNCONDITIONAL fail-soft (provenance substrate, not a throttle) —
 #   docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4)
-# Last reused or audited: 2026-06-10 (P0 mode-authority, operator review 2026-06-10):
-#   the FINAL command builder no longer re-selects maker/taker mode. The selected proof's
-#   PROVEN execution_mode_intent + maker_limit_price are first-class receipt fields that
-#   flow receipt -> actionable payload -> final intent certificate. _select_edli_order_mode
-#   is demoted to a VALIDATOR input (_validate_final_order_mode_or_abort): any final-stage
-#   mode change in EITHER direction (incl. the removed late EV-override TAKER re-build, and
-#   a missing/unknown mode fail-closed) aborts the typed _SubmitAbortedModeFlipped, mapped
-#   to the first-class SUBMIT_ABORTED_MODE_FLIPPED lifecycle state for a full re-rank.
-#   Authority basis: operator review 2026-06-10 P0 mode-authority.
+# Last reused or audited: 2026-06-30 (mode redecision repair):
+#   the FINAL command builder keeps proof mode as the authority for stale/economically
+#   unsafe flips, but a proven MAKER candidate may cross as TAKER when the fresh
+#   rest-then-cross policy, taker quality proof, and final submit certificates all clear
+#   on the same live book. TAKER->MAKER, missing/unknown proof mode, and legacy stale
+#   mode changes still fail closed as SUBMIT_ABORTED_MODE_FLIPPED.
+#   Authority basis: live redecision repair for unfilled orders disappearing after cancel.
 # Last reused or audited: 2026-06-10 (S6 PRICE_MOVED maker/taker fix: the submit-
 #   recapture gate now threads order_rests_at_admitted_price into RecaptureInputs.
 #   A resting MAKER (governor GTC/GTD) order pays its admitted limit and never chases
@@ -3000,16 +2998,13 @@ def event_bound_live_adapter_from_trade_conn(
                             proof_accepted=False,
                         )
                 _live_order_build_phase = "building_live_order_certificates"
-                command_certificates = _run_live_order_build_savepoint(
-                    build_conn,
-                    lambda: _build_live_execution_command_certificates(
-                        event=event,
-                        receipt=no_submit_receipt,
-                        decision_time=decision_time.astimezone(UTC),
-                        live_cap_conn=build_conn,
-                        trade_conn=trade_conn,
-                        pre_submit_authority_provider=pre_submit_authority_provider,
-                    ),
+                command_certificates = _build_live_execution_command_certificates(
+                    event=event,
+                    receipt=no_submit_receipt,
+                    decision_time=decision_time.astimezone(UTC),
+                    live_cap_conn=build_conn,
+                    trade_conn=trade_conn,
+                    pre_submit_authority_provider=pre_submit_authority_provider,
                 )
                 _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -6335,14 +6330,12 @@ _MODE_FLIPPED_ABORT_PREFIX = "SUBMIT_ABORTED_MODE_FLIPPED"
 class _SubmitAbortedModeFlipped(ValueError):
     """Typed final-stage abort: the proven proof mode is no longer executable.
 
-    P0 mode-authority (operator review 2026-06-10). The selected proof's maker/taker
-    ``execution_mode_intent`` was PROVEN through submit recapture under that mode's
-    economics (a MAKER rests at the admitted limit with zero taker fee and skips the
-    PRICE_MOVED ceiling; a TAKER pays full fee under the bounded ceiling). The final
-    command builder may NOT re-decide the mode. If the FRESH book / governor /
-    EV boundary would change it — in EITHER direction (MAKER->TAKER or TAKER->MAKER) —
-    the proven economics are stale: raise so the submit aborts and the next cycle does a
-    FULL re-rank rather than submitting under an unproven mode.
+    The selected proof's maker/taker ``execution_mode_intent`` was proven through
+    submit recapture under that mode's economics. A MAKER proof may upgrade to a
+    TAKER submit only when the fresh rest-then-cross policy and downstream taker
+    certificates clear on the same live book. TAKER->MAKER, missing/unknown proof
+    mode, and legacy second-doctrine mode changes remain stale/unproven economics
+    and abort for a full re-rank.
 
     Subclasses ValueError so it propagates through the existing ``except Exception``
     submit boundary; the caller maps it to the first-class SUBMIT_ABORTED_MODE_FLIPPED
@@ -6464,20 +6457,19 @@ def _validate_final_order_mode_or_abort(
     fresh_best_bid: float | None,
     fresh_best_ask: float | None,
 ) -> str:
-    """VALIDATOR (not a re-selector): confirm the proven proof mode still holds.
+    """Validate or upgrade the proven proof mode against the fresh submit book.
 
-    P0 mode-authority (operator review 2026-06-10, fix requirement #2). The fresh-book
-    ``fresh_mode`` (from :func:`_select_edli_order_mode`) is used ONLY to validate that the
-    proven ``proof_mode`` is still executable — never to silently flip the order. Behavior:
+    The fresh-book ``fresh_mode`` comes from the same rest-then-cross policy that selected
+    the proof mode. It is therefore allowed to upgrade a resting maker proof into a taker
+    submit when the live book now clears the crossing economics. Other disagreements remain
+    fail-closed because they indicate stale or unproven submit economics.
 
-    * proof_mode present and EQUAL to fresh_mode  -> return proof_mode (proceed, no flip).
-    * proof_mode present and DIFFERENT             -> raise _SubmitAbortedModeFlipped (both
-      directions: MAKER->TAKER and TAKER->MAKER abort; NO inline flip in either direction).
-    * proof_mode MISSING / unknown at this stage   -> FAIL CLOSED: raise (treat as unproven;
+    * proof_mode present and EQUAL to fresh_mode  -> return proof_mode.
+    * proof_mode MAKER and fresh_mode TAKER       -> return TAKER; downstream taker
+      quality, pre-submit, and executor expressibility certificates must still pass.
+    * proof_mode TAKER and fresh_mode MAKER       -> raise _SubmitAbortedModeFlipped.
+    * proof_mode MISSING / unknown at this stage  -> FAIL CLOSED: raise (treat as unproven;
       never default to a taker submit).
-
-    Returns the validated proof mode (normalized upper-case) on success so the caller uses
-    the PROVEN mode for the final intent, not the re-decided fresh mode.
     """
     _proof = str(proof_mode or "").strip().upper() or None
     _fresh = str(fresh_mode or "").strip().upper() or None
@@ -6489,6 +6481,8 @@ def _validate_final_order_mode_or_abort(
             f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
         )
     if _proof != _fresh:
+        if _proof == "MAKER" and _fresh == "TAKER":
+            return "TAKER"
         raise _SubmitAbortedModeFlipped(
             f"{_MODE_FLIPPED_ABORT_PREFIX}:proof_mode={_proof}:fresh_mode={_fresh}:"
             f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
@@ -6932,23 +6926,12 @@ def _build_live_execution_command_certificates(
             )
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
-        # P0 mode-authority (operator review 2026-06-10, fix requirement #1+#2): the
-        # final command builder must NOT re-SELECT the mode. _select_edli_order_mode is
-        # demoted to a VALIDATOR input: it re-derives the fresh-book mode ONLY so
-        # _validate_final_order_mode_or_abort can confirm the PROVEN proof mode is still
-        # executable. The PROVEN mode (receipt.execution_mode_intent → actionable payload)
-        # is the SOLE authority that drives the final intent build below.
-        #
-        # The proof's execution_mode_intent was computed at candidate-generation on the
-        # snapshot book AND proven through submit recapture under that mode's economics
-        # (zero taker fee + skipped PRICE_MOVED ceiling for MAKER; full fee + ceiling for
-        # TAKER). If the fresh book / mode-consistent EV boundary would change the
-        # mode — in EITHER direction (MAKER->TAKER and TAKER->MAKER) — those proven
-        # economics are stale: abort SUBMIT_ABORTED_MODE_FLIPPED so the next cycle does a
-        # FULL re-rank rather than submitting under an unproven mode. NO inline flip.
-        #
-        # Fail-closed: a missing/unknown proven mode at the final stage is treated as
-        # unproven and ALSO aborts here (never a default taker submit).
+        # Mode redecision at the live submit boundary: proof mode is not decorative, but
+        # a MAKER proof is only a resting plan. If the same rest-then-cross policy now
+        # says the fresh book should be crossed, the builder may upgrade to TAKER and
+        # must then pass taker quality, pre-submit revalidation, live-cap, and executor
+        # certificates on that same fresh book. TAKER->MAKER and missing/unknown proof
+        # modes still fail closed because those are stale/unproven submit economics.
         # SINGLE MODE AUTHORITY (twin-authority #9, 2026-06-11 live): the proof
         # mode comes from the K4.0 rest-then-cross policy; the validator's fresh
         # mode MUST come from the SAME policy evaluated on the FRESH book —
@@ -7265,22 +7248,11 @@ def _build_live_execution_command_certificates(
             executable_market_context=executable_market_context,
             taker_quality_proof=taker_quality_proof,
         )
-        # P0 mode-authority (operator review 2026-06-10, fix requirement #2): the former
-        # late maker->taker EV-override RE-BUILD lived HERE and unconditionally re-built the
-        # final intent as TAKER whenever the freshly-built (proven-MAKER) intent was post_only
-        # and the FRESH-book EV boundary favored crossing. That was a SECOND independent mode
-        # decision that bypassed the proof-mode validator above — the exact MAKER->TAKER flip
-        # this P0 forbids (a maker that never cleared TAKER recapture full-fee/PRICE_MOVED
-        # entered the taker submit path).
-        #
-        # The flip is REMOVED. The mode is now decided ONCE — by
-        # _validate_final_order_mode_or_abort against the proven proof mode. If the fresh book
-        # makes crossing newly attractive for a proven-MAKER candidate, that is a mode flip:
-        # _fresh_rest_then_cross_mode would have returned TAKER under the same
-        # policy math and the validator would already have aborted
-        # SUBMIT_ABORTED_MODE_FLIPPED for a full re-rank.
-        # We therefore FAIL CLOSED here: a proven-MAKER post_only intent that the fresh-book EV
-        # boundary now wants to cross is an abort, never an inline re-build to taker.
+        # Legacy guard for old proofs without rest_then_cross policy. Modern proofs already
+        # use the same policy in _validate_final_order_mode_or_abort; if a MAKER proof
+        # upgrades to TAKER, that happened before the final intent was built and all taker
+        # certificates are evaluated below. This block only prevents legacy second-doctrine
+        # late EV overrides.
         from src.strategy.live_inference.mode_consistent_ev import (
             taker_spread_guard_reason as _taker_spread_guard_reason,
         )
@@ -7342,134 +7314,145 @@ def _build_live_execution_command_certificates(
         if already_locked_reason is not None:
             raise _LiveOpportunityAlreadyLocked(already_locked_reason)
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
-        aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
-        aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
-        decision_event = aggregate_ledger.append_event(
-            aggregate_id=aggregate_id,
-            event_type="DecisionProofAccepted",
-            payload={
-                "event_id": event.event_id,
-                "final_intent_id": final_intent.payload["final_intent_id"],
-                "no_submit_certificate_count": len(base_certs),
-                "no_submit_receipt_event_id": receipt.event_id,
-                "decision_audit": _live_decision_audit_payload(
-                    receipt=receipt,
-                    base_certs=base_certs,
-                    actionable=actionable,
-                    final_intent=final_intent,
-                ),
-            },
-            occurred_at=decision_time,
-            source_authority="decision_kernel",
-        )
-        submit_plan_event = aggregate_ledger.append_event(
-            aggregate_id=aggregate_id,
-            event_type="SubmitPlanBuilt",
-            payload={
-                "event_id": event.event_id,
-                "final_intent_id": final_intent.payload["final_intent_id"],
-                "condition_id": final_intent.payload["condition_id"],
-                "token_id": final_intent.payload["token_id"],
-                "direction": final_intent.payload["direction"],
-                "family_id": actionable.payload.get("family_id"),
-                "city": actionable.payload.get("city"),
-                "target_date": actionable.payload.get("target_date"),
-                "metric": actionable.payload.get("metric") or actionable.payload.get("temperature_metric"),
-                "order_type": final_intent.payload["order_type"],
-                "time_in_force": final_intent.payload["time_in_force"],
-                "post_only": final_intent.payload["post_only"],
-                "limit_price": final_intent.payload["limit_price"],
-                "size": final_intent.payload["size"],
-            },
-            occurred_at=decision_time,
-            source_authority="engine_adapter",
-            expected_parent_event_hash=decision_event.event_hash,
-        )
-        pre_submit_event = aggregate_ledger.append_event(
-            aggregate_id=aggregate_id,
-            event_type="PreSubmitRevalidated",
-            payload=_pre_submit_revalidation_payload_from_final_intent(
-                final_intent=final_intent,
-                executable_snapshot=executable_snapshot,
-                decision_time=decision_time,
-                authority_witness=authority_witness,
-            ),
-            occurred_at=decision_time,
-            source_authority="engine_adapter",
-            expected_parent_event_hash=submit_plan_event.event_hash,
-        )
-        live_cap_event = aggregate_ledger.append_event(
-            aggregate_id=aggregate_id,
-            event_type="LiveCapReserved",
-            payload={
-                "event_id": event.event_id,
-                "final_intent_id": final_intent.payload["final_intent_id"],
-                "usage_id": live_cap.payload["usage_id"],
-                "reserved_notional_usd": live_cap.payload["reserved_notional_usd"],
-                "reservation_status": live_cap.payload["reservation_status"],
-            },
-            occurred_at=decision_time,
-            source_authority="live_cap_ledger",
-            expected_parent_event_hash=pre_submit_event.event_hash,
-        )
-        execution_command_id = _execution_command_id_from_final_intent(actionable, final_intent)
-        expressibility = build_executor_expressibility_certificate(
-            final_intent_cert=final_intent,
-            executable_snapshot_cert=executable_snapshot,
-            live_cap_cert=live_cap,
-            decision_time=decision_time,
-            executor_native_intent_hash=executor_native_intent_hash,
-        )
-        command_event = aggregate_ledger.append_event(
-            aggregate_id=aggregate_id,
-            event_type="ExecutionCommandCreated",
-            payload={
-                "event_id": event.event_id,
-                "final_intent_id": final_intent.payload["final_intent_id"],
-                "execution_command_id": execution_command_id,
-                "pre_submit_event_hash": pre_submit_event.event_hash,
-                "live_cap_reserved_event_hash": live_cap_event.event_hash,
-                "usage_id": live_cap.payload["usage_id"],
-            },
-            occurred_at=decision_time,
-            source_authority="engine_adapter",
-            expected_parent_event_hash=live_cap_event.event_hash,
-        )
-        pre_submit = build_pre_submit_revalidation_certificate(
-            pre_submit_event=pre_submit_event,
-            final_intent_cert=final_intent,
-            live_cap_cert=live_cap,
-            decision_time=decision_time,
-            execution_command_event_hash=command_event.event_hash,
-        )
-        command = build_execution_command_certificate_from_final_intent(
-            actionable_cert=actionable,
-            final_intent_cert=final_intent,
-            executor_expressibility_cert=expressibility,
-            live_cap_cert=live_cap,
-            pre_submit_revalidation_cert=pre_submit,
-            decision_time=decision_time,
-        )
-        from src.events.live_cap import LIVE_EXECUTION_RESERVATION_SCOPE, LiveCapLedger
+        if live_cap_conn is None:
+            raise ValueError("LIVE_CAP_CONNECTION_REQUIRED")
 
-        # Durable re-reservation of the Kelly notional already computed by
-        # _build_live_cap_certificate_from_ledger above (which built the cert with
-        # persist=False). This is the EXACTLY-ONCE + DRIFT-DETECT write: it dedupes
-        # by (event_id, cap_scope) and raises if the reserved notional drifted.
-        # 2026-06-08: no notional/order-count cap args — the reservation caps
-        # nothing; it only records and dedupes.
-        reserve_result = LiveCapLedger(live_cap_conn).reserve(
-            event_id=event.event_id,
-            decision_time=decision_time,
-            cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
-            requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
-            final_intent_id=str(final_intent.payload["final_intent_id"]),
-            execution_command_id=execution_command_id,
+        def _append_live_order_state() -> tuple[DecisionCertificate, DecisionCertificate, DecisionCertificate]:
+            aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
+            aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
+            decision_event = aggregate_ledger.append_event(
+                aggregate_id=aggregate_id,
+                event_type="DecisionProofAccepted",
+                payload={
+                    "event_id": event.event_id,
+                    "final_intent_id": final_intent.payload["final_intent_id"],
+                    "no_submit_certificate_count": len(base_certs),
+                    "no_submit_receipt_event_id": receipt.event_id,
+                    "decision_audit": _live_decision_audit_payload(
+                        receipt=receipt,
+                        base_certs=base_certs,
+                        actionable=actionable,
+                        final_intent=final_intent,
+                    ),
+                },
+                occurred_at=decision_time,
+                source_authority="decision_kernel",
+            )
+            submit_plan_event = aggregate_ledger.append_event(
+                aggregate_id=aggregate_id,
+                event_type="SubmitPlanBuilt",
+                payload={
+                    "event_id": event.event_id,
+                    "final_intent_id": final_intent.payload["final_intent_id"],
+                    "condition_id": final_intent.payload["condition_id"],
+                    "token_id": final_intent.payload["token_id"],
+                    "direction": final_intent.payload["direction"],
+                    "family_id": actionable.payload.get("family_id"),
+                    "city": actionable.payload.get("city"),
+                    "target_date": actionable.payload.get("target_date"),
+                    "metric": actionable.payload.get("metric") or actionable.payload.get("temperature_metric"),
+                    "order_type": final_intent.payload["order_type"],
+                    "time_in_force": final_intent.payload["time_in_force"],
+                    "post_only": final_intent.payload["post_only"],
+                    "limit_price": final_intent.payload["limit_price"],
+                    "size": final_intent.payload["size"],
+                },
+                occurred_at=decision_time,
+                source_authority="engine_adapter",
+                expected_parent_event_hash=decision_event.event_hash,
+            )
+            pre_submit_event = aggregate_ledger.append_event(
+                aggregate_id=aggregate_id,
+                event_type="PreSubmitRevalidated",
+                payload=_pre_submit_revalidation_payload_from_final_intent(
+                    final_intent=final_intent,
+                    executable_snapshot=executable_snapshot,
+                    decision_time=decision_time,
+                    authority_witness=authority_witness,
+                ),
+                occurred_at=decision_time,
+                source_authority="engine_adapter",
+                expected_parent_event_hash=submit_plan_event.event_hash,
+            )
+            live_cap_event = aggregate_ledger.append_event(
+                aggregate_id=aggregate_id,
+                event_type="LiveCapReserved",
+                payload={
+                    "event_id": event.event_id,
+                    "final_intent_id": final_intent.payload["final_intent_id"],
+                    "usage_id": live_cap.payload["usage_id"],
+                    "reserved_notional_usd": live_cap.payload["reserved_notional_usd"],
+                    "reservation_status": live_cap.payload["reservation_status"],
+                },
+                occurred_at=decision_time,
+                source_authority="live_cap_ledger",
+                expected_parent_event_hash=pre_submit_event.event_hash,
+            )
+            execution_command_id = _execution_command_id_from_final_intent(actionable, final_intent)
+            expressibility = build_executor_expressibility_certificate(
+                final_intent_cert=final_intent,
+                executable_snapshot_cert=executable_snapshot,
+                live_cap_cert=live_cap,
+                decision_time=decision_time,
+                executor_native_intent_hash=executor_native_intent_hash,
+            )
+            command_event = aggregate_ledger.append_event(
+                aggregate_id=aggregate_id,
+                event_type="ExecutionCommandCreated",
+                payload={
+                    "event_id": event.event_id,
+                    "final_intent_id": final_intent.payload["final_intent_id"],
+                    "execution_command_id": execution_command_id,
+                    "pre_submit_event_hash": pre_submit_event.event_hash,
+                    "live_cap_reserved_event_hash": live_cap_event.event_hash,
+                    "usage_id": live_cap.payload["usage_id"],
+                },
+                occurred_at=decision_time,
+                source_authority="engine_adapter",
+                expected_parent_event_hash=live_cap_event.event_hash,
+            )
+            pre_submit = build_pre_submit_revalidation_certificate(
+                pre_submit_event=pre_submit_event,
+                final_intent_cert=final_intent,
+                live_cap_cert=live_cap,
+                decision_time=decision_time,
+                execution_command_event_hash=command_event.event_hash,
+            )
+            command = build_execution_command_certificate_from_final_intent(
+                actionable_cert=actionable,
+                final_intent_cert=final_intent,
+                executor_expressibility_cert=expressibility,
+                live_cap_cert=live_cap,
+                pre_submit_revalidation_cert=pre_submit,
+                decision_time=decision_time,
+            )
+            from src.events.live_cap import LIVE_EXECUTION_RESERVATION_SCOPE, LiveCapLedger
+
+            # Durable re-reservation of the Kelly notional already computed by
+            # _build_live_cap_certificate_from_ledger above (which built the cert with
+            # persist=False). This is the EXACTLY-ONCE + DRIFT-DETECT write: it dedupes
+            # by (event_id, cap_scope) and raises if the reserved notional drifted.
+            reserve_result = LiveCapLedger(live_cap_conn).reserve(
+                event_id=event.event_id,
+                decision_time=decision_time,
+                cap_scope=LIVE_EXECUTION_RESERVATION_SCOPE,
+                requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
+                final_intent_id=str(final_intent.payload["final_intent_id"]),
+                execution_command_id=execution_command_id,
+            )
+            if reserve_result.usage_id != str(live_cap.payload["usage_id"]):
+                raise ValueError("live cap reservation drift for provisional certificate")
+            if float(reserve_result.reserved_notional_usd) != float(live_cap.payload["reserved_notional_usd"]):
+                raise ValueError("LIVE_CAP_RESERVED_NOTIONAL_DRIFT")
+            return expressibility, pre_submit, command
+
+        # The HTTP/JIT book work above must not hold the trade DB write lock. This
+        # savepoint covers only the aggregate/live-cap write unit and rolls it back
+        # as a whole on aggregate validation or reservation failure.
+        expressibility, pre_submit, command = _run_live_order_build_savepoint(
+            live_cap_conn,
+            _append_live_order_state,
         )
-        if reserve_result.usage_id != str(live_cap.payload["usage_id"]):
-            raise ValueError("live cap reservation drift for provisional certificate")
-        if float(reserve_result.reserved_notional_usd) != float(live_cap.payload["reserved_notional_usd"]):
-            raise ValueError("LIVE_CAP_RESERVED_NOTIONAL_DRIFT")
     except Exception:
         raise
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
