@@ -131,9 +131,10 @@ settlement_capture:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
-  min_expected_profit_usd: 0.05
+  min_expected_profit_usd: 1.00
+  min_submit_edge_density: 0.05
   allow_ultra_low_tail: false
 
 day0_nowcast_entry:
@@ -165,7 +166,7 @@ day0_nowcast_entry:
     resolved: 0.0
   min_settled_decisions: 20
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 1.00
   min_submit_edge_density: 0.05
@@ -231,7 +232,7 @@ opening_inertia:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 1.00
   min_submit_edge_density: 0.05
@@ -269,7 +270,7 @@ shoulder_sell:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: null
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 1.00
   min_submit_edge_density: 0.05
@@ -345,7 +346,7 @@ imminent_open_capture:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: null
-  min_entry_price: 0.05
+  min_entry_price: 0.10
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 1.00
   min_submit_edge_density: 0.05

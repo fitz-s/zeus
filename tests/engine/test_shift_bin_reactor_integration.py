@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +97,58 @@ def test_reactor_runs_same_family_management_for_forecast_selections_too():
     assert "if _recapture.may_submit and allow_same_family_monitor_owned" not in src
     assert "if _recapture.may_submit:" in src
     assert "_shift_bin_wiring.read_held_sibling_exposure(" in src
+
+
+def test_reactor_fails_closed_when_held_family_cannot_bind_sibling():
+    """Held-family truth with no old-leg binding must not fall through to fresh entry."""
+
+    src = inspect.getsource(era)
+    sibling_read = src.index("_shift_bin_wiring.read_held_sibling_exposure(")
+    unresolved_gate = src.index("SHIFT_BIN_NO_SUBMIT:HELD_FAMILY_UNRESOLVED", sibling_read)
+    entry_build = src.index("kelly = dataclass_replace(", sibling_read)
+
+    assert "_entry_held_position_same_family_reason(" in src[sibling_read:unresolved_gate]
+    assert unresolved_gate < entry_build
+
+
+def test_reactor_family_truth_reads_attached_chain_backed_zero_cost_quarantine():
+    """Attached chain-backed quarantine must be visible to the adapter fallback."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS trade")
+    conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
+    conn.execute("ALTER TABLE trade.position_current ADD COLUMN chain_state TEXT")
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO trade.position_current (
+            position_id, phase, token_id, no_token_id, bin_label, direction,
+            condition_id, city, target_date, temperature_metric, p_posterior,
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
+            size_usd, updated_at, chain_state
+        ) VALUES (
+            'munich-chain-risk', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
+            0.0, 0.0, 0.0, 29.14, 0.0, '2026-06-30T05:00:00',
+            'entry_authority_quarantined'
+        )
+        """
+    )
+    proof = SimpleNamespace(
+        candidate=SimpleNamespace(
+            city="Munich",
+            target_date="2026-06-30",
+            metric="high",
+        )
+    )
+
+    reason = era._entry_held_position_same_family_reason(conn, proof)
+
+    assert reason is not None
+    assert reason.startswith("OPEN_POSITION_SAME_FAMILY_MONITOR_OWNED:")
+    assert "position_id=munich-chain-risk" in reason
+    assert "bin_label=30C" in reason
 
 
 def test_sibling_live_old_leg_is_exit_old_leg_no_entry():

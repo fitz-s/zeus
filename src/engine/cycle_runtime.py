@@ -28,7 +28,10 @@ from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
-from src.contracts.position_truth import REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
+from src.contracts.position_truth import (
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+    has_current_money_risk_chain_state,
+)
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     LifecyclePhase,
@@ -3066,8 +3069,7 @@ def _family_monitor_positions(portfolio, pos) -> list:
     for other in get_open_positions(portfolio):
         if _family_monitor_key(other) != key:
             continue
-        phase = _position_state_value(other)
-        if phase not in {"entered", "holding", "day0_window", "pending_exit"}:
+        if not _family_monitor_position_has_live_risk(other):
             continue
         try:
             if float(getattr(other, "effective_shares", getattr(other, "shares", 0.0)) or 0.0) <= 0.0:
@@ -3076,6 +3078,36 @@ def _family_monitor_positions(portfolio, pos) -> list:
             continue
         out.append(other)
     return out or [pos]
+
+
+def _family_monitor_position_has_live_risk(pos) -> bool:
+    phase = _position_state_value(pos)
+    if phase in {"entered", "holding", "active", "day0_window", "pending_exit"}:
+        return True
+    if phase != "quarantined":
+        return False
+    try:
+        chain_shares = float(getattr(pos, "chain_shares", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        chain_shares = 0.0
+    return chain_shares > 0.01 and has_current_money_risk_chain_state(
+        getattr(pos, "chain_state", "")
+    )
+
+
+_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES = (
+    "day0_high_extreme_not_mature:",
+    "day0_low_extreme_not_terminal:",
+    "day0_extreme_maturity_unavailable:",
+)
+
+
+def _day0_immature_exit_authority_reason(pos) -> str | None:
+    for validation in getattr(pos, "applied_validations", []) or []:
+        text = str(validation or "")
+        if text.startswith(_DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES):
+            return text
+    return None
 
 
 def _monitor_value_inputs(position) -> tuple[float, float | None, float | None, str | None]:
@@ -3191,6 +3223,20 @@ def _apply_family_monitor_overlay(
     sell_advantage_threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
     payload["family_direct_sell_advantage_usd"] = sell_advantage
     payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
+    day0_maturity_block = _day0_immature_exit_authority_reason(pos)
+
+    if day0_maturity_block is not None and _is_statistical_single_leg_exit(exit_decision, exit_reason):
+        payload["decision"] = "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+        payload["blocked_exit_reason"] = exit_reason
+        payload["day0_maturity_block"] = day0_maturity_block
+        setattr(pos, "_monitor_family_redecision", payload)
+        validations = list(getattr(pos, "applied_validations", []) or [])
+        validations.append("family_day0_immature_exit_authority_blocked")
+        pos.applied_validations = list(dict.fromkeys(validations))
+        summary["family_redecision_day0_immature_exits_blocked"] = (
+            summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
+        )
+        return False, "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
         if hold_value + 1e-9 >= sell_value:
@@ -3217,6 +3263,18 @@ def _apply_family_monitor_overlay(
         and float(_cur_belief) < float(_entry_belief)
     )
     if (not should_exit) and sell_advantage > sell_advantage_threshold and _belief_reversed_below_entry:
+        if day0_maturity_block is not None:
+            payload["decision"] = "FAMILY_DIRECT_SELL_BLOCKED_DAY0_IMMATURE"
+            payload["suppressed_exit_reason"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+            payload["day0_maturity_block"] = day0_maturity_block
+            setattr(pos, "_monitor_family_redecision", payload)
+            validations = list(getattr(pos, "applied_validations", []) or [])
+            validations.append("family_direct_sell_blocked_day0_immature")
+            pos.applied_validations = list(dict.fromkeys(validations))
+            summary["family_redecision_day0_immature_exits_blocked"] = (
+                summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
+            )
+            return should_exit, exit_reason
         payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
         payload["promoted_exit_reason"] = exit_reason
         payload["belief_reversed_below_entry"] = True

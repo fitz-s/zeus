@@ -2369,16 +2369,12 @@ def _edli_market_substrate_warm_cycle() -> None:
     )
     priority_marker_has_scope = bool(priority_marker_families or priority_marker_condition_ids)
     if priority_marker_has_scope:
-        summary = _substrate_warm_failed_summary(
-            status="background_deferred_to_priority_lane",
-            reason="money-path priority marker active",
-            priority_request=priority_marker_request,
-            priority_marker_active=True,
-        )
-        summary["scheduler_failed"] = False
-        summary.pop("scheduler_failure_reason", None)
-        _substrate_priority_receipt(request=priority_marker_request, summary=summary)
-        logger.info("EDLI market-substrate warm skipped: %s", summary["status"])
+        summary = _edli_money_path_substrate_priority_cycle()
+        if isinstance(summary, dict):
+            summary = {**summary, "serviced_by": "edli_market_substrate_warm_cycle"}
+            logger.info("EDLI market-substrate warm serviced priority marker: %s", summary)
+        else:
+            logger.info("EDLI market-substrate warm priority marker produced no summary")
         return summary
     from src.state.db import (
         ZEUS_FORECASTS_DB_PATH,

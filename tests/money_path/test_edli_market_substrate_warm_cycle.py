@@ -1561,14 +1561,19 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     assert calls == [1]
 
 
-def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
-    """Broad substrate warm must not occupy the shared lock while live recapture is queued."""
+def test_market_substrate_warm_cycle_services_money_path_priority_marker(monkeypatch):
+    """The sidecar warm tick must service the hot money-path marker, not starve it."""
 
-    calls: list[int] = []
+    calls: list[str] = []
     monkeypatch.setattr(
         substrate_observer,
         "_refresh_pending_family_snapshots",
-        lambda *a, **k: calls.append(1),
+        lambda *a, **k: calls.append("background"),
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_edli_money_path_substrate_priority_cycle",
+        lambda: calls.append("priority") or {"status": "refreshed", "inserted": 1},
     )
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
     monkeypatch.setattr(
@@ -1579,9 +1584,11 @@ def test_market_substrate_warm_cycle_yields_to_money_path_priority(monkeypatch):
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     _enable_edli_cfg(monkeypatch, enabled=True)
 
-    substrate_observer._edli_market_substrate_warm_cycle()
+    result = substrate_observer._edli_market_substrate_warm_cycle()
 
-    assert calls == []
+    assert calls == ["priority"]
+    assert result["status"] == "refreshed"
+    assert result["serviced_by"] == "edli_market_substrate_warm_cycle"
 
 
 def test_market_substrate_warm_cycle_ignores_empty_priority_marker(monkeypatch):

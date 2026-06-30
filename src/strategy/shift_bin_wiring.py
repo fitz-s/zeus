@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
+from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.strategy.family_rebalance import (
     ActiveRebalanceLease,
     ShiftBinDecision,
@@ -75,6 +76,7 @@ from src.strategy.fill_up_wiring import (
 
 
 _CHAIN_COLLATERAL_RESIDUAL_MAX_AGE_SECONDS = 180.0
+_CURRENT_MONEY_RISK_CHAIN_STATES = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
 
 
 @dataclass(frozen=True)
@@ -147,10 +149,10 @@ def read_held_sibling_exposure(
     bin_label DIFFER from the fresh selection is the OLD leg to close. Returns None
     when the fresh selection is the SAME token (that is fill-up, not a shift) or when
     no different-bin family position is held. Reads canonical ``position_current``,
-    restricted to live/in-flight phases with positive committed cost. Fails CLOSED on
-    a malformed schema (returns None → the caller leaves the entry path untouched; a
-    missed shift degrades to the existing fresh-entry selection, never to an unsafe
-    double-open because the family-exclusive admission still gates a true fresh entry).
+    restricted to live/in-flight phases or chain-proven current money risk. Schema/read
+    ambiguity returns None, but the live adapter must pair that with independent
+    same-family truth and fail closed rather than treating None as proof there is no
+    old leg.
     """
     sel_token = str(selected_token_id or "").strip()
     sel_bin = str(selected_bin_label or "").strip()
@@ -173,14 +175,35 @@ def read_held_sibling_exposure(
         return None
 
     phase_sql, phase_params = _live_position_phase_sql(cols)
-    cost_terms = [c for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd") if c in cols]
-    if not cost_terms:
+    positive_terms = [
+        (f"COALESCE({c},0) > 0", ())
+        for c in ("chain_cost_basis_usd", "cost_basis_usd", "size_usd")
+        if c in cols
+    ]
+    if "chain_shares" in cols:
+        if "chain_state" in cols:
+            chain_state_placeholders = ",".join("?" for _ in _CURRENT_MONEY_RISK_CHAIN_STATES)
+            positive_terms.append(
+                (
+                    f"(COALESCE(chain_shares,0) > ? AND chain_state IN ({chain_state_placeholders}))",
+                    (_LIVE_CHAIN_SHARE_EPSILON, *_CURRENT_MONEY_RISK_CHAIN_STATES),
+                )
+            )
+        else:
+            positive_terms.append(
+                ("COALESCE(chain_shares,0) > ?", (_LIVE_CHAIN_SHARE_EPSILON,))
+            )
+    if not positive_terms:
         return None
-    positive_sql = " AND (" + " OR ".join(f"COALESCE({c},0) > 0" for c in cost_terms) + ")"
+    positive_sql = " AND (" + " OR ".join(term for term, _ in positive_terms) + ")"
+    positive_params: list[object] = []
+    for _, params_for_term in positive_terms:
+        positive_params.extend(params_for_term)
 
     selected_names = (
         "position_id", "token_id", "no_token_id", "bin_label", "direction",
-        "chain_cost_basis_usd", "cost_basis_usd", "size_usd", metric_col,
+        "chain_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_shares",
+        "chain_state", metric_col,
     )
     select_cols = []
     for name in selected_names:
@@ -193,6 +216,7 @@ def read_held_sibling_exposure(
     params: list[object] = []
     params.extend(phase_params)
     params.extend([str(city), str(target_date)])
+    params.extend(positive_params)
     try:
         rows = conn.execute(sql, tuple(params)).fetchall()
     except sqlite3.Error:
@@ -225,6 +249,13 @@ def read_held_sibling_exposure(
             if v > 0.0:
                 current_live = v
                 break
+        if current_live <= 0.0:
+            try:
+                chain_shares = float(_g("chain_shares") or 0.0)
+            except (TypeError, ValueError):
+                chain_shares = 0.0
+            if chain_shares > _LIVE_CHAIN_SHARE_EPSILON:
+                current_live = chain_shares
         return HeldSiblingExposure(
             position_id=str(_g("position_id") or ""),
             token_id=tok,

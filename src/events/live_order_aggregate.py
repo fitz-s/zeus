@@ -12,6 +12,9 @@ from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.state.schema.edli_live_order_events_schema import LIVE_ORDER_EVENT_TYPES, ensure_tables
 
 
+_LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
+
+
 PRE_SUBMIT_REQUIRED_FIELDS = (
     "event_id",
     "final_intent_id",
@@ -771,7 +774,9 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     min_submit_edge_density = _non_negative_number(
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
-    if limit_price + 1e-12 < min_entry_price:
+    if min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+        raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
+    if limit_price + 1e-12 < max(min_entry_price, _LIVE_ENTRY_MIN_ENTRY_PRICE):
         raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")

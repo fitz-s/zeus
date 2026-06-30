@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-06-30
 # Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -4973,6 +4973,117 @@ def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates()
     assert family["family_direct_sell_advantage_usd"] > family["family_direct_sell_advantage_threshold_usd"]
 
 
+def test_family_monitor_overlay_blocks_direct_sell_on_immature_day0_authority():
+    """Pre-peak Day0 remaining-window signal is not sell authority by itself."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-direct-sell-day0-immature",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.83,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
+    pos.last_monitor_prob = 0.15
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.55
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.55
+    pos.last_monitor_best_ask = 0.57
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = [
+        "day0_observation_remaining_window",
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+    ]
+
+    hold_decision = ExitDecision(
+        False,
+        reason="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
+        trigger="CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=list(pos.applied_validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=hold_decision,
+        should_exit=False,
+        exit_reason=hold_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "CI_SEPARATED_EDGE_WITHIN_THRESHOLD_HOLD"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+    assert "family_direct_sell_blocked_day0_immature" in pos.applied_validations
+    family = pos._monitor_family_redecision
+    assert family["decision"] == "FAMILY_DIRECT_SELL_BLOCKED_DAY0_IMMATURE"
+    assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
+
+
+def test_family_monitor_overlay_blocks_statistical_exit_on_immature_day0_authority():
+    """An immature Day0 validation cannot sponsor a CI-style exit."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-stat-exit-day0-immature",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.83,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
+    pos.last_monitor_prob = 0.15
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.55
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.55
+    pos.last_monitor_best_ask = 0.57
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    pos.applied_validations = [
+        "day0_observation_remaining_window",
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+    ]
+    exit_decision = ExitDecision(
+        True,
+        reason="CI_SEPARATED_REVERSAL",
+        trigger="CI_SEPARATED_REVERSAL",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=list(pos.applied_validations),
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos),
+        pos=pos,
+        exit_decision=exit_decision,
+        should_exit=True,
+        exit_reason=exit_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+    assert "family_day0_immature_exit_authority_blocked" in pos.applied_validations
+    assert pos._monitor_family_redecision["decision"] == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+
+
 def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
     """A high bid over a conservative belief is not by itself an exit signal."""
     from src.engine import cycle_runtime
@@ -5025,6 +5136,59 @@ def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
     assert family["decision"] == "FAMILY_OVERLAY_NO_OVERRIDE"
     assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
     assert "family_direct_sell_dominates_hold_exit" not in pos.applied_validations
+
+
+def test_family_monitor_overlay_keeps_chain_backed_quarantine_in_family_vector():
+    """Chain-backed quarantine remains live family risk for hold-vs-sell math."""
+    from src.engine import cycle_runtime
+
+    old_leg = _make_position(
+        trade_id="munich-30-quarantine",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="30C",
+        direction="buy_no",
+        shares=29.14,
+        chain_shares=29.14,
+        chain_state="entry_authority_quarantined",
+        state="quarantined",
+        entry_price=0.73,
+        p_posterior=0.88,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    new_leg = _make_position(
+        trade_id="munich-29-active",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        state="day0_window",
+        entry_price=0.60,
+        p_posterior=0.83,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    for pos, prob, bid in ((old_leg, 0.92, 0.71), (new_leg, 0.84, 0.55)):
+        pos.last_monitor_prob = prob
+        pos.last_monitor_prob_is_fresh = True
+        pos.last_monitor_market_price = bid
+        pos.last_monitor_market_price_is_fresh = True
+        pos.last_monitor_best_bid = bid
+        pos.last_monitor_best_ask = min(0.99, bid + 0.02)
+
+    positions = cycle_runtime._family_monitor_positions(
+        _make_portfolio(old_leg, new_leg),
+        new_leg,
+    )
+
+    assert [pos.trade_id for pos in positions] == [
+        "munich-30-quarantine",
+        "munich-29-active",
+    ]
 
 
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):

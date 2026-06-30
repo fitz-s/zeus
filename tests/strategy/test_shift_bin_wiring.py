@@ -159,6 +159,81 @@ def test_sibling_different_bin_reads_tuple_rows_without_row_factory():
     assert held.current_live_usd == pytest.approx(4.0)
 
 
+def test_sibling_different_bin_reads_attached_position_current_schema():
+    """Attached trade/world position_current must not disappear at column discovery."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS trade")
+    conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO trade.position_current (
+            position_id, phase, token_id, no_token_id, bin_label, direction,
+            condition_id, city, target_date, temperature_metric, p_posterior,
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares, size_usd, updated_at
+        ) VALUES (
+            'p-attached', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
+            0.0, 21.27, 29.14, 29.14, 0.0, '2026-06-30T05:00:00'
+        )
+        """
+    )
+
+    held = sbw.read_held_sibling_exposure(
+        conn,
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        selected_token_id="no-29",
+        selected_bin_label="29C",
+    )
+
+    assert held is not None
+    assert held.position_id == "p-attached"
+    assert held.token_id == "no-30"
+    assert held.current_live_usd == pytest.approx(21.27)
+
+
+def test_sibling_reads_attached_chain_backed_zero_cost_quarantine():
+    """Chain-backed quarantine is old-leg exposure even before fill economics bind."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS trade")
+    conn.execute(_POSITION_CURRENT_DDL.replace("position_current", "trade.position_current"))
+    conn.execute("ALTER TABLE trade.position_current ADD COLUMN chain_state TEXT")
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO trade.position_current (
+            position_id, phase, token_id, no_token_id, bin_label, direction,
+            condition_id, city, target_date, temperature_metric, p_posterior,
+            entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
+            size_usd, updated_at, chain_state
+        ) VALUES (
+            'p-chain-risk', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
+            0.0, 0.0, 0.0, 29.14, 0.0, '2026-06-30T05:00:00',
+            'entry_authority_quarantined'
+        )
+        """
+    )
+
+    held = sbw.read_held_sibling_exposure(
+        conn,
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        selected_token_id="no-29",
+        selected_bin_label="29C",
+    )
+
+    assert held is not None
+    assert held.position_id == "p-chain-risk"
+    assert held.token_id == "no-30"
+    assert held.current_live_usd == pytest.approx(29.14)
+
+
 def test_active_shift_lease_for_family_reads_existing_shift_before_fill_up():
     """A multi-cycle SHIFT_BIN lease must be visible to the reactor before D1 fill-up."""
     conn = _conn()

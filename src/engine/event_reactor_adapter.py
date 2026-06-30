@@ -665,7 +665,22 @@ def _adapter_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
         (table_name,),
     ).fetchone()
-    return row is not None
+    if row is not None:
+        return True
+    try:
+        for schema_row in conn.execute("PRAGMA database_list").fetchall():
+            schema = schema_row[1] if not isinstance(schema_row, sqlite3.Row) else schema_row["name"]
+            if schema in ("main", "temp"):
+                continue
+            probe = conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table_name,),
+            ).fetchone()
+            if probe is not None:
+                return True
+    except sqlite3.Error:
+        return False
+    return False
 
 
 _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
@@ -819,10 +834,23 @@ def _durable_live_cap_usage_is_represented_in_trade_truth(
 
 def _position_current_columns(conn: sqlite3.Connection) -> set[str]:
     try:
-        return {
+        columns = {
             str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
             for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
         }
+        if columns:
+            return columns
+        for schema_row in conn.execute("PRAGMA database_list").fetchall():
+            schema = schema_row[1] if not isinstance(schema_row, sqlite3.Row) else schema_row["name"]
+            if schema in ("main", "temp"):
+                continue
+            columns = {
+                str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                for row in conn.execute(f"PRAGMA {schema}.table_info(position_current)").fetchall()
+            }
+            if columns:
+                return columns
+        return set()
     except Exception as exc:  # noqa: BLE001 - live exposure truth ambiguity is fatal.
         raise RuntimeError(
             f"OPEN_POSITION_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
@@ -4934,6 +4962,42 @@ def _build_event_bound_no_submit_receipt_core(
                     selected_token_id=str(selected_token_id or ""),
                     selected_bin_label=str(candidate.bin.label or ""),
                 )
+                if _held_sibling is None:
+                    try:
+                        _unresolved_family_reason = _entry_held_position_same_family_reason(
+                            trade_conn,
+                            proof,
+                        )
+                    except RuntimeError as exc:
+                        _unresolved_family_reason = str(exc)
+                    if _unresolved_family_reason is not None:
+                        return _with_shrink(EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason=(
+                                "SHIFT_BIN_NO_SUBMIT:HELD_FAMILY_UNRESOLVED:"
+                                f"{_unresolved_family_reason}"
+                            ),
+                            city=family.city,
+                            target_date=family.target_date,
+                            metric=family.metric,
+                            condition_id=str(candidate.condition_id or ""),
+                            token_id=selected_token_id,
+                            executable_snapshot_id=proof.executable_snapshot_id,
+                            family_id=family.family_id,
+                            bin_label=candidate.bin.label,
+                            direction=direction,
+                            q_live=proof.q_posterior,
+                            q_lcb_5pct=proof.q_lcb_5pct,
+                            c_fee_adjusted=execution_price.value,
+                            c_cost_95pct=proof.c_cost_95pct,
+                            p_fill_lcb=proof.p_fill_lcb,
+                            trade_score=trade_score,
+                            native_quote_available=True,
+                            source_status="MATCH",
+                            family_complete=True,
+                        ))
                 if _held_sibling is not None:
                     # Old-leg residual from canonical truth: 0.0 == proven closed
                     # (no live row for the old token); +inf on ambiguous read (treat as

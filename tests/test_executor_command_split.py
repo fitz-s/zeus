@@ -329,9 +329,9 @@ def _make_entry_intent(
         q_live=0.99,
         q_lcb_5pct=0.95,
         expected_edge=0.07,
-        min_entry_price=0.05,
-        min_expected_profit_usd=0.05,
-        min_submit_edge_density=0.02,
+        min_entry_price=0.10,
+        min_expected_profit_usd=1.0,
+        min_submit_edge_density=0.05,
         actionable_certificate_hash=actionable_certificate_hash,
         qkernel_execution_economics={
             "source": "qkernel_spine",
@@ -344,6 +344,9 @@ def _make_entry_intent(
             "false_edge_rate": 0.01,
             "direction_law_ok": True,
             "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.95,
         },
     )
 
@@ -629,7 +632,8 @@ class TestLiveOrderCommandSplit:
             "executable_snapshot_gate",
         }
         assert components_by_name["entry_economics"]["allowed"] is True
-        assert components_by_name["entry_economics"]["details"]["min_entry_price"] == 0.05
+        assert components_by_name["entry_economics"]["details"]["min_entry_price"] == 0.10
+        assert components_by_name["entry_economics"]["details"]["live_min_entry_price"] == 0.10
         assert components_by_name["entry_actionable_certificate"]["allowed"] is True
         assert (
             components_by_name["entry_actionable_certificate"]["details"]["certificate_hash"]
@@ -1178,6 +1182,9 @@ class TestLiveOrderCommandSplit:
                 "false_edge_rate": 0.01,
                 "direction_law_ok": True,
                 "coherence_allows": True,
+                "selection_guard_basis": "SELECTION_BETA_95",
+                "selection_guard_abstained": False,
+                "selection_guard_q_safe": 0.95,
             },
         )
 

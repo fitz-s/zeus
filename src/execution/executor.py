@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
+_LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 
 
 # Mode-based fill timeout (seconds). Spec §6.4.
@@ -725,8 +726,14 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         min_edge_density,
         _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY,
     )
+    effective_min_entry_price = max(
+        min_entry_price,
+        _LIVE_ENTRY_MIN_ENTRY_PRICE,
+    )
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
+    elif min_entry_price + 1e-12 < _LIVE_ENTRY_MIN_ENTRY_PRICE:
+        reason = "min_entry_price_below_live_floor"
     elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
         reason = "min_expected_profit_below_live_floor"
     elif min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY:
@@ -737,7 +744,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
-    elif limit_price <= min_entry_price + 1e-12:
+    elif limit_price <= effective_min_entry_price + 1e-12:
         reason = "limit_price_below_strategy_entry_floor"
     elif expected_profit + 1e-9 < effective_min_expected_profit:
         reason = "expected_profit_below_floor"
@@ -757,6 +764,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
             submit_edge=submit_edge,
             expected_profit_usd=expected_profit,
             min_entry_price=min_entry_price,
+            live_min_entry_price=_LIVE_ENTRY_MIN_ENTRY_PRICE,
             min_expected_profit_usd=min_expected_profit,
             live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
             submit_edge_density=edge_density,
@@ -864,6 +872,7 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         submit_edge=submit_edge,
         expected_profit_usd=expected_profit,
         min_entry_price=min_entry_price,
+        live_min_entry_price=_LIVE_ENTRY_MIN_ENTRY_PRICE,
         min_expected_profit_usd=min_expected_profit,
         live_min_expected_profit_usd=_LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD,
         submit_edge_density=edge_density,

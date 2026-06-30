@@ -434,7 +434,8 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"expected_edge": 0.25}, "expected_edge exceeds"),
         ({"size": 0.0}, "positive size"),
         ({"min_entry_price": -0.01}, "min_entry_price"),
-        ({"limit_price": 0.01, "min_entry_price": 0.05}, "entry price below strategy floor"),
+        ({"min_entry_price": 0.05}, "min_entry_price below live floor"),
+        ({"limit_price": 0.09, "min_entry_price": 0.10}, "entry price below strategy floor"),
         ({"min_expected_profit_usd": 10.0}, "expected profit below"),
         ({"min_submit_edge_density": 0.75}, "submit edge density below"),
         ({"expected_edge_source_certificate_hash": ""}, "expected_edge_source_certificate_hash"),
@@ -477,11 +478,11 @@ def test_pre_submit_rejects_lucknow_negative_submit_edge():
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
             payload=_pre_submit_payload(
-                q_live=0.005426579861923466,
-                q_lcb_5pct=0.003,
-                limit_price=0.006,
-                expected_edge=0.04049776073684555,
-                min_entry_price=0.0,
+                q_live=0.12,
+                q_lcb_5pct=0.11,
+                limit_price=0.12,
+                expected_edge=0.04,
+                min_entry_price=0.10,
             ),
             occurred_at=NOW,
             source_authority="engine_adapter",
@@ -510,7 +511,7 @@ def test_pre_submit_rejects_weak_qkernel_without_selection_guard():
         )
 
 
-def test_pre_submit_allows_low_price_yes_when_qkernel_economics_clear_floors():
+def test_pre_submit_rejects_low_price_yes_below_live_floor():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -520,20 +521,21 @@ def test_pre_submit_allows_low_price_yes_when_qkernel_economics_clear_floors():
         source_authority="decision_kernel",
     )
 
-    ledger.append_event(
-        aggregate_id="event-1:intent-1",
-        event_type="PreSubmitRevalidated",
-        payload=_pre_submit_payload(
-            q_live=0.118809820736935,
-            q_lcb_5pct=0.100708440505795,
-            limit_price=0.07,
-            expected_edge=0.0307084405057945,
-            size=5.0,
-            min_entry_price=0.05,
-            min_expected_profit_usd=0.05,
-            min_submit_edge_density=0.02,
-            current_best_bid=0.06,
-            current_best_ask=0.08,
+    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="PreSubmitRevalidated",
+            payload=_pre_submit_payload(
+                q_live=0.118809820736935,
+                q_lcb_5pct=0.100708440505795,
+                limit_price=0.07,
+                expected_edge=0.0307084405057945,
+                size=50.0,
+                min_entry_price=0.10,
+                min_expected_profit_usd=1.0,
+                min_submit_edge_density=0.05,
+                current_best_bid=0.06,
+                current_best_ask=0.08,
                 qkernel_execution_economics={
                     "source": "qkernel_spine",
                     "route_id": "DIRECT_YES:b23@proof",
@@ -554,10 +556,7 @@ def test_pre_submit_allows_low_price_yes_when_qkernel_economics_clear_floors():
             ),
             occurred_at=NOW,
             source_authority="engine_adapter",
-    )
-
-    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
-    assert pre_submit is not None
+        )
 
 
 def test_pre_submit_rejects_jeddah_qkernel_payoff_above_submit_lcb():
@@ -753,9 +752,9 @@ def _pre_submit_payload(**overrides):
         "q_live": 0.70,
         "q_lcb_5pct": 0.60,
         "expected_edge": 0.10,
-        "min_entry_price": 0.05,
-        "min_expected_profit_usd": 0.05,
-        "min_submit_edge_density": 0.02,
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.05,
         "would_cross_book": False,
         "tick_size": 0.01,
         "tick_aligned": True,

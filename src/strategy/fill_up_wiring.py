@@ -156,10 +156,26 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {
+    columns = {
         str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
     }
+    if columns:
+        return columns
+    try:
+        for schema_row in conn.execute("PRAGMA database_list").fetchall():
+            schema = schema_row[1] if not isinstance(schema_row, sqlite3.Row) else schema_row["name"]
+            if schema in ("main", "temp"):
+                continue
+            columns = {
+                str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                for row in conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
+            }
+            if columns:
+                return columns
+    except sqlite3.Error:
+        return set()
+    return set()
 
 
 def _row_get(row: sqlite3.Row | tuple, selected_names: tuple[str, ...], name: str):
