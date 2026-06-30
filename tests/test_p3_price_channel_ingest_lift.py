@@ -83,6 +83,42 @@ def test_quote_refresh_no_coverage_is_business_failure() -> None:
     assert reason == "quote_refresh_budget_exhausted_no_coverage"
 
 
+def test_quote_refresh_partial_coverage_is_business_failure() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    failed, reason = pci._price_channel_quote_refresh_failed(
+        {
+            "held_token_metadata": 2,
+            "held_quote_refresh_events": 1,
+            "budget_exhausted": False,
+            "budget_skipped_tokens": 1,
+        },
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+
+    assert failed is True
+    assert reason == "quote_refresh_partial_coverage"
+
+
+def test_quote_refresh_complete_coverage_is_healthy_even_if_elapsed_crosses_budget() -> None:
+    from src.ingest import price_channel_ingest as pci
+
+    failed, reason = pci._price_channel_quote_refresh_failed(
+        {
+            "held_token_metadata": 2,
+            "held_quote_refresh_events": 2,
+            "budget_exhausted": True,
+            "budget_skipped_tokens": 0,
+        },
+        token_key="held_token_metadata",
+        event_key="held_quote_refresh_events",
+    )
+
+    assert failed is False
+    assert reason is None
+
+
 def test_price_channel_daemon_scheduler_health_uses_business_result(monkeypatch) -> None:
     import src.ingest.price_channel_daemon as daemon
     import src.observability.scheduler_health as scheduler_health

@@ -5239,6 +5239,84 @@ def test_family_monitor_overlay_blocks_exit_decision_only_immature_day0_authorit
     )
 
 
+def test_family_monitor_overlay_blocks_immature_day0_before_missing_family_quotes():
+    """Missing sibling quote evidence cannot bypass immature Day0 exit authority."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="family-stat-exit-day0-immature-missing-quotes",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="29C",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.83,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:00+00:00"
+    pos.last_monitor_prob = 0.15
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.55
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.55
+    pos.last_monitor_best_ask = 0.57
+    pos.last_monitor_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    sibling = _make_position(
+        trade_id="family-stat-exit-day0-immature-stale-sibling",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="30C",
+        direction="buy_no",
+        shares=10.0,
+        entry_price=0.70,
+        p_posterior=0.90,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    sibling.last_monitor_prob = 0.90
+    sibling.last_monitor_prob_is_fresh = True
+    sibling.last_monitor_market_price = 0.40
+    sibling.last_monitor_market_price_is_fresh = False
+    sibling.last_monitor_best_bid = 0.40
+    sibling.last_monitor_best_ask = 0.42
+    exit_decision = ExitDecision(
+        True,
+        reason="CI_SEPARATED_REVERSAL",
+        trigger="CI_SEPARATED_REVERSAL",
+        selected_method="day0_observation_remaining_window",
+        applied_validations=[
+            "day0_observation_remaining_window",
+            "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+        ],
+    )
+    summary = {}
+
+    should_exit, reason = cycle_runtime._apply_family_monitor_overlay(
+        portfolio=_make_portfolio(pos, sibling),
+        pos=pos,
+        exit_decision=exit_decision,
+        should_exit=True,
+        exit_reason=exit_decision.reason,
+        summary=summary,
+    )
+
+    assert should_exit is False
+    assert reason == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert summary["family_redecision_day0_immature_exits_blocked"] == 1
+    family = pos._monitor_family_redecision
+    assert family["decision"] == "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    assert family["missing"] == [
+        {
+            "position_id": "family-stat-exit-day0-immature-stale-sibling",
+            "reason": "market_price_not_fresh",
+        }
+    ]
+
+
 def test_family_monitor_overlay_does_not_sell_winner_without_belief_reversal():
     """A high bid over a conservative belief is not by itself an exit signal."""
     from src.engine import cycle_runtime

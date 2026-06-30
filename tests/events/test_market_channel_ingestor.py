@@ -509,6 +509,63 @@ def test_rest_seed_uses_batch_orderbook_fetch_when_available():
     )
 
 
+def test_rest_seed_falls_back_for_partial_batch_orderbook_response():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    metadata = {
+        "token-0": _metadata("token-0")["token-0"],
+        "token-1": _metadata("token-1")["token-1"],
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        quote_cache=QuoteCache(),
+    )
+    batch_calls: list[list[str]] = []
+    single_calls: list[str] = []
+
+    def _book(token_id: str) -> dict:
+        return {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        }
+
+    def fetch_one(token_id: str) -> dict:
+        single_calls.append(token_id)
+        return _book(token_id)
+
+    def fetch_many(token_ids: list[str]) -> dict[str, dict]:
+        batch_calls.append(list(token_ids))
+        return {"token-0": _book("token-0")}
+
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=fetch_one,
+        fetch_orderbooks=fetch_many,
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["token-0", "token-1"],
+        received_at="2026-05-24T10:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=2,
+    )
+
+    assert written == 2
+    assert batch_calls == [["token-0", "token-1"]]
+    assert single_calls == ["token-1"]
+    assert (
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        == 4
+    )
+
+
 def test_rest_seed_deadline_stops_before_fetching_more_tokens():
     from contextlib import nullcontext
 

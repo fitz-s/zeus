@@ -1010,13 +1010,26 @@ class MarketChannelOnlineService:
                 books = {}
             if isinstance(books, dict) and books:
                 wanted = set(token_ids)
-                return {
+                pre_captured_books = {
                     str(token_id): dict(book)
                     for token_id, book in books.items()
                     if str(token_id) in wanted and isinstance(book, dict)
                 }
+                if len(pre_captured_books) == len(wanted):
+                    return pre_captured_books
+                if logger is not None and pre_captured_books:
+                    logger.warning(
+                        "%s batch pre-fetch returned partial books: captured=%d missing=%d",
+                        log_prefix,
+                        len(pre_captured_books),
+                        max(0, len(wanted) - len(pre_captured_books)),
+                    )
+                token_ids = [token_id for token_id in token_ids if str(token_id) not in pre_captured_books]
+            else:
+                pre_captured_books = {}
+        else:
+            pre_captured_books = {}
 
-        pre_captured_books: dict[str, dict] = {}
         for token_id in token_ids:
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 if logger is not None:

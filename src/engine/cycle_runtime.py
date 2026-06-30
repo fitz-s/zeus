@@ -3165,6 +3165,27 @@ def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
     return any(trigger.startswith(prefix) for prefix in _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS)
 
 
+def _block_immature_day0_exit_authority(
+    *,
+    pos,
+    payload: dict[str, object],
+    summary: dict,
+    exit_reason: str,
+    day0_maturity_block: str,
+) -> tuple[bool, str]:
+    payload["decision"] = "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+    payload["blocked_exit_reason"] = exit_reason
+    payload["day0_maturity_block"] = day0_maturity_block
+    setattr(pos, "_monitor_family_redecision", payload)
+    validations = list(getattr(pos, "applied_validations", []) or [])
+    validations.append("family_day0_immature_exit_authority_blocked")
+    pos.applied_validations = list(dict.fromkeys(validations))
+    summary["family_redecision_day0_immature_exits_blocked"] = (
+        summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
+    )
+    return False, "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
+
+
 def _apply_family_monitor_overlay(
     *,
     portfolio,
@@ -3234,6 +3255,18 @@ def _apply_family_monitor_overlay(
         leg_payloads.append(leg_payload)
 
     payload["legs"] = leg_payloads
+    day0_maturity_block = _day0_immature_exit_authority_reason(pos, exit_decision)
+    if day0_maturity_block is not None and _is_statistical_single_leg_exit(exit_decision, exit_reason):
+        if missing:
+            payload["missing"] = missing
+        return _block_immature_day0_exit_authority(
+            pos=pos,
+            payload=payload,
+            summary=summary,
+            exit_reason=exit_reason,
+            day0_maturity_block=day0_maturity_block,
+        )
+
     if missing:
         payload["decision"] = "FAMILY_VALUE_EVIDENCE_UNAVAILABLE"
         payload["missing"] = missing
@@ -3250,20 +3283,6 @@ def _apply_family_monitor_overlay(
     sell_advantage_threshold = _family_direct_sell_advantage_threshold_usd(sell_value)
     payload["family_direct_sell_advantage_usd"] = sell_advantage
     payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
-    day0_maturity_block = _day0_immature_exit_authority_reason(pos, exit_decision)
-
-    if day0_maturity_block is not None and _is_statistical_single_leg_exit(exit_decision, exit_reason):
-        payload["decision"] = "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
-        payload["blocked_exit_reason"] = exit_reason
-        payload["day0_maturity_block"] = day0_maturity_block
-        setattr(pos, "_monitor_family_redecision", payload)
-        validations = list(getattr(pos, "applied_validations", []) or [])
-        validations.append("family_day0_immature_exit_authority_blocked")
-        pos.applied_validations = list(dict.fromkeys(validations))
-        summary["family_redecision_day0_immature_exits_blocked"] = (
-            summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
-        )
-        return False, "FAMILY_DAY0_IMMATURE_EXIT_AUTHORITY_BLOCKED"
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
         if hold_value + 1e-9 >= sell_value:

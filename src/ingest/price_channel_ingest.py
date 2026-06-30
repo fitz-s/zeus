@@ -265,14 +265,19 @@ def _price_channel_quote_refresh_failed(
 
     token_count = int(result.get(token_key) or 0)
     events = int(result.get(event_key) or 0)
+    skipped_tokens = int(result.get("budget_skipped_tokens") or 0)
     if token_count <= 0:
-        return False, None
-    if events > 0:
         return False, None
     if result.get("backpressure"):
         return True, str(result.get("write_backpressure_reason") or result.get("skipped") or "quote_refresh_backpressure")
-    if result.get("budget_exhausted") or int(result.get("budget_skipped_tokens") or 0) > 0:
+    if skipped_tokens > 0:
+        if events > 0:
+            return True, "quote_refresh_partial_coverage"
         return True, "quote_refresh_budget_exhausted_no_coverage"
+    if result.get("budget_exhausted") and events <= 0:
+        return True, "quote_refresh_budget_exhausted_no_coverage"
+    if events > 0:
+        return False, None
     skipped = str(result.get("skipped") or "")
     if skipped:
         return True, skipped
