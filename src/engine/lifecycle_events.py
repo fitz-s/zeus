@@ -636,6 +636,15 @@ def build_monitor_refreshed_canonical_write(
     family_redecision = getattr(position, "_monitor_family_redecision", None)
     if family_redecision:
         payload_dict["family_redecision"] = family_redecision
+    day0_probability_receipt = getattr(
+        position, "_day0_monitor_probability_receipt", None
+    )
+    if (
+        day0_probability_receipt
+        and str(getattr(position, "selected_method", "") or "")
+        == "day0_observation_remaining_window"
+    ):
+        payload_dict["day0_monitor_probability_receipt"] = day0_probability_receipt
     if exit_decision is not None:
         should_exit = (
             bool(final_should_exit)

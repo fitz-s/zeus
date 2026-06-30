@@ -5639,6 +5639,136 @@ def test_family_monitor_overlay_replays_munich_0244_receipt_as_immature_day0_hol
     }
 
 
+def test_monitor_refreshed_persists_day0_probability_receipt():
+    """Day0 monitor events must carry enough input evidence to replay probability flips."""
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="munich-day0-receipt",
+        city="Munich",
+        target_date="2026-06-30",
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Munich be 29°C on June 30?",
+        direction="buy_no",
+        shares=33.15,
+        entry_price=0.60,
+        p_posterior=0.8728257780611077,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-06-30T02:44:44.908942+00:00"
+    pos.last_monitor_prob = 0.15810000000000002
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.57
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.57
+    pos.last_monitor_best_ask = 0.58
+    pos.last_monitor_edge = -0.41189999999999993
+    pos.selected_method = "day0_observation_remaining_window"
+    pos.applied_validations = [
+        "day0_observation_remaining_window",
+        "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+    ]
+    pos._day0_monitor_probability_receipt = {
+        "schema_version": 1,
+        "selected_method": "day0_observation_remaining_window",
+        "metric": "high",
+        "held_idx": 1,
+        "held_direction": "buy_no",
+        "held_side_probability": 0.15810000000000002,
+        "bin_labels": ["28C", "29C", "30C"],
+        "p_cal_vector": [0.01, 0.8419, 0.1481],
+        "observation": {
+            "source": "wu_hourly",
+            "observed_high_so_far": 18.5,
+            "current_temp": 18.0,
+            "observation_time": "2026-06-30T02:44:00+00:00",
+        },
+        "remaining_window": {
+            "source": "day0_hourly_vectors",
+            "source_models": ["icon_d2"],
+            "source_model_count": 1,
+            "fetch_time": "2026-06-30T02:44:32.480826+00:00",
+            "hours_remaining": 21.25,
+            "member_extrema_summary": {
+                "count": 1,
+                "min": 28.8,
+                "q50": 28.8,
+                "q90": 28.8,
+                "max": 28.8,
+            },
+        },
+        "temporal_context": {
+            "daypart": "pre_sunrise",
+            "post_peak_confidence": 0.034,
+        },
+        "maturity_validations": [
+            "day0_extreme_not_absorbing",
+            "day0_high_extreme_not_mature:daypart=pre_sunrise,post_peak_confidence=0.034",
+        ],
+    }
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=27,
+        phase_after=LifecyclePhase.DAY0_WINDOW.value,
+        source_module="tests/test_day0_probability_receipt",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    receipt = payload["day0_monitor_probability_receipt"]
+    assert receipt["selected_method"] == "day0_observation_remaining_window"
+    assert receipt["remaining_window"]["source"] == "day0_hourly_vectors"
+    assert receipt["remaining_window"]["source_models"] == ["icon_d2"]
+    assert receipt["remaining_window"]["member_extrema_summary"]["max"] == pytest.approx(28.8)
+    assert receipt["held_side_probability"] == pytest.approx(0.15810000000000002)
+    assert receipt["p_cal_vector"] == pytest.approx([0.01, 0.8419, 0.1481])
+
+
+def test_monitor_refreshed_omits_stale_day0_probability_receipt_on_non_day0_method():
+    """A stale Day0 receipt must not contaminate later non-Day0 monitor events."""
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="replacement-monitor-after-day0",
+        city="Munich",
+        target_date="2026-07-02",
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Munich be 29°C on July 2?",
+        direction="buy_no",
+        shares=12.0,
+        entry_price=0.60,
+        p_posterior=0.80,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.selected_method = "replacement_posterior"
+    pos.last_monitor_at = "2026-06-30T12:00:00+00:00"
+    pos.last_monitor_prob = 0.80
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.61
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_edge = 0.19
+    pos._day0_monitor_probability_receipt = {
+        "schema_version": 1,
+        "selected_method": "day0_observation_remaining_window",
+        "remaining_window": {"source": "day0_hourly_vectors"},
+    }
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=3,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        source_module="tests/test_day0_probability_receipt",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["selected_method"] == "replacement_posterior"
+    assert "day0_monitor_probability_receipt" not in payload
+
+
 def test_family_monitor_overlay_includes_entry_authority_quarantined_family_exposure():
     """Chain-backed quarantine is live money risk and must enter family value math."""
     from src.engine import cycle_runtime

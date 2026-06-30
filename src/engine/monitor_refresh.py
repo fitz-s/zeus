@@ -99,6 +99,43 @@ _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
 _nowcast_consecutive_write_failures = 0
 
 
+def _monitor_receipt_float(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _monitor_receipt_vector(values) -> list[float | None]:
+    try:
+        arr = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return []
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
+    return [_monitor_receipt_float(item) for item in arr.tolist()]
+
+
+def _monitor_receipt_quantiles(values) -> dict[str, float | None]:
+    try:
+        arr = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return {"count": 0, "min": None, "q50": None, "q90": None, "max": None}
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {"count": 0, "min": None, "q50": None, "q90": None, "max": None}
+    return {
+        "count": int(arr.size),
+        "min": _monitor_receipt_float(np.min(arr)),
+        "q50": _monitor_receipt_float(np.quantile(arr, 0.5)),
+        "q90": _monitor_receipt_float(np.quantile(arr, 0.9)),
+        "max": _monitor_receipt_float(np.max(arr)),
+    }
+
+
 @dataclass(frozen=True)
 class HeldTokenMonitorQuote:
     """Held-token executable quote surface for monitor/exit economics."""
@@ -2801,6 +2838,66 @@ def _refresh_day0_observation(
         position.direction,
     )
     current_p_posterior = _model_only_native_posterior(p_cal_native)
+    setattr(
+        position,
+        "_day0_monitor_probability_receipt",
+        {
+            "schema_version": 1,
+            "selected_method": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+            "metric": temperature_metric.temperature_metric,
+            "unit": str(getattr(city, "settlement_unit", "") or ""),
+            "target_date": str(target_d),
+            "held_idx": int(held_idx),
+            "held_direction": str(getattr(position, "direction", "") or ""),
+            "held_yes_probability": _monitor_receipt_float(p_cal_yes),
+            "held_side_probability": _monitor_receipt_float(current_p_posterior),
+            "bin_labels": [str(getattr(bin_, "label", bin_)) for bin_ in all_bins],
+            "p_raw_vector": _monitor_receipt_vector(p_raw_vector),
+            "p_cal_vector": _monitor_receipt_vector(p_cal_full),
+            "observation": {
+                "source": str(_day0_observation_field(obs, "source", "") or ""),
+                "observation_time": _day0_observation_field(obs, "observation_time"),
+                "observation_available_at": _day0_observation_field(
+                    obs, "observation_available_at"
+                ),
+                "provider_reported_time": _day0_observation_field(
+                    obs, "provider_reported_time"
+                ),
+                "coverage_status": _day0_observation_field(obs, "coverage_status"),
+                "current_temp": _monitor_receipt_float(current_temp),
+                "observed_high_so_far": _monitor_receipt_float(observed_high_so_far),
+                "observed_low_so_far": _monitor_receipt_float(observed_low_so_far),
+            },
+            "remaining_window": {
+                "source": live_forecast_source,
+                "source_models": list(ens_result.get("source_models") or [])
+                if ens_result is not None
+                else [],
+                "expected_models": list(ens_result.get("expected_models") or [])
+                if ens_result is not None
+                else [],
+                "source_model_count": int(ens_result.get("source_model_count") or 0)
+                if ens_result is not None
+                else None,
+                "fetch_time": str(ens_result.get("fetch_time") or "")
+                if ens_result is not None
+                else "",
+                "forecast_source_validations": list(forecast_source_validations),
+                "hours_remaining": _monitor_receipt_float(hours_remaining),
+                "member_extrema_summary": _monitor_receipt_quantiles(member_extrema),
+            },
+            "temporal_context": {
+                "daypart": str(getattr(temporal_context, "daypart", "") or ""),
+                "post_peak_confidence": _monitor_receipt_float(
+                    getattr(temporal_context, "post_peak_confidence", None)
+                ),
+                "current_utc_timestamp": str(
+                    getattr(temporal_context, "current_utc_timestamp", "") or ""
+                ),
+            },
+            "maturity_validations": list(maturity_validations),
+        },
+    )
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
     setattr(position, "_bootstrap_context", {
@@ -3721,6 +3818,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     pos.last_monitor_whale_toxicity = None
     pos.last_monitor_market_price_is_fresh = False
     pos.last_monitor_prob_is_fresh = False
+    try:
+        delattr(pos, "_day0_monitor_probability_receipt")
+    except AttributeError:
+        pass
 
     # 1. Refresh held-token quote
     market_refreshed = False
@@ -3752,6 +3853,9 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _bootstrap_ctx = getattr(refresh_pos, "_bootstrap_context", None)
         if _bootstrap_ctx is not None:
             setattr(pos, "_bootstrap_context", _bootstrap_ctx)
+        _day0_receipt = getattr(refresh_pos, "_day0_monitor_probability_receipt", None)
+        if _day0_receipt is not None:
+            setattr(pos, "_day0_monitor_probability_receipt", _day0_receipt)
 
         # Persist monitor state on Position only when the producer explicitly
         # attests freshness. Stored entry-time posterior is not a current
