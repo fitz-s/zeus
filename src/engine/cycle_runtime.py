@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from src.config import get_mode, state_path
+from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
@@ -2058,7 +2059,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
                 str(command_id),
                 lambda venue_order_id: clob.cancel_order(venue_order_id),
             )
-            if outcome.status == "CANCELED":
+            if is_cancel_confirmed_status(outcome.status):
                 cancelled += 1
         except Exception as exc:
             deps.logger.warning("Orphan open-order durable cancel failed for %s: %s", order_id, exc)
@@ -2228,7 +2229,7 @@ def cleanup_stale_entry_orders(clob, *, deps, conn=None) -> int:
         except Exception as exc:
             deps.logger.warning("Stale entry-order cancel failed for %s: %s", command_id, exc)
             continue
-        if outcome.status == "CANCELED":
+        if is_cancel_confirmed_status(outcome.status):
             cancelled += 1
             deps.logger.info(
                 "Stale entry order %s canceled for reprice: old_price=%s latest_best_bid=%s",
