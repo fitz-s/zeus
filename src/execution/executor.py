@@ -821,10 +821,10 @@ def _entry_economics_component(intent: ExecutionIntent, *, shares: float) -> dic
         reason = "qkernel_payoff_probability_missing"
     elif abs((payoff_q_lcb - econ_cost) - econ_edge_lcb) > 1e-6:
         reason = "qkernel_payoff_edge_inconsistent"
-    elif payoff_q_point > q_live + 1e-6:
-        reason = "qkernel_payoff_q_point_exceeds_q_live"
-    elif payoff_q_lcb > q_lcb + 1e-6:
-        reason = "qkernel_payoff_q_lcb_exceeds_q_lcb"
+    elif not math.isclose(payoff_q_point, q_live, rel_tol=0.0, abs_tol=1e-6):
+        reason = "qkernel_payoff_q_point_mismatch_q_live"
+    elif not math.isclose(payoff_q_lcb, q_lcb, rel_tol=0.0, abs_tol=1e-6):
+        reason = "qkernel_payoff_q_lcb_mismatch_q_lcb"
     elif economics.get("direction_law_ok") is not True:
         reason = "qkernel_direction_law_not_ok"
     elif economics.get("coherence_allows") is not True:

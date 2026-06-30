@@ -51,21 +51,21 @@ def _intent(**overrides) -> ExecutionIntent:
 def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.006,
-            q_live=0.005426579861923467,
-            q_lcb_5pct=0.005426579861923467,
-            expected_edge=-0.0019288776308719231,
-            min_entry_price=0.0,
+            limit_price=0.12,
+            q_live=0.13,
+            q_lcb_5pct=0.115,
+            expected_edge=-0.005,
+            min_entry_price=0.10,
             qkernel_execution_economics=_econ(
-                payoff_q_point=0.005426579861923467,
-                payoff_q_lcb=0.005426579861923467,
-                cost=0.006,
-                edge_lcb=-0.0005734201380765332,
+                payoff_q_point=0.13,
+                payoff_q_lcb=0.115,
+                cost=0.12,
+                edge_lcb=-0.005,
                 false_edge_rate=1.0,
-                selection_guard_q_safe=0.005426579861923467,
+                selection_guard_q_safe=0.115,
             ),
         ),
-        shares=1497.78,
+        shares=100.0,
     )
 
     assert verdict["allowed"] is False
@@ -123,7 +123,7 @@ def test_entry_economics_blocks_price_at_strategy_entry_floor():
     assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
 
 
-def test_entry_economics_allows_low_price_only_when_strategy_floor_allows_it():
+def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.006,
@@ -144,24 +144,24 @@ def test_entry_economics_allows_low_price_only_when_strategy_floor_allows_it():
         shares=1497.78,
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["details"]["submit_edge_density"] > 0.05
-    assert verdict["details"]["expected_profit_usd"] > 1.0
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "min_entry_price_below_live_floor"
+    assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.003,
+            limit_price=0.11,
             q_live=0.24,
             q_lcb_5pct=0.18,
-            expected_edge=0.177,
-            min_entry_price=0.0,
+            expected_edge=0.07,
+            min_entry_price=0.10,
             qkernel_execution_economics=_econ(
                 payoff_q_point=0.24,
                 payoff_q_lcb=0.18,
-                cost=0.003,
-                edge_lcb=0.177,
+                cost=0.11,
+                edge_lcb=0.07,
                 selection_guard_basis="SIDE_NOT_ARMED",
                 selection_guard_abstained=True,
                 selection_guard_q_safe=0.0,
@@ -210,6 +210,40 @@ def test_entry_economics_allows_positive_side_matched_edge():
     assert verdict["allowed"] is True
     assert abs(verdict["details"]["submit_edge"] - 0.12) < 1e-9
     assert abs(verdict["details"]["expected_profit_usd"] - 1.2) < 1e-9
+
+
+def test_entry_economics_blocks_qkernel_point_belief_below_served_belief():
+    verdict = _entry_economics_component(
+        _intent(
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.61,
+                payoff_q_lcb=0.52,
+                cost=0.4,
+                edge_lcb=0.12,
+            )
+        ),
+        shares=10.0,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "qkernel_payoff_q_point_mismatch_q_live"
+
+
+def test_entry_economics_blocks_qkernel_lcb_below_served_belief_lcb():
+    verdict = _entry_economics_component(
+        _intent(
+            qkernel_execution_economics=_econ(
+                payoff_q_point=0.62,
+                payoff_q_lcb=0.51,
+                cost=0.4,
+                edge_lcb=0.11,
+            )
+        ),
+        shares=10.0,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "qkernel_payoff_q_lcb_mismatch_q_lcb"
 
 
 def test_entry_economics_allows_maker_price_improvement_below_qkernel_cost_basis():
