@@ -89,6 +89,20 @@ def test_actionable_requires_qkernel_selection_guard():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_rejects_side_not_armed_qkernel_selection_guard():
+    parents, action = actionable_graph(
+        action_payload={
+            "qkernel_execution_economics": {
+                **_action_payload()["qkernel_execution_economics"],
+                "selection_guard_basis": "SIDE_NOT_ARMED",
+            }
+        }
+    )
+
+    with pytest.raises(CertificateVerificationError, match="selection_guard_basis blocks side"):
+        verify_actionable_trade(action, parents)
+
+
 def test_actionable_rejects_qkernel_payoff_above_receipt_lcb():
     parents, action = actionable_graph(
         action_payload={

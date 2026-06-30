@@ -82,3 +82,31 @@ def test_buy_yes_is_identity(monkeypatch):
     )
     assert proof is not None and proof["passed"] is True
     assert proof["q_exec_lcb_basis"] == "BUY_YES_IDENTITY"
+
+
+def test_center_buy_taker_quality_uses_current_registry_floor_over_legacy_payload(monkeypatch):
+    _patch(monkeypatch, _bound())
+    payload = dict(
+        _BUY_NO,
+        event_type="FORECAST_SNAPSHOT_READY",
+        strategy_key="center_buy",
+        direction="buy_yes",
+        q_live="0.24",
+        q_lcb_5pct="0.18",
+        kelly_size_usd="10.0",
+        min_entry_price="0.05",
+        min_expected_profit_usd="0.05",
+        min_submit_edge_density="0.02",
+    )
+
+    proof = _build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.06,
+        fresh_best_ask=0.07,
+    )
+
+    assert proof is not None
+    assert proof["passed"] is False
+    assert proof["reason"] == "strategy_live_quality_floor_not_met"
+    assert proof["min_entry_price"] == "0.1"

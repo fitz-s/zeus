@@ -945,7 +945,17 @@ def mark_market_closed_hold_to_settlement(
     settlement harvesting.
     """
 
-    position.state = LifecyclePhase.DAY0_WINDOW.value
+    current_state = _runtime_state_value(position)
+    if current_state in {
+        LifecyclePhase.QUARANTINED.value,
+        LifecyclePhase.ECONOMICALLY_CLOSED.value,
+        LifecyclePhase.SETTLED.value,
+        LifecyclePhase.VOIDED.value,
+        LifecyclePhase.ADMIN_CLOSED.value,
+    }:
+        position.state = current_state
+    else:
+        position.state = LifecyclePhase.DAY0_WINDOW.value
     position.pre_exit_state = ""
     position.exit_state = ""
     position.next_exit_retry_at = ""
@@ -1071,10 +1081,11 @@ def _dual_write_market_closed_hold_if_available(
         position.last_monitor_at = occurred_at
         if "closed_market_hold_preserved_monitor_evidence" not in position.applied_validations:
             position.applied_validations.append("closed_market_hold_preserved_monitor_evidence")
+        phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
         events, projection = build_monitor_refreshed_canonical_write(
             position,
             sequence_no=sequence_no,
-            phase_after=LifecyclePhase.DAY0_WINDOW.value,
+            phase_after=phase_after,
             source_module="src.execution.exit_lifecycle",
         )
         event = dict(events[0])
@@ -1094,7 +1105,7 @@ def _dual_write_market_closed_hold_if_available(
         event["venue_status"] = None
         event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
         projection["updated_at"] = occurred_at
-        projection["phase"] = LifecyclePhase.DAY0_WINDOW.value
+        projection["phase"] = phase_after
         projection["order_status"] = getattr(position, "order_status", "") or "filled"
         projection["exit_reason"] = ""
         projection["exit_retry_count"] = 0

@@ -6886,10 +6886,11 @@ def _edli_refresh_continuous_money_path_families(
         try:
             from src.data.substrate_priority import mark_money_path_substrate_priority
 
+            marker_families = () if priority_conditions else clean_families
             mark_money_path_substrate_priority(
                 reason="continuous_redecision_confirm_refresh",
                 ttl_seconds=35.0,
-                families=clean_families,
+                families=marker_families,
                 condition_ids=priority_conditions,
             )
         except Exception as exc:  # noqa: BLE001
@@ -6919,12 +6920,12 @@ def _edli_refresh_continuous_money_path_families(
 def _edli_redecision_priority_condition_limit() -> int:
     raw = os.environ.get(
         "ZEUS_REDECISION_PRIORITY_CONDITION_LIMIT",
-        os.environ.get("ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS", "24"),
+        os.environ.get("ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS", "8"),
     )
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        value = 24
+        value = 8
     return max(1, min(500, value))
 
 

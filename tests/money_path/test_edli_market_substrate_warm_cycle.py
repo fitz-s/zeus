@@ -105,6 +105,81 @@ def _create_minimal_trade_exposure_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def test_held_position_refresh_scope_excludes_stale_closed_trading_dates(monkeypatch):
+    """Old chain-backed rows stay settlement work; they must not consume live refresh budget."""
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 6, 30, 2, 50, tzinfo=timezone.utc)
+            return value if tz is None else value.astimezone(tz)
+
+    class _NoClose:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def execute(self, *args, **kwargs):
+            return self._conn.execute(*args, **kwargs)
+
+        def close(self) -> None:
+            pass
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            phase TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            condition_id TEXT
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_current (
+            position_id, city, target_date, temperature_metric, phase,
+            chain_state, chain_shares, condition_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "old-munich-30-no",
+                "Munich",
+                "2026-06-17",
+                "high",
+                "quarantined",
+                "entry_authority_quarantined",
+                29.14,
+                "old-cond",
+            ),
+            (
+                "current-miami",
+                "Miami",
+                "2026-06-29",
+                "high",
+                "active",
+                "synced",
+                12.0,
+                "current-cond",
+            ),
+        ],
+    )
+    monkeypatch.setattr(substrate_observer, "datetime", _FixedDatetime)
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_read_only",
+        lambda: _NoClose(conn),
+    )
+
+    rows = substrate_observer._edli_current_held_position_scope_rows()
+
+    assert rows == [(("Miami", "2026-06-29", "high"), "current-cond")]
+
+
 def test_day0_live_family_admission_uses_market_events_without_coldboot_flood():
     forecasts_conn = sqlite3.connect(":memory:")
     trade_conn = sqlite3.connect(":memory:")
@@ -855,7 +930,7 @@ def test_continuous_redecision_confirm_refresh_delegates_snapshot_production(mon
         {
             "reason": "continuous_redecision_confirm_refresh",
             "ttl_seconds": 35.0,
-            "families": {("Paris", "2026-06-20", "low")},
+            "families": (),
             "condition_ids": {"cond-1", "cond-2"},
         }
     ]
@@ -1334,7 +1409,7 @@ def test_money_path_priority_cycle_resolves_condition_marker_without_pending_bac
     monkeypatch.setattr(
         substrate_observer,
         "_claim_order_priority_families_for_refresh",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("claim read should not run")),
+        lambda *a, **k: [],
     )
     monkeypatch.setattr(
         substrate_observer,
@@ -1646,14 +1721,17 @@ def test_money_path_priority_cycle_services_blocked_family_priority_marker(monke
     substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
-    assert calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["extra_priority_families"] == [
+        ("Tokyo", "2026-06-28", "low"),
+        ("Shanghai", "2026-06-28", "high"),
+    ]
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
 
 
-def test_money_path_priority_cycle_marker_family_does_not_mix_claim_order(monkeypatch):
-    """A live priority marker owns the current tick even without condition ids."""
+def test_money_path_priority_cycle_marker_family_does_not_starve_claim_order(monkeypatch):
+    """A live marker cannot hide claim-order Day0/redecision work."""
 
     calls: list[dict] = []
     marker_families = [("Shanghai", "2026-06-28", "high")]
@@ -1699,7 +1777,7 @@ def test_money_path_priority_cycle_marker_family_does_not_mix_claim_order(monkey
     substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
-    assert calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["extra_priority_families"] == claim_families + marker_families
     assert calls[0]["include_pending_families"] is False
 
 
@@ -2029,7 +2107,7 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert "merge_existing=True" in refresh_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
-    assert "families=clean_families" in confirm_src
+    assert "families=marker_families" in confirm_src
     assert "condition_ids=priority_conditions" in confirm_src
 
 

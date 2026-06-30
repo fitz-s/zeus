@@ -55,7 +55,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from src.config import settings
@@ -707,19 +707,25 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
                 if "shares" in cols
                 else "COALESCE(chain_shares, 0)"
             )
+            # Executable substrate refresh is for live/redecision money paths, not
+            # historical settlement cleanup. Keep yesterday to avoid UTC/local-date
+            # false drops for west-of-UTC markets after 00:00Z; older held rows remain
+            # settlement/reconciliation work and must not consume live refresh budget.
+            target_floor = (
+                datetime.now(timezone.utc).date() - timedelta(days=1)
+            ).isoformat()
             chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
             if "chain_state" in cols:
                 chain_state_filter = "AND COALESCE(chain_state, '') IN ({})".format(
                     ",".join("?" for _ in chain_state_values)
                 )
-                quarantine_chain_state_filter = "AND COALESCE(chain_state, '') IN ({})".format(
-                    ",".join("?" for _ in chain_state_values)
+                query_params: tuple[object, ...] = (
+                    *chain_state_values,
+                    target_floor,
                 )
-                query_params: tuple[object, ...] = (*chain_state_values, *chain_state_values)
             else:
                 chain_state_filter = ""
-                quarantine_chain_state_filter = "AND 0"
-                query_params = ()
+                query_params = (target_floor,)
             rows = conn.execute(
                 f"""
                 SELECT DISTINCT city, target_date, temperature_metric, condition_id
@@ -731,13 +737,13 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
                             {chain_state_filter}
                         )
                         OR (
-                            phase = 'quarantined'
+                            phase IN ('quarantined', 'voided')
                             AND COALESCE(chain_shares, 0) > 0.000001
-                            {quarantine_chain_state_filter}
                         )
                        )
                    AND condition_id IS NOT NULL
                    AND TRIM(condition_id) != ''
+                   AND target_date >= ?
                 """,
                 query_params,
             ).fetchall()
@@ -2608,17 +2614,14 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
                 exact_priority_condition_ids,
             )
             claim_priority_read_failed = False
-            if priority_marker_active:
+            claim_priority_families = _claim_order_priority_families_for_refresh(
+                conn,
+                consumer_name="edli_reactor_v1",
+                now_utc=datetime.now(timezone.utc),
+            )
+            if claim_priority_families is None:
+                claim_priority_read_failed = True
                 claim_priority_families = []
-            else:
-                claim_priority_families = _claim_order_priority_families_for_refresh(
-                    conn,
-                    consumer_name="edli_reactor_v1",
-                    now_utc=datetime.now(timezone.utc),
-                )
-                if claim_priority_families is None:
-                    claim_priority_read_failed = True
-                    claim_priority_families = []
         finally:
             _cancel_sqlite_deadline_interrupt(claim_deadline_timer)
             if claim_deadline_installed:
@@ -2626,11 +2629,18 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
         # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
-        priority_families = (
-            list(priority_marker_families)
-            + list(condition_priority_families)
+        priority_families: list[tuple[str, str, str]] = []
+        priority_family_seen: set[tuple[str, str, str]] = set()
+        for family in (
+            list(condition_priority_families)
             + list(claim_priority_families)
-        )
+            + list(priority_marker_families)
+        ):
+            key = tuple(str(part or "").strip() for part in family)
+            if len(key) != 3 or not all(key) or key in priority_family_seen:
+                continue
+            priority_family_seen.add(key)
+            priority_families.append(key)  # type: ignore[arg-type]
         if not (
             priority_families
             or exact_priority_condition_ids

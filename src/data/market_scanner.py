@@ -299,7 +299,7 @@ def _priority_direct_clob_prefetch_condition_limit() -> int:
         configured = int(
             os.environ.get(
                 "ZEUS_MARKET_DISCOVERY_PRIORITY_DIRECT_CLOB_PREFETCH_MAX_CONDITIONS",
-                "24",
+                "8",
             )
         )
     except ValueError:

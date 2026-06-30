@@ -3,18 +3,21 @@
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
-#     - the close-before-open gate: a SIBLING-different-bin redecision with a live old
+#     - the close-before-open gate: a SIBLING-different-bin selection with a live old
 #       leg produces EXIT_OLD_LEG (lease EXIT_SUBMITTED) and NO new-bin entry; the old
-#       leg must be proven zero/dust before a counter-entry is admitted (ENTER_NEW_BIN),
-#     - entry-path + D1 fill-up byte-identity: for a fresh entry OR a same-token fill-up
-#       the shift-bin orchestration is a complete no-op (read_held_sibling_exposure →
-#       None → NOOP), so neither working path is altered,
+#       leg must be proven zero/dust before a counter-entry is admitted (ENTER_NEW_BIN).
+#       This applies even when the trigger is a forecast snapshot rather than an
+#       already-labelled redecision event.
+#     - true fresh-entry byte-identity: with no held family exposure, shift-bin is a
+#       complete no-op (read_held_sibling_exposure → None → NOOP), so the entry path is
+#       unaltered. Same-token held exposure belongs to D1 fill-up, not D2 shift-bin.
 #     - the OLD-leg closure proof: read_old_leg_residual_usd returns 0.0 once the old
 #       leg leaves position_current (voided/closed), and +inf on ambiguous truth so the
 #       caller never falsely enters.
 """Reactor-level integration for D2 shift-bin: close-before-open + path byte-identity."""
 from __future__ import annotations
 
+import inspect
 import sqlite3
 
 import pytest
@@ -83,9 +86,18 @@ def test_old_leg_residual_ambiguous_truth_is_inf_never_enter():
 
 
 # ---------------------------------------------------------------------------
-# THE HAZARD this feature fixes: a sibling redecision must NOT open the new bin while
+# THE HAZARD this feature fixes: a sibling selection must NOT open the new bin while
 # the old leg is live. Through the wiring this is EXIT_OLD_LEG, allow_entry False.
 # ---------------------------------------------------------------------------
+def test_reactor_runs_same_family_management_for_forecast_selections_too():
+    """A forecast event with a held sibling is position management, not fresh entry."""
+
+    src = inspect.getsource(era)
+    assert "if _recapture.may_submit and allow_same_family_monitor_owned" not in src
+    assert "if _recapture.may_submit:" in src
+    assert "_shift_bin_wiring.read_held_sibling_exposure(" in src
+
+
 def test_sibling_live_old_leg_is_exit_old_leg_no_entry():
     conn = _conn()
     _insert_held(conn, position_id="p-old", token_id="tok-A", bin_label="60-61F", cost_basis_usd=4.0)

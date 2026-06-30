@@ -1832,6 +1832,38 @@ def _event_bound_strategy_live_quality_floors(strategy_key: str | None) -> dict[
     }
 
 
+def _event_bound_effective_live_quality_floors(
+    actionable_payload: Mapping[str, object],
+) -> dict[str, float]:
+    """Current registry floors, never weakened by older durable receipt payloads."""
+
+    strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
+    if not strategy_key:
+        event_type = str(actionable_payload.get("event_type") or "").strip()
+        try:
+            strategy_key = _event_bound_strategy_key(
+                event_type=event_type,
+                direction=str(actionable_payload.get("direction") or ""),
+                metric=str(actionable_payload.get("metric") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            strategy_key = ""
+    registry_floors = _event_bound_strategy_live_quality_floors(strategy_key)
+
+    def _max_floor(field: str) -> float:
+        payload_value = _optional_float(actionable_payload.get(field))
+        registry_value = float(registry_floors[field])
+        if payload_value is None:
+            return registry_value
+        return max(float(payload_value), registry_value)
+
+    return {
+        "min_entry_price": _max_floor("min_entry_price"),
+        "min_expected_profit_usd": _max_floor("min_expected_profit_usd"),
+        "min_submit_edge_density": _max_floor("min_submit_edge_density"),
+    }
+
+
 def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertificate) -> None:
     """Require executable calibration evidence before real live entry commands."""
 
@@ -4641,21 +4673,25 @@ def _build_event_bound_no_submit_receipt_core(
                 free_cash_usd=free_cash_usd,
             )
         )
-        # D1 FILL-UP (2026-06-22 lifecycle consult REQ-20260622-060011): the ONLY
-        # additive money-path branch. For a same-family management event whose
-        # freshly-selected winning leg is the SAME token as an existing held position, the
-        # family-total ΔU stake (_robust_stake_usd) is NOT what we submit — we top up
-        # the EXISTING position by the RESIDUAL to the fresh target
+        # D1/D2 SAME-FAMILY MANAGEMENT (2026-06-30 live fix): this must run for any
+        # submit-cleared family selection, not only events already labelled as
+        # ``allow_same_family_monitor_owned``. A forecast event that selects a sibling
+        # while a live old leg exists is no longer a true fresh entry; it is a position
+        # management problem. Same-token selections become residual fill-up, and
+        # sibling selections become close-before-open SHIFT_BIN. With no held family
+        # exposure both helpers no-op and the fresh-entry path is unchanged.
+        #
+        # For a freshly-selected winning leg that is the SAME token as an existing held
+        # position, the family-total ΔU stake (_robust_stake_usd) is NOT what we submit
+        # — we top up the EXISTING position by the RESIDUAL to the fresh target
         # (delta = target - current_live - same_token_pending), gated by the committed
-        # decide_fill_up predicate + the family-rebalance lease. Everything else
-        # (fresh entries, shift-bin siblings, non-redecision) takes the
-        # `held is None`/NOOP branch and runs BYTE-IDENTICAL to the prior path.
+        # decide_fill_up predicate + the family-rebalance lease.
         #
         # Placed AFTER the recapture proved may_submit and BEFORE kelly.size_usd is
         # bound: overriding _robust_stake_usd here keeps the portfolio reservation,
         # cost-basis hash, receipt kelly_size_usd, actionable cert and USD->shares
         # conversion ALL coherent off the one value (consult: the single chokepoint).
-        if _recapture.may_submit and allow_same_family_monitor_owned:
+        if _recapture.may_submit:
             _family_key = str(family.family_id or "")
             _existing_shift_lease = _shift_bin_wiring.active_shift_lease_for_family(
                 trade_conn,
@@ -6315,9 +6351,10 @@ def _build_event_bound_taker_quality_proof(
     min_incremental_profit = Decimal(str(actionable_payload.get("min_taker_incremental_profit_usd") or "0.05"))
     min_model_confidence = Decimal(str(actionable_payload.get("min_taker_model_confidence") or "0.60"))
     min_profit_ratio = Decimal(str(actionable_payload.get("min_taker_profit_ratio") or "1.20"))
-    min_entry_price = Decimal(str(actionable_payload.get("min_entry_price") or "0"))
-    min_expected_profit = Decimal(str(actionable_payload.get("min_expected_profit_usd") or "0"))
-    min_submit_edge_density = Decimal(str(actionable_payload.get("min_submit_edge_density") or "0"))
+    live_quality_floors = _event_bound_effective_live_quality_floors(actionable_payload)
+    min_entry_price = Decimal(str(live_quality_floors["min_entry_price"]))
+    min_expected_profit = Decimal(str(live_quality_floors["min_expected_profit_usd"]))
+    min_submit_edge_density = Decimal(str(live_quality_floors["min_submit_edge_density"]))
     required_profit = max(
         maker_expected_profit_usd * min_profit_ratio,
         maker_expected_profit_usd + min_incremental_profit,
@@ -6331,7 +6368,7 @@ def _build_event_bound_taker_quality_proof(
         and model_confidence >= min_model_confidence
     )
     strategy_quality_floor_pass = bool(
-        touch_dec >= min_entry_price
+        touch_dec > min_entry_price
         and taker_expected_profit_usd >= min_expected_profit
         and taker_edge_density >= min_submit_edge_density
     )
@@ -7136,12 +7173,14 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             f"cert_q={cert_q_live:.9f}:payload_q={payload_q_live:.9f}:"
             f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
         )
-    min_entry_price = _optional_float(actionable_payload.get("min_entry_price"))
+    min_entry_price = _event_bound_effective_live_quality_floors(actionable_payload)[
+        "min_entry_price"
+    ]
     cert_cost = _optional_float(cert.get("cost"))
     if (
         min_entry_price is not None
         and cert_cost is not None
-        and cert_cost + 1e-12 < min_entry_price
+        and cert_cost <= min_entry_price + 1e-12
     ):
         raise ValueError(
             "LIVE_ENTRY_QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
@@ -7186,6 +7225,13 @@ def _actionable_payload_from_receipt(
 ) -> dict[str, object]:
     reserved_notional = float(live_cap_cert.payload["reserved_notional_usd"])
     live_quality_floors = _event_bound_strategy_live_quality_floors(receipt.strategy_key)
+    def _receipt_floor(field: str, value: object) -> float:
+        receipt_value = _optional_float(value)
+        registry_value = float(live_quality_floors[field])
+        if receipt_value is None:
+            return registry_value
+        return max(receipt_value, registry_value)
+
     city = receipt.city or _event_identity_value(event, "city")
     target_date = receipt.target_date or _event_identity_value(event, "target_date")
     metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
@@ -7248,20 +7294,14 @@ def _actionable_payload_from_receipt(
         "p_fill_lcb": receipt.p_fill_lcb,
         "trade_score": receipt.trade_score,
         "action_score": receipt.trade_score,
-        "min_entry_price": (
-            receipt.min_entry_price
-            if receipt.min_entry_price is not None
-            else live_quality_floors["min_entry_price"]
+        "min_entry_price": _receipt_floor("min_entry_price", receipt.min_entry_price),
+        "min_expected_profit_usd": _receipt_floor(
+            "min_expected_profit_usd",
+            receipt.min_expected_profit_usd,
         ),
-        "min_expected_profit_usd": (
-            receipt.min_expected_profit_usd
-            if receipt.min_expected_profit_usd is not None
-            else live_quality_floors["min_expected_profit_usd"]
-        ),
-        "min_submit_edge_density": (
-            receipt.min_submit_edge_density
-            if receipt.min_submit_edge_density is not None
-            else live_quality_floors["min_submit_edge_density"]
+        "min_submit_edge_density": _receipt_floor(
+            "min_submit_edge_density",
+            receipt.min_submit_edge_density,
         ),
         "fdr_family_id": receipt.fdr_family_id,
         "kelly_decision_id": receipt.kelly_decision_id,
@@ -11268,7 +11308,7 @@ def _proofs_with_qkernel_candidate_economics(
             min_entry_price is not None
             and math.isfinite(min_entry_price)
             and min_entry_price > 0.0
-            and cost + 1e-12 < min_entry_price
+            and cost <= min_entry_price + 1e-12
         ):
             return (
                 "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"

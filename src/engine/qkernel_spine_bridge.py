@@ -1599,7 +1599,7 @@ def _qkernel_buy_yes_strategy_floor_rejection_reason(
         floor = float(getattr(profile, "min_entry_price", 0.05) if profile is not None else 0.05)
     except Exception:  # noqa: BLE001
         floor = 0.05
-    if cost + 1e-12 < floor:
+    if cost <= floor + 1e-12:
         return (
             "QKERNEL_COST_BELOW_STRATEGY_FLOOR:"
             f"strategy=center_buy:cost={cost:.9f}:min_entry_price={floor:.9f}"

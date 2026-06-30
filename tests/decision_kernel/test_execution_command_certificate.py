@@ -226,6 +226,17 @@ def test_execution_command_rejects_missing_qkernel_selection_guard():
         verify_execution_command(command, parents)
 
 
+def test_execution_command_rejects_side_not_armed_qkernel_selection_guard():
+    economics = dict(_actionable_payload()["qkernel_execution_economics"])
+    economics["selection_guard_basis"] = "SIDE_NOT_ARMED"
+    parents, command = execution_graph(
+        command_payload={"qkernel_execution_economics": economics},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="selection_guard_basis blocks side"):
+        verify_execution_command(command, parents)
+
+
 def test_execution_command_verifies_without_cap_flag():
     # The cap-enabled flag is gone from both the live_cap and actionable payloads;
     # verification does not depend on it and still passes.

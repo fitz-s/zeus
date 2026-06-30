@@ -3021,6 +3021,69 @@ def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
     assert "closed_market_hold_preserved_monitor_evidence" in payload["applied_validations"]
 
 
+def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-chain-backed-quarantine-hold",
+        market_id="condition-test",
+        city="Munich",
+        cluster="Munich",
+        target_date="2026-06-30",
+        bin_label="30C",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-test",
+        state="quarantined",
+        chain_state="entry_authority_quarantined",
+        shares=29.14,
+        chain_shares=29.14,
+        cost_basis_usd=21.27,
+        chain_cost_basis_usd=21.27,
+        strategy_key="opening_inertia",
+        env="live",
+        entered_at="2026-06-29T08:55:00+00:00",
+        order_status="filled",
+        exit_reason="entry_authority_chain_absence_conflict",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+
+    mark_market_closed_hold_to_settlement(position, conn=conn)
+
+    assert position.state == "quarantined"
+    current = conn.execute(
+        """
+        SELECT phase, chain_state, order_status, exit_reason
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "quarantined",
+        "chain_state": "entry_authority_quarantined",
+        "order_status": "filled",
+        "exit_reason": "",
+    }
+    event = conn.execute(
+        """
+        SELECT phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert event["phase_after"] == "quarantined"
+    payload = json.loads(event["payload_json"])
+    assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+
+
 def test_day0_monitor_projection_clears_stale_backoff_order_status(conn):
     from src.contracts.semantic_types import ExitState
     from src.engine.lifecycle_events import (
