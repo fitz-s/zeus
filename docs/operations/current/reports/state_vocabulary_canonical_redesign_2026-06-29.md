@@ -220,3 +220,72 @@ State` lifecycle + `resolution_state` column are therefore **clean forward-prep*
 and the retirement arc has nothing live to retire until the dead backfill is reconciled (flagged as a
 separate task: fix-or-delete `backfill_settlement_outcome_type.py`). The schema/projection layer stands on
 its own merits (typed axes, no value-coupling); no live behavior depends on it yet.
+
+## 12. Round-2 consult ruling (2026-06-30) — Polymarket-grounded redundancy verdict + ideal fact-log model
+
+Consult round-2 (thread `6a42bc3d`, frontier model, web-grounded in Polymarket CLOB / ERC-1155 / UMA
+docs) **independently converged** with the Claude-side first-principles analysis
+(`scratchpad/first_principles_redundancy_analysis.md`). Both, from different model families, reached:
+the ideal is **not** "A1–A10 stored axes" — it is an **append-only fact/decision log with typed reducers
+and pure (optionally materialized) projections**. A projection that has a second writer or can diverge
+from source facts is a redundancy bug.
+
+### 12.1 Headline counts (consult, scoped to inventory + `cb1e3c64f` source)
+- **Object level:** 14 REAL / 39 REDUNDANT of **53** state-bearing vocabularies (73.6% redundant).
+- **Value level:** 84 REAL / 137 REDUNDANT of **221** values (62.0% redundant).
+- Revises the doc's earlier §0 "13 survivors / 40 collapsible" to **14 survivors** (A8 event-resolution
+  and A10 redemption-accounting are now deliberately split).
+
+### 12.2 Root mechanism (confirmed): stored-projection drift
+Every Type-B scar state — phantom void reasons (`de147e29` repair), stale terminal projection events
+(`c92b171d4` ignore-filter), the chain/quarantine enum accretion (the `CHAIN_CONFIRMED_ZERO` loader-crash
+its own docstring records), `HOLD_REST_IN_PROGRESS` ("a lock masquerading as state") — is a **second-writer
+drift symptom**. Make the projection pure (recompute from the fact log; one writer for any materialized
+cache) and the entire Type-B class is **unreachable by construction**: nothing stored to go phantom/stale,
+no non-member to crash the loader, no repair pass to undo a void.
+
+### 12.3 The ideal: 8 stored mechanisms, everything else projects
+STORED (append-only, one reducer each): (1) command/outbox fact log — local stages only, **no**
+FILLED/CANCELLED/EXPIRED/PARTIAL; (2) venue-order fact log (`LIVE/PARTIALLY_MATCHED/MATCHED/
+CANCEL_CONFIRMED/EXPIRED`; `VENUE_WIPED`→reconcile finding); (3) venue-trade fact log
+(`MATCHED/MINED/CONFIRMED/RETRYING/FAILED`); (4) wallet/token-balance fact log (quantity + snapshot
+completeness `CHAIN_SYNCED/CHAIN_EMPTY/CHAIN_UNKNOWN`; **no on-chain "position status"**); (5)
+**review/work-item log** `OPEN/EXPIRED/RESOLVED` + reason codes — **absorbs all quarantine phases/reasons**;
+(6) market/event resolution fact log (`UNRESOLVED…VENUE_RESOLVED`+`winning_bin`/`DISPUTED`/`VOID_50_50`/
+`SOURCE_REVISION`; **no position WIN/LOSE at event grain**); (7) redemption-accounting fact log
+(intent/tx-observed/confirmed/review/operator; **no `REDEEM_SUBMITTED`** — Zeus never submits); (8)
+collateral wrap/unwrap command log.
+PROJECTIONS (computed, ≤1 writer if materialized): A5 `PositionPhase`, A6 `ExitProgress`, A9
+`PositionEconomicOutcome` (Direction Law over `winning_bin`×direction), `OrderResult.status`,
+governor/family-dedup exposure predicates, `position_lots.state` (collapses to optimistic|confirmed +
+`FillAuthority`/`CausalityStatus`). UMA dispute / void-50-50 / source-revision stay **distinct** (action-
+changing), not collapsed to one unresolved flag.
+
+### 12.4 Migration ordering (consult, authoritative) + status
+1. **Freeze the source-owner list + a no-other-writer antibody per mechanism** ("more important than
+   deleting values"). ✅ **Landed this session:** `tests/test_single_writer_per_state_mechanism.py`
+   (INV-OWNER-1). Locks the 4 already-single-owner mechanisms; baselines the multi-writer ones with
+   ratchet targets. **Quantified the disease: `position_current` (materialized A5 projection) has 7
+   writers** (`projection.py`, `ledger.py`, `position_duplicate_consolidator.py`, `edli_position_bridge.py`,
+   `command_recovery.py`, `exchange_reconcile.py`, `main.py`); `venue_commands` 2; `settlement_commands` 2.
+2. Complete INV-CL-1 (raw-status ratchet, file by file) — baseline already 9→3.
+3. Narrow command truth by projection first (`project_legacy_command_display`; prove FILLED/CANCELLED/
+   EXPIRED derivable from command events + A2/A3 before changing any writer).
+4. Move `VENUE_WIPED` to a reconcile finding (projection-preserve behavior; low-row, high-semantic).
+5. Finish A6 sell-truth elimination (stop writing sell states into `position.order_status`).
+6. Collapse `position_lots.state` CHECK to optimistic|confirmed (after writer-grep proves no legacy writes).
+7. Introduce `ReviewWorkItem` as the quarantine owner; keep `phase=quarantined` only as projection in transit.
+8. A8/A9 retirement arc (keep `outcome_type` legacy; populate `resolution_state` only same-transaction — see §11).
+9. Redemption cleanup (delete `REDEEM_SUBMITTED` after zero-row + no-writer proof).
+10. Dead-value deletion (two proofs each). Consult-named provable-dead: `HEARTBEAT_CANCEL_SUSPECTED`,
+    `GHOST_DUPLICATE`, `quarantine_fill_failed`, `quarantine_void_failed`, `REDEEM_SUBMITTED`, retrain `RUNNING`.
+11. Core CHECK migrations stay single-DB (all 6 vocab tables are trade-class in `zeus_trades.db` → one
+    SAVEPOINT per table; cross-DB still INV-37 ATTACH+SAVEPOINT).
+12. Only then remove compatibility enums — when the owning reducer/projection is wired and the old write
+    path is unreachable. **Never delete a value because the ideal calls it redundant; delete it when its
+    owner is wired and its write path is dead.**
+
+### 12.5 The one fact that would change the verdict
+A live path where a "redundant" stored projection cannot be deterministically reconstructed from source
+facts and is needed to avoid a wrong next-cycle decision. The fix even then is **not** a second truth
+writer — it is to identify and store the **missing source fact**.
