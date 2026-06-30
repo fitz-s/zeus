@@ -113,6 +113,35 @@ class TestNoAction:
         """Even after 48h uptime, same SHA is fine."""
         _run(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, boot_ts_hours_ago=48.0)
 
+    def test_no_divergence_clears_existing_stale_flag_projection(self, tmp_path):
+        """A stale advisory flag must not keep saying paused after a matching restart."""
+        df_path = tmp_path / "deployment_freshness.json"
+        df_path.write_text(
+            json.dumps(
+                {
+                    "boot_sha": "old",
+                    "current_sha": DIFF_SHA,
+                    "uptime_hours": 1.0,
+                    "detected_at": _ts().isoformat(),
+                    "pause_reason": "deployment_freshness_mismatch",
+                    "status": "mismatch",
+                }
+            )
+        )
+
+        _run(
+            boot_sha=BOOT_SHA,
+            current_sha=BOOT_SHA,
+            boot_ts_hours_ago=1.0,
+            state_path_return=df_path,
+        )
+
+        flag = json.loads(df_path.read_text())
+        assert flag["boot_sha"] == BOOT_SHA
+        assert flag["current_sha"] == BOOT_SHA
+        assert flag["pause_reason"] is None
+        assert flag["status"] == "fresh"
+
     def test_boot_state_not_captured_silent(self):
         """If boot SHA is None (capture failed), function returns silently."""
         _check_deployment_freshness(

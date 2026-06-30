@@ -3080,10 +3080,31 @@ def _check_deployment_freshness(
         )
         return
 
-    if current_sha == _boot_sha:
-        return  # No divergence.
-
     uptime_hours: float = (_now - _boot_ts).total_seconds() / 3600.0
+    df_path = state_path("deployment_freshness.json")
+
+    def _write_deployment_freshness_state(payload: dict[str, object]) -> None:
+        try:
+            _tmp = str(df_path) + ".tmp"
+            with open(_tmp, "w") as _f:
+                json.dump(payload, _f, indent=2)
+            os.replace(_tmp, str(df_path))
+        except Exception as _exc:
+            logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
+
+    if current_sha == _boot_sha:
+        if df_path.exists():
+            _write_deployment_freshness_state(
+                {
+                    "boot_sha": _boot_sha,
+                    "current_sha": current_sha,
+                    "uptime_hours": round(uptime_hours, 2),
+                    "detected_at": _now.isoformat(),
+                    "pause_reason": None,
+                    "status": "fresh",
+                }
+            )
+        return  # No divergence.
 
     if uptime_hours >= 24.0:
         import signal as _signal
@@ -3112,21 +3133,16 @@ def _check_deployment_freshness(
         # NOT control_plane.json — that file is overwritten on every cycle by
         # _write_control_payload (control_plane.py:119) which writes only
         # {commands, acks}. A dedicated file survives all control_plane writes.
-        df_path = state_path("deployment_freshness.json")
-        try:
-            _df: dict = {
+        _write_deployment_freshness_state(
+            {
                 "boot_sha": _boot_sha,
                 "current_sha": current_sha,
                 "uptime_hours": round(uptime_hours, 2),
                 "detected_at": _now.isoformat(),
                 "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
+                "status": "mismatch",
             }
-            _tmp = str(df_path) + ".tmp"
-            with open(_tmp, "w") as _f:
-                json.dump(_df, _f, indent=2)
-            os.replace(_tmp, str(df_path))
-        except Exception as _exc:
-            logger.warning("deployment_freshness: failed to write flag file: %s", _exc)
+        )
         # Pause new entries immediately. Exit submits are also protected at the
         # live_venue_submit capability boundary, so stale code cannot keep trading
         # while the operator restarts.
