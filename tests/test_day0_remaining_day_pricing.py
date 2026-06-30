@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-25
+# Last reused or audited: 2026-06-30
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -151,6 +151,98 @@ class TestPersistence:
         )
         assert len(out) == 1 and out[0].temps_c[0] == 20.0
 
+    def test_require_expected_rejects_partial_model_bundle(self):
+        """Munich regression: one fresh regional vector is not a complete live bundle."""
+        conn = _conn()
+        icon_only = _vector(model="icon_d2")
+        persist_day0_hourly_vectors(
+            [icon_only],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:test",
+            now=PRUNE_NOW,
+        )
+
+        out = read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            now=datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
+            conn=conn,
+            expected_models=["icon_d2", "ecmwf_ifs"],
+            require_expected=True,
+        )
+
+        assert out == []
+
+    def test_expected_bundle_reads_freshest_per_model_across_capture_times(self):
+        conn = _conn()
+        icon = _vector(
+            model="icon_d2",
+            captured_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            temps=[20.0] * 24,
+        )
+        ecmwf = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 8, 55, tzinfo=UTC),
+            temps=[18.0] * 24,
+        )
+        stale_ecmwf = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 7, 0, tzinfo=UTC),
+            temps=[10.0] * 24,
+        )
+        persist_day0_hourly_vectors(
+            [icon, ecmwf, stale_ecmwf],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:test",
+            now=PRUNE_NOW,
+        )
+
+        out = read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+            conn=conn,
+            expected_models=["icon_d2", "ecmwf_ifs"],
+            require_expected=True,
+        )
+
+        assert [v.model for v in out] == ["icon_d2", "ecmwf_ifs"]
+        assert [v.temps_c[0] for v in out] == [20.0, 18.0]
+
+    def test_required_expected_bundle_rejects_excessive_model_capture_skew(self):
+        conn = _conn()
+        icon = _vector(
+            model="icon_d2",
+            captured_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            temps=[20.0] * 24,
+        )
+        stale_anchor = _vector(
+            model="ecmwf_ifs",
+            captured_at=datetime(2026, 6, 10, 7, 50, tzinfo=UTC),
+            temps=[18.0] * 24,
+        )
+        persist_day0_hourly_vectors(
+            [icon, stale_anchor],
+            target_date="2026-06-10",
+            conn=conn,
+            request_hash="sha256:test",
+            now=PRUNE_NOW,
+        )
+
+        out = read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+            conn=conn,
+            expected_models=["icon_d2", "ecmwf_ifs"],
+            require_expected=True,
+            max_bundle_skew_minutes=60.0,
+        )
+
+        assert out == []
+
     def test_stale_vectors_are_not_served(self):
         """R9 freshness gate: a 5h-old run must NOT masquerade as the current
         remaining-day distribution."""
@@ -289,6 +381,81 @@ class TestRemainingDayMembers:
             payload={"metric": "high", "rounded_value": 25.0}, family=self._family(),
             unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         ) is None
+
+    def test_redecision_members_require_expected_hourly_bundle(self, monkeypatch):
+        import src.engine.event_reactor_adapter as era
+        import src.data.day0_hourly_vectors as hv
+
+        captured = {}
+
+        def fake_read(**kw):
+            captured.update(kw)
+            return []
+
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda city: ["icon_d2", "ecmwf_ifs"])
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", fake_read)
+
+        payload = {"metric": "high", "rounded_value": 25.0}
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        )
+
+        assert members is None
+        assert captured["expected_models"] == ["icon_d2", "ecmwf_ifs"]
+        assert captured["require_expected"] is True
+        assert captured["max_bundle_skew_minutes"] == hv.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
+        assert payload["_edli_day0_remaining_unavailable_reason"] == "incomplete_hourly_model_bundle"
+
+    def test_redecision_members_missing_city_config_blocks_before_vector_read(self, monkeypatch):
+        import src.engine.event_reactor_adapter as era
+        import src.data.day0_hourly_vectors as hv
+
+        def fail_read(**kw):
+            raise AssertionError("missing city config must not read an unscoped vector bundle")
+
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {})
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", fail_read)
+
+        payload = {"metric": "high", "rounded_value": 25.0}
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        )
+
+        assert members is None
+        assert payload["_edli_day0_remaining_unavailable_reason"] == "city_config_missing_for_hourly_bundle"
+
+    def test_monitor_read_requires_expected_hourly_bundle(self, monkeypatch):
+        import src.engine.monitor_refresh as monitor_refresh
+        import src.data.day0_hourly_vectors as hv
+        import src.state.db as db
+
+        captured = {}
+
+        def fake_read(**kw):
+            captured.update(kw)
+            return []
+
+        monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
+        monkeypatch.setattr(hv, "day0_hourly_models_for_city", lambda city: ["icon_d2", "ecmwf_ifs"])
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", fake_read)
+
+        out = monitor_refresh._read_day0_hourly_vectors(
+            city=_paris(),
+            target_d=datetime(2026, 6, 10, tzinfo=UTC).date(),
+            now=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+        )
+
+        assert out is None
+        assert captured["expected_models"] == ["icon_d2", "ecmwf_ifs"]
+        assert captured["require_expected"] is True
+        assert captured["max_bundle_skew_minutes"] == hv.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
 
     def test_live_remaining_day_unavailable_blocks_before_legacy_fallback(self, monkeypatch):
         """When live Day0 remaining-day mode is enabled, missing vectors are an
@@ -512,6 +679,13 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
 
         assert hv.day0_hourly_models_for_city(_paris()) == ["ecmwf_ifs"]
+
+    def test_regional_model_keeps_global_ecmwf_anchor(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+
+        assert hv.day0_hourly_models_for_city(_paris()) == ["icon_d2", "ecmwf_ifs"]
 
     def test_refresh_uses_global_ecmwf_fallback_when_no_regional_model(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv

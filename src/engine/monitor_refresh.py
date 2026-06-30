@@ -929,6 +929,11 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
     """
 
     from src.state.db import get_forecasts_connection_read_only
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        day0_hourly_models_for_city,
+        read_freshest_day0_hourly_vectors,
+    )
 
     city_name = str(getattr(city, "name", "") or "")
     if not city_name:
@@ -937,53 +942,34 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
     decision_time = now or datetime.now(timezone.utc)
     try:
         conn = get_forecasts_connection_read_only()
-        conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         return None
     try:
-        latest = conn.execute(
-            """
-            SELECT captured_at
-            FROM day0_hourly_vectors
-            WHERE city = ? AND target_date = ?
-              AND datetime(captured_at) <= datetime(?)
-            ORDER BY datetime(captured_at) DESC
-            LIMIT 1
-            """,
-            (city_name, target_date, decision_time.isoformat()),
-        ).fetchone()
-        if latest is None:
-            return None
-        captured_at = str(latest["captured_at"] or "")
-        rows = conn.execute(
-            """
-            SELECT model, timezone_name, times_json, temps_c_json
-            FROM day0_hourly_vectors
-            WHERE city = ? AND target_date = ? AND captured_at = ?
-            ORDER BY model
-            """,
-            (city_name, target_date, captured_at),
-        ).fetchall()
+        expected_models = day0_hourly_models_for_city(city)
+        vectors = read_freshest_day0_hourly_vectors(
+            city=city_name,
+            target_date=target_date,
+            now=decision_time,
+            conn=conn,
+            expected_models=expected_models,
+            require_expected=bool(expected_models),
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        )
     except sqlite3.Error:
         return None
     finally:
         conn.close()
-    if not rows:
+    if not vectors:
         return None
 
     times: list[str] | None = None
     member_rows: list[list[float]] = []
-    for row in rows:
-        try:
-            row_times = json.loads(row["times_json"] or "null")
-            temps_c = json.loads(row["temps_c_json"] or "null")
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(row_times, list) or not isinstance(temps_c, list):
-            return None
+    captured_times: list[datetime] = []
+    for vector in vectors:
+        row_times = [str(item) for item in vector.times]
+        temps_c = list(vector.temps_c)
         if len(row_times) != len(temps_c) or not row_times:
             return None
-        row_times = [str(item) for item in row_times]
         if times is None:
             times = row_times
         elif row_times != times:
@@ -1001,15 +987,21 @@ def _read_day0_hourly_vectors(*, city, target_d: date, now: datetime | None = No
             member_rows.append(values_c)
         else:
             return None
+        captured_dt = _parse_utc_datetime(vector.captured_at)
+        if captured_dt is not None:
+            captured_times.append(captured_dt)
     if times is None or not member_rows:
         return None
-    captured_dt = _parse_utc_datetime(captured_at)
+    captured_dt = max(captured_times) if captured_times else None
     return {
         "members_hourly": np.asarray(member_rows, dtype=float),
         "times": times,
         "fetch_time": captured_dt,
         "source_id": "day0_hourly_vectors",
         "forecast_source_role": "day0_remaining_window_live",
+        "source_models": [vector.model for vector in vectors],
+        "expected_models": expected_models,
+        "source_model_count": len(vectors),
     }
 
 

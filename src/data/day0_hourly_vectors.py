@@ -68,6 +68,7 @@ DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-is
 DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
+DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -147,16 +148,21 @@ def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_
 def day0_hourly_models_for_city(city: Any) -> list[str]:
     """Live Day0 remaining-day hourly model set for a city.
 
-    Regional high-resolution models are preferred when the domain gate admits at least one. Global
-    ECMWF IFS 9km is the universal fallback, matching the replacement forecast anchor source already
-    used by the live probability chain. Without this fallback, cities outside the regional polygons
-    enter the Day0 evaluator and then fail at ``DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE`` forever.
+    Regional high-resolution models are experts, not a replacement for the live
+    probability chain's global anchor. When a regional model is available, keep
+    it in the bundle and also include the ECMWF IFS 9km anchor. Cities outside
+    the regional polygons use the anchor alone. Without this anchor floor, a
+    same-day monitor can silently collapse to one regional model and make live
+    exits on a different probability authority than the entry chain.
     """
 
     regional = in_domain_models_for_city(city)
-    if regional:
-        return regional
-    return list(GLOBAL_DAY0_HOURLY_FALLBACK_MODELS)
+    out: list[str] = []
+    for model in (*regional, *GLOBAL_DAY0_HOURLY_FALLBACK_MODELS):
+        normalized = str(model or "").strip()
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -405,14 +411,30 @@ def read_freshest_day0_hourly_vectors(
     max_age_hours: float = 3.0,
     now: Optional[datetime] = None,
     conn: Optional[sqlite3.Connection] = None,
+    expected_models: Optional[Iterable[str]] = None,
+    require_expected: bool = False,
+    max_bundle_skew_minutes: Optional[float] = None,
 ) -> list[Day0HourlyVector]:
     """Freshest persisted vector per model for (city, target_date).
 
     Vectors older than max_age_hours are EXCLUDED (a stale high-res run must
     not masquerade as the current remaining-day distribution — fail-closed to
     the legacy full-day path instead).
+
+    ``expected_models`` lets live consumers define the complete bundle they are
+    willing to treat as same-day authority. With ``require_expected=True``, any
+    missing expected model returns [] so a partial single-model regional vector
+    cannot sponsor a live decision. ``max_bundle_skew_minutes`` additionally
+    prevents mixing a fresh model row with a materially older row from another
+    model as one live authority bundle.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
+    expected: list[str] = []
+    for model in expected_models or ():
+        normalized = str(model or "").strip()
+        if normalized and normalized not in expected:
+            expected.append(normalized)
+    expected_set = set(expected)
     own_conn = conn is None
     if own_conn:
         from src.state.db import get_forecasts_connection_read_only
@@ -435,6 +457,8 @@ def read_freshest_day0_hourly_vectors(
         freshest: dict[str, Day0HourlyVector] = {}
         for row in rows:
             model = str(row[0])
+            if expected_set and model not in expected_set:
+                continue
             if model in freshest:
                 continue
             try:
@@ -455,6 +479,30 @@ def read_freshest_day0_hourly_vectors(
                 timezone_name=str(row[3]), captured_at=str(row[4]),
                 times=times, temps_c=temps,
             )
+        if require_expected and expected and any(model not in freshest for model in expected):
+            return []
+        if (
+            require_expected
+            and expected
+            and max_bundle_skew_minutes is not None
+            and all(model in freshest for model in expected)
+        ):
+            captured_times: list[datetime] = []
+            for model in expected:
+                captured = datetime.fromisoformat(
+                    str(freshest[model].captured_at).replace("Z", "+00:00")
+                )
+                if captured.tzinfo is None:
+                    return []
+                captured_times.append(captured.astimezone(UTC))
+            if captured_times:
+                skew_minutes = (
+                    max(captured_times) - min(captured_times)
+                ).total_seconds() / 60.0
+                if skew_minutes > float(max_bundle_skew_minutes):
+                    return []
+        if expected:
+            return [freshest[model] for model in expected if model in freshest]
         return list(freshest.values())
     finally:
         if own_conn:

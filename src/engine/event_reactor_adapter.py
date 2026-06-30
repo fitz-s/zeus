@@ -18495,6 +18495,8 @@ def _day0_remaining_day_members(
         return None
     try:
         from src.data.day0_hourly_vectors import (
+            DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            day0_hourly_models_for_city,
             read_freshest_day0_hourly_vectors,
             remaining_day_extremes_c,
         )
@@ -18502,10 +18504,23 @@ def _day0_remaining_day_members(
         metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
         if metric not in {"high", "low"}:
             return None
+        city_obj = runtime_cities_by_name().get(str(family.city))
+        if city_obj is None:
+            payload["_edli_day0_remaining_unavailable_reason"] = "city_config_missing_for_hourly_bundle"
+            return None
+        expected_models = day0_hourly_models_for_city(city_obj)
         vectors = read_freshest_day0_hourly_vectors(
-            city=str(family.city), target_date=str(family.target_date), now=decision_time
+            city=str(family.city),
+            target_date=str(family.target_date),
+            now=decision_time,
+            expected_models=expected_models,
+            require_expected=bool(expected_models),
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
         )
         if not vectors:
+            if expected_models:
+                payload["_edli_day0_remaining_expected_models"] = list(expected_models)
+                payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
             return None
         extremes_c = remaining_day_extremes_c(
             vectors, target_date=str(family.target_date), now=decision_time, metric=metric
@@ -18523,6 +18538,9 @@ def _day0_remaining_day_members(
                 else np.minimum(values, float(rounded))
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
+        payload["_edli_day0_remaining_model_names"] = [str(vector.model) for vector in vectors]
+        if expected_models:
+            payload["_edli_day0_remaining_expected_models"] = list(expected_models)
         return values
     except Exception as exc:  # noqa: BLE001 — report unavailable vectors at the seam
         import logging as _logging

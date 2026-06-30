@@ -327,7 +327,7 @@ test_trust_policy:
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
-    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-06-30"}
     tests/test_edli_live_scope_no_submit.py: {created: "2026-06-09", last_used: "2026-06-18", note: "live-only EDLI adapter boundary: forecast_plus_day0 is the only production scope; unsupported scopes reject before proof build or executor submit"}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}
