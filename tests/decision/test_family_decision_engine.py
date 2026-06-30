@@ -2211,8 +2211,15 @@ def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
     assert selected is passed_yes
 
 
-def test_selection_calibrator_blocks_unarmed_yes(monkeypatch):
-    """Unarmed selected-side evidence cannot license YES, modal or nonmodal."""
+@pytest.mark.parametrize("selection_basis", ["SIDE_NOT_ARMED", "ACTIVE_MISSING_CELL", "ACTIVE_THIN_CELL", "EB_THIN_SELECTED"])
+def test_selection_calibrator_blocks_unarmed_tail_yes_but_not_modal_yes(monkeypatch, selection_basis):
+    """Selection-bias evidence must not create a closed loop that starves modal YES.
+
+    Nonmodal YES tails still require selected-side evidence. The modal YES leg is
+    the center-buy route already guarded by qkernel payoff bounds, OOF reliability,
+    coherence, and the live strategy price floor, so lack of a selected-bias cell
+    must not force it to non-positive edge before selection.
+    """
 
     case = _case()
     space = _outcome_space(case)
@@ -2241,7 +2248,7 @@ def test_selection_calibrator_blocks_unarmed_yes(monkeypatch):
             cell_key=f"{kwargs['side']}|SIDE_NOT_ARMED",
             L_g=0.0,
             n_g=0,
-            basis="SIDE_NOT_ARMED",
+            basis=selection_basis,
         )
 
     monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
@@ -2272,17 +2279,22 @@ def test_selection_calibrator_blocks_unarmed_yes(monkeypatch):
 
     blocked_tail = next(d for d in guarded if d.route.bin_id == "b24")
     passed_modal = next(d for d in guarded if d.route.bin_id == "b25")
-    assert blocked_tail.selection_guard_basis == "SIDE_NOT_ARMED"
+    assert blocked_tail.selection_guard_basis == selection_basis
     assert blocked_tail.selection_guard_abstained is True
     assert blocked_tail.selection_guard_n == 0
     assert blocked_tail.selection_guard_q_safe == pytest.approx(0.0)
     assert blocked_tail.economics.edge_lcb < 0.0
     assert blocked_tail.economics.optimal_delta_u <= 0.0
-    assert passed_modal.selection_guard_basis == "SIDE_NOT_ARMED"
-    assert passed_modal.selection_guard_abstained is True
-    assert passed_modal.selection_guard_q_safe == pytest.approx(0.0)
-    assert passed_modal.economics.edge_lcb < 0.0
-    assert passed_modal.economics.optimal_delta_u <= 0.0
+    assert passed_modal.selection_guard_basis == "MODAL_YES_QKERNEL_OOF_GUARD"
+    assert passed_modal.selection_guard_abstained is False
+    assert passed_modal.selection_guard_cell_key.startswith(f"{selection_basis}:")
+    assert passed_modal.selection_guard_q_safe == pytest.approx(0.32)
+    assert passed_modal.economics.edge_lcb > 0.0
+    assert passed_modal.economics.optimal_delta_u > 0.0
+
+    selected, reason = engine._select(guarded)
+    assert reason is None
+    assert selected is passed_modal
 
 
 def test_selection_calibrator_deflation_recomputes_qkernel_stake(monkeypatch):

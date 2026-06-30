@@ -2559,7 +2559,12 @@ def _apply_edli_live_family_before_selection(
 
         def _edli_bootstrap_bin_no(bin_idx: int, _n: int) -> tuple[float, float, float]:
             p_market_no = analysis.buy_no_market_price(bin_idx)
-            edge = -float("inf")
+            p_yes = float(probabilities[bin_idx])
+            if not math.isfinite(p_yes):
+                edge = -float("inf")
+            else:
+                p_no = 1.0 - min(max(p_yes, 0.0), 1.0)
+                edge = float(p_no - p_market_no)
             return edge, edge, (0.0 if edge > 0.0 else 1.0)
 
         analysis._bootstrap_bin = _edli_bootstrap_bin  # type: ignore[method-assign]

@@ -1427,6 +1427,8 @@ class FamilyDecisionEngine:
             text = str(basis or "").upper()
             if not text:
                 continue
+            if text == "MODAL_YES_QKERNEL_OOF_GUARD":
+                continue
             if any(
                 marker in text
                 for marker in (
@@ -1739,12 +1741,21 @@ class FamilyDecisionEngine:
         raises probability and never moves the forecast center; it only lowers the
         candidate-local ``payoff_q_lcb`` used by edge, robust DeltaU, stake, and ROI.
 
-        Active armed cells that are missing/thin/stale are live-money abstains.
-        Unarmed sides are also live-money abstains: the forecast center is the
-        probability authority, but live entry still needs selected-side empirical
-        evidence before a candidate can outrank alternatives or reach execution.
+        Active armed cells that are missing/thin/stale remain live-money
+        abstains for NO and nonmodal YES. Forecast-modal YES is not re-expressed
+        through this selected-bias guard when the guard has no cell evidence:
+        it stays under the qkernel payoff lower bound, the OOF reliability guard,
+        market coherence, and live strategy price floors. That breaks the
+        closed loop where a missing selected-bias cell starved all center-buy
+        YES while still blocking tail/adjacent substitutes.
         """
         lead_days = float(getattr(case, "lead_hours", 0.0) or 0.0) / 24.0
+        modal_yes_no_selection_bias_evidence = {
+            "SIDE_NOT_ARMED",
+            "ACTIVE_MISSING_CELL",
+            "ACTIVE_THIN_CELL",
+            "EB_THIN_SELECTED",
+        }
 
         def _blocked_economics(econ: CandidateEconomics, *, edge_lcb: float) -> CandidateEconomics:
             return replace(
@@ -1806,6 +1817,11 @@ class FamilyDecisionEngine:
                     admission_margin=cost,
                 )
                 unarmed_side = str(verdict.basis) == "SIDE_NOT_ARMED"
+                modal_yes_without_selection_bias_evidence = (
+                    d.route.side == "YES"
+                    and bin_class == "modal"
+                    and str(verdict.basis) in modal_yes_no_selection_bias_evidence
+                )
                 q_safe = float(min(prior_lcb, float(verdict.q_safe)))
                 if unarmed_side:
                     q_safe = 0.0
@@ -1818,6 +1834,20 @@ class FamilyDecisionEngine:
                     "selection_guard_n": int(getattr(verdict, "n_g", 0) or 0),
                     "selection_guard_q_safe": float(q_safe),
                 }
+                if modal_yes_without_selection_bias_evidence:
+                    out.append(
+                        replace(
+                            d,
+                            selection_guard_basis="MODAL_YES_QKERNEL_OOF_GUARD",
+                            selection_guard_abstained=False,
+                            selection_guard_cell_key=(
+                                f"{str(verdict.basis)}:{str(verdict.cell_key)}"
+                            ),
+                            selection_guard_n=int(getattr(verdict, "n_g", 0) or 0),
+                            selection_guard_q_safe=float(prior_lcb),
+                        )
+                    )
+                    continue
                 if not verdict.trade or unarmed_side:
                     new_econ = _blocked_economics(econ, edge_lcb=-max(cost, 1e-9))
                     out.append(replace(d, economics=new_econ, **guard_fields))
