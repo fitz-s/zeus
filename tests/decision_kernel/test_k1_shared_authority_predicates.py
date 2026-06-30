@@ -36,6 +36,7 @@ def test_alt_credential_constant_is_shared_single_source():
     assert shared == frozenset(
         {
             verifier_module.IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+            verifier_module.FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
             verifier_module.FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
             verifier_module.DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
         }
@@ -158,6 +159,7 @@ def test_settlement_preimage_single_source():
         (3, "LIVE", False),
         # ALT credentials use maturity_level=4 as placeholder; guard must not apply.
         (4, "IDENTITY_FALLBACK_NO_PLATT_BUCKET", False),
+        (4, "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB", False),
         (4, "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE", False),
         (4, "DAY0_LIVE_OBSERVATION_HARD_FACT", False),
         # Unapproved/unknown authority with placeholder maturity stays too-low here

@@ -253,18 +253,36 @@ def test_actionable_rejects_risk_not_passed():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_fused_bootstrap_insufficient_calibration_parent():
+def test_actionable_accepts_conservative_bootstrap_when_coverage_history_is_thin():
     parents, action = actionable_graph(
         parent_overrides={
             claims.CALIBRATION: {
-                "authority": "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE",
+                "authority": "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB",
                 "coverage_status": "INSUFFICIENT_DATA",
+                "q_lcb_basis": "fused_center_bootstrap_p05",
+                "bootstrap_draws": 200,
                 "n_samples": 0,
             },
         },
     )
 
-    with pytest.raises(CertificateVerificationError, match="coverage insufficient"):
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_conservative_bootstrap_without_draws():
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.CALIBRATION: {
+                "authority": "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB",
+                "coverage_status": "INSUFFICIENT_DATA",
+                "q_lcb_basis": "fused_center_bootstrap_p05",
+                "bootstrap_draws": 10,
+                "n_samples": 0,
+            },
+        },
+    )
+
+    with pytest.raises(CertificateVerificationError, match="bootstrap draw floor"):
         verify_actionable_trade(action, parents)
 
 

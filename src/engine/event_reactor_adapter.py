@@ -377,13 +377,13 @@ class _CandidateProof:
     q_source: str | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
-    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
-    # coverage VERDICT status ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on
-    # the canonical path). Computed ONCE per family on the replacement path and
-    # carried on the proof — exactly how same_bin_yes_posterior travels — so the
-    # receipt-level twin admission gate evaluates the SAME settled-record evidence
-    # the proof-generation gate saw (never starved, never recomputed).
+    # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
+    # the settlement-backward coverage VERDICT status for this exact condition+direction
+    # ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on the canonical path).
+    # Carried on the proof so the receipt-level twin admission gate evaluates the SAME
+    # selected-leg evidence the proof-generation gate saw.
     settlement_coverage_status: str | None = None
+    replacement_calibration_credential: dict[str, Any] | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
     # probability_authority from the evidence dict
     # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
@@ -1906,15 +1906,34 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         raise ValueError("EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:IDENTITY_FALLBACK_NO_PLATT_BUCKET")
     # CERT BRIDGE (2026-06-10, funnel #1 unlock; corrected 2026-06-30) — the
-    # replacement credential without a typed, sufficiently-sampled coverage verdict is
-    # fail-closed for live submit. INSUFFICIENT_DATA is non-refuting for the
-    # settlement-coverage ARM/shrink predicate, but it is not a live-money confidence
-    # credential.
+    # replacement credential has two live forms:
+    #   * settlement-coverage licensed when enough claim-days exist;
+    #   * conservative fused-bootstrap q_lcb when claim-history is still thin.
+    # Missing/unknown coverage remains non-live; thin data is not allowed to masquerade
+    # as settlement coverage and is not allowed to default-deny the bootstrap bound.
     if authority == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY:
         raise ValueError(
             "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
         )
     if authority == DAY0_OBSERVATION_CALIBRATION_AUTHORITY:
+        return
+    if authority == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY:
+        if coverage_status != "INSUFFICIENT_DATA":
+            raise ValueError(
+                "EDLI_LIVE_CALIBRATION_COVERAGE_BLOCKED:"
+                f"{coverage_status or 'missing'}"
+            )
+        if payload.get("q_lcb_basis") != _FUSED_BOOTSTRAP_QLCB_BASIS:
+            raise ValueError("EDLI_LIVE_CALIBRATION_Q_LCB_BASIS_BLOCKED")
+        try:
+            bootstrap_draws = int(payload.get("bootstrap_draws"))
+        except (TypeError, ValueError):
+            bootstrap_draws = 0
+        if bootstrap_draws < _FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS:
+            raise ValueError(
+                "EDLI_LIVE_CALIBRATION_BOOTSTRAP_DRAW_FLOOR_BLOCKED:"
+                f"draws={bootstrap_draws}:min_draws={_FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS}"
+            )
         return
     if authority == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY:
         if coverage_status == "INSUFFICIENT_DATA":
@@ -9003,6 +9022,15 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     bankroll_usd: float,
     kelly_multiplier: float,
 ) -> NoSubmitProofBundle:
+    payload = dict(payload)
+    # Selected-leg authority only. Earlier code stamped a family-level replacement
+    # credential before proof selection; that could license/block a sibling bin or side.
+    # The proof carries the credential built for its exact (condition_id, direction).
+    payload.pop(_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY, None)
+    if proof.replacement_calibration_credential is not None:
+        payload[_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY] = dict(
+            proof.replacement_calibration_credential
+        )
     event_clock = EvidenceClock(
         source_available_at=_parse_utc(event.available_at) or decision_time,
         agent_received_at=_parse_utc(event.received_at) or decision_time,
@@ -12056,18 +12084,28 @@ def _generate_candidate_proofs(
     _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
         trade_conn, family=family, decision_time=decision_time
     )
-    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
-    # coverage verdict status, computed ONCE on the replacement path and threaded via
-    # the probability evidence. Read ONCE per family here; passed to the buy-NO
-    # admission gate AND carried on every proof so the receipt-level twin gate
-    # (events.reactor._receipt_money_path_blocker) evaluates the SAME evidence —
-    # the 21a4c14ee2 twin-gate lockstep lesson. None on the canonical path.
-    _settlement_coverage_status_raw = probability_evidence.get("settlement_coverage_status")
-    settlement_coverage_status = (
-        str(_settlement_coverage_status_raw)
-        if _settlement_coverage_status_raw is not None
-        else None
+    # Twin-authority reconciliation #7 (2026-06-11, selected-leg repair 2026-06-30):
+    # replacement coverage verdicts are keyed by (condition_id, direction). The
+    # selected proof's own leg controls both buy-NO admission and the calibration
+    # credential; a family representative verdict would license/block the wrong sibling.
+    _coverage_status_by_direction_raw = probability_evidence.get(
+        "settlement_coverage_status_by_direction"
     )
+    coverage_status_by_direction = (
+        _coverage_status_by_direction_raw
+        if isinstance(_coverage_status_by_direction_raw, Mapping)
+        else {}
+    )
+    _coverage_verdict_by_direction_raw = probability_evidence.get(
+        "settlement_coverage_verdict_by_direction"
+    )
+    coverage_verdict_by_direction = (
+        _coverage_verdict_by_direction_raw
+        if isinstance(_coverage_verdict_by_direction_raw, Mapping)
+        else {}
+    )
+    replacement_bundle_for_credential = probability_evidence.get("replacement_bundle")
+    replacement_q_mode = str(probability_evidence.get("replacement_q_mode") or "")
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -12098,6 +12136,25 @@ def _generate_candidate_proofs(
             (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb, None),
             (str(candidate.no_token_id or ""), "buy_no", no_q, no_lcb, None),
         ):
+            coverage_key = (condition_id, direction)
+            _settlement_coverage_status_raw = coverage_status_by_direction.get(coverage_key)
+            settlement_coverage_status = (
+                str(_settlement_coverage_status_raw)
+                if _settlement_coverage_status_raw is not None
+                else None
+            )
+            replacement_calibration_credential = None
+            if (
+                probability_evidence.get("probability_authority") == "replacement_0_1"
+                and replacement_bundle_for_credential is not None
+                and replacement_q_mode
+            ):
+                replacement_calibration_credential = _build_replacement_calibration_credential(
+                    replacement_bundle=replacement_bundle_for_credential,
+                    q_mode=replacement_q_mode,
+                    coverage_verdict=coverage_verdict_by_direction.get(coverage_key),
+                    family=family,
+                )
             row = rows_by_direction.get((condition_id, direction))
             # bin-selection S2: q_lcb <= q_point is now an UPSTREAM structural guarantee
             # (ProbabilityUncertainty for YES, the 1 - q_ucb_yes complement clamped under
@@ -12290,6 +12347,7 @@ def _generate_candidate_proofs(
                     q_source=payload.get("_edli_q_source"),
                     same_bin_yes_posterior=yes_q,
                     settlement_coverage_status=settlement_coverage_status,
+                    replacement_calibration_credential=replacement_calibration_credential,
                     # H2_E2E: carry posterior_id + probability_authority from the
                     # probability evidence dict. Present only on the replacement_0_1
                     # path; None (absent key) on canonical. posterior_id is emitted
@@ -14673,16 +14731,17 @@ def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bo
 #       credential here → fall through to the legacy Platt path → IDENTITY_FALLBACK reject
 #       exactly as today.
 #   (c) bounds present but coverage NEVER evaluated the scope, or produced an unknown
-#       status, or produced INSUFFICIENT_DATA, → authority is
-#       FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED, which the gate REJECTS with a distinct
-#       reason. A typed INSUFFICIENT_DATA verdict is preserved as provenance, but it
-#       is not a live-money confidence credential.
+#       status, or produced no verdict, → authority is FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED,
+#       which the gate REJECTS with a distinct reason. A typed INSUFFICIENT_DATA verdict is
+#       preserved as provenance and admits only through FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB.
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY = "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB"
 FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY = "FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
 _FUSED_BOOTSTRAP_CERT_COVERAGE_STATUSES = frozenset(
     {"LICENSED", "UNLICENSED"}
 )
 _FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
+_FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = 100
 # The only q_lcb_basis marker the materializer writes for certified fused-center bootstrap
 # bounds; the credential's bounds leg requires an EXACT match (basis-pinned, no aliasing).
 _FUSED_BOOTSTRAP_QLCB_BASIS = "fused_center_bootstrap_p05"
@@ -14781,9 +14840,9 @@ def _build_replacement_calibration_credential(
     or ``None`` when the bounds leg is absent (→ caller stamps nothing → legacy Platt path
     → IDENTITY_FALLBACK reject, strictness (b)). The bounds leg requires: a live-eligible
     fused-Normal q_mode, a non-empty bundle q_lcb map, AND provenance q_lcb_basis EXACTLY
-    equal to the fused-center bootstrap marker. Coverage verdict is carried as-is (may be
-    None / INSUFFICIENT_DATA → UNEVALUATED and blocked downstream; typed
-    INSUFFICIENT_DATA is preserved as an evaluated thin-history verdict.
+    equal to the fused-center bootstrap marker. Coverage verdict is carried as-is:
+    None/unknown stays UNEVALUATED and blocked downstream; typed INSUFFICIENT_DATA is
+    preserved as evaluated thin history and admits only as conservative bootstrap q_lcb.
     """
     if q_mode not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE:
         return None
@@ -14854,9 +14913,10 @@ def _replacement_calibration_payload_from_credential(
 
     AUTHORITY:
       * LICENSED → admit with authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE.
-      * INSUFFICIENT_DATA → do NOT mint a live-submit credential. Thin settled
-        history is non-refuting for ARM/shrink, but it is not confidence evidence
-        for live-money entry.
+      * INSUFFICIENT_DATA → admit with authority=FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB.
+        Thin settled claim-history is non-refuting; it is not a settlement-coverage
+        license, but it also must not default-deny a fused bootstrap q_lcb that is
+        already a conservative live confidence bound.
       * UNLICENSED (``settlement_coverage_refutes_claim``) → admit ONLY when the selected
         leg's q_lcb was ACTUALLY shrunk (coverage gate flag ON and q_lcb_out < q_lcb_in,
         recorded as ``coverage.shrink_applied``). An UNLICENSED verdict whose shrink was
@@ -14882,11 +14942,12 @@ def _replacement_calibration_payload_from_credential(
     else:
         # None / UNEVALUATED / unknown: no verdict → never license.
         licensed = False
-    authority = (
-        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
-        if licensed
-        else FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
-    )
+    if licensed:
+        authority = FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    elif status_str == "INSUFFICIENT_DATA":
+        authority = FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
+    else:
+        authority = FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
     q_mode = str(credential.get("q_mode") or "")
     posterior_id = credential.get("posterior_id")
     model_key = (
@@ -15336,49 +15397,26 @@ def _replacement_authority_probability_and_fdr_proof(
     # K3 settlement-backward coverage is a live safety gate. It only ever lowers an
     # unlicensed q_lcb; INSUFFICIENT_DATA is a typed no-shrink verdict, while structural
     # coverage-authority faults fail closed instead of serving an unlicensed bound.
-    _maybe_apply_settlement_coverage_to_lcb(
+    _coverage_verdict_by_direction = _maybe_apply_settlement_coverage_to_lcb(
         family=family,
         forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
         coverage_cache=coverage_cache,
     )
-    # CERT BRIDGE (2026-06-10, funnel #1 unlock) — stamp the replacement calibration
-    # credential onto the threaded `payload` so `_calibration_authority_payload_and_clock`
-    # can mint the first-class FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE authority instead of the
-    # legacy IDENTITY_FALLBACK reject. The credential is built HERE (the point where the
-    # certified bounds and the coverage verdict are actually known) — the calibration
-    # builder must NOT re-read the bundle (avoids a second read / provenance drift). The
-    # coverage verdict is the same flag-independent VERDICT the ARM gate reads; we never
-    # move the live q_lcb here (that stays the shrink helper's job, gated by its flag).
-    # When the bounds leg is absent the credential is None and we stamp NOTHING → the
-    # calibration builder falls through to the legacy Platt path → IDENTITY_FALLBACK reject
-    # exactly as today (strictness (b)).
-    _coverage_verdict = _replacement_family_coverage_verdict(
-        family=family,
-        forecast_conn=conn,
-        lcb_by_direction=lcb_by_direction,
-        coverage_cache=coverage_cache,
-    )
-    _credential = _build_replacement_calibration_credential(
-        replacement_bundle=replacement_bundle,
-        q_mode=_q_mode,
-        coverage_verdict=_coverage_verdict,
-        family=family,
-    )
-    if _credential is not None:
-        payload[_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY] = _credential
+    _coverage_status_by_direction: dict[tuple[str, str], str] = {
+        key: str(getattr(verdict, "status"))
+        for key, verdict in _coverage_verdict_by_direction.items()
+    }
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
-        # Twin-authority reconciliation #7 (2026-06-11): the family's settlement-
-        # backward coverage VERDICT status — the SINGLE computation above (the same
-        # verdict object the cert credential was built from; never a second verdict)
-        # threaded to the proof-construction seam so the buy-NO admission gate reads
-        # the SAME settled-record evidence the cert layer licenses on. None/absent on
-        # the canonical path and when the verdict could not be evaluated.
-        "settlement_coverage_status": (
-            str(_coverage_verdict.status) if _coverage_verdict is not None else None
-        ),
+        # Selected-leg coverage authority: every proof receives the verdict for its
+        # own (condition_id, direction). A family-level representative verdict would
+        # license or block unrelated sibling legs.
+        "settlement_coverage_status_by_direction": _coverage_status_by_direction,
+        "settlement_coverage_verdict_by_direction": dict(_coverage_verdict_by_direction),
+        "replacement_bundle": replacement_bundle,
+        "replacement_q_mode": _q_mode,
         # FIX A (direction law; 2026-06-10 Milan-24C incident): thread the fused
         # posterior center + predictive sigma (°C) to the proof-construction seam
         # so candidate admission can enforce buy_yes <=> bin ~= forecast. Read
@@ -18054,7 +18092,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
     forecast_conn: sqlite3.Connection,
     lcb_by_direction,
     coverage_cache: dict | None = None,
-) -> None:
+) -> dict[tuple[str, str], Any]:
     """K3 (Phase-2): shrink an UNLICENSED q_lcb to its realized settlement rate.
 
     For each (cond, direction), build the backward-coverage stream through grade_receipt,
@@ -18099,6 +18137,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
             f"QLCB_COVERAGE_AUTHORITY_FAULT:setup:{exc}"
         ) from exc
 
+    verdicts: dict[tuple[str, str], Any] = {}
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         bin_obj = getattr(candidate, "bin", None)
@@ -18128,6 +18167,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     city=family.city, metric=metric, season=season,
                     q_lcb=claimed, observations=obs, min_n=30,
                 )
+                verdicts[key] = verdict
                 new_q = apply_settlement_coverage(q_lcb=claimed, verdict=verdict)
                 if new_q != claimed:
                     _set_qlcb_provenance(
@@ -18151,6 +18191,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
                     f"city={family.city}:bin={getattr(bin_obj, 'label', '?')}:"
                     f"dir={direction}:{exc}"
                 ) from exc
+    return verdicts
 
 
 def _snapshot_p_raw(

@@ -124,6 +124,15 @@ class Day0HourlyVector:
     temps_c: tuple[float, ...]   # ALWAYS degC
 
 
+@dataclass(frozen=True)
+class Day0HourlyRefreshStats:
+    vectors_written: int = 0
+    cities_attempted: int = 0
+    cities_skipped_throttle: int = 0
+    incomplete_expected_bundles: int = 0
+    budget_exhausted: bool = False
+
+
 def in_domain_models_for_city(city: Any, *, models: Iterable[str] = DAY0_HOURLY_MODELS) -> list[str]:
     """Polygon-gated model list for a city (lead 0). Fail-soft to [] on gate errors."""
     try:
@@ -566,7 +575,8 @@ def maybe_refresh_day0_hourly_vectors(
     max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
     persist_lock_blocking: bool = True,
-) -> int:
+    return_stats: bool = False,
+) -> int | Day0HourlyRefreshStats:
     """Throttled per-city fetch+persist of the freshest high-res hourly curves.
 
     Cities with an in-domain regional high-res model use that regional source;
@@ -576,6 +586,9 @@ def maybe_refresh_day0_hourly_vectors(
     refresh interval; the key is cleared so the next reactor pass can retry.
     """
     written = 0
+    skipped_throttle = 0
+    incomplete_expected_bundles = 0
+    budget_exhausted = False
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
     checked = 0
@@ -583,6 +596,7 @@ def maybe_refresh_day0_hourly_vectors(
         if checked >= max(0, int(max_cities)):
             break
         if budget_s > 0.0 and checked > 0 and (time.monotonic() - started_monotonic) >= budget_s:
+            budget_exhausted = True
             logger.warning(
                 "DAY0_HOURLY_VECTORS_REFRESH_BUDGET_EXHAUSTED checked=%d budget_s=%.3f",
                 checked,
@@ -600,6 +614,7 @@ def maybe_refresh_day0_hourly_vectors(
             with _REFRESH_LOCK:
                 last = _LAST_REFRESH_MONOTONIC.get(refresh_key, 0.0)
                 if now_monotonic - last < float(interval_s):
+                    skipped_throttle += 1
                     continue
                 _LAST_REFRESH_MONOTONIC[refresh_key] = now_monotonic
             models = day0_hourly_models_for_city(city)
@@ -619,6 +634,9 @@ def maybe_refresh_day0_hourly_vectors(
                     city, models=models, now=decision_time
                 )
             if vectors and request_hash:
+                vector_models = {str(vector.model) for vector in vectors}
+                expected_models = {str(model) for model in models}
+                incomplete_expected = bool(expected_models and not expected_models.issubset(vector_models))
                 for target_date in target_dates:
                     written += persist_day0_hourly_vectors(
                         vectors,
@@ -626,6 +644,10 @@ def maybe_refresh_day0_hourly_vectors(
                         request_hash=request_hash,
                         lock_blocking=persist_lock_blocking,
                     )
+                if incomplete_expected:
+                    incomplete_expected_bundles += 1
+                    with _REFRESH_LOCK:
+                        _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
             else:
                 with _REFRESH_LOCK:
                     _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
@@ -637,4 +659,11 @@ def maybe_refresh_day0_hourly_vectors(
                 "DAY0_HOURLY_VECTORS_REFRESH_FAILED city=%s exc=%s: %s",
                 name, type(exc).__name__, exc,
             )
-    return written
+    stats = Day0HourlyRefreshStats(
+        vectors_written=written,
+        cities_attempted=checked,
+        cities_skipped_throttle=skipped_throttle,
+        incomplete_expected_bundles=incomplete_expected_bundles,
+        budget_exhausted=budget_exhausted,
+    )
+    return stats if return_stats else stats.vectors_written

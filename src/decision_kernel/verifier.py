@@ -58,12 +58,15 @@ IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
 # by the settlement-backward coverage verdict. A live-admissible authority (the live gate
 # _assert_event_bound_calibration_live_admitted lets it through), so the certificate must
 # round-trip it through verification. Its UNEVALUATED sibling
-# (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) is INTENTIONALLY excluded — like IDENTITY_FALLBACK
-# it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
-# certificate, so it is not in the approved set.
+# (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) is INTENTIONALLY excluded: it is evidence-only
+# and is not minted onto an admitted live certificate. Thin settlement-coverage history
+# is not an unevaluated authority: the fused bootstrap q_lcb is its own live credential,
+# while settlement coverage remains a refutation/shrink overlay when enough claim-days exist.
+FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY = "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB"
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
 DAY0_OBSERVATION_CALIBRATION_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
+FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = 100
 FUSED_BOOTSTRAP_LIVE_COVERAGE_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
 # K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
 # ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
@@ -74,6 +77,7 @@ FUSED_BOOTSTRAP_LIVE_COVERAGE_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
 ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
     {
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
         DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     }
@@ -97,6 +101,7 @@ APPROVED_CALIBRATION_AUTHORITIES = frozenset(
         "LIVE",
         "APPROVED",
         IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
         FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
         DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
     }
@@ -184,15 +189,27 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
 def _verify_actionable_live_calibration(parent_tuple: tuple[DecisionCertificate, ...]) -> None:
     """Actionable live entries require calibration evidence strong enough for submit.
 
-    FUSED_BOOTSTRAP is a valid non-Platt probability authority only after the
-    settlement-coverage check has a sufficiently sampled, live-admitting verdict.
-    INSUFFICIENT_DATA is allowed to be non-refuting for shrink/ARM logic, but it is not
-    live-money confidence evidence and must not verify an ActionableTradeCertificate.
+    FUSED_BOOTSTRAP has two valid non-Platt authorities: settlement coverage when
+    enough claim-days exist, and conservative q_lcb when the typed coverage verdict is
+    INSUFFICIENT_DATA. Unknown/missing coverage is still non-live.
     """
 
     parent = _parents_by_type(parent_tuple)
     calibration = _required_parent_payload(parent, claims.CALIBRATION)
     authority = str(calibration.get("authority") or "").strip()
+    if authority == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY:
+        coverage_status = str(calibration.get("coverage_status") or "").strip()
+        if coverage_status != "INSUFFICIENT_DATA":
+            raise CertificateVerificationError("actionable conservative q_lcb coverage status invalid")
+        if calibration.get("q_lcb_basis") != "fused_center_bootstrap_p05":
+            raise CertificateVerificationError("actionable conservative q_lcb basis invalid")
+        try:
+            bootstrap_draws = int(calibration.get("bootstrap_draws"))
+        except (TypeError, ValueError) as exc:
+            raise CertificateVerificationError("actionable conservative q_lcb bootstrap draws missing") from exc
+        if bootstrap_draws < FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS:
+            raise CertificateVerificationError("actionable conservative q_lcb bootstrap draw floor not met")
+        return
     if authority != FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY:
         return
     coverage_status = str(calibration.get("coverage_status") or "").strip()

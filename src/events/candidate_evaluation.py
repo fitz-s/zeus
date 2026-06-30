@@ -42,10 +42,10 @@ class CandidateEvaluation:
     low_volume_usd: float | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
-    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
-    # coverage VERDICT status, copied from the proof so this receipt projection's
-    # admission view (live_buy_no_conservative_evidence_*) matches the proof-
-    # generation gate's verdict-aware outcome. None on canonical/legacy paths.
+    # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
+    # settlement-backward coverage VERDICT status for this exact condition+direction,
+    # copied from the proof so this receipt projection's admission view matches the
+    # proof-generation gate's verdict-aware outcome. None on canonical/legacy paths.
     settlement_coverage_status: str | None = None
     # FIX C (mode-consistent EV, 2026-06-10): the per-candidate maker/taker mode
     # decision and BOTH EVs (trade_score == the chosen mode's EV). Receipt-level

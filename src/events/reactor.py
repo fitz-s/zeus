@@ -510,13 +510,11 @@ class EventSubmissionReceipt:
     # buy-YES / canonical / legacy receipts; omitted-when-None from receipt_json so
     # those receipts keep byte-identical hashes.
     same_bin_yes_posterior: float | None = None
-    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
-    # coverage VERDICT status ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on
-    # canonical/legacy receipts). Mirrors same_bin_yes_posterior's travel exactly:
-    # the ADAPTER admission gate evaluated buy-NO conservative evidence WITH this
-    # verdict, so the receipt-level re-enforcement (_receipt_money_path_blocker)
-    # MUST see the SAME value — a starved receipt-level twin would re-reject every
-    # coverage-licensed buy_no it had just admitted (the 21a4c14ee2 lesson).
+    # Twin-authority reconciliation #7 (2026-06-11; selected-leg repair 2026-06-30):
+    # settlement-backward coverage VERDICT status for the exact condition+direction
+    # ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on canonical/legacy receipts).
+    # The adapter admission gate and receipt-level re-enforcement must see the same
+    # selected-leg value.
     # Omitted-when-None from receipt_json so existing hashes stay byte-stable.
     settlement_coverage_status: str | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order

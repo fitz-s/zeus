@@ -673,6 +673,41 @@ class TestRequestHashProvenance:
         assert (n1, n2) == (0, 0)
         assert attempts == {"fetch": 2, "persist": 0}
 
+    def test_partial_expected_bundle_does_not_throttle_next_attempt(self, monkeypatch):
+        """A partial regional+ECMWF bundle is useful data, but not a complete live authority."""
+        import src.data.day0_hourly_vectors as hv
+
+        attempts = {"fetch": 0, "persist": 0}
+
+        def fake_fetch(city, *, models=None, now=None, timeout_s=None):
+            attempts["fetch"] += 1
+            assert list(models or []) == ["icon_d2", "ecmwf_ifs"]
+            return [_vector(model="icon_d2")], "sha256:partial"
+
+        def fake_persist(vectors, *, target_date, request_hash, **kw):
+            attempts["persist"] += 1
+            return len(vectors)
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        n1 = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=decision_time,
+            interval_s=1800.0,
+        )
+        n2 = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=decision_time + timedelta(seconds=1),
+            interval_s=1800.0,
+        )
+
+        assert (n1, n2) == (2, 2)
+        assert attempts == {"fetch": 2, "persist": 4}
+
     def test_no_regional_model_uses_global_ecmwf_fallback(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
@@ -767,3 +802,16 @@ class TestRequestHashProvenance:
 
         assert priority_count == 1
         assert [c.name for c in ordered] == ["Wellington", "Paris"]
+
+    def test_scheduler_rotates_priority_segment_without_demoting_priority(self):
+        import src.main as main
+
+        ordered = [_paris(), _wellington(), SimpleNamespace(name="London")]
+
+        rotated = main._edli_rotate_day0_hourly_refresh_order(
+            ordered,
+            priority_city_count=2,
+            cursor=1,
+        )
+
+        assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]

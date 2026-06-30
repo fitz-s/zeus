@@ -8394,6 +8394,30 @@ def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
     return families
 
 
+_DAY0_HOURLY_REFRESH_CURSOR = 0
+
+
+def _rotate_day0_refresh_segment(items: list[Any], cursor: int) -> list[Any]:
+    if not items:
+        return []
+    offset = int(cursor) % len(items)
+    return items[offset:] + items[:offset]
+
+
+def _edli_rotate_day0_hourly_refresh_order(
+    ordered: list[Any],
+    *,
+    priority_city_count: int,
+    cursor: int,
+) -> list[Any]:
+    priority = ordered[: max(0, int(priority_city_count))]
+    rest = ordered[max(0, int(priority_city_count)) :]
+    return (
+        _rotate_day0_refresh_segment(priority, cursor)
+        + _rotate_day0_refresh_segment(rest, cursor)
+    )
+
+
 def _edli_order_day0_hourly_refresh_cities(
     cities: list[Any],
     *,
@@ -8452,6 +8476,8 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     lane is active.
     """
 
+    global _DAY0_HOURLY_REFRESH_CURSOR
+
     edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
@@ -8466,6 +8492,11 @@ def _edli_day0_hourly_refresh_cycle() -> None:
             decision_time=decision_time,
             priority_families=priority_families,
         )
+        ordered_cities = _edli_rotate_day0_hourly_refresh_order(
+            ordered_cities,
+            priority_city_count=priority_city_count,
+            cursor=_DAY0_HOURLY_REFRESH_CURSOR,
+        )
         trading_lane_active = _edli_reactor_active() or _edli_redecision_screen_lock.locked()
         if trading_lane_active and priority_city_count <= 0:
             logger.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
@@ -8478,20 +8509,34 @@ def _edli_day0_hourly_refresh_cycle() -> None:
             )
         configured_max_cities = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3"))
         max_cities = max(configured_max_cities, priority_city_count)
-        written = maybe_refresh_day0_hourly_vectors(
+        stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
             budget_s=float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")),
             max_cities=max_cities,
             timeout_s=float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "4.0")),
             persist_lock_blocking=False,
+            return_stats=True,
         )
-        if written or priority_city_count:
+        vectors_written = int(getattr(stats, "vectors_written", stats))
+        cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
+        if cities_attempted > 0 and ordered_cities:
+            _DAY0_HOURLY_REFRESH_CURSOR = (
+                _DAY0_HOURLY_REFRESH_CURSOR + cities_attempted
+            ) % max(1, len(ordered_cities))
+        if vectors_written or priority_city_count:
             logger.info(
-                "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d max_cities=%d",
-                written,
+                "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
+                "max_cities=%d cities_attempted=%d skipped_throttle=%d "
+                "incomplete_expected_bundles=%d budget_exhausted=%s cursor=%d",
+                vectors_written,
                 priority_city_count,
                 max_cities,
+                cities_attempted,
+                int(getattr(stats, "cities_skipped_throttle", 0) or 0),
+                int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+                bool(getattr(stats, "budget_exhausted", False)),
+                _DAY0_HOURLY_REFRESH_CURSOR,
             )
     except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
         logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)

@@ -1,8 +1,9 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-14
 # Authority basis: K3 coverage measures whether settled history refutes a claimed q_lcb.
-#   ``settlement_coverage_allows_arm`` is an ARM/shrink predicate, not a live-submit
-#   license. Live entry layers may require stricter realized evidence.
+#   ``settlement_coverage_allows_arm`` is an ARM/shrink predicate, not the whole
+#   live-submit license. Thin history does not license settlement coverage, but live
+#   entry may still use a separate conservative-bootstrap q_lcb credential.
 #   docs/evidence/deadloop_2026-06-14/qlcb_suppression.md + operator
 #   RULE 1 (every q_lcb<price rejection is OUR DEFECT until settlement proves otherwise).
 #   2026-06-14 REBUILD: the prior check measured CLIMATOLOGY, not CALIBRATION. The live
@@ -225,18 +226,18 @@ def settlement_backward_coverage_check(
 
     Returns:
         A ``CoverageVerdict``. INSUFFICIENT_DATA when n < min_n (q_lcb unchanged + WARN,
-        non-refuting for ARM/shrink only; not a live-submit credential). UNLICENSED ONLY on
-        PROVEN overconfidence (n >= min_n AND realized < claimed - tol -> shrink to
-        realized-1pp). LICENSED when realized >= claimed - tol (calibrated or conservative;
-        q_lcb unchanged).
+        non-refuting for ARM/shrink; not a settlement-coverage license). UNLICENSED ONLY
+        on PROVEN overconfidence (n >= min_n AND realized < claimed - tol -> shrink to
+        realized-1pp). LICENSED when realized >= claimed - tol (calibrated or
+        conservative; q_lcb unchanged).
     """
     obs = list(observations)
     n = len(obs)
     if n < min_n:
         logger.warning(
-            "settlement coverage INSUFFICIENT_DATA (non-refuting for ARM only; "
-            "not a live-submit credential) city=%s metric=%s season=%s q_lcb=%.4f: "
-            "n=%d < min_n=%d — MC LCB stands for shrink math only",
+            "settlement coverage INSUFFICIENT_DATA (non-refuting; not a "
+            "settlement-coverage license) city=%s metric=%s season=%s q_lcb=%.4f: "
+            "n=%d < min_n=%d — conservative q_lcb remains its own credential",
             city, metric, season, float(q_lcb), n, min_n,
         )
         return CoverageVerdict(

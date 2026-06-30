@@ -7,10 +7,11 @@
 #   RELATIONSHIP tests (Fitz methodology): they assert the cross-function invariant
 #   credential-state -> certificate-authority -> live-gate-verdict holds across the boundary
 #   between the calibration-authority builder, the live admission gate, and the verifier.
-#   Typed coverage verdicts license the certificate bridge only when they carry enough
-#   settled evidence for live money. INSUFFICIENT_DATA is thin-history provenance, not a
-#   live-submit credential. UNLICENSED still admits ONLY when the shrink was actually
-#   applied to the leg; no verdict / unknown verdict remains blocked.
+#   Typed coverage verdicts license settlement coverage only when they carry enough
+#   settled evidence. INSUFFICIENT_DATA is thin-history provenance and admits through
+#   the conservative fused-bootstrap q_lcb authority, not through the settlement-coverage
+#   authority. UNLICENSED still admits ONLY when the shrink was actually applied to the
+#   leg; no verdict / unknown verdict remains blocked.
 """Quadrant relationship matrix for the replacement calibration credential.
 
 The credential bridges three modules whose boundary the bug lived at:
@@ -22,6 +23,8 @@ The credential bridges three modules whose boundary the bug lived at:
 The quadrants:
   Q1 replacement + bounds + LICENSED / UNLICENSED-shrunk -> admitted,
      FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE
+  Q1b replacement + bounds + INSUFFICIENT_DATA -> admitted,
+      FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB
   Q2 replacement + NO bounds                   -> IDENTITY_FALLBACK reject (unchanged)
   Q3 replacement + bounds, NO verdict (None) / unknown status OR UNLICENSED-unshrunk
      -> UNEVALUATED reject
@@ -43,6 +46,7 @@ from src.decision_kernel.verifier import (
 from src.engine import event_reactor_adapter as adapter
 from src.engine.event_reactor_adapter import (
     FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY,
     FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY,
     _REPLACEMENT_CALIBRATION_CREDENTIAL_KEY,
     _assert_event_bound_calibration_live_admitted,
@@ -161,7 +165,7 @@ def test_q1_replacement_with_bounds_and_coverage_is_admitted(status):
     assert FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
 
 
-def test_insufficient_data_coverage_is_not_live_submit_credential():
+def test_insufficient_data_coverage_uses_conservative_bootstrap_authority():
     bundle = _replacement_bundle(
         q_lcb={"bin-a": 0.80},
         q_lcb_basis="fused_center_bootstrap_p05",
@@ -178,10 +182,12 @@ def test_insufficient_data_coverage_is_not_live_submit_credential():
     cal_payload, _clock = _render_payload(credential)
     assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
     assert cal_payload["n_samples"] == 0
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
+    assert cal_payload["q_lcb_basis"] == "fused_center_bootstrap_p05"
+    assert cal_payload["bootstrap_draws"] == 200
 
-    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
-        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    assert FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
 
 
 def test_day0_live_observation_hard_fact_calibration_authority_admits():
@@ -281,9 +287,9 @@ def test_q2_replacement_without_bounds_yields_no_credential(q_lcb, q_lcb_basis, 
 
 
 # ---------------------------------------------------------------------------
-# Q3 — replacement + bounds, no live-admitting coverage verdict -> UNEVALUATED reject
-#   (distinct). INSUFFICIENT_DATA is a typed verdict, but it is not a live-submit
-#   confidence credential.
+# Q3 — replacement + bounds, no evaluated coverage verdict -> UNEVALUATED reject
+#   (distinct). INSUFFICIENT_DATA is evaluated thin history and therefore takes the
+#   conservative-bootstrap authority path tested above.
 # ---------------------------------------------------------------------------
 def test_q3_replacement_bounds_no_coverage_verdict_is_unevaluated_blocked():
     bundle = _replacement_bundle(
@@ -436,7 +442,8 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
     )
     assert verdict is not None
     assert verdict.status == "INSUFFICIENT_DATA"
-    # INSUFFICIENT_DATA is preserved for provenance but does not license live submit.
+    # INSUFFICIENT_DATA is preserved for provenance and admits through the conservative
+    # bootstrap q_lcb authority, not through settlement-coverage licensing.
     credential = _build_replacement_calibration_credential(
         replacement_bundle=_replacement_bundle(
             q_lcb={"bin-a": 0.80},
@@ -448,10 +455,71 @@ def test_family_coverage_verdict_insufficient_data_below_min_n():
         family=family,
     )
     cal_payload, _clock = _render_payload(credential)
-    assert cal_payload["authority"] == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
+    assert cal_payload["authority"] == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
     assert cal_payload["coverage_status"] == "INSUFFICIENT_DATA"
-    with pytest.raises(ValueError, match="FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"):
-        _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
+
+
+def test_selected_leg_coverage_verdict_controls_replacement_credential(monkeypatch):
+    """Coverage credentials are scoped to the selected bin+direction, not the family.
+
+    The first candidate's buy_yes can be LICENSED while the selected buy_no leg is still
+    thin. The selected buy_no must use FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB, not inherit
+    the sibling YES settlement-coverage license.
+    """
+
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+    from src.calibration.settlement_backward_coverage import CoverageObservation
+
+    def fake_observations(*, direction, claimed_q_lcb, **_kwargs):
+        if direction == "buy_yes":
+            return [CoverageObservation(q_lcb=float(claimed_q_lcb), won=True) for _ in range(40)]
+        if direction == "buy_no":
+            return []
+        raise AssertionError(direction)
+
+    monkeypatch.setattr(adapter, "_settlement_coverage_observations", fake_observations)
+    candidate = SimpleNamespace(condition_id="cond-1", bin=Bin(70, 71, "F", "70-71°F"))
+    family = SimpleNamespace(
+        city=_CITY, metric=_METRIC, target_date=_TARGET_DATE, candidates=(candidate,)
+    )
+    lcb = QlcbByDirection()
+    _set_qlcb_provenance(lcb, ("cond-1", "buy_yes"), 0.80, source="FORECAST_BOOTSTRAP")
+    _set_qlcb_provenance(lcb, ("cond-1", "buy_no"), 0.70, source="FORECAST_BOOTSTRAP")
+
+    verdicts = adapter._maybe_apply_settlement_coverage_to_lcb(
+        family=family,
+        forecast_conn=sqlite3.connect(":memory:"),
+        lcb_by_direction=lcb,
+    )
+
+    assert verdicts[("cond-1", "buy_yes")].status == "LICENSED"
+    assert verdicts[("cond-1", "buy_no")].status == "INSUFFICIENT_DATA"
+    bundle = _replacement_bundle(
+        q_lcb={"bin-a": 0.80},
+        q_lcb_basis="fused_center_bootstrap_p05",
+        q_mode="FUSED_NORMAL_FULL",
+    )
+    yes_payload, _ = _render_payload(
+        _build_replacement_calibration_credential(
+            replacement_bundle=bundle,
+            q_mode="FUSED_NORMAL_FULL",
+            coverage_verdict=verdicts[("cond-1", "buy_yes")],
+            family=family,
+        )
+    )
+    no_payload, _ = _render_payload(
+        _build_replacement_calibration_credential(
+            replacement_bundle=bundle,
+            q_mode="FUSED_NORMAL_FULL",
+            coverage_verdict=verdicts[("cond-1", "buy_no")],
+            family=family,
+        )
+    )
+
+    assert yes_payload["authority"] == FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+    assert no_payload["authority"] == FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY
+    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=no_payload))
 
 
 def test_family_coverage_verdict_none_when_no_candidate_lcb():
