@@ -813,6 +813,7 @@ def test_reactor_seam_routes_day0_through_qkernel_with_observed_boundary():
     assert "_FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES" in src
     assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" not in src
     assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src
+    assert "event_bound_legacy_selector" not in src
     # Forecast/Day0 flag-off must no-trade; neither may use the legacy selector as fallback.
     assert "if _spine_eligible_event and not _spine_flag_on" in src
     assert '_spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"' in src
@@ -852,6 +853,62 @@ def test_reactor_seam_routes_day0_through_qkernel_with_observed_boundary():
     assert result.decision.predictive.day0.status == "HIGH_CLAMPED"
     assert result.selected_proof is not None
     assert result.selected_proof.qkernel_execution_economics["source"] == "qkernel_spine"
+
+
+def test_day0_single_remaining_member_threads_process_sigma_to_spine():
+    """A single remaining-day hourly model is valid Day0 evidence and must still carry sigma.
+
+    Live failure being guarded: remaining-day q often had one global fallback model, so the
+    empirical member std branch never wrote ``_edli_spine_sigma_native`` and qkernel emitted
+    ``SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED`` before the legacy Day0 selector wrote a
+    misleading legacy selection fact.
+    """
+
+    family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
+    payload = _payload(mu=20.0, sigma=0.0, members=[20.0], source_cycle=DECISION_TIME.isoformat())
+    payload.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "metric": "high",
+            "raw_value": 20.1,
+            "rounded_value": 20,
+            "high_so_far": 20.1,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "observation_time": "2026-06-13T11:30:00Z",
+            "observation_available_at": "2026-06-13T11:31:00Z",
+            "_edli_q_source": "day0_remaining_day",
+        }
+    )
+    sigma = era._day0_process_sigma_native(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=DECISION_TIME,
+    )
+    assert sigma is not None and sigma > 0.0
+    payload["_edli_spine_sigma_native"] = sigma
+    payload["_edli_spine_day0_sigma_basis"] = "remaining_day_member_spread_plus_obs_process"
+    payload["_edli_spine_source_cycle_time_utc"] = DECISION_TIME.isoformat()
+
+    assert bridge._spine_inputs_missing_reason(payload) == "UNKNOWN"
+
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.40, 0.90, 0.90],
+        no_asks=[0.95, 0.90, 0.80, 0.80],
+        q_by_bin=[0.02, 0.82, 0.12, 0.04],
+        q_lcb_by_bin=[0.01, 0.68, 0.06, 0.02],
+    )
+    result = _drive(family, proofs, payload)
+    assert result.no_trade_reason is None or "MU_SIGMA_NOT_STASHED" not in result.no_trade_reason
+    assert result.decision is not None
 
 
 def test_spine_accepts_day0_event_type_from_payload_when_family_event_type_is_generic():

@@ -4132,215 +4132,6 @@ def _record_qkernel_selection_family_facts(
     }
 
 
-def _legacy_selection_fact_family_id(
-    *,
-    event_id: str,
-    family_id: str,
-    book_id: str,
-) -> str:
-    return "event_bound_selection:" + stable_hash(
-        {
-            "event_id": event_id,
-            "family_id": family_id,
-            "book_id": book_id,
-        }
-    )[:32]
-
-
-def _legacy_selection_hypothesis_id(
-    *,
-    fact_family_id: str,
-    candidate_id: str,
-) -> str:
-    return "event_bound_hypothesis:" + stable_hash(
-        {
-            "fact_family_id": fact_family_id,
-            "candidate_id": candidate_id,
-        }
-    )[:32]
-
-
-def _record_day0_selection_family_facts(
-    conn: sqlite3.Connection | None,
-    *,
-    family: EventBoundCandidateFamily,
-    opportunity_book: OpportunityBook | None,
-    event: OpportunityEvent,
-    decision_time: datetime,
-    decision_snapshot_id: str | None,
-) -> dict[str, Any]:
-    """Persist legacy Day0 selector facts to the canonical world DB.
-
-    New live Day0 entry routes through qkernel with an observed-boundary input.
-    This writer remains for older observation-aware selector evidence and must
-    still record the selected leg's real strategy identity instead of stamping
-    every Day0 row as settlement_capture.
-    """
-
-    if conn is None:
-        return {"status": "skipped_no_connection", "families": 0, "hypotheses": 0}
-    if opportunity_book is None:
-        return {"status": "skipped_no_opportunity_book", "families": 0, "hypotheses": 0}
-    evaluations = tuple(getattr(opportunity_book, "evaluations", ()) or ())
-    if not evaluations:
-        return {"status": "skipped_no_hypotheses", "families": 0, "hypotheses": 0}
-
-    from src.state.db import log_selection_family_fact, log_selection_hypothesis_fact
-
-    selected_candidate_id = str(getattr(opportunity_book, "selected_candidate_id", "") or "")
-    fact_family_id = _legacy_selection_fact_family_id(
-        event_id=str(event.event_id or ""),
-        family_id=str(getattr(family, "family_id", "") or ""),
-        book_id=str(getattr(opportunity_book, "book_id", "") or ""),
-    )
-    recorded_at = decision_time.astimezone(UTC).isoformat()
-    selected_count = sum(1 for ev in evaluations if ev.candidate_id == selected_candidate_id)
-    selected_direction = ""
-    for ev in evaluations:
-        if ev.candidate_id == selected_candidate_id:
-            selected_direction = str(getattr(ev, "direction", "") or "")
-            break
-    selected_strategy_key = ""
-    if selected_direction:
-        try:
-            selected_strategy_key = _event_bound_strategy_key(
-                event_type=str(getattr(event, "event_type", "") or ""),
-                direction=selected_direction,
-                metric=str(getattr(family, "metric", "") or ""),
-            )
-        except Exception:
-            selected_strategy_key = ""
-    passed_prefilter_count = sum(1 for ev in evaluations if bool(ev.passed_prefilter))
-    admitted_count = sum(
-        1
-        for ev in evaluations
-        if ev.execution_price is not None
-        and bool(ev.passed_prefilter)
-        and not str(ev.missing_reason or "").strip()
-    )
-    family_meta = {
-        "source": "event_bound_legacy_selector",
-        "event_id": event.event_id,
-        "event_type": event.event_type,
-        "book_id": opportunity_book.book_id,
-        "book_version": opportunity_book.book_version,
-        "event_bound_family_id": str(getattr(family, "family_id", "") or ""),
-        "tested_hypotheses": len(evaluations),
-        "passed_prefilter": passed_prefilter_count,
-        "admitted_count": admitted_count,
-        "selected_post_fdr": selected_count,
-        "selected_candidate_id": selected_candidate_id,
-        "selected_strategy_key": selected_strategy_key,
-        "selection_authority": str(
-            opportunity_book.cache_summary.get("selection_authority")
-            or "robust_marginal_utility"
-        ),
-        "actual_receipt_selected_candidate_id": str(
-            opportunity_book.cache_summary.get("actual_receipt_selected_candidate_id") or ""
-        ),
-    }
-    family_result = log_selection_family_fact(
-        conn,
-        family_id=fact_family_id,
-        cycle_mode="event_bound_legacy_selector",
-        created_at=recorded_at,
-        meta=family_meta,
-        decision_snapshot_id=decision_snapshot_id,
-        city=family.city,
-        target_date=family.target_date,
-        strategy_key=selected_strategy_key,
-        discovery_mode=event.event_type,
-        decision_time_status="live",
-        require_attached_world=True,
-    )
-    if family_result.get("status") != "written":
-        return {
-            "status": str(family_result.get("status") or "family_write_failed"),
-            "families": 0,
-            "hypotheses": 0,
-        }
-
-    hypothesis_writes = 0
-    first_failure: str | None = None
-    for ev in evaluations:
-        candidate_id = str(ev.candidate_id or "")
-        selected = bool(candidate_id and candidate_id == selected_candidate_id)
-        if selected:
-            rejection_stage = None
-            rejection_detail = None
-        elif str(ev.missing_reason or "").strip():
-            rejection_stage = "EVENT_BOUND_GATE_REJECTED"
-            rejection_detail = str(ev.missing_reason or "").strip()
-        elif ev.execution_price is None:
-            rejection_stage = "NATIVE_QUOTE_MISSING"
-            rejection_detail = "execution_price_missing"
-        elif not bool(ev.passed_prefilter):
-            rejection_stage = "PREFILTER_REJECTED"
-            rejection_detail = "passed_prefilter_false"
-        else:
-            rejection_stage = "EVENT_BOUND_NOT_SELECTED"
-            rejection_detail = "not_live_rank_winner"
-        result = log_selection_hypothesis_fact(
-            conn,
-            hypothesis_id=_legacy_selection_hypothesis_id(
-                fact_family_id=fact_family_id,
-                candidate_id=candidate_id,
-            ),
-            family_id=fact_family_id,
-            city=family.city,
-            target_date=family.target_date,
-            range_label=str(ev.bin_label or ""),
-            direction=str(ev.direction or "unknown"),
-            recorded_at=recorded_at,
-            meta={
-                "source": "event_bound_legacy_selector",
-                "event_id": event.event_id,
-                "event_type": event.event_type,
-                "book_id": opportunity_book.book_id,
-                "candidate_id": candidate_id,
-                "condition_id": ev.condition_id,
-                "token_id": ev.token_id,
-                "native_quote_available": bool(ev.native_quote_available),
-                "missing_reason": ev.missing_reason,
-                "rejection_detail": rejection_detail,
-                "execution_price": ev.execution_price,
-                "c_cost_95pct": ev.c_cost_95pct,
-                "p_fill_lcb": ev.p_fill_lcb,
-                "support_index": ev.support_index,
-                "bin_id": ev.bin_id,
-            },
-            decision_id=None,
-            candidate_id=candidate_id,
-            p_value=ev.p_value,
-            q_value=ev.q_posterior,
-            ci_lower=ev.q_lcb_5pct,
-            ci_upper=None,
-            edge=ev.trade_score,
-            tested=True,
-            passed_prefilter=bool(ev.passed_prefilter),
-            selected_post_fdr=selected,
-            rejection_stage=rejection_stage,
-            require_attached_world=True,
-        )
-        if result.get("status") == "written":
-            hypothesis_writes += 1
-        elif first_failure is None:
-            first_failure = str(result.get("status") or "hypothesis_write_failed")
-
-    if hypothesis_writes <= 0:
-        return {
-            "status": first_failure or "hypothesis_write_failed",
-            "families": 1,
-            "hypotheses": 0,
-        }
-    return {
-        "status": "written",
-        "families": 1,
-        "hypotheses": hypothesis_writes,
-        "family_id": fact_family_id,
-    }
-
-
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -4825,32 +4616,6 @@ def _build_event_bound_no_submit_receipt_core(
         qkernel_economics_by_bin_side=_spine_candidate_economics_by_key,
         selection_exposure_by_outcome=_selection_exposure,
     )
-    if _is_day0_event:
-        _day0_selection_fact_result = _record_day0_selection_family_facts(
-            trade_conn,
-            family=family,
-            opportunity_book=opportunity_book,
-            event=event,
-            decision_time=decision_time,
-            decision_snapshot_id=event.causal_snapshot_id,
-        )
-        if _day0_selection_fact_result.get("status") != "written":
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason=(
-                    "DAY0_SELECTION_FACT_PERSISTENCE_FAILED:"
-                    f"{_day0_selection_fact_result.get('status') or 'unknown'}"
-                ),
-                city=family.city,
-                target_date=family.target_date,
-                metric=family.metric,
-                family_id=family.family_id,
-                source_status="MATCH",
-                family_complete=True,
-                opportunity_book=_json_finite(opportunity_book.to_receipt_dict()),
-            )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
         # persist the best-scoring family's mainstream verdict on the MISSING receipt so
@@ -12428,6 +12193,8 @@ def _qkernel_final_submit_floor_rejection_reason(
 ) -> str | None:
     """Reject qkernel candidates that cannot clear the final live submit floors."""
 
+    if not str(strategy_policy_event_type or "").strip():
+        return None
     try:
         strategy_key = _event_bound_strategy_key(
             event_type=str(strategy_policy_event_type or ""),
@@ -12469,7 +12236,6 @@ def _qkernel_final_submit_floor_rejection_reason(
     )
     effective_min_entry_price = float(floor_decision.effective_min_entry_price)
     min_expected_profit_usd = float(floors["min_expected_profit_usd"])
-    min_submit_edge_density = float(floors["min_submit_edge_density"])
     if cost + 1e-12 < effective_min_entry_price:
         return (
             "QKERNEL_FINAL_SUBMIT_FLOOR:limit_price_below_strategy_entry_floor:"
@@ -12485,13 +12251,6 @@ def _qkernel_final_submit_floor_rejection_reason(
             "QKERNEL_FINAL_SUBMIT_FLOOR:expected_profit_below_strategy_floor:"
             f"strategy={strategy_key}:profit_lcb_usd={profit_lcb_usd:.6f}:"
             f"floor={min_expected_profit_usd:.6f}"
-        )
-    edge_density = edge_lcb / cost if cost > 0.0 else float("-inf")
-    if edge_density + 1e-9 < min_submit_edge_density:
-        return (
-            "QKERNEL_FINAL_SUBMIT_FLOOR:submit_edge_density_below_strategy_floor:"
-            f"strategy={strategy_key}:edge_density={edge_density:.6f}:"
-            f"floor={min_submit_edge_density:.6f}"
         )
     return None
 
@@ -17937,6 +17696,42 @@ def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
     return _sampler
 
 
+def _day0_process_sigma_native(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+) -> float | None:
+    """Day0 observation/process width in the settlement native unit.
+
+    Day0 remaining-day q is conditioned on an observed running boundary, but that
+    boundary still has instrument noise and publication latency. This helper is
+    the single process-sigma seam used by both q_lcb bootstrap and qkernel served
+    sigma threading, so a single-model remaining-day bundle still carries a real
+    positive predictive width instead of failing with MU_SIGMA_NOT_STASHED.
+    """
+    try:
+        from src.signal.forecast_uncertainty import sigma_instrument
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        base_sigma = float(sigma_instrument(unit).value)
+        obs_age_min = _day0_observation_age_minutes(payload, decision_time)
+        budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or ""))
+        margin = stale_extreme_uncertainty_margin(
+            unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
+        )
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
+    except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
+        return None
+    if not (sigma > 0.0 and np.isfinite(sigma)):
+        return None
+    return sigma
+
+
 def _make_day0_bootstrap_sampler(
     *,
     members_native,
@@ -17965,21 +17760,11 @@ def _make_day0_bootstrap_sampler(
         if metric not in {"high", "low"}:
             raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
         mask = _day0_absorbing_mask(payload=payload, family=family)
-        from src.signal.forecast_uncertainty import sigma_instrument
-        from src.signal.day0_obs_latency import (
-            stale_extreme_uncertainty_margin,
-            staleness_budget_minutes,
+        sigma = _day0_process_sigma_native(
+            payload=payload, family=family, unit=unit, decision_time=decision_time
         )
-
-        base_sigma = float(sigma_instrument(unit).value)
-        obs_age_min = _day0_observation_age_minutes(payload, decision_time)
-        budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or ""))
-        margin = stale_extreme_uncertainty_margin(
-            unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
-        )
-        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
-        if not (sigma > 0.0 and np.isfinite(sigma)):
-            raise ValueError(f"day0 bootstrap sigma invalid: {sigma}")
+        if sigma is None:
+            raise ValueError("day0 bootstrap sigma invalid")
     except Exception as exc:  # noqa: BLE001 — degrade LOUDLY to the static sampler
         import logging as _logging
 
@@ -18367,9 +18152,17 @@ def _market_analysis_from_event_snapshot(
         except Exception:  # noqa: BLE001 — observation only
             _spine_q_list = None
 
+        _day0_remaining_spine_mode = (
+            is_day0 and str(payload.get("_edli_q_source") or "") == "day0_remaining_day"
+        )
         _spine_raw_list: list[float] | None = None
         try:
-            _spine_raw_arr = np.asarray(raw_members, dtype=float).ravel()
+            # For Day0 remaining-day q, the integrated envelope is the remaining-day
+            # member array, not the full-day snapshot seed. Thread that same envelope
+            # into both raw/debiased spine fields so qkernel, receipt, and q_lcb share
+            # one probability surface.
+            _spine_raw_source = members if _day0_remaining_spine_mode else raw_members
+            _spine_raw_arr = np.asarray(_spine_raw_source, dtype=float).ravel()
             if _spine_raw_arr.size and np.isfinite(_spine_raw_arr).all():
                 _spine_raw_list = [float(x) for x in _spine_raw_arr.tolist()]
         except Exception:  # noqa: BLE001 — observation only
@@ -18396,6 +18189,35 @@ def _market_analysis_from_event_snapshot(
             _m = float(sum(_spine_debiased_list) / len(_spine_debiased_list))
             _var = sum((v - _m) ** 2 for v in _spine_debiased_list) / (len(_spine_debiased_list) - 1)
             _spine_sigma = float(_var ** 0.5)
+        if _day0_remaining_spine_mode and _spine_debiased_list:
+            _member_sigma = 0.0
+            if len(_spine_debiased_list) >= 2:
+                _m = float(sum(_spine_debiased_list) / len(_spine_debiased_list))
+                _member_var = sum((v - _m) ** 2 for v in _spine_debiased_list) / (
+                    len(_spine_debiased_list) - 1
+                )
+                _member_sigma = float(_member_var ** 0.5)
+            if _spine_sigma is not None:
+                try:
+                    _candidate_member_sigma = float(_spine_sigma)
+                    if np.isfinite(_candidate_member_sigma) and _candidate_member_sigma > 0.0:
+                        _member_sigma = max(_member_sigma, _candidate_member_sigma)
+                except (TypeError, ValueError):
+                    pass
+            _process_sigma = _day0_process_sigma_native(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+            )
+            if _process_sigma is not None:
+                _spine_sigma = float(
+                    np.sqrt(_member_sigma ** 2 + float(_process_sigma) ** 2)
+                )
+                payload["_edli_spine_day0_sigma_basis"] = (
+                    "remaining_day_member_spread_plus_obs_process"
+                )
+                payload["_edli_spine_day0_process_sigma_native"] = float(_process_sigma)
 
         if _spine_mu is None or _spine_sigma is None:
             # DIAGNOSTIC (2026-06-15 MU_SIGMA_NOT_STASHED frontier): the spine gets
@@ -18416,16 +18238,11 @@ def _market_analysis_from_event_snapshot(
                 )
             except Exception:  # noqa: BLE001
                 pass
-        # OBSERVABILITY-ONLY (source-parity note 2026-06-16): these keys are derived
-        # from the snapshot's ``ensemble_snapshots`` members and feed the DecisionReceipt
-        # for the canonical / Day0 path. They are NOT the authoritative spine-decision
-        # source: the live producer in ``_generate_candidate_proofs`` UNCONDITIONALLY
-        # runs ``_spine_multimodel_members_for_event`` (raw_model_forecasts) and
-        # OVERWRITES ``_edli_spine_mu_native`` / ``_edli_spine_sigma_native`` /
-        # ``_edli_spine_{raw,debiased}_members_native`` when that accessor succeeds, so a
-        # spine DECISION is never seeded from these ensemble-derived values. (Day0 is
-        # excluded from the spine entirely.) Do NOT re-add a guard that lets these
-        # pre-empt the multi-model producer — that was the cold-center regression.
+        # OBSERVABILITY-ONLY for forecast snapshots; load-bearing for Day0 remaining-day:
+        # Day0 has no later raw_model_forecasts overwrite in _generate_candidate_proofs,
+        # so its served spine inputs must be the same remaining-day envelope and
+        # observation-process sigma used by MarketAnalysis above. Forecast events still
+        # overwrite these keys from the raw_model_forecasts multi-model producer.
         if _spine_mu is not None:
             payload["_edli_spine_mu_native"] = float(_spine_mu)
         if _spine_sigma is not None:
@@ -18444,10 +18261,10 @@ def _market_analysis_from_event_snapshot(
         # (snapshot.source_cycle_time / issue_time / payload.cycle). Absent ⇒ the bridge
         # fails closed to a typed SPINE_INPUTS_UNAVAILABLE no-trade (never decision_time).
         _spine_source_cycle = (
-            snapshot.get("source_cycle_time")
-            or snapshot.get("issue_time")
-            or payload.get("cycle")
-        )
+            payload.get("_edli_day0_remaining_source_cycle_time_utc")
+            if _day0_remaining_spine_mode
+            else None
+        ) or snapshot.get("source_cycle_time") or snapshot.get("issue_time") or payload.get("cycle")
         if _spine_source_cycle:
             payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
     except Exception as _spine_stash_exc:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
@@ -20055,6 +19872,18 @@ def _day0_remaining_day_members(
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
         payload["_edli_day0_remaining_model_names"] = [str(vector.model) for vector in vectors]
+        captured_times: list[str] = []
+        for vector in vectors:
+            try:
+                captured = datetime.fromisoformat(str(vector.captured_at).replace("Z", "+00:00"))
+                if captured.tzinfo is None:
+                    continue
+                captured_times.append(captured.astimezone(timezone.utc).isoformat())
+            except (TypeError, ValueError):
+                continue
+        if captured_times:
+            payload["_edli_day0_remaining_source_cycle_time_utc"] = max(captured_times)
+            payload["_edli_day0_remaining_capture_times_utc"] = captured_times
         if expected_models:
             payload["_edli_day0_remaining_expected_models"] = list(expected_models)
         return values

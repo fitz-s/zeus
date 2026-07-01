@@ -17,7 +17,6 @@ from src.engine.event_reactor_adapter import (
     _assert_live_entry_submit_authority,
     _fdr_rejection_reason,
     _pre_submit_revalidation_payload_from_final_intent,
-    _record_day0_selection_family_facts,
     _record_qkernel_selection_family_facts,
 )
 
@@ -224,107 +223,6 @@ def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_pat
         "SELECT meta_json FROM world.selection_hypothesis_fact"
     ).fetchone()
     assert json.loads(hypothesis_row["meta_json"])["strategy_key"] == "center_buy"
-    conn.close()
-
-
-def test_day0_legacy_selection_facts_write_to_attached_world_not_trade_local(tmp_path):
-    from src.state.db import init_schema
-
-    world_path = tmp_path / "world.db"
-    world = sqlite3.connect(world_path)
-    world.row_factory = sqlite3.Row
-    init_schema(world)
-    world.close()
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_schema(conn)
-    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
-
-    selected = SimpleNamespace(
-        candidate_id="day0-candidate-selected",
-        condition_id="condition-1",
-        token_id="token-yes",
-        direction="buy_yes",
-        bin_label="30C",
-        execution_price=0.38,
-        q_posterior=1.0,
-        q_lcb_5pct=0.96,
-        c_cost_95pct=0.38,
-        p_fill_lcb=0.90,
-        trade_score=0.58,
-        p_value=0.04,
-        passed_prefilter=True,
-        native_quote_available=True,
-        missing_reason=None,
-        support_index=0,
-        bin_id="bin-30c",
-    )
-    rejected = SimpleNamespace(
-        candidate_id="day0-candidate-rejected",
-        condition_id="condition-2",
-        token_id="token-no",
-        direction="buy_no",
-        bin_label="31C",
-        execution_price=0.72,
-        q_posterior=0.05,
-        q_lcb_5pct=0.02,
-        c_cost_95pct=0.72,
-        p_fill_lcb=0.90,
-        trade_score=0.0,
-        p_value=1.0,
-        passed_prefilter=False,
-        native_quote_available=True,
-        missing_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
-        support_index=1,
-        bin_id="bin-31c",
-    )
-    book = SimpleNamespace(
-        book_id="opportunity-book-day0",
-        book_version=1,
-        evaluations=(selected, rejected),
-        selected_candidate_id=selected.candidate_id,
-        cache_summary={
-            "selection_authority": "robust_marginal_utility",
-            "actual_receipt_selected_candidate_id": selected.candidate_id,
-        },
-    )
-
-    result = _record_day0_selection_family_facts(
-        conn,
-        family=_fake_family(),
-        opportunity_book=book,
-        event=_fake_day0_event(),
-        decision_time=datetime(2026, 7, 1, 9, tzinfo=timezone.utc),
-        decision_snapshot_id="snapshot-day0-selection",
-    )
-
-    assert result["status"] == "written"
-    assert result["families"] == 1
-    assert result["hypotheses"] == 2
-    assert conn.execute("SELECT COUNT(*) FROM main.selection_family_fact").fetchone()[0] == 0
-    family_row = conn.execute(
-        "SELECT strategy_key, discovery_mode, meta_json FROM world.selection_family_fact"
-    ).fetchone()
-    assert family_row["strategy_key"] == "center_buy"
-    assert family_row["discovery_mode"] == "DAY0_EXTREME_UPDATED"
-    family_meta = json.loads(family_row["meta_json"])
-    assert family_meta["source"] == "event_bound_legacy_selector"
-    assert family_meta["selected_post_fdr"] == 1
-    assert conn.execute(
-        "SELECT COUNT(*) FROM world.selection_hypothesis_fact WHERE selected_post_fdr=1"
-    ).fetchone()[0] == 1
-    rejected_row = conn.execute(
-        """
-        SELECT rejection_stage, meta_json
-        FROM world.selection_hypothesis_fact
-        WHERE selected_post_fdr=0
-        """
-    ).fetchone()
-    assert rejected_row["rejection_stage"] == "EVENT_BOUND_GATE_REJECTED"
-    assert json.loads(rejected_row["meta_json"])["missing_reason"] == (
-        "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV"
-    )
     conn.close()
 
 
